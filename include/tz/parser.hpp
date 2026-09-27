@@ -20,8 +20,14 @@ namespace tz {
 
 class parser {
 public:
-    parser(ast_db& db, std::string_view src) : db_(db), src_(src), toks_(lexer(src).run()) {
-        db_.record_import(std::string(src));
+    parser(ast_db& db, std::string_view src, std::string label = {}) : db_(db), src_(src) {
+        source_ = db_.record_import(std::string(src), std::move(label));
+        try {
+            toks_ = lexer(src).run();
+        } catch (const diagnostic& d) {
+            errors_.push_back(with_source(d));
+            toks_.assign(1, token{});
+        }
         match_brackets();
     }
 
@@ -39,7 +45,12 @@ public:
         return id;
     }
 
-    const std::vector<diagnostic>& errors() const { return errors_; }
+    // parsing errors with import number in positions.
+    std::vector<diagnostic> errors() const {
+        std::vector<diagnostic> out;
+        for (auto d : errors_) out.push_back(with_source(d));
+        return out;
+    }
 
 private:
     // --- Phase 1: paired brackets ---
@@ -570,7 +581,16 @@ private:
         return out;
     }
 
+    diagnostic with_source(diagnostic d) const {
+        span w   = d.where();
+        w.source = source_;
+        diagnostic out(d.what(), w, d.kind());
+        for (auto f : d.trace()) { f.where.source = source_; out.note(f.what, f.where); }
+        return out;
+    }
+
     ast_db&                 db_;
+    u32                     source_ = 0;
     std::string_view        src_;
     std::vector<token>      toks_;
     std::vector<u32>        match_;

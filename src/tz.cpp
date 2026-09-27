@@ -12,6 +12,9 @@
 #include "tz/test_runner.hpp"
 #include "tz/views.hpp"
 #include "tz/store.hpp"
+#include "tz/session.hpp"
+
+#include <iostream>
 
 #include <fstream>
 #include <sstream>
@@ -36,6 +39,7 @@ int usage() {
                          "  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n"
                          "  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n"
                          "  tz log <база.tzdb>         журнал операций базы в тексте\n"
+                         "  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n"
                          "  tz test <каталог>          прогнать эталонные тесты");
     return 2;
 }
@@ -47,7 +51,7 @@ struct program {
     std::vector<tz::diagnostic> parse_errors;
     std::string                 path;
 
-    const std::string& src() const { return db.source(); }
+    const std::string& src() const { return db.source(0); }
 };
 
 void load(program& p, const std::string& path) {
@@ -63,7 +67,7 @@ void load(program& p, const std::string& path) {
 }
 
 int report_error(const program& p, const tz::diagnostic& d) {
-    std::print(stderr, "{}", tz::render(d, p.path, p.src()));
+    std::print(stderr, "{}", tz::render(d, p.path, p.db));
     return 1;
 }
 
@@ -87,7 +91,7 @@ int main(int argc, char** argv) {
 
         program p;
         load(p, argv[at++]);
-        for (const auto& e : p.parse_errors) std::print(stderr, "{}", tz::render(e, p.path, p.src()));
+        for (const auto& e : p.parse_errors) std::print(stderr, "{}", tz::render(e, p.path, p.db));
         bool parsed = p.parse_errors.empty();
 
         if (cmd == "save") {
@@ -114,6 +118,20 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (!parsed) return 1; // We don't do the whole thing - M0
+
+        if (cmd == "vm") {
+            tz::vm_session session(p.db, p.root, p.path);
+            for (std::string line; std::getline(std::cin, line);) {
+                if (line.empty() || line.starts_with("//")) continue;
+                if (line == "quit") break;
+                std::string body;
+                if (line.starts_with("edit ")) // editing body - up to a line from one point
+                    for (std::string l; std::getline(std::cin, l) && l != ".";) body += l + "\n";
+                std::print("> {}\n{}", line, session.exec(line, body));
+                std::fflush(stdout);
+            }
+            return 0;
+        }
 
         if (cmd == "run") {
             std::vector<std::string> args{p.path};

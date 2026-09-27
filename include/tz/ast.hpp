@@ -64,7 +64,7 @@ struct j_intern  { u32 id; std::string text; };
 struct j_add     { u32 id; node_kind kind; span where; };
 struct j_replace { u32 id; node_kind kind; };
 struct j_link    { u32 root; }; // Put the parent in the subtree (deterministically)
-struct j_import  { std::string text; }; // projection: span node - position in it
+struct j_import  { std::string text; std::string label; }; // projection: span node - position in it
 using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import>;
 
 struct journal_entry {
@@ -76,10 +76,15 @@ class ast_db {
 public:
     node_id add(node_kind k, span where) {
         ++revision_;
-        node_id id = nodes_.add(node{std::move(k), where, {}});
+        where.source = u32(sources_.empty() ? 0 : sources_.size() - 1);
+        node_id id   = nodes_.add(node{std::move(k), where, {}});
+        node_rev_.push_back(revision_);
         log({j_add{id.value(), nodes_[id].kind, where}});
         return id;
     }
+
+    // node revision - when it was last changed (for reactive disability).
+    u64 node_revision(node_id n) const { return node_rev_[n.value()]; }
 
     template <class kind>
     node_id add(kind k, span where) {
@@ -95,7 +100,8 @@ public:
 
     void replace(node_id n, node_kind k) {
         ++revision_;
-        nodes_[n].kind = std::move(k);
+        nodes_[n].kind        = std::move(k);
+        node_rev_[n.value()]  = revision_;
         log({j_replace{n.value(), nodes_[n].kind}});
     }
 
@@ -108,12 +114,23 @@ public:
 
     // Text input - operation on the base (§3.1): the text is stored in journal, the
     // positions node (span) indicate it.
-    void record_import(std::string text) {
-        source_ = text;
-        log({j_import{std::move(text)}});
+    u32 record_import(std::string text, std::string label = {}) {
+        sources_.push_back(text);
+        labels_.push_back(label);
+        log({j_import{std::move(text), std::move(label)}});
+        return u32(sources_.size() - 1);
     }
 
-    const std::string& source() const { return source_; }
+    // Import tag for diagnostics (empty - main file).
+    const std::string& source_label(u32 i) const {
+        static const std::string empty;
+        return i < labels_.size() ? labels_[i] : empty;
+    }
+
+    const std::string& source(u32 i = 0) const {
+        static const std::string empty;
+        return i < sources_.size() ? sources_[i] : empty;
+    }
 
     // journal with new strings before each operation.
     std::vector<journal_entry> journal() const {
@@ -143,7 +160,7 @@ public:
                 } else if constexpr (std::is_same_v<T, j_link>) {
                     link_parents(node_id(op.root));
                 } else {
-                    record_import(op.text);
+                    record_import(op.text, op.label);
                 }
             }, e.op);
         }
@@ -185,8 +202,25 @@ private:
     arena<node, node_tag>                            nodes_;
     u64                                              revision_ = 0;
     std::vector<std::pair<u32, journal_entry>>       log_; // (line interned at time, operation)
-    std::string                                      source_;
+    std::vector<std::string>                         sources_;
+    std::vector<std::string>                         labels_;
+    std::vector<u64>                                 node_rev_;
 };
+
+// Diagnostics on the basis: the text is taken from the import to which the node belongs.
+inline std::string render(const diagnostic& d, std::string_view file, const ast_db& db) {
+    auto name = [&](span w) -> std::string_view {
+        const auto& l = db.source_label(w.source);
+        return l.empty() ? file : std::string_view(l);
+    };
+    auto lc  = locate(db.source(d.where().source), d.where().begin);
+    auto out = std::format("{}:{}:{}: ошибка: {}\n", name(d.where()), lc.line, lc.col, d.what());
+    for (const auto& f : d.trace()) {
+        auto l = locate(db.source(f.where.source), f.where.begin);
+        out += std::format("  {}:{}:{}: {}\n", name(f.where), l.line, l.col, f.what);
+    }
+    return out;
+}
 
 // The name node is for debugging (through reflection, without manual tables).
 inline std::string_view kind_name(const node& n) {

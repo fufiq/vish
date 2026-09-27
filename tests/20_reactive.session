@@ -1,0 +1,31 @@
+// Reactivity (§10.1): editing functions only recalculates dependent instance.
+// program: stats.tz
+check
+// expect: пересчитано 4 экземпл.
+check
+// expect: пересчитано 0 экземпл.
+// expect: из кэша 1
+stdin 1 2 3 4
+run
+// expect: 30.0
+// expect: 2.5
+edit mean
+mean(xs) {
+  auto s = 0.0;
+  for(auto x : xs) s = s + x;
+  s / f64(xs.size) * 2.0
+}
+.
+// expect: функция mean заменена
+check
+// expect: пересчитано 2 экземпл. (mean, main)
+// expect: из кэша 1
+run
+// expect: 30.0
+// expect: 5.0
+edit mean
+mean(xs) => xs.size * 1.5;
+.
+check
+// expect: <правка mean #2>:1:
+// expect: оператор * не определён для i64 и f64

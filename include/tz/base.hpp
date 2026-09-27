@@ -94,8 +94,9 @@ private:
 
 // Position in the text projection (for diagnostics and feedback with the editor).
 struct span {
-    u32 begin = 0;
-    u32 end   = 0;
+    u32 begin  = 0;
+    u32 end    = 0;
+    u32 source = 0; // text import number in the database (adjustments - new imports)
 };
 
 // Type of error: instantiation (name, overload, type - "not compiled") or runtime

@@ -1,0 +1,23 @@
+// Программа для сценария 20_reactive.session (сама по себе — обычный тест).
+// stdin: 1 2 3 4
+// out: 30.0
+// out: 2.5
+sq(x) => x * x;
+
+sum_sq(xs) {
+  auto s = 0.0;
+  for(auto x : xs) s = s + sq(x);
+  s
+}
+
+mean(xs) {
+  auto s = 0.0;
+  for(auto x : xs) s = s + x;
+  s / f64(xs.size)
+}
+
+main() {
+  auto xs = read_floats(stdin);
+  print(sum_sq(xs));
+  print(mean(xs));
+}

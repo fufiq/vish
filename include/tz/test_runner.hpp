@@ -22,6 +22,7 @@
 #include "printer.hpp"
 #include "views.hpp"
 #include "store.hpp"
+#include "session.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -34,7 +35,7 @@ public:
     int run(const std::string& dir) {
         std::vector<std::filesystem::path> files;
         for (auto& e : std::filesystem::directory_iterator(dir))
-            if (e.path().extension() == ".tz") files.push_back(e.path());
+            if (e.path().extension() == ".tz" || e.path().extension() == ".session") files.push_back(e.path());
         std::ranges::sort(files);
         u32 passed = 0;
         for (auto& f : files) {
@@ -95,7 +96,52 @@ private:
         return e;
     }
 
+    // Scenario of the VM session: commands and after each waiting for its conclusion.
+    // // program: file.tz program (relative to script directory)
+    // // expect: substring // expect-not: substring
+    std::string run_session(const std::filesystem::path& path) {
+        std::ifstream               in(path);
+        std::vector<std::string>    lines;
+        for (std::string l; std::getline(in, l);) lines.push_back(l);
+        ast_db                      db;
+        node_id                     root;
+        std::optional<vm_session>   session;
+        std::string                 last, why;
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const auto& l = lines[i];
+            if (l.starts_with("// program:")) {
+                auto file = path.parent_path() / std::string_view(l).substr(11 + (l.size() > 11 && l[11] == ' '));
+                std::ifstream     f(file);
+                std::stringstream ss;
+                ss << f.rdbuf();
+                parser p(db, ss.str());
+                root = p.parse_module();
+                session.emplace(db, root, file.filename().string());
+                continue;
+            }
+            if (l.starts_with("// expect:")) {
+                auto want = std::string_view(l).substr(10);
+                while (want.starts_with(' ')) want.remove_prefix(1);
+                if (!last.contains(want)) why += std::format("    строка {}: нет {:?} в выводе:\n{}", i + 1, want, last);
+                continue;
+            }
+            if (l.starts_with("// expect-not:")) {
+                auto bad = std::string_view(l).substr(14);
+                while (bad.starts_with(' ')) bad.remove_prefix(1);
+                if (last.contains(bad)) why += std::format("    строка {}: лишнее {:?} в выводе:\n{}", i + 1, bad, last);
+                continue;
+            }
+            if (l.empty() || l.starts_with("//") || !session) continue;
+            std::string body;
+            if (l.starts_with("edit "))
+                while (++i < lines.size() && lines[i] != ".") body += lines[i] + "\n";
+            last = session->exec(l, body);
+        }
+        return why;
+    }
+
     std::string run_one(const std::filesystem::path& path) {
+        if (path.extension() == ".session") return run_session(path);
         std::ifstream in(path);
         std::stringstream ss;
         ss << in.rdbuf();
@@ -107,7 +153,7 @@ private:
         node_id root = p.parse_module();
 
         std::string errors;
-        for (const auto& d : p.errors()) errors += render(d, path.filename().string(), src);
+        for (const auto& d : p.errors()) errors += render(d, path.filename().string(), db);
 
         if (e.fmt_stable) {
             std::string once = printer(db).print(root);
@@ -133,7 +179,7 @@ private:
             try {
                 vm.run_main();
             } catch (const diagnostic& d) {
-                errors += render(d, path.filename().string(), src);
+                errors += render(d, path.filename().string(), db);
             }
             instances = vm.instances();
         }
@@ -147,7 +193,7 @@ private:
                 try {
                     chk.run_main();
                 } catch (const diagnostic& d) {
-                    check_errors = render(d, path.filename().string(), src);
+                    check_errors = render(d, path.filename().string(), db);
                 }
                 report = chk.report(path.filename().string(), src);
             }

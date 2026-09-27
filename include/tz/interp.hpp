@@ -66,6 +66,35 @@ using scope_ptr = std::shared_ptr<scope>;
 
 enum class mode : u8 { run, check };
 
+// --- reactive cache of static parsing (§10.1) ---
+//
+// Granularity is functions, not files. instance functions (key: function + compile-time /
+// run-time -arguments + continuation) are remembered along with the result, dependencies
+// (whose bodies were executed, with node revisions) and report events. After editing,
+// only instance with changed dependencies are recalculated, the rest are reproduced. Cash
+// lives in a long-lived VM session (tz vm).
+//
+struct report_event {
+    enum kind_t : u8 { instance, folded, stage, split, excluded, live } kind;
+    std::string              a, b, c; // meaning depends on the species
+    span                     where;
+    std::vector<std::string> alts;
+    u32                      fn = 0;
+};
+
+struct check_cache {
+    struct entry {
+        value                     result;
+        std::map<u32, u64>        deps; // Node of function → revision at parsing
+        std::vector<report_event> events;
+        std::vector<std::tuple<u32, value, bool, bool, bool>> journal; // observation
+        bool                      effect = false;
+    };
+    std::map<std::string, entry> entries;
+    u32                          hits = 0, recomputed = 0;
+    std::vector<std::string>     recomputed_names;
+};
+
 class interpreter {
 public:
     // residual program inputs: known arguments and strings of stdin (§13.2).
@@ -74,8 +103,8 @@ public:
     };
 
     interpreter(ast_db& db, node_id module, std::vector<std::string> args, mode m = mode::run,
-                std::optional<known_inputs> known = std::nullopt)
-        : db_(db), module_(module), mode_(m), known_inputs_(std::move(known)) {
+                std::optional<known_inputs> known = std::nullopt, check_cache* cache = nullptr)
+        : db_(db), module_(module), mode_(m), cache_(cache), known_inputs_(std::move(known)) {
         globals_ = std::make_shared<scope>();
         array_v a;
         for (auto& s : args) a.items.push_back(value(s));
@@ -143,7 +172,12 @@ public:
     // Verification mode report.
     std::string report(std::string_view file, std::string_view src) const {
         std::string out;
-        auto        loc = [&](span w) { auto lc = locate(src, w.begin); return std::format("{}:{}", file, lc.line); };
+        (void)src;
+        auto loc = [&](span w) {
+            auto        lc    = locate(db_.source(w.source), w.begin);
+            const auto& label = db_.source_label(w.source);
+            return std::format("{}:{}", label.empty() ? file : std::string_view(label), lc.line);
+        };
         out += "стадии:\n";
         for (const auto& s : stages_) out += std::format("  {} {}{} = {}\n", loc(s.where), s.path, s.name, s.what);
         if (!splits_.empty()) {
@@ -216,6 +250,20 @@ private:
         flow f = std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
         observe(n, f, effects_ != effects_before);
         return f;
+    }
+
+    // All changes to the report go through emit: so they can be written to the
+    // instance cache and reproduced when hit.
+    void emit(report_event ev) {
+        for (auto* rec : recording_) rec->push_back(ev);
+        switch (ev.kind) {
+        case report_event::instance: ++instances_[ev.a]; break;
+        case report_event::folded: ++folded_[ev.a]; break;
+        case report_event::stage: stages_.push_back({ev.where, ev.a, ev.b, ev.c}); break;
+        case report_event::split: splits_.push_back({ev.where, ev.a, ev.alts}); break;
+        case report_event::excluded: excluded_.push_back({ev.where, ev.a, ev.b}); break;
+        case report_event::live: live_fns_.insert(ev.fn); break;
+        }
     }
 
     // Observations are written in journal: the call, completely folded into compile-time,
@@ -320,7 +368,25 @@ private:
     }
 
     // Returns accumulated by branches under run-time-condition: frame → values.
-    void record_return(const flow& f) { may_return_[f.target].push_back(f.v); }
+    void record_return(const flow& f) {
+        may_return_[f.target].push_back(f.v);
+        // return to external frame (return(caller) over run-time-branch): calls for which the
+        // target is external cannot be cached
+        for (auto& [floor, outer] : frame_floors_)
+            if (f.target <= floor) outer = true;
+    }
+
+    // Only instance is cached with no side effect on the caller: no expr-arguments
+    // (inline-function is part of the caller) and no mut/own/out-parameters (changes
+    // of the caller cells cannot be reproduced).
+    bool memoizable(node_id f, const std::vector<value>& vals) const {
+        for (const auto& v : vals) if (v.is<thunk_v>()) return false;
+        for (node_id p : db_.as<n_fn>(f).params) {
+            auto m = db_.as<n_param>(p).mode;
+            if (m == param_mode::mut || m == param_mode::own || m == param_mode::out || m == param_mode::expr) return false;
+        }
+        return true;
+    }
 
     // The result of the branching under run-time-condition: the branch with the return is
     // registered as a possible return and does not continue.
@@ -392,7 +458,7 @@ private:
         const auto&              v = db_.as<n_var>(s);
         std::vector<std::string> names;
         for (const auto& a : init.as<split_v>().alts) names.push_back(types_.describe(a));
-        splits_.push_back({db_[s].where, std::string(str(v.name)), names});
+        emit({report_event::split, std::string(str(v.name)), {}, {}, db_[s].where, names});
 
         flow result;
         bool first = true;
@@ -412,8 +478,8 @@ private:
     void declare_var(node_id s, const n_var& v, value init, const scope_ptr& env) {
         if (v.type && db_.is<n_ident>(v.type)) check_type(init, db_.as<n_ident>(v.type).name, db_[v.init].where);
         if (checking())
-            stages_.push_back({db_[s].where, path_, std::string(str(v.name)),
-                               init.known() ? std::format("кт {}", show_v(init)) : std::format("рт {}", types_.describe(init))});
+            emit({report_event::stage, path_, std::string(str(v.name)),
+                  init.known() ? std::format("кт {}", show_v(init)) : std::format("рт {}", types_.describe(init)), db_[s].where, {}});
         env->declare(v.name, std::move(init));
     }
 
@@ -564,7 +630,7 @@ private:
         } catch (const diagnostic& d) {
             if (d.kind() != diag_kind::instantiation) throw;
             may_return_ = std::move(saved_may);
-            excluded_.push_back({db_[n].where, path_, d.what()});
+            emit({report_event::excluded, path_, d.what(), {}, db_[n].where, {}});
             return ok();
         }
     }
@@ -1029,8 +1095,28 @@ private:
             if (frames_.size() > 2000) fail("рекурсия не останавливается при статическом разборе", site.where);
         }
 
+        // Reactive cache: instance with unchanged dependencies is not rediscovered
+        std::string memo_key  = active_key + "#" + path_;
+        bool        memoize   = checking() && cache_ && approx_.empty() && memoizable(f, vals);
+        if (memoize) {
+            if (auto it = cache_->entries.find(memo_key); it != cache_->entries.end() && valid(it->second)) {
+                ++cache_->hits;
+                for (const auto& ev : it->second.events) emit(ev);
+                for (const auto& [node, v, seen, div, eff] : it->second.journal) journal_.push_back({node, v, seen, div, eff});
+                observed_dirty_ = true;
+                if (it->second.effect) { ++effects_; if (!frames_.empty()) frames_.back().rt_effect = true; }
+                last_rt_effect_ = it->second.effect;
+                if (!deps_.empty()) deps_.back().insert(it->second.deps.begin(), it->second.deps.end());
+                return ok(it->second.result);
+            }
+        }
+        std::vector<report_event> recorded;
+        if (memoize) { recording_.push_back(&recorded); deps_.emplace_back(); }
+        if (checking() && !deps_.empty()) deps_.back()[f.value()] = db_.node_revision(f);
+
         stack_.push_back(site);
-        std::size_t journal_mark = journal_.size();
+        std::size_t journal_mark  = journal_.size();
+        frame_floors_.push_back({frame_counter_, false});
         flow r;
         for (u32 pass = 0;; ++pass) {
             auto inner    = std::make_shared<scope>();
@@ -1041,6 +1127,8 @@ private:
                 r = run_frame(fn.body, inner, fn.name, fn.outline);
             } catch (...) {
                 stack_.pop_back();
+                frame_floors_.pop_back();
+                if (memoize) { recording_.pop_back(); deps_.pop_back(); }
                 if (checking()) { active_.erase(active_key); approx_.erase(active_key); recursed_.erase(active_key); }
                 throw;
             }
@@ -1058,14 +1146,37 @@ private:
         // curled up in compile-time: all arguments and result known, runtime no effects
         bool folded = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect_;
         if (folded) {
-            ++folded_[std::string(str(fn.name))];
+            emit({report_event::folded, std::string(str(fn.name)), {}, {}, {}, {}});
             journal_.resize(journal_mark); // There is no folded call in runtime.
             observed_dirty_ = true;
         } else {
-            ++instances_[path_.empty() ? key : std::format("{}   {}", key, path_)];
-            live_fns_.insert(f.value()); // I need runtime.
+            emit({report_event::instance, path_.empty() ? key : std::format("{}   {}", key, path_), {}, {}, {}, {}});
+            emit({report_event::live, {}, {}, {}, {}, {}, f.value()}); // I need runtime.
+        }
+        bool outer_return = frame_floors_.back().second;
+        frame_floors_.pop_back();
+        if (memoize) {
+            recording_.pop_back();
+            auto deps = std::move(deps_.back());
+            deps_.pop_back();
+            if (!deps_.empty()) deps_.back().insert(deps.begin(), deps.end());
+            deps[module_.value()] = db_.node_revision(module_); // set of functions (overload)
+            if (r.normal() && approx_.empty() && !outer_return) {
+                ++cache_->recomputed;
+                cache_->recomputed_names.push_back(std::string(str(fn.name)));
+                check_cache::entry e{r.v, std::move(deps), std::move(recorded), {}, last_rt_effect_};
+                for (std::size_t i = journal_mark; i < journal_.size(); ++i)
+                    e.journal.emplace_back(journal_[i].node, journal_[i].v, journal_[i].seen, journal_[i].diverted, journal_[i].effect);
+                cache_->entries[memo_key] = std::move(e);
+            }
         }
         return r; // return, addressed to the caller (semantic inlining), goes further
+    }
+
+    bool valid(const check_cache::entry& e) const {
+        for (const auto& [node, rev] : e.deps)
+            if (db_.node_revision(node_id(node)) != rev) return false;
+        return true;
     }
 
     // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell.
@@ -1160,10 +1271,13 @@ private:
             rt_effect();
             std::string line;
             bool        have = false;
-            if (checking()) {
-                if (!known_inputs_ || known_inputs_->stdin_lines.empty()) return erase(value(array_v{{value(f64(1))}}));
-                line = known_inputs_->stdin_lines.front(); // Entry is given - the value is known
-                known_inputs_->stdin_lines.erase(known_inputs_->stdin_lines.begin());
+            if (checking() && (!known_inputs_ || known_inputs_->stdin_lines.empty()))
+                return erase(value(array_v{{value(f64(1))}}));
+            if (known_inputs_) { // Entry is set (statically known or submitted by session)
+                if (!known_inputs_->stdin_lines.empty()) {
+                    line = known_inputs_->stdin_lines.front();
+                    known_inputs_->stdin_lines.erase(known_inputs_->stdin_lines.begin());
+                }
                 have = true;
             }
             array_v r;
@@ -1251,6 +1365,10 @@ private:
     std::vector<split_rec>                  splits_;
     std::string                             path_; // current continuation of splitting
     std::string*                            captured_ = nullptr;
+    check_cache*                            cache_ = nullptr;
+    std::vector<std::pair<u32, bool>>       frame_floors_; // (The first frame of the call was a return to the outside)
+    std::vector<std::vector<report_event>*> recording_;
+    std::vector<std::map<u32, u64>>         deps_;
     std::optional<known_inputs>             known_inputs_;
     std::vector<obs_entry>                  journal_;
     mutable std::unordered_map<u32, observation> observed_;
