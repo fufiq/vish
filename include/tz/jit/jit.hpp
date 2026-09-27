@@ -31,14 +31,11 @@ inline u64 jit_fault_node = 0;
 
 // Pointer to a dense array buffer of the desired layout; nullptr - layout is not the
 // same (deoptimization: the interpreter will perform).
-// want: 1 — i64, 2 — f64; +4 — тело пишет в элементы (указатель на изменяемый буфер).
+// want: 1 — i64, 2 — f64. Машинный код получает массив вызывающего (алиас).
 inline void* jit_array_data(array_v* a, u64 want) {
     if (a->empty()) return reinterpret_cast<void*>(8); // Empty array: no access
-    bool write = want & 4;
-    if ((want & 3) == 1 && a->kind() == array_v::layout::ints)
-        return write ? static_cast<void*>(a->ints_mut()) : const_cast<i64*>(a->ints());
-    if ((want & 3) == 2 && a->kind() == array_v::layout::floats)
-        return write ? static_cast<void*>(a->floats_mut()) : const_cast<f64*>(a->floats());
+    if (want == 1 && a->kind() == array_v::layout::ints) return a->ints_mut();
+    if (want == 2 && a->kind() == array_v::layout::floats) return a->floats_mut();
     return nullptr;
 }
 inline u64 jit_array_size(array_v* a) { return a->size(); }
@@ -185,12 +182,9 @@ public:
             if (is_array(s.type)) arrays.push_back({s, i});
         }
         // Arrays: dense buffer and size - once at the input (the size in the code does not change)
-        std::set<symbol> written; // In these arrays the body writes
-        collect_written_arrays(f.body, written);
         for (auto [s, i] : arrays) {
-            bool w = written.contains(db_.as<n_param>(f.params[i]).name);
             as_.load(rdi, rbp, s.off);
-            as_.mov(rsi, u64((s.type == jt::arr_i64 ? 1 : 2) | (w ? 4 : 0)));
+            as_.mov(rsi, u64(s.type == jt::arr_i64 ? 1 : 2));
             call_native(reinterpret_cast<void*>(&jit_array_data));
             as_.test(rax, rax);
             as_.jcc(e, fault(jit_fault_kind::deopt, f.params[i]));
@@ -200,6 +194,7 @@ public:
             as_.store(rbp, s.size_off, rax);
         }
 
+        frames_.push_back({fn_, &epilogue_, out_.result, 0, true});
         jt body = gen_value(f.body);
         if (body != out_.result && body != jt::unit)
             throw jit_unsupported{f.body, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(out_.result))};
@@ -221,9 +216,25 @@ public:
 
 private:
     struct slot {
-        i32 off = 0;
-        jt  type = jt::unit;
-        i32 data_off = 0, size_off = 0; // massif
+        i32     off = 0;
+        jt      type = jt::unit;
+        i32     data_off = 0, size_off = 0; // massif
+        node_id thunk;                      // expr-parameter: the expression of the calling ...
+        u32     ctx = 0;                    // ... and the context in which it is calculated.
+    };
+
+    // The context of the embedding point: what was seen by the caller.
+    struct context {
+        u32 scopes, fn_base, frames;
+    };
+
+    // The frame of the function in the embedding chain: where does its return lead?
+    struct frame {
+        node_id     fn;
+        x64::label* exit;
+        jt          result;
+        u32         depth; // time-stack depth at the entrance
+        bool        top;   // instance: Return to the epilogue
     };
 
     struct stub {
@@ -234,18 +245,6 @@ private:
 
     static bool is_array(jt t) { return t == jt::arr_i64 || t == jt::arr_f64; }
 
-    // Massives in which the body writes.
-    void collect_written_arrays(node_id n, std::set<symbol>& out) const {
-        if (!n) return;
-        if (db_.is<n_op>(n)) {
-            auto op = db_.strings.text(db_.as<n_op>(n).op);
-            node_id t = db_.as<n_op>(n).args.empty() ? node_id{} : db_.as<n_op>(n).args[0];
-            if ((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && db_.is<n_index>(t)
-                && db_.is<n_ident>(db_.as<n_index>(t).object))
-                out.insert(db_.as<n_ident>(db_.as<n_index>(t).object).name);
-        }
-        db_.for_each_child(n, [&](node_id c) { collect_written_arrays(c, out); });
-    }
 
     i32 alloc() { return -8 * i32(++slots_); }
 
@@ -261,11 +260,41 @@ private:
         return s;
     }
 
+    // The name in the visible areas of the current function (the built-in function
+    // does not see the local names of the caller - only its parameters - alias).
     const slot* find(symbol name) const {
-        for (auto sc = scopes_.rbegin(); sc != scopes_.rend(); ++sc)
-            for (auto it = sc->rbegin(); it != sc->rend(); ++it)
+        for (u32 k = u32(scopes_.size()); k-- > fn_base_;)
+            for (auto it = scopes_[k].rbegin(); it != scopes_[k].rend(); ++it)
                 if (it->first == name) return &it->second;
         return nullptr;
+    }
+
+    // Perform gen in the context of the caller (for the expr parameter): areas and
+    // frames that appear after the embedding point are removed at this time.
+    template <class F>
+    auto in_context(u32 ctx, F&& f) {
+        const context& c = contexts_[ctx];
+        std::vector<std::vector<std::pair<symbol, slot>>> scopes(std::make_move_iterator(scopes_.begin() + c.scopes),
+                                                                 std::make_move_iterator(scopes_.end()));
+        std::vector<frame> frames(frames_.begin() + c.frames, frames_.end());
+        scopes_.resize(c.scopes);
+        frames_.resize(c.frames);
+        u32 base = std::exchange(fn_base_, c.fn_base);
+        auto r   = f();
+        fn_base_ = base;
+        for (auto& sc : scopes) scopes_.push_back(std::move(sc));
+        frames_.insert(frames_.end(), frames.begin(), frames.end());
+        return r;
+    }
+
+    // The variable slot; the expr parameter associated with the name of the caller is its slot.
+    const slot* resolve(symbol name) {
+        const slot* s = find(name);
+        if (s && s->thunk && db_.is<n_ident>(s->thunk)) {
+            symbol inner = db_.as<n_ident>(s->thunk).name;
+            return in_context(s->ctx, [&] { return resolve(inner); });
+        }
+        return s;
     }
 
     x64::label& fault(jit_fault_kind k, node_id n) {
@@ -369,6 +398,10 @@ private:
     jt gen(node_id n, const n_ident& x) {
         const slot* s = find(x.name);
         if (!s) throw jit_unsupported{n, std::format("имя {} вне кадра", db_.strings.text(x.name))};
+        if (s->thunk) { // expr parameter: the caller expression is calculated at each mention (§6.1)
+            slot th = *s;
+            return in_context(th.ctx, [&] { return gen_value(th.thunk); });
+        }
         if (s->type == jt::f64_) as_.movsd_load(x64::xmm0, x64::rbp, s->off);
         else as_.load(x64::rax, x64::rbp, s->off);
         return s->type;
@@ -376,7 +409,7 @@ private:
 
     const slot& array_slot(node_id obj) {
         if (!db_.is<n_ident>(obj)) throw jit_unsupported{obj, "массив не из переменной"};
-        const slot* s = find(db_.as<n_ident>(obj).name);
+        const slot* s = resolve(db_.as<n_ident>(obj).name);
         if (!s || !is_array(s->type)) throw jit_unsupported{obj, "не массив"};
         return *s;
     }
@@ -524,13 +557,16 @@ private:
         using namespace x64;
         node_id target = o.args[0];
         if (db_.is<n_ident>(target)) {
-            const slot* s = find(db_.as<n_ident>(target).name);
-            if (!s || is_array(s->type)) throw jit_unsupported{target, "присваивание"};
+            const slot* sp = resolve(db_.as<n_ident>(target).name);
+            if (!sp || sp->thunk || is_array(sp->type)) throw jit_unsupported{target, "присваивание"};
+            slot  cell = *sp; // meaning: embedding on the right side can shift areas
+            const slot* s = &cell;
             jt t = gen_value(o.args[1]);
             if (t != s->type) throw jit_unsupported{n, "тип присваивания"};
             if (op != "=") { // The current is the first operand, the right is the second
                 push_result(t);
-                gen(target, db_.as<n_ident>(target));
+                if (t == jt::f64_) as_.movsd_load(xmm0, rbp, s->off);
+                else as_.load(rax, rbp, s->off);
                 pop_second(t);
                 binary(n, op.substr(0, 1), t);
             }
@@ -610,6 +646,14 @@ private:
                 target = item;
             }
         if (!target) throw jit_unsupported{n, std::format("вызов {}", name)};
+        // Default semantic inlining (D10): the body is embedded in the context of the
+        // call, the parameters are alias of the caller's seats, without ABI.
+//,
+        // 
+        // 
+        // . Recursion and outline are a real challenge.
+        bool recursive = std::ranges::any_of(frames_, [&](const frame& f) { return f.fn == target; });
+        if (!recursive && !db_.as<n_fn>(target).outline && frames_.size() < 64) return inline_call(n, c, target);
         std::vector<jt> types;
         for (node_id a : c.args) {
             jt t = type_of(a);
@@ -648,6 +692,59 @@ private:
         return callee->result;
     }
 
+    jt inline_call(node_id n, const n_call& c, node_id target) {
+        using namespace x64;
+        const auto& g = db_.as<n_fn>(target);
+        context     at{u32(scopes_.size()), fn_base_, u32(frames_.size())};
+        u32         ctx = u32(contexts_.size());
+        contexts_.push_back(at);
+        // arguments: place - alias slot, expr - expression with context, other - calculated in your slot
+        std::vector<std::pair<symbol, slot>> params;
+        for (u32 i = 0; i < g.params.size(); ++i) {
+            const auto& p   = db_.as<n_param>(g.params[i]);
+            node_id     arg = c.args[i];
+            if (p.mode == param_mode::expr) {
+                slot s;
+                s.thunk = arg;
+                s.ctx   = ctx;
+                params.push_back({p.name, s});
+                continue;
+            }
+            if (p.mode != param_mode::own && db_.is<n_ident>(arg)) {
+                if (const slot* s = find(db_.as<n_ident>(arg).name)) {
+                    params.push_back({p.name, *s}); // alias: both reading and writing are caller cells
+                    continue;
+                }
+            }
+            if (p.mode == param_mode::out || p.mode == param_mode::mut) throw jit_unsupported{arg, "mut/out не на место"};
+            jt t = gen_value(arg);
+            if (t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{arg, std::format("аргумент типа {}", jt_name(t))};
+            slot s;
+            s.type = t;
+            s.off  = alloc();
+            if (t == jt::f64_) as_.movsd_store(rbp, s.off, xmm0);
+            else as_.store(rbp, s.off, rax);
+            params.push_back({p.name, s});
+        }
+        const auto* o      = obs(n);
+        jt          result = o && o->seen ? jt_of(o->v) : jt::unit;
+        if (result == jt::other || is_array(result)) throw jit_unsupported{n, "тип результата встроенной функции"};
+        out_.deps[target.value()] = db_.node_revision(target);
+
+        auto exit = std::make_unique<label>();
+        scopes_.emplace_back(std::move(params));
+        u32 base = std::exchange(fn_base_, u32(scopes_.size() - 1));
+        frames_.push_back({target, exit.get(), result, depth_, false});
+        jt body = gen_value(g.body);
+        if (body != result && body != jt::unit) throw jit_unsupported{n, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(result))};
+        as_.bind(*exit);
+        frames_.pop_back();
+        fn_base_ = base;
+        scopes_.resize(at.scopes);
+        inline_exits_.push_back(std::move(exit));
+        return result;
+    }
+
     jt gen(node_id n, const n_if& i) {
         using namespace x64;
         label else_, done;
@@ -684,12 +781,31 @@ private:
         return jt::unit;
     }
 
+    // return(f) / return(caller) - from the external in the embedding chain (§6.1): just
+    // a transition to its output.
     jt gen(node_id n, const n_return& r) {
-        if (r.target) throw jit_unsupported{n, "адресный return (инлайн — M1b)"};
-        jt t = r.value ? gen_value(r.value) : jt::unit;
-        if (t != out_.result) throw jit_unsupported{n, "тип return"};
-        to_result(t);
-        as_.jmp(epilogue_);
+        u32 k = u32(frames_.size() - 1);
+        if (r.target) {
+            symbol name      = db_.as<n_ident>(r.target).name;
+            bool   to_caller = db_.strings.text(name) == "caller";
+            bool   found     = false;
+            while (k > 0) {
+                if (db_.as<n_fn>(frames_[k].fn).outline) throw jit_unsupported{n, "return через outline"};
+                --k;
+                if (to_caller || db_.as<n_fn>(frames_[k].fn).name == name) { found = true; break; }
+            }
+            if (!found) throw jit_unsupported{n, "return: цель вне машинного кода"};
+        }
+        frame fr = frames_[k];
+        jt    t  = r.value ? gen_value(r.value) : jt::unit;
+        if (t != fr.result) throw jit_unsupported{n, "тип return"};
+        if (fr.top) {
+            to_result(t);
+            as_.jmp(epilogue_); // epilogue restores rsp
+        } else {
+            if (depth_ > fr.depth) as_.add_rsp(i32(8 * (depth_ - fr.depth))); // transient
+            as_.jmp(*fr.exit);
+        }
         return jt::unit;
     }
 
@@ -787,6 +903,10 @@ private:
     u32                                           bce_ = 0; // stripped
     u32                                           depth_ = 0;
     u32                                           frame_patch_ = 0;
+    u32                                           fn_base_ = 0; // first area of the current (built-in) function
+    std::vector<frame>                            frames_;
+    std::vector<context>                          contexts_;
+    std::vector<std::unique_ptr<x64::label>>      inline_exits_;
 };
 
 // Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth

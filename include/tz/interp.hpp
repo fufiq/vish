@@ -120,7 +120,7 @@ public:
     int run_main() {
         auto it = functions_.find(sym("main"));
         if (it == functions_.end()) throw diagnostic("нет функции main", {});
-        call_site site{db_[module_].where, "main"};
+        call_site site{db_[it->second.front()].where, "main"};
         flow r = call_overloaded(it->second, {}, globals_, 0, site);
         return r.v.is<i64>() ? int(r.v.as<i64>()) : 0;
     }
@@ -700,8 +700,63 @@ private:
         return ok_;
     }
 
+    // The parameter x / auto x / T x - alias is read-only by this function (§6.2); you
+    // can only change the location of the caller via mut/out.
+    void check_param_writes(node_id f) {
+        std::set<symbol> readonly;
+        for (node_id p : db_.as<n_fn>(f).params) {
+            auto m = db_.as<n_param>(p).mode;
+            if (m == param_mode::let || m == param_mode::ct) readonly.insert(db_.as<n_param>(p).name);
+        }
+        if (!readonly.empty()) check_param_writes(db_.as<n_fn>(f).body, readonly);
+    }
+
+    void check_param_writes(node_id n, std::set<symbol> readonly) { // copy: shadows local to the block
+        if (!n || readonly.empty() || db_.is<n_fn>(n) || db_.is<n_lambda>(n)) return;
+        if (db_.is<n_block>(n)) {
+            for (node_id k : db_.as<n_block>(n).items) {
+                check_param_writes(k, readonly);
+                if (db_.is<n_var>(k)) readonly.erase(db_.as<n_var>(k).name); // Next is the local variable.
+            }
+            return;
+        }
+        if (db_.is<n_for>(n)) {
+            check_param_writes(db_.as<n_for>(n).range, readonly);
+            readonly.erase(db_.as<n_for>(n).var);
+            check_param_writes(db_.as<n_for>(n).body, readonly);
+            return;
+        }
+        if (db_.is<n_op>(n)) {
+            const auto& o  = db_.as<n_op>(n);
+            auto        op = str(o.op);
+            if ((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && !o.args.empty()) {
+                node_id t = o.args[0];
+                while (db_.is<n_index>(t) || db_.is<n_member>(t))
+                    t = db_.is<n_index>(t) ? db_.as<n_index>(t).object : db_.as<n_member>(t).object;
+                if (db_.is<n_ident>(t) && readonly.contains(db_.as<n_ident>(t).name))
+                    fail(std::format("параметр {} — алиас только для чтения; чтобы менять, объявите его mut", str(db_.as<n_ident>(t).name)),
+                         db_[o.args[0]].where);
+            }
+        }
+        db_.for_each_child(n, [&](node_id c) { check_param_writes(c, readonly); });
+    }
+
     void collect_assigned(node_id n, std::set<symbol>& out) const {
         if (!n) return;
+        if (db_.is<n_call>(n) && db_.is<n_ident>(db_.as<n_call>(n).callee)) { // change-place
+            const auto& c = db_.as<n_call>(n);
+            if (auto it = functions_.find(db_.as<n_ident>(c.callee).name); it != functions_.end())
+                for (u32 k = 0; k < c.args.size(); ++k) {
+                    node_id a = c.args[k];
+                    while (db_.is<n_index>(a)) a = db_.as<n_index>(a).object;
+                    if (!db_.is<n_ident>(a)) continue;
+                    for (node_id fn : it->second) {
+                        const auto& ps = db_.as<n_fn>(fn).params;
+                        if (k < ps.size() && db_.as<n_param>(ps[k]).mode != param_mode::let && db_.as<n_param>(ps[k]).mode != param_mode::ct)
+                            out.insert(db_.as<n_ident>(a).name);
+                    }
+                }
+        }
         if (db_.is<n_op>(n)) {
             const auto& o  = db_.as<n_op>(n);
             auto        op = str(o.op);
@@ -1189,6 +1244,7 @@ private:
         const auto& fn = db_.as<n_fn>(f);
         if (fn.outline && inline_required(f))
             fail(std::format("{} помечена outline, но использует семантику инлайна", site.what), db_[f].where);
+        if (param_writes_checked_.insert(f.value()).second) check_param_writes(f);
 
         // instance key : only runtime is part of the argument
         bool        all_known = true;
@@ -1514,6 +1570,7 @@ private:
     mutable std::unordered_map<u32, observation> observed_;
     mutable bool                            observed_dirty_ = false;
     std::set<u32>                           live_fns_;
+    std::set<u32>                           param_writes_checked_;
     std::set<u32>                           proven_;      // node Indexations Proven within Boundaries
     std::vector<std::pair<span, std::string>> proven_list_;
     std::vector<std::tuple<const value*, const value*, symbol>> index_proofs_; // (cell variable cycle, cell and array name)
