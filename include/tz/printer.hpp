@@ -133,6 +133,7 @@ private:
 
     void print_node(node_id, const n_return& r) {
         out_ += "return";
+        if (r.target) { out_ += '('; item(r.target); out_ += ')'; }
         if (r.value) { out_ += ' '; item(r.value); }
         out_ += ';';
     }

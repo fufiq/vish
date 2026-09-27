@@ -277,10 +277,18 @@ private:
 
         if (is_word("return")) {
             advance();
+            // return(цель) value - close; return (x) with space - value
+            node_id target;
+            if (is_open('(') && here().glued) {
+                advance();
+                u32 t0 = here().where.begin;
+                target = db_.add(n_ident{ident()}, {t0, toks_[pos_ - 1].where.end});
+                expect_close(')');
+            }
             node_id v;
             if (!is_op(";") && !is_close('}')) v = expression();
             end_statement();
-            return db_.add(n_return{v}, {start, toks_[pos_ - 1].where.end});
+            return db_.add(n_return{v, target}, {start, toks_[pos_ - 1].where.end});
         }
         if (is_word("require") && is_open('(', 1)) {
             advance();

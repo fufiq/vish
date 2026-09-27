@@ -1,0 +1,13 @@
+// out: small
+// out: big
+// out: odd
+// require в начале тела — ограничение кандидата; побеждает самый специфичный.
+kind(auto x) { require(x < 10); "small" }
+kind(auto x) { require(x >= 10); "big" }
+kind(auto x) { require(x >= 10); require(x % 2 == 1); "odd" }
+
+main() {
+  print(kind(3));
+  print(kind(40));
+  print(kind(41));
+}

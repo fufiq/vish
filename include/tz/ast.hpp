@@ -37,7 +37,7 @@ struct n_index    { node_id object; node_id index; };
 struct n_if       { node_id cond; node_id then_; node_id else_; };
 struct n_for      { symbol var; node_id range; node_id body; };
 struct n_while    { node_id cond; node_id body; };
-struct n_return   { node_id value; };
+struct n_return   { node_id value; node_id target; };   // return(f) x is the output from the external function f; return(caller) x is the output from the calling function (§6.1)
 struct n_require  { node_id cond; };
 struct n_try_compile { node_id body; };                   // SFINAE block (§5.4)
 struct n_ct       { node_id body; };                      // ct e / ct { }

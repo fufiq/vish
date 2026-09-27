@@ -1,0 +1,7 @@
+// error: нет подходящей перегрузки half
+// error: кандидат half(i64 x)
+half(i64 x) => x / 2;
+
+main() {
+  print(half(3.0));
+}
