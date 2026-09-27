@@ -26,6 +26,7 @@ int usage() {
                          "  tz fmt <файл.tz>   разобрать и напечатать каноническую проекцию\n"
                          "  tz ast <файл.tz>   напечатать дерево AST\n"
                          "  tz run [--instances] <файл.tz> [аргументы...]   исполнить main()\n"
+                         "  tz check <файл.tz>  статический разбор: стадии кт/рт, расщепления, экземпляры\n"
                          "  tz test <каталог>  прогнать эталонные тесты");
     return 2;
 }
@@ -50,6 +51,19 @@ int main(int argc, char** argv) {
 
         if (cmd == "fmt") std::print("{}", tz::printer(db).print(root));
         else if (cmd == "ast") std::print("{}", tz::dumper(db).dump(root));
+        else if (cmd == "check") {
+            if (!p.errors().empty()) return 1;
+            tz::interpreter vm(db, root, {path}, tz::mode::check);
+            int code = 0;
+            try {
+                vm.run_main();
+            } catch (const tz::diagnostic& d) {
+                std::print(stderr, "{}", tz::render(d, path, src));
+                code = 1;
+            }
+            std::print("{}", vm.report(path, src));
+            return code;
+        }
         else if (cmd == "run") {
             if (!p.errors().empty()) return 1; // We do not perform the whole hole - M0
             std::vector<std::string> args{path};

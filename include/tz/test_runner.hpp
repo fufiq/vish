@@ -6,6 +6,8 @@
 // // out: text expected line stdout (in order)
 // // error: adjustment expected error (diagnosis adjustment)
 // // instances: dot(...) expected instance
+// // check: substrate expected line of `tz check` report
+// Check-error: Predicted static parsing error
 // // fmt-stable check fmtffmt = fmt
 #pragma once
 
@@ -42,7 +44,7 @@ public:
 
 private:
     struct expect {
-        std::vector<std::string> args, stdin_lines, out, errors, instances;
+        std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_errors;
         bool                     fmt_stable = false;
     };
 
@@ -70,7 +72,7 @@ private:
                 std::string        a;
                 while (as >> a) e.args.push_back(a);
             } else if (take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors)
-                       || take("instances:", e.instances)) {
+                       || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check:", e.check)) {
             } else if (body.starts_with("fmt-stable")) {
                 e.fmt_stable = true;
             }
@@ -123,6 +125,23 @@ private:
         std::cin.rdbuf(old_in);
 
         std::string why;
+        if (!e.check.empty() || !e.check_errors.empty()) {
+            std::string check_errors, report;
+            if (p.errors().empty()) {
+                interpreter chk(db, root, {path.filename().string()}, mode::check);
+                try {
+                    chk.run_main();
+                } catch (const diagnostic& d) {
+                    check_errors = render(d, path.filename().string(), src);
+                }
+                report = chk.report(path.filename().string(), src);
+            }
+            for (auto& want : e.check)
+                if (!report.contains(want)) why += std::format("    нет в отчёте check: {:?}\n{}", want, report);
+            for (auto& want : e.check_errors)
+                if (!check_errors.contains(want)) why += std::format("    нет ошибки check: {:?}; есть: {}\n", want, check_errors);
+            if (e.check_errors.empty() && !check_errors.empty()) why += "    неожиданная ошибка check:\n" + check_errors;
+        }
         std::istringstream out_lines(out);
         std::string        line;
         u32                i = 0;

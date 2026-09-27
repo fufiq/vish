@@ -1,0 +1,22 @@
+// stdin: 1 2 3
+// out: 32.0
+// out: 14.0
+// check: u = кт [1.0, 2.0, 3.0]
+// check: xs = рт array<f64>
+// check: dot  ×1
+// check: dot(рт array<f64>, рт array<f64>)  ×1
+// Value-подход: известное сворачивается в кт, рт даёт экземпляр по рантайм-части.
+dot(a, b) {
+  require(a.size == b.size);
+  auto s = zero(typeof(a[0]));
+  for(auto i : range(a.size)) s = s + a[i] * b[i];
+  s
+}
+
+main() {
+  auto u = array{1.0, 2.0, 3.0};
+  auto v = array{4.0, 5.0, 6.0};
+  print(dot(u, v));
+  auto xs = read_floats(stdin);
+  print(dot(xs, xs));
+}

@@ -36,8 +36,20 @@ struct thunk_v {
     u32                    frame; // function from which `return` within the expression
 };
 
+// Verification mode (value approach):
+//
+//
+// rt_v is an erased runtime value: only the type is known. The type is given by the sample
+// (shape): the meaning of this type, the leaves of which are also erased. shape == nullptr
+// - type unknown (e.g. recursion in static parsing).
+struct rt_v { std::shared_ptr<value> shape; };
+
+// split_v is the value of split context: the branch branch has its own type (§5.5).
+// It's not an "A" or a "B" type: a sequel is sorted out for each branch.
+struct split_v { std::vector<value> alts; };
+
 struct value {
-    std::variant<unit_v, bool, i64, f64, std::string, type_v, array_v, agg_v, fn_v, thunk_v> v;
+    std::variant<unit_v, bool, i64, f64, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v> v;
 
     value() : v(unit_v{}) {}
     template <class T> value(T x) : v(std::move(x)) {}
@@ -45,7 +57,38 @@ struct value {
     template <class T> bool     is() const { return std::holds_alternative<T>(v); }
     template <class T> T&       as()       { return std::get<T>(v); }
     template <class T> const T& as() const { return std::get<T>(v); }
+
+    bool known() const { return !is<rt_v>() && !is<split_v>(); } // compile-time: value known
 };
+
+// Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the
+// type of the result of the operation on the samples does not rest on the division by zero.
+inline value erase(const value& x) {
+    if (x.is<rt_v>() || x.is<split_v>()) return x;
+    value shape;
+    if (x.is<i64>()) shape = value(i64(1));
+    else if (x.is<f64>()) shape = value(f64(1));
+    else if (x.is<bool>()) shape = value(true);
+    else if (x.is<std::string>()) shape = value(std::string("x"));
+    else if (x.is<array_v>()) {
+        array_v a;
+        if (!x.as<array_v>().items.empty()) a.items.push_back(erase(x.as<array_v>().items[0]));
+        shape = value(std::move(a));
+    } else if (x.is<agg_v>()) {
+        agg_v g{x.as<agg_v>().type, {}};
+        for (const auto& [k, v] : x.as<agg_v>().fields) g.fields.push_back({k, erase(v)});
+        shape = value(std::move(g));
+    } else {
+        return x; // Types, functions - always known
+    }
+    return value(rt_v{std::make_shared<value>(std::move(shape))});
+}
+
+// Sample type of erased value (for operations on run-time).
+inline const value* shape_of(const value& x) {
+    if (x.is<rt_v>()) return x.as<rt_v>().shape.get();
+    return &x;
+}
 
 // Register of types: closed system of types VM - id instead of strings (§5.1, §9.2).
 class type_registry {
@@ -68,6 +111,7 @@ public:
     std::string_view name(type_id t) const { return t ? std::string_view(names_[t.value()]) : "?"; }
 
     type_id of(const value& x) const {
+        if (x.is<rt_v>()) return x.as<rt_v>().shape ? of(*x.as<rt_v>().shape) : type_id{};
         return std::visit([&](const auto& a) -> type_id {
             using T = std::remove_cvref_t<decltype(a)>;
             if constexpr (std::is_same_v<T, unit_v>) return type_id(0);
@@ -79,12 +123,19 @@ public:
             else if constexpr (std::is_same_v<T, array_v>) return type_id(6);
             else if constexpr (std::is_same_v<T, fn_v>) return type_id(7);
             else if constexpr (std::is_same_v<T, thunk_v>) return type_id(8);
-            else return a.type;
+            else if constexpr (std::is_same_v<T, agg_v>) return a.type;
+            else return type_id{};
         }, x.v);
     }
 
     // The full name of the value type, including the array element type: array<f64>.
     std::string describe(const value& x) const {
+        if (x.is<rt_v>()) return x.as<rt_v>().shape ? describe(*x.as<rt_v>().shape) : "?";
+        if (x.is<split_v>()) {
+            std::string s;
+            for (const auto& a : x.as<split_v>().alts) s += (s.empty() ? "" : " | ") + describe(a);
+            return "{" + s + "}";
+        }
         if (x.is<array_v>()) {
             const auto& items = x.as<array_v>().items;
             return std::format("array<{}>", items.empty() ? std::string("?") : describe(items[0]));
@@ -128,6 +179,8 @@ inline std::string show(const value& x, const type_registry& types, const intern
             }
             return s + "}";
         } else if constexpr (std::is_same_v<T, fn_v>) return "<fn>";
+        else if constexpr (std::is_same_v<T, rt_v>) return std::format("рт {}", types.describe(x));
+        else if constexpr (std::is_same_v<T, split_v>) return std::format("расщеплено {}", types.describe(x));
         else return "<expr>";
     }, x.v);
 }

@@ -1,0 +1,15 @@
+// args: 42
+// out: 42
+// check: p = рт i64
+// check: try(expr)  ×1
+// Тип результата try выводится по всем путям: return(caller) r и r.value.
+try(expr e) {
+  auto r = e;
+  if(r.is_err()) return(caller) r;
+  r.value
+}
+
+main() {
+  auto p = try(parse_int(args[1]));
+  print(p);
+}
