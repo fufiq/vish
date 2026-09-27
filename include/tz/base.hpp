@@ -96,6 +96,12 @@ struct span {
     u32 end   = 0;
 };
 
+// Type of error: instantiation (name, overload, type - "not compiled") or runtime
+// (boundary, division by zero). SFINAE-block try_compile discards only the first:
+//
+//
+enum class diag_kind : u8 { instantiation, runtime };
+
 // Diagnosis is a track, not a single line.
 class diagnostic : public std::runtime_error {
 public:
@@ -104,8 +110,10 @@ public:
         span        where;
     };
 
-    diagnostic(std::string message, span where)
-        : std::runtime_error(message), where_(where) {}
+    diagnostic(std::string message, span where, diag_kind kind = diag_kind::instantiation)
+        : std::runtime_error(message), where_(where), kind_(kind) {}
+
+    diag_kind kind() const { return kind_; }
 
     diagnostic& note(std::string what, span where = {}) {
         trace_.push_back({std::move(what), where});
@@ -117,6 +125,7 @@ public:
 
 private:
     span               where_;
+    diag_kind          kind_;
     std::vector<frame> trace_;
 };
 

@@ -1,0 +1,18 @@
+// args: 5
+// out: 120
+// out: 120
+// check: fact  ×5
+// check: fact(рт i64)  ×1
+// check: r = рт i64
+// Рекурсия по кт исполняется;
+// по рт — неподвижная точка: инстансы сводятся к общему типу.
+fact(n) {
+  if(n <= 1) return 1;
+  n * fact(n - 1)
+}
+
+main() {
+  print(fact(5));
+  auto r = fact(parse_int(args[1]).value);
+  print(r);
+}

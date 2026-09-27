@@ -108,6 +108,10 @@ public:
             out += "расщепления:\n";
             for (const auto& s : splits_) out += std::format("  {} {} → {} продолжения: {}\n", loc(s.where), s.name, s.alts.size(), join(s.alts));
         }
+        if (!excluded_.empty()) {
+            out += "исключённые блоки try_compile:\n";
+            for (const auto& e : excluded_) out += std::format("  {} {}{}\n", loc(e.where), e.path, e.why);
+        }
         if (!folded_.empty()) {
             out += "свёрнуто в кт:\n";
             for (const auto& [name, count] : folded_) out += std::format("  {}  ×{}\n", name, count);
@@ -140,8 +144,8 @@ private:
 
     // --- call-trace errors ---
 
-    [[noreturn]] void fail(std::string msg, span where) {
-        diagnostic d(std::move(msg), where);
+    [[noreturn]] void fail(std::string msg, span where, diag_kind kind = diag_kind::instantiation) {
+        diagnostic d(std::move(msg), where, kind);
         if (!path_.empty()) d.note(std::format("в продолжении {}", path_), where);
         for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) d.note(std::format("в {}", it->what), it->where);
         throw d;
@@ -191,6 +195,8 @@ private:
     }
 
     void add_alt(std::vector<value>& alts, const value& x) {
+        if (unknown(x)) { if (alts.empty()) alts.push_back(x); return; } // ⊥ ⊔ T = T
+        if (alts.size() == 1 && unknown(alts[0])) { alts[0] = x; return; }
         for (auto& y : alts) {
             if (types_.describe(y) != types_.describe(x)) continue;
             if (y.known() && x.known() && show_v(y) == show_v(x)) return; // calculus
@@ -217,6 +223,7 @@ private:
     // bool, known statically; nullopt is run-time-bool (branch by runtime).
     std::optional<bool> known_bool(const value& v, span where) {
         if (v.is<bool>()) return v.as<bool>();
+        if (unknown(v)) return std::nullopt;
         if (v.is<rt_v>() && types_.describe(v) == "bool") return std::nullopt;
         if (v.is<split_v>()) return std::nullopt;
         fail(std::format("условие должно быть bool, получено {}", types_.describe(v)), where);
@@ -368,7 +375,7 @@ private:
     flow eval_node(node_id n, const n_require& r, const scope_ptr& env, u32 frame) {
         TZ_TRY(c, eval(r.cond, env, frame));
         auto b = known_bool(c, db_[r.cond].where);
-        if (b && !*b) fail("нарушено требование require", db_[n].where);
+        if (b && !*b) fail("нарушено требование require", db_[n].where, diag_kind::runtime);
         return ok(); // run-time - Condition: runtime (§5.4)
     }
 
@@ -463,11 +470,16 @@ private:
         return ok(std::move(v));
     }
 
+    // SFINAE block (§5.4):
+// runtime - errors don't get jammed.
     flow eval_node(node_id n, const n_try_compile& t, const scope_ptr& env, u32 frame) {
-        // M0: A block is deleted if it does not contain a name or overload.
+        auto saved_may = may_return_;
         try {
             return eval(t.body, env, frame);
-        } catch (const diagnostic&) {
+        } catch (const diagnostic& d) {
+            if (d.kind() != diag_kind::instantiation) throw;
+            may_return_ = std::move(saved_may);
+            excluded_.push_back({db_[n].where, path_, d.what()});
             return ok();
         }
     }
@@ -522,6 +534,7 @@ private:
     }
 
     value element_type(const value& arr, span where) {
+        if (unknown(arr)) return arr;
         const value* shape = shape_of(arr);
         if (!shape || !shape->is<array_v>()) fail(std::format("индексация значения типа {}", types_.describe(arr)), where);
         if (shape->as<array_v>().items.empty()) return value(rt_v{});
@@ -534,7 +547,7 @@ private:
         auto& items = arr.as<array_v>().items;
         i64   k     = idx.as<i64>();
         if (k < 0 || u64(k) >= items.size())
-            fail(std::format("индекс {} вне границ массива размера {}", k, items.size()), where); // OutOfBounds (§12.1)
+            fail(std::format("индекс {} вне границ массива размера {}", k, items.size()), where, diag_kind::runtime); // OutOfBounds (§12.1)
         return &items[k];
     }
 
@@ -587,7 +600,15 @@ private:
             TZ_TRY(rhs, eval(o.args[1], env, frame));
             value* target = place(o.args[0], env, frame);
             if (!target) {
-                if (checking()) return ok(); // run-time Array: Type is verified in runtime (M0)
+                if (checking() && db_.is<n_index>(o.args[0])) { // entry into the run-time-array element: type reconciliation
+                    TZ_TRY(cur, eval(o.args[0], env, frame));
+                    value res = op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
+                    if (!unknown(cur) && !unknown(res) && types_.describe(cur) != types_.describe(res))
+                        fail(std::format("элемент массива типа {} нельзя заменить значением типа {}", types_.describe(cur),
+                                         types_.describe(res)),
+                             where);
+                    return ok();
+                }
                 fail("присваивание не в переменную", db_[o.args[0]].where);
             }
             if (op == "=") *target = std::move(rhs);
@@ -600,6 +621,7 @@ private:
     }
 
     value unary(std::string_view op, const value& x, span where) {
+        if (unknown(x)) return x;
         if (!x.known()) return erase(unary(op, *shape_or_fail(x, where), where));
         if (op == "!") return value(!truthy(x, where));
         if (op == "-") {
@@ -615,10 +637,13 @@ private:
         return s;
     }
 
+    static bool unknown(const value& x) { return x.is<rt_v>() && !x.as<rt_v>().shape; }
+
     // Binary operation; with run-time-operand, the result type is calculated on the samples.
     value binary(std::string_view op, const value& a, const value& b, span where) {
         if (a.is<split_v>()) return lift(a, [&](const value& x) { return binary(op, x, b, where); });
         if (b.is<split_v>()) return lift(b, [&](const value& y) { return binary(op, a, y, where); });
+        if (unknown(a) || unknown(b)) return value(rt_v{}); // type is still being removed (recursion)
         if (!a.known() || !b.known())
             return erase(arith(op, *shape_or_fail(erase(a), where), *shape_or_fail(erase(b), where), where));
         return arith(op, a, b, where);
@@ -646,7 +671,7 @@ private:
         if (op == "-") return w(u64(x) - u64(y));
         if (op == "*") return w(u64(x) * u64(y));
         if (op == "/" || op == "%") {
-            if (y == 0) fail("деление на ноль", where); // certain exception, not UB
+            if (y == 0) fail("деление на ноль", where, diag_kind::runtime); // certain exception, not UB
             return value(op == "/" ? x / y : x % y);
         }
         return compare(op, x, y, where);
@@ -901,25 +926,48 @@ private:
         }
         key += ")";
 
-        // recursion in static parsing: the same key is already understood
-        if (checking() && active_.contains(key)) return ok(value(rt_v{}));
-        if (checking()) active_.insert(key);
-
-        auto inner    = std::make_shared<scope>();
-        inner->parent = globals_;
-        bind_values(fn.params, vals, args, env, inner);
+        // Recursion in static parsing. According to known values, the usual execution:
+        // “recursion stops the condition”; the activity key includes CT values. By mouth
+        // values is a fixed point: the recursive call receives the current approximation
+        // of the type of result, the body is disassembled again until the type ceases to
+        // change.
+//).
+        std::string active_key = key;
+        if (checking()) {
+            active_key += "|";
+            for (auto& v : vals) active_key += v.known() && !v.is<thunk_v>() ? show_v(v) + "|" : "·|";
+            if (active_.contains(active_key)) {
+                recursed_.insert(active_key);
+                auto it = approx_.find(active_key);
+                return ok(it != approx_.end() ? it->second : value(rt_v{}));
+            }
+            if (frames_.size() > 2000) fail("рекурсия не останавливается при статическом разборе", site.where);
+        }
 
         stack_.push_back(site);
         flow r;
-        try {
-            r = run_frame(fn.body, inner, fn.name, fn.outline);
-        } catch (...) {
-            stack_.pop_back();
-            if (checking()) active_.erase(key);
-            throw;
+        for (u32 pass = 0;; ++pass) {
+            auto inner    = std::make_shared<scope>();
+            inner->parent = globals_;
+            bind_values(fn.params, vals, args, env, inner);
+            if (checking()) active_.insert(active_key);
+            try {
+                r = run_frame(fn.body, inner, fn.name, fn.outline);
+            } catch (...) {
+                stack_.pop_back();
+                if (checking()) { active_.erase(active_key); approx_.erase(active_key); recursed_.erase(active_key); }
+                throw;
+            }
+            if (checking()) active_.erase(active_key);
+            if (!checking() || !recursed_.contains(active_key) || !r.normal()) break;
+            value prev = approx_.contains(active_key) ? approx_[active_key] : value(rt_v{});
+            value next = erase(merge(prev, r.v));
+            if (types_.describe(next) == types_.describe(prev) && !unknown(next)) break;
+            if (pass > 8) fail(std::format("тип результата рекурсивной {} не сходится: {}", str(fn.name), types_.describe(next)), site.where);
+            approx_[active_key] = next;
         }
         stack_.pop_back();
-        if (checking()) active_.erase(key);
+        if (checking()) { approx_.erase(active_key); recursed_.erase(active_key); }
 
         // curled up in compile-time: all arguments and result known, runtime no effects
         bool folded = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect_;
@@ -1090,6 +1138,14 @@ private:
     std::map<std::string, u32>              instances_;
     std::map<std::string, u32>              folded_;
     std::set<std::string>                   active_;
+    std::set<std::string>                   recursed_;
+    std::map<std::string, value>            approx_;
+
+    struct excluded_rec {
+        span        where;
+        std::string path, why;
+    };
+    std::vector<excluded_rec>               excluded_;
     std::vector<stage_rec>                  stages_;
     std::vector<split_rec>                  splits_;
     std::string                             path_; // current continuation of splitting

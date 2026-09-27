@@ -1,0 +1,19 @@
+// check-error: индекс 5 вне границ
+// out: fast
+// out: slow
+// error: индекс 5 вне границ
+// check: исключённые блоки try_compile
+// try_compile исключает блок только по ошибке инстанцирования (нет перегрузки,
+// имени, поля), а рантайм-ошибки не глушит.
+fast_size(auto x) { x.size }
+
+describe(auto x) {
+  try_compile { auto n = fast_size(x); return "fast"; }
+  "slow"
+}
+
+main() {
+  print(describe(array{1, 2}));
+  print(describe(42));
+  try_compile { auto a = array{1}; print(a[5]); }
+}
