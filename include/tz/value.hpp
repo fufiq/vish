@@ -18,7 +18,36 @@ struct scope;
 
 struct unit_v {};
 struct type_v { type_id type; };
-struct array_v { std::vector<value> items; };
+// Array. Uniform numbers are stored tightly (i64/f64 is a real buffer, it works with
+// both the interpreter and the native JIT code without copying); the rest is a general
+// list of values, but the layout must be honest.
+//
+class array_v {
+public:
+    enum class layout : u8 { generic, ints, floats };
+
+    array_v() = default;
+    static array_v of(std::vector<value> items);
+
+    u32    size() const;
+    bool   empty() const { return size() == 0; }
+    value  get(u32 i) const;
+    void   set(u32 i, value v);
+    void   push(value v);
+    layout kind() const { return layout_; }
+
+    i64*       ints() { return ints_.data(); }
+    f64*       floats() { return floats_.data(); }
+    value*     generic_cell(u32 i) { return layout_ == layout::generic ? &items_[i] : nullptr; }
+
+private:
+    void to_generic();
+
+    layout             layout_ = layout::generic;
+    std::vector<value> items_;
+    std::vector<i64>   ints_;
+    std::vector<f64>   floats_;
+};
 struct agg_v { type_id type; std::vector<std::pair<symbol, value>> fields; };
 
 // Function as value: a set of overloads by name or lambda with environment.
@@ -61,6 +90,58 @@ struct value {
     bool known() const { return !is<rt_v>() && !is<split_v>(); } // compile-time: value known
 };
 
+// --- array_v: definitions after value ---
+
+inline array_v array_v::of(std::vector<value> items) {
+    array_v a;
+    for (auto& x : items) a.push(std::move(x));
+    return a;
+}
+
+inline u32 array_v::size() const {
+    switch (layout_) {
+    case layout::ints: return u32(ints_.size());
+    case layout::floats: return u32(floats_.size());
+    default: return u32(items_.size());
+    }
+}
+
+inline value array_v::get(u32 i) const {
+    switch (layout_) {
+    case layout::ints: return value(ints_[i]);
+    case layout::floats: return value(floats_[i]);
+    default: return items_[i];
+    }
+}
+
+inline void array_v::to_generic() {
+    if (layout_ == layout::generic) return;
+    std::vector<value> items;
+    for (u32 i = 0; i < size(); ++i) items.push_back(get(i));
+    ints_.clear();
+    floats_.clear();
+    items_  = std::move(items);
+    layout_ = layout::generic;
+}
+
+inline void array_v::push(value v) {
+    if (size() == 0 && layout_ == layout::generic) { // first element selects the layout
+        if (v.is<i64>()) layout_ = layout::ints;
+        else if (v.is<f64>()) layout_ = layout::floats;
+    }
+    if (layout_ == layout::ints && v.is<i64>()) { ints_.push_back(v.as<i64>()); return; }
+    if (layout_ == layout::floats && v.is<f64>()) { floats_.push_back(v.as<f64>()); return; }
+    to_generic();
+    items_.push_back(std::move(v));
+}
+
+inline void array_v::set(u32 i, value v) {
+    if (layout_ == layout::ints && v.is<i64>()) { ints_[i] = v.as<i64>(); return; }
+    if (layout_ == layout::floats && v.is<f64>()) { floats_[i] = v.as<f64>(); return; }
+    to_generic();
+    items_[i] = std::move(v);
+}
+
 // Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the
 // type of the result of the operation on the samples does not rest on the division by zero.
 inline value erase(const value& x) {
@@ -72,7 +153,7 @@ inline value erase(const value& x) {
     else if (x.is<std::string>()) shape = value(std::string("x"));
     else if (x.is<array_v>()) {
         array_v a;
-        if (!x.as<array_v>().items.empty()) a.items.push_back(erase(x.as<array_v>().items[0]));
+        if (!x.as<array_v>().empty()) a.push(erase(x.as<array_v>().get(0)));
         shape = value(std::move(a));
     } else if (x.is<agg_v>()) {
         agg_v g{x.as<agg_v>().type, {}};
@@ -137,8 +218,8 @@ public:
             return "{" + s + "}";
         }
         if (x.is<array_v>()) {
-            const auto& items = x.as<array_v>().items;
-            return std::format("array<{}>", items.empty() ? std::string("?") : describe(items[0]));
+            const auto& a = x.as<array_v>();
+            return std::format("array<{}>", a.empty() ? std::string("?") : describe(a.get(0)));
         }
         return std::string(name(of(x)));
     }
@@ -166,9 +247,9 @@ inline std::string show(const value& x, const type_registry& types, const intern
         else if constexpr (std::is_same_v<T, type_v>) return std::string(types.name(a.type));
         else if constexpr (std::is_same_v<T, array_v>) {
             std::string s = "[";
-            for (u32 i = 0; i < a.items.size(); ++i) {
+            for (u32 i = 0; i < a.size(); ++i) {
                 if (i) s += ", ";
-                s += show(a.items[i], types, strings);
+                s += show(a.get(i), types, strings);
             }
             return s + "]";
         } else if constexpr (std::is_same_v<T, agg_v>) {

@@ -107,9 +107,9 @@ public:
         : db_(db), module_(module), mode_(m), cache_(cache), known_inputs_(std::move(known)) {
         globals_ = std::make_shared<scope>();
         array_v a;
-        for (auto& s : args) a.items.push_back(value(s));
+        for (auto& s : args) a.push(value(s));
         value args_v(std::move(a));
-        if (checking() && !known_inputs_) args_v = erase(value(array_v{{value(std::string("x"))}})); // arguments - runtime
+        if (checking() && !known_inputs_) args_v = erase(value(array_v::of({value(std::string("x"))}))); // arguments - runtime
         globals_->declare(sym("args"), std::move(args_v));
         globals_->declare(sym("stdin"), value(agg_v{types_.named("stream"), {}})); // descriptor, no value
         for (node_id item : db_.as<n_module>(module).items)
@@ -149,8 +149,8 @@ public:
         if (v.is<std::string>()) return std::format("{:?}", v.as<std::string>());
         if (v.is<array_v>()) {
             std::string s = "array{";
-            for (u32 i = 0; i < v.as<array_v>().items.size(); ++i) {
-                auto item = literal(v.as<array_v>().items[i]);
+            for (u32 i = 0; i < v.as<array_v>().size(); ++i) {
+                auto item = literal(v.as<array_v>().get(i));
                 if (!item) return std::nullopt;
                 s += (i ? ", " : "") + *item;
             }
@@ -563,14 +563,15 @@ private:
         if (r.is<rt_v>()) {
             const value* shape = shape_of(r);
             if (!shape || !shape->is<array_v>()) fail(std::format("for ожидает массив, получено {}", types_.describe(r)), db_[f.range].where);
-            value elem = shape->as<array_v>().items.empty() ? value(rt_v{}) : shape->as<array_v>().items[0];
+            value elem = shape->as<array_v>().empty() ? value(rt_v{}) : shape->as<array_v>().get(0);
             return abstract_loop(f.body, env, frame, f.var, elem);
         }
         if (!r.is<array_v>()) fail(std::format("for ожидает массив, получено {}", types_.describe(r)), db_[f.range].where);
-        for (auto& item : r.as<array_v>().items) {
+        const auto& arr = r.as<array_v>();
+        for (u32 k = 0; k < arr.size(); ++k) {
             auto inner    = std::make_shared<scope>();
             inner->parent = env;
-            inner->declare(f.var, item);
+            inner->declare(f.var, arr.get(k));
             flow b = eval(f.body, inner, frame);
             if (b.kind == flow_kind::brk) break;
             if (b.kind == flow_kind::ret) return b;
@@ -638,16 +639,16 @@ private:
     flow eval_node(node_id n, const n_lambda& l, const scope_ptr& env, u32) { return ok(value(fn_v{{}, n, env})); }
 
     flow eval_node(node_id n, const n_construct& c, const scope_ptr& env, u32 frame) {
-        array_v a;
+        std::vector<value> items;
         for (node_id item : c.items) {
             TZ_TRY(x, eval(item, env, frame));
-            a.items.push_back(std::move(x));
+            items.push_back(std::move(x));
         }
         auto tname = str(db_.as<n_ident>(c.type).name);
         if (tname != "array") fail(std::format("конструктор {}{{}} пока не поддержан", tname), db_[n].where);
-        for (const auto& x : a.items)
-            if (!x.known()) return ok(erase(value(array_v{{x}}))); // At least one run-time element is an array of run-time
-        return ok(value(std::move(a)));
+        for (const auto& x : items)
+            if (!x.known()) return ok(erase(value(array_v::of({x})))); // At least one run-time element is an array of run-time
+        return ok(value(array_v::of(std::move(items))));
     }
 
     // --- field access ---
@@ -664,7 +665,7 @@ private:
             return erase(member(*shape, name, where));
         }
         if (str(name) == "size") {
-            if (obj.is<array_v>()) return value(i64(obj.as<array_v>().items.size()));
+            if (obj.is<array_v>()) return value(i64(obj.as<array_v>().size()));
             if (obj.is<std::string>()) return value(i64(obj.as<std::string>().size()));
         }
         if (obj.is<agg_v>())
@@ -679,8 +680,7 @@ private:
         span where = db_[n].where;
         return ok(lift(obj, [&](const value& o) {
             if (o.is<rt_v>() || !idx.known()) return element_type(o, where);
-            value copy = o;
-            return *element(copy, idx, where);
+            return o.as<array_v>().get(checked_index(o, idx, where));
         }));
     }
 
@@ -688,18 +688,18 @@ private:
         if (unknown(arr)) return arr;
         const value* shape = shape_of(arr);
         if (!shape || !shape->is<array_v>()) fail(std::format("индексация значения типа {}", types_.describe(arr)), where);
-        if (shape->as<array_v>().items.empty()) return value(rt_v{});
-        return erase(shape->as<array_v>().items[0]);
+        if (shape->as<array_v>().empty()) return value(rt_v{});
+        return erase(shape->as<array_v>().get(0));
     }
 
-    value* element(value& arr, const value& idx, span where) {
+    // Proven index of the array element: OutOfBounds (§12.1) - runtime - error.
+    u32 checked_index(const value& arr, const value& idx, span where) {
         if (!arr.is<array_v>()) fail(std::format("индексация значения типа {}", types_.describe(arr)), where);
         if (!idx.is<i64>()) fail("индекс должен быть i64", where);
-        auto& items = arr.as<array_v>().items;
-        i64   k     = idx.as<i64>();
-        if (k < 0 || u64(k) >= items.size())
-            fail(std::format("индекс {} вне границ массива размера {}", k, items.size()), where, diag_kind::runtime); // OutOfBounds (§12.1)
-        return &items[k];
+        i64 k = idx.as<i64>();
+        u32 n = arr.as<array_v>().size();
+        if (k < 0 || u64(k) >= n) fail(std::format("индекс {} вне границ массива размера {}", k, n), where, diag_kind::runtime);
+        return u32(k);
     }
 
     flow eval_node(node_id n, const n_hole& h, const scope_ptr&, u32) {
@@ -718,12 +718,12 @@ private:
             if (value* c = env->find(db_.as<n_ident>(n).name)) return c;
             fail(std::format("неизвестная переменная {}", str(db_.as<n_ident>(n).name)), db_[n].where);
         }
-        if (db_.is<n_index>(n)) {
+        if (db_.is<n_index>(n)) { // cell of the element is only in a common array
             const auto& i   = db_.as<n_index>(n);
             value*      arr = place(i.object, env, frame);
             flow        idx = eval(i.index, env, frame);
-            if (arr->is<rt_v>() || !idx.v.known()) return nullptr; // run-time-array: type check only
-            return element(*arr, idx.v, db_[n].where);
+            if (!arr || arr->is<rt_v>() || !idx.v.known()) return nullptr;
+            return arr->as<array_v>().generic_cell(checked_index(*arr, idx.v, db_[n].where));
         }
         return nullptr;
     }
@@ -749,6 +749,16 @@ private:
         }
         if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
             TZ_TRY(rhs, eval(o.args[1], env, frame));
+            if (!checking() && db_.is<n_index>(o.args[0])) { // entry into an element: set, not cell
+                const auto& ix  = db_.as<n_index>(o.args[0]);
+                value*      arr = place(ix.object, env, frame);
+                if (!arr) fail("присваивание не в переменную", db_[o.args[0]].where);
+                TZ_TRY(idx, eval(ix.index, env, frame));
+                u32   k   = checked_index(*arr, idx, db_[o.args[0]].where);
+                value cur = arr->as<array_v>().get(k);
+                arr->as<array_v>().set(k, op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
+                return ok();
+            }
             value* target = place(o.args[0], env, frame);
             if (!target) {
                 if (checking() && db_.is<n_index>(o.args[0])) { // entry into the run-time-array element: type reconciliation
@@ -1256,10 +1266,10 @@ private:
             fail(std::format("zero не определён для {}", t), where);
         }
         if (n == "range" && a.size() == 1) {
-            if (!a[0].known() && types_.describe(a[0]) == "i64") return erase(value(array_v{{value(i64(0))}}));
+            if (!a[0].known() && types_.describe(a[0]) == "i64") return erase(value(array_v::of({value(i64(0))})));
             if (a[0].is<i64>()) {
                 array_v r;
-                for (i64 i = 0; i < a[0].as<i64>(); ++i) r.items.push_back(value(i));
+                for (i64 i = 0; i < a[0].as<i64>(); ++i) r.push(value(i));
                 return value(std::move(r));
             }
         }
@@ -1272,7 +1282,7 @@ private:
             std::string line;
             bool        have = false;
             if (checking() && (!known_inputs_ || known_inputs_->stdin_lines.empty()))
-                return erase(value(array_v{{value(f64(1))}}));
+                return erase(value(array_v::of({value(f64(1))})));
             if (known_inputs_) { // Entry is set (statically known or submitted by session)
                 if (!known_inputs_->stdin_lines.empty()) {
                     line = known_inputs_->stdin_lines.front();
@@ -1284,7 +1294,7 @@ private:
             if (have || std::getline(std::cin, line)) {
                 std::stringstream ss(line);
                 f64               x;
-                while (ss >> x) r.items.push_back(value(x));
+                while (ss >> x) r.push(value(x));
             }
             return value(std::move(r));
         }
