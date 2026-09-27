@@ -8,6 +8,7 @@
 
 #include "base.hpp"
 
+#include <deque>
 #include <variant>
 
 namespace tz {
@@ -202,7 +203,7 @@ private:
     arena<node, node_tag>                            nodes_;
     u64                                              revision_ = 0;
     std::vector<std::pair<u32, journal_entry>>       log_; // (line interned at time, operation)
-    std::vector<std::string>                         sources_;
+    std::deque<std::string>                          sources_; // Deque: Text references are stable
     std::vector<std::string>                         labels_;
     std::vector<u64>                                 node_rev_;
 };

@@ -20,10 +20,13 @@ namespace tz {
 
 class parser {
 public:
-    parser(ast_db& db, std::string_view src, std::string label = {}) : db_(db), src_(src) {
+    // The parser reads a copy of the text stored by the database when importing: tokens and
+    // holes refer to it, not to the caller string (which may be temporary).
+    parser(ast_db& db, std::string_view src, std::string label = {}) : db_(db) {
         source_ = db_.record_import(std::string(src), std::move(label));
+        src_    = db_.source(source_);
         try {
-            toks_ = lexer(src).run();
+            toks_ = lexer(src_).run();
         } catch (const diagnostic& d) {
             errors_.push_back(with_source(d));
             toks_.assign(1, token{});
