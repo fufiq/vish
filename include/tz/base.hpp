@@ -81,6 +81,8 @@ public:
         return sym;
     }
 
+    u32 size() const { return u32(strings_.size()); }
+
     std::string_view text(symbol s) const {
         return s.valid() ? std::string_view(strings_[s.value()]) : std::string_view("<none>");
     }

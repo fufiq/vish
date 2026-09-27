@@ -20,7 +20,10 @@ namespace tz {
 
 class parser {
 public:
-    parser(ast_db& db, std::string_view src) : db_(db), src_(src), toks_(lexer(src).run()) { match_brackets(); }
+    parser(ast_db& db, std::string_view src) : db_(db), src_(src), toks_(lexer(src).run()) {
+        db_.record_import(std::string(src));
+        match_brackets();
+    }
 
     node_id parse_module() {
         u32       start = here().where.begin;

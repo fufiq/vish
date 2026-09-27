@@ -56,11 +56,29 @@ struct node {
     node_id   parent;
 };
 
+// journal of base operations (§3.1):
+// 
+// The base state is the reproduction of journal;
+// journal is the history of change.
+struct j_intern  { u32 id; std::string text; };
+struct j_add     { u32 id; node_kind kind; span where; };
+struct j_replace { u32 id; node_kind kind; };
+struct j_link    { u32 root; }; // Put the parent in the subtree (deterministically)
+struct j_import  { std::string text; }; // projection: span node - position in it
+using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import>;
+
+struct journal_entry {
+    u64        revision;
+    journal_op op;
+};
+
 class ast_db {
 public:
     node_id add(node_kind k, span where) {
         ++revision_;
-        return nodes_.add(node{std::move(k), where, {}});
+        node_id id = nodes_.add(node{std::move(k), where, {}});
+        log({j_add{id.value(), nodes_[id].kind, where}});
+        return id;
     }
 
     template <class kind>
@@ -78,14 +96,57 @@ public:
     void replace(node_id n, node_kind k) {
         ++revision_;
         nodes_[n].kind = std::move(k);
+        log({j_replace{n.value(), nodes_[n].kind}});
     }
 
     // Assign a parent to all descendants - bypass through reflection of node fields.
     void link_parents(node_id root) {
-        for_each_child(root, [&](node_id child) {
-            nodes_[child].parent = root;
-            link_parents(child);
-        });
+        ++revision_;
+        link_rec(root);
+        log({j_link{root.value()}});
+    }
+
+    // Text input - operation on the base (§3.1): the text is stored in journal, the
+    // positions node (span) indicate it.
+    void record_import(std::string text) {
+        source_ = text;
+        log({j_import{std::move(text)}});
+    }
+
+    const std::string& source() const { return source_; }
+
+    // journal with new strings before each operation.
+    std::vector<journal_entry> journal() const {
+        std::vector<journal_entry> out;
+        u32                        emitted = 0;
+        for (const auto& [strings_count, e] : log_) {
+            for (; emitted < strings_count; ++emitted)
+                out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
+            out.push_back(e);
+        }
+        for (; emitted < strings.size(); ++emitted)
+            out.push_back({revision_, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
+        return out;
+    }
+
+    // Play journal to an empty database.
+    void replay(const std::vector<journal_entry>& entries) {
+        for (const auto& e : entries) {
+            std::visit([&](const auto& op) {
+                using T = std::remove_cvref_t<decltype(op)>;
+                if constexpr (std::is_same_v<T, j_intern>) {
+                    if (strings.intern(op.text).value() != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
+                } else if constexpr (std::is_same_v<T, j_add>) {
+                    if (add(op.kind, op.where).value() != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
+                } else if constexpr (std::is_same_v<T, j_replace>) {
+                    replace(node_id(op.id), op.kind);
+                } else if constexpr (std::is_same_v<T, j_link>) {
+                    link_parents(node_id(op.root));
+                } else {
+                    record_import(op.text);
+                }
+            }, e.op);
+        }
     }
 
     // All daughter node_id node: One realization for all species through reflection.
@@ -100,6 +161,15 @@ public:
     interner strings;
 
 private:
+    void log(journal_op op) { log_.push_back({strings.size(), journal_entry{revision_, std::move(op)}}); }
+
+    void link_rec(node_id root) {
+        for_each_child(root, [&](node_id child) {
+            nodes_[child].parent = root;
+            link_rec(child);
+        });
+    }
+
     template <class kind, class fn>
     static void for_each_child_of(const kind& k, fn& f) {
         template for (constexpr auto m : fields_of<kind>()) {
@@ -112,8 +182,10 @@ private:
         }
     }
 
-    arena<node, node_tag> nodes_;
-    u64                   revision_ = 0;
+    arena<node, node_tag>                            nodes_;
+    u64                                              revision_ = 0;
+    std::vector<std::pair<u32, journal_entry>>       log_; // (line interned at time, operation)
+    std::string                                      source_;
 };
 
 // The name node is for debugging (through reflection, without manual tables).

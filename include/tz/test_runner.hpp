@@ -14,12 +14,14 @@
 // // slice: function variable
 // // slice-has: text / slice-lacks: text
 // // fmt-stable check fmtffmt = fmt
+// // store-roundtrip save to .tzdb, download: same projection and same output
 #pragma once
 
 #include "interp.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
 #include "views.hpp"
+#include "store.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -53,6 +55,7 @@ private:
         std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_errors;
         std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks;
         bool                     fmt_stable = false;
+        bool                     store_roundtrip = false;
     };
 
     static expect read_header(const std::string& src) {
@@ -85,6 +88,8 @@ private:
                        || take("slice:", e.slice)) {
             } else if (body.starts_with("fmt-stable")) {
                 e.fmt_stable = true;
+            } else if (body.starts_with("store-roundtrip")) {
+                e.store_roundtrip = true;
             }
         }
         return e;
@@ -176,6 +181,27 @@ private:
                 if (!text.contains(want)) why += std::format("    нет в срезе: {:?}\n{}", want, text);
             for (auto& bad : e.slice_lacks)
                 if (text.contains(bad)) why += std::format("    лишнее в срезе: {:?}\n{}", bad, text);
+        }
+        if (e.store_roundtrip) {
+            auto tmp = std::filesystem::temp_directory_path() / std::format("tz-test-{}.tzdb", path.stem().string());
+            save_db(db, root, tmp.string());
+            ast_db  db2;
+            node_id root2 = load_db(db2, tmp.string());
+            std::filesystem::remove(tmp);
+            if (printer(db).print(root) != printer(db2).print(root2)) why += "    проекция после загрузки базы отличается\n";
+            std::istringstream fake2(stdin_text);
+            auto*              old2 = std::cin.rdbuf(fake2.rdbuf());
+            std::string        out2;
+            std::vector<std::string> args{path.filename().string()};
+            args.insert(args.end(), e.args.begin(), e.args.end());
+            interpreter vm2(db2, root2, args);
+            vm2.capture_output(&out2);
+            try {
+                vm2.run_main();
+            } catch (const diagnostic&) {
+            }
+            std::cin.rdbuf(old2);
+            if (out2 != out) why += std::format("    вывод из базы отличается: {:?} против {:?}\n", out2, out);
         }
         std::istringstream out_lines(out);
         std::string        line;

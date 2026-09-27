@@ -1,4 +1,7 @@
 // tz - VM king. One unit of translation: all code is headers (HO-Build).
+//
+// The source of truth is AST (D7). Any command accepts either text (.tz - import text
+// projection to the database) or the base itself (.tzdb - journal).
 #include "tz/base.hpp"
 #include "tz/lexer.hpp"
 #include "tz/ast.hpp"
@@ -8,6 +11,7 @@
 #include "tz/interp.hpp"
 #include "tz/test_runner.hpp"
 #include "tz/views.hpp"
+#include "tz/store.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -23,72 +27,85 @@ std::string read_file(const std::string& path) {
 }
 
 int usage() {
-    std::println(stderr, "использование:\n"
-                         "  tz fmt <файл.tz>   разобрать и напечатать каноническую проекцию\n"
-                         "  tz ast <файл.tz>   напечатать дерево AST\n"
-                         "  tz run [--instances] <файл.tz> [аргументы...]   исполнить main()\n"
-                         "  tz check <файл.tz>  статический разбор: стадии кт/рт, расщепления, экземпляры\n"
-                         "  tz residual <файл.tz> [--stdin СТРОКА]... [аргументы...]  программа для заданных входов\n"
-                         "  tz slice <файл.tz> <функция> <переменная>  только то, что связано с переменной\n"
-                         "  tz test <каталог>  прогнать эталонные тесты");
+    std::println(stderr, "использование (<программа> — файл .tz или база .tzdb):\n"
+                         "  tz fmt <программа>        каноническая текстовая проекция\n"
+                         "  tz ast <программа>        дерево AST\n"
+                         "  tz run [--instances] <программа> [аргументы...]   исполнить main()\n"
+                         "  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n"
+                         "  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n"
+                         "  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n"
+                         "  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n"
+                         "  tz log <база.tzdb>         журнал операций базы в тексте\n"
+                         "  tz test <каталог>          прогнать эталонные тесты");
     return 2;
+}
+
+// Downloaded program: base, root, text for diagnostics, errors parsing.
+struct program {
+    tz::ast_db                  db;
+    tz::node_id                 root;
+    std::vector<tz::diagnostic> parse_errors;
+    std::string                 path;
+
+    const std::string& src() const { return db.source(); }
+};
+
+void load(program& p, const std::string& path) {
+    p.path = path;
+    if (path.ends_with(".tzdb")) {
+        p.root = tz::load_db(p.db, path);
+        return;
+    }
+    std::string text = read_file(path);
+    tz::parser  parser(p.db, text);
+    p.root         = parser.parse_module();
+    p.parse_errors = parser.errors();
+}
+
+int report_error(const program& p, const tz::diagnostic& d) {
+    std::print(stderr, "{}", tz::render(d, p.path, p.src()));
+    return 1;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
-    std::string cmd  = argv[1];
-    if (cmd == "test") return tz::test_runner().run(argv[2]);
-    int         at   = 2;
-    bool        show_instances = false;
-    if (cmd == "run" && std::string_view(argv[at]) == "--instances") { show_instances = true; ++at; }
-    if (at >= argc) return usage();
-    std::string path = argv[at++];
+    std::string cmd = argv[1];
     try {
-        std::string src = read_file(path);
-        tz::ast_db  db;
-        tz::parser  p(db, src);
-        tz::node_id root = p.parse_module();
-        for (const auto& e : p.errors()) std::print(stderr, "{}", tz::render(e, path, src));
+        if (cmd == "test") return tz::test_runner().run(argv[2]);
+        if (cmd == "log") {
+            tz::node_id root;
+            std::print("{}", tz::describe_journal(tz::read_journal(argv[2], root)));
+            return 0;
+        }
 
-        if (cmd == "fmt") std::print("{}", tz::printer(db).print(root));
-        else if (cmd == "ast") std::print("{}", tz::dumper(db).dump(root));
-        else if (cmd == "check") {
-            if (!p.errors().empty()) return 1;
-            tz::interpreter vm(db, root, {path}, tz::mode::check);
-            int code = 0;
-            try {
-                vm.run_main();
-            } catch (const tz::diagnostic& d) {
-                std::print(stderr, "{}", tz::render(d, path, src));
-                code = 1;
-            }
-            std::print("{}", vm.report(path, src));
-            return code;
+        int  at             = 2;
+        bool show_instances = false;
+        if (cmd == "run" && std::string_view(argv[at]) == "--instances") { show_instances = true; ++at; }
+        if (at >= argc) return usage();
+
+        program p;
+        load(p, argv[at++]);
+        for (const auto& e : p.parse_errors) std::print(stderr, "{}", tz::render(e, p.path, p.src()));
+        bool parsed = p.parse_errors.empty();
+
+        if (cmd == "save") {
+            if (at >= argc) return usage();
+            tz::save_db(p.db, p.root, argv[at]);
+            return parsed ? 0 : 1;
         }
-        else if (cmd == "residual") {
-            if (!p.errors().empty()) return 1;
-            tz::interpreter::known_inputs known;
-            std::vector<std::string>      args{path};
-            for (int i = at; i < argc; ++i) {
-                if (std::string_view(argv[i]) == "--stdin" && i + 1 < argc) known.stdin_lines.push_back(argv[++i]);
-                else args.push_back(argv[i]);
-            }
-            tz::interpreter vm(db, root, args, tz::mode::check, known);
-            int code = 0;
-            try {
-                vm.run_main();
-            } catch (const tz::diagnostic& d) {
-                std::print(stderr, "{}", tz::render(d, path, src));
-                code = 1;
-            }
-            std::print("{}", tz::residual_view(db, vm).print(root));
-            return code;
+        if (cmd == "fmt") {
+            std::print("{}", tz::printer(p.db).print(p.root));
+            return parsed ? 0 : 1;
         }
-        else if (cmd == "slice") {
+        if (cmd == "ast") {
+            std::print("{}", tz::dumper(p.db).dump(p.root));
+            return parsed ? 0 : 1;
+        }
+        if (cmd == "slice") {
             if (at + 1 >= argc) return usage();
-            auto out = tz::slice_view(db).print(root, argv[at], argv[at + 1]);
+            auto out = tz::slice_view(p.db).print(p.root, argv[at], argv[at + 1]);
             if (out.empty()) {
                 std::println(stderr, "не найдены функция {} или переменная {}", argv[at], argv[at + 1]);
                 return 1;
@@ -96,23 +113,50 @@ int main(int argc, char** argv) {
             std::print("{}", out);
             return 0;
         }
-        else if (cmd == "run") {
-            if (!p.errors().empty()) return 1; // We do not perform the whole hole - M0
-            std::vector<std::string> args{path};
+        if (!parsed) return 1; // We don't do the whole thing - M0
+
+        if (cmd == "run") {
+            std::vector<std::string> args{p.path};
             args.insert(args.end(), argv + at, argv + argc);
-            tz::interpreter vm(db, root, std::move(args));
+            tz::interpreter vm(p.db, p.root, std::move(args));
             int code = 0;
             try {
                 code = vm.run_main();
             } catch (const tz::diagnostic& d) {
-                std::print(stderr, "{}", tz::render(d, path, src));
-                code = 1;
+                code = report_error(p, d);
             }
             if (show_instances) std::print(stderr, "экземпляры:\n{}", vm.instances());
             return code;
         }
-        else return usage();
-        return p.errors().empty() ? 0 : 1;
+        if (cmd == "check") {
+            tz::interpreter vm(p.db, p.root, {p.path}, tz::mode::check);
+            int code = 0;
+            try {
+                vm.run_main();
+            } catch (const tz::diagnostic& d) {
+                code = report_error(p, d);
+            }
+            std::print("{}", vm.report(p.path, p.src()));
+            return code;
+        }
+        if (cmd == "residual") {
+            tz::interpreter::known_inputs known;
+            std::vector<std::string>      args{p.path};
+            for (int i = at; i < argc; ++i) {
+                if (std::string_view(argv[i]) == "--stdin" && i + 1 < argc) known.stdin_lines.push_back(argv[++i]);
+                else args.push_back(argv[i]);
+            }
+            tz::interpreter vm(p.db, p.root, args, tz::mode::check, known);
+            int code = 0;
+            try {
+                vm.run_main();
+            } catch (const tz::diagnostic& d) {
+                code = report_error(p, d);
+            }
+            std::print("{}", tz::residual_view(p.db, vm).print(p.root));
+            return code;
+        }
+        return usage();
     } catch (const tz::diagnostic& d) {
         std::println(stderr, "{}", d.what());
         return 1;
