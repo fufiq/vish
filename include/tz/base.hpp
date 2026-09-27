@@ -1,0 +1,156 @@
+// VM base layer: identifiers, arenas, line internment, errors.
+//
+// Principle: There are no pointers in the data. Everything is addressed by
+// indices (u32) - So dumping, journal, and recovery is all about copying
+// arenas.
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+#include <format>
+#include <meta>
+#include <print>
+#include <source_location>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace tz {
+
+using u8  = std::uint8_t;
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+using i64 = std::int64_t;
+using f64 = double;
+
+// Typed index: id< node_tag> and id< symbol_tag> are not mixed.
+template <class tag>
+class id {
+public:
+    static constexpr u32 none_value = ~u32{0};
+
+    constexpr id() = default;
+    constexpr explicit id(u32 v) : value_(v) {}
+
+    constexpr u32  value() const { return value_; }
+    constexpr bool valid() const { return value_ != none_value; }
+    constexpr explicit operator bool() const { return valid(); }
+    constexpr auto operator<=>(const id&) const = default;
+
+private:
+    u32 value_ = none_value;
+};
+
+// Arena: a dense array of objects of the same kind addressed by the index.
+template <class T, class tag = T>
+class arena {
+public:
+    using handle = id<tag>;
+
+    handle add(T value) {
+        items_.push_back(std::move(value));
+        return handle(u32(items_.size() - 1));
+    }
+
+    T&       operator[](handle h)       pre(h.value() < items_.size()) { return items_[h.value()]; }
+    const T& operator[](handle h) const pre(h.value() < items_.size()) { return items_[h.value()]; }
+
+    u32  size() const { return u32(items_.size()); }
+    auto begin() const { return items_.begin(); }
+    auto end() const { return items_.end(); }
+    void clear() { items_.clear(); }
+
+private:
+    std::vector<T> items_;
+};
+
+// Internated line: Comparison - Comparison of numbers.
+struct symbol_tag;
+using symbol = id<symbol_tag>;
+
+class interner {
+public:
+    symbol intern(std::string_view s) {
+        if (auto it = index_.find(std::string(s)); it != index_.end()) return it->second;
+        symbol sym(u32(strings_.size()));
+        strings_.emplace_back(s);
+        index_.emplace(strings_.back(), sym);
+        return sym;
+    }
+
+    std::string_view text(symbol s) const {
+        return s.valid() ? std::string_view(strings_[s.value()]) : std::string_view("<none>");
+    }
+
+private:
+    std::vector<std::string> strings_;
+    std::unordered_map<std::string, symbol> index_;
+};
+
+// Position in the text projection (for diagnostics and feedback with the editor).
+struct span {
+    u32 begin = 0;
+    u32 end   = 0;
+};
+
+// Diagnosis is a track, not a single line.
+class diagnostic : public std::runtime_error {
+public:
+    struct frame {
+        std::string what;
+        span        where;
+    };
+
+    diagnostic(std::string message, span where)
+        : std::runtime_error(message), where_(where) {}
+
+    diagnostic& note(std::string what, span where = {}) {
+        trace_.push_back({std::move(what), where});
+        return *this;
+    }
+
+    span                      where() const { return where_; }
+    const std::vector<frame>& trace() const { return trace_; }
+
+private:
+    span               where_;
+    std::vector<frame> trace_;
+};
+
+// The line / column for span - only when output to a person.
+struct line_col {
+    u32 line = 1;
+    u32 col  = 1;
+};
+
+inline line_col locate(std::string_view text, u32 offset) {
+    line_col lc;
+    for (u32 i = 0; i < offset && i < text.size(); ++i) {
+        if (text[i] == '\n') { ++lc.line; lc.col = 1; }
+        else ++lc.col;
+    }
+    return lc;
+}
+
+inline std::string render(const diagnostic& d, std::string_view file, std::string_view text) {
+    auto lc  = locate(text, d.where().begin);
+    auto out = std::format("{}:{}:{}: ошибка: {}\n", file, lc.line, lc.col, d.what());
+    for (const auto& f : d.trace()) {
+        auto l = locate(text, f.where.begin);
+        out += std::format("  {}:{}:{}: {}\n", file, l.line, l.col, f.what);
+    }
+    return out;
+}
+
+// --- Reflection: one implementation for all aggregates ---
+
+template <class T>
+consteval auto fields_of() {
+    return std::define_static_array(
+        std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()));
+}
+
+} // namespace tz
