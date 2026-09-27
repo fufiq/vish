@@ -1,0 +1,45 @@
+// jit-compiled: sum
+// jit-compiled: first_to
+// out: [1, 2, 3] [9, 2, 3]
+// out: [1, 2, 3]
+// out: [[1, 2, 3], [1, 2, 3]] [7, 2, 3]
+// out: 6
+// out: [5, 2, 3]
+// Массив-место передаётся заёмным видом ячейки вызывающего, без копии и без
+// счётчиков ссылок 
+// Копия внутри функции, возврат
+// параметра и сохранение его в другом массиве — самостоятельные значения.
+local_copy(auto a) {
+  auto b = a;
+  b[0] = 9;
+  print(a, b);
+}
+
+same(auto a) => a
+
+keep(auto a) {
+  auto box = array{a, a};
+  box
+}
+
+sum(auto a) {
+  auto s = 0;
+  for(auto i : range(a.size)) s += a[i];
+  s
+}
+
+first_to(mut auto a, auto v) { a[0] = v; }
+
+main() {
+  auto xs = array{1, 2, 3};
+  local_copy(xs);
+  auto ys = same(xs);
+  print(ys);
+  auto box = keep(xs);
+  xs[0] = 7;
+  print(box, xs);
+  xs[0] = 1;
+  print(sum(xs));
+  first_to(xs, 5);
+  print(xs);
+}

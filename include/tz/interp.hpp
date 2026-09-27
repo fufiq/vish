@@ -1004,6 +1004,8 @@ private:
                 if (i >= ps.size() || db_.as<n_param>(ps[i]).mode != param_mode::expr) expr_everywhere = false;
             }
             if (expr_everywhere) vals[i] = value(thunk_v{args[i], env, frame});
+            else if (value* cell = checking() ? nullptr : place_or_null(args[i], env); cell && cell->is<array_v>())
+                vals[i] = value(array_v::borrow(cell->as<array_v>())); // place-link, not copy
             else {
                 TZ_TRY(v, eval(args[i], env, frame));
                 vals[i] = std::move(v);

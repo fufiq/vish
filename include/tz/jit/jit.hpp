@@ -31,7 +31,7 @@ inline u64 jit_fault_node = 0;
 
 // Pointer to a dense array buffer of the desired layout; nullptr - layout is not the
 // same (deoptimization: the interpreter will perform).
-// want: 1 — i64, 2 — f64; +4 — буфер будет изменяться (своя копия хранилища).
+// want: 1 — i64, 2 — f64; +4 — тело пишет в элементы (указатель на изменяемый буфер).
 inline void* jit_array_data(array_v* a, u64 want) {
     if (a->empty()) return reinterpret_cast<void*>(8); // Empty array: no access
     bool write = want & 4;
@@ -183,7 +183,7 @@ public:
             if (is_array(s.type)) arrays.push_back({s, i});
         }
         // Arrays: dense buffer and size - once at the input (the size in the code does not change)
-        std::set<symbol> written;
+        std::set<symbol> written; // In these arrays the body writes
         collect_written_arrays(f.body, written);
         for (auto [s, i] : arrays) {
             bool w = written.contains(db_.as<n_param>(f.params[i]).name);
@@ -231,7 +231,7 @@ private:
 
     static bool is_array(jt t) { return t == jt::arr_i64 || t == jt::arr_f64; }
 
-    // Arrays in which the body writes (they need their own copy of the storehouse).
+    // Massives in which the body writes.
     void collect_written_arrays(node_id n, std::set<symbol>& out) const {
         if (!n) return;
         if (db_.is<n_op>(n)) {
@@ -854,6 +854,7 @@ inline void jit_engine::compile(node_id fn, jit_fn& out) {
     try {
         value r    = an.analyze_instance(fn, shapes);
         out.result = jt_of(r);
+        if (out.result == jt::arr_i64 || out.result == jt::arr_f64) { out.reason = "результат — массив (пока интерпретатор)"; return; }
         if (out.result == jt::other) { out.reason = std::format("тип результата {}", r.is<split_v>() ? "расщеплён" : "не скалярный"); return; }
         jit_codegen(*this, fn, out, an).run();
     } catch (const jit_unsupported& u) {

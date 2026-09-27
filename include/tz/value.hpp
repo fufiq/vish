@@ -23,44 +23,66 @@ struct type_v { type_id type; };
 // list of values, but the layout must be honest.
 //
 //
-// The repository is divided between copies and copied at the first record: a copy of the
-// array (transfer, assignment) costs O(1), the semantics of values is preserved.
+// No reference counters. "" There's no copying where it's thrown out by parsing: the
+// argument-place is transmitted by the borrowed view of the caller's cell. The loan does
+// not own and lives no longer than the call; a copy or record of the loan array makes its
+// own copy.
+//
 class array_v {
 public:
     enum class layout : u8 { generic, ints, floats };
 
     array_v() = default;
+    array_v(const array_v& o) { *this = o; }
+    array_v(array_v&& o) noexcept = default;
+    array_v& operator=(const array_v& o) {
+        if (this == &o) return *this;
+        const array_v& src = o.borrowed_ ? *o.borrowed_ : o;
+        layout_   = src.layout_;
+        items_    = src.items_;
+        ints_     = src.ints_;
+        floats_   = src.floats_;
+        borrowed_ = nullptr;
+        return *this;
+    }
+    array_v& operator=(array_v&& o) noexcept = default;
+
     static array_v of(std::vector<value> items);
+    static array_v borrow(const array_v& cell) { // caller
+        array_v a;
+        a.borrowed_ = cell.borrowed_ ? cell.borrowed_ : &cell;
+        return a;
+    }
 
     u32    size() const;
     bool   empty() const { return size() == 0; }
     value  get(u32 i) const;
     void   set(u32 i, value v);
     void   push(value v);
-    layout kind() const { return s_ ? s_->layout_ : layout::generic; }
+    layout kind() const { return r().layout_; }
 
-    const i64* ints() const { return s_->ints_.data(); }
-    const f64* floats() const { return s_->floats_.data(); }
-    i64*       ints_mut() { own(); return s_->ints_.data(); }     // recorder
-    f64*       floats_mut() { own(); return s_->floats_.data(); }
+    const i64* ints() const { return r().ints_.data(); }
+    const f64* floats() const { return r().floats_.data(); }
+    i64*       ints_mut() { own(); return ints_.data(); }
+    f64*       floats_mut() { own(); return floats_.data(); }
     value*     generic_cell(u32 i) {
         if (kind() != layout::generic) return nullptr;
         own();
-        return &s_->items_[i];
+        return &items_[i];
     }
 
 private:
-    struct storage {
-        layout             layout_ = layout::generic;
-        std::vector<value> items_;
-        std::vector<i64>   ints_;
-        std::vector<f64>   floats_;
-    };
-
-    void own(); // copy
+    const array_v& r() const { return borrowed_ ? *borrowed_ : *this; }
+    void           own() {
+        if (borrowed_) *this = *borrowed_;
+    }
     void to_generic();
 
-    std::shared_ptr<storage> s_;
+    layout             layout_ = layout::generic;
+    std::vector<value> items_;
+    std::vector<i64>   ints_;
+    std::vector<f64>   floats_;
+    const array_v*     borrowed_ = nullptr;
 };
 
 struct agg_v { type_id type; std::vector<std::pair<symbol, value>> fields; };
@@ -113,57 +135,53 @@ inline array_v array_v::of(std::vector<value> items) {
     return a;
 }
 
-inline void array_v::own() {
-    if (!s_) s_ = std::make_shared<storage>();
-    else if (s_.use_count() > 1) s_ = std::make_shared<storage>(*s_);
-}
-
 inline u32 array_v::size() const {
-    if (!s_) return 0;
-    switch (s_->layout_) {
-    case layout::ints: return u32(s_->ints_.size());
-    case layout::floats: return u32(s_->floats_.size());
-    default: return u32(s_->items_.size());
+    const array_v& a = r();
+    switch (a.layout_) {
+    case layout::ints: return u32(a.ints_.size());
+    case layout::floats: return u32(a.floats_.size());
+    default: return u32(a.items_.size());
     }
 }
 
 inline value array_v::get(u32 i) const {
-    switch (s_->layout_) {
-    case layout::ints: return value(s_->ints_[i]);
-    case layout::floats: return value(s_->floats_[i]);
-    default: return s_->items_[i];
+    const array_v& a = r();
+    switch (a.layout_) {
+    case layout::ints: return value(a.ints_[i]);
+    case layout::floats: return value(a.floats_[i]);
+    default: return a.items_[i];
     }
 }
 
 inline void array_v::to_generic() {
     own();
-    if (s_->layout_ == layout::generic) return;
+    if (layout_ == layout::generic) return;
     std::vector<value> items;
     for (u32 i = 0; i < size(); ++i) items.push_back(get(i));
-    s_->ints_.clear();
-    s_->floats_.clear();
-    s_->items_  = std::move(items);
-    s_->layout_ = layout::generic;
+    ints_.clear();
+    floats_.clear();
+    items_  = std::move(items);
+    layout_ = layout::generic;
 }
 
 inline void array_v::push(value v) {
     own();
-    if (size() == 0 && s_->layout_ == layout::generic) { // first element selects the layout
-        if (v.is<i64>()) s_->layout_ = layout::ints;
-        else if (v.is<f64>()) s_->layout_ = layout::floats;
+    if (size() == 0 && layout_ == layout::generic) { // first element selects the layout
+        if (v.is<i64>()) layout_ = layout::ints;
+        else if (v.is<f64>()) layout_ = layout::floats;
     }
-    if (s_->layout_ == layout::ints && v.is<i64>()) { s_->ints_.push_back(v.as<i64>()); return; }
-    if (s_->layout_ == layout::floats && v.is<f64>()) { s_->floats_.push_back(v.as<f64>()); return; }
+    if (layout_ == layout::ints && v.is<i64>()) { ints_.push_back(v.as<i64>()); return; }
+    if (layout_ == layout::floats && v.is<f64>()) { floats_.push_back(v.as<f64>()); return; }
     to_generic();
-    s_->items_.push_back(std::move(v));
+    items_.push_back(std::move(v));
 }
 
 inline void array_v::set(u32 i, value v) {
     own();
-    if (s_->layout_ == layout::ints && v.is<i64>()) { s_->ints_[i] = v.as<i64>(); return; }
-    if (s_->layout_ == layout::floats && v.is<f64>()) { s_->floats_[i] = v.as<f64>(); return; }
+    if (layout_ == layout::ints && v.is<i64>()) { ints_[i] = v.as<i64>(); return; }
+    if (layout_ == layout::floats && v.is<f64>()) { floats_[i] = v.as<f64>(); return; }
     to_generic();
-    s_->items_[i] = std::move(v);
+    items_[i] = std::move(v);
 }
 
 // Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the
