@@ -75,7 +75,7 @@ enum class mode : u8 { run, check };
 // lives in a long-lived VM session (tz vm).
 //
 struct report_event {
-    enum kind_t : u8 { instance, folded, stage, split, excluded, live } kind;
+    enum kind_t : u8 { instance, folded, stage, split, excluded, live, proven } kind;
     std::string              a, b, c; // meaning depends on the species
     span                     where;
     std::vector<std::string> alts;
@@ -211,9 +211,17 @@ public:
             out += "свёрнуто в кт:\n";
             for (const auto& [name, count] : folded_) out += std::format("  {}  ×{}\n", name, count);
         }
+        if (!proven_list_.empty()) {
+            out += "индексы, доказанные в границах (проверка снята):\n";
+            for (const auto& [w, what] : proven_list_) out += std::format("  {} {}\n", loc(w), what);
+        }
         out += "экземпляры (рантайм-часть):\n" + instances();
         return out;
     }
+
+    // Indexing proved by parsing within the array boundaries ("top-up optimization": the
+    // language knows the check is off and shows it in the report).
+    bool bounds_proven(node_id n) const { return proven_.contains(n.value()); }
 
 private:
     // --- flow ---
@@ -283,6 +291,9 @@ private:
         case report_event::split: splits_.push_back({ev.where, ev.a, ev.alts}); break;
         case report_event::excluded: excluded_.push_back({ev.where, ev.a, ev.b}); break;
         case report_event::live: live_fns_.insert(ev.fn); break;
+        case report_event::proven:
+            if (proven_.insert(ev.fn).second) proven_list_.push_back({ev.where, ev.a});
+            break;
         }
     }
 
@@ -584,7 +595,9 @@ private:
             const value* shape = shape_of(r);
             if (!shape || !shape->is<array_v>()) fail(std::format("for ожидает массив, получено {}", types_.describe(r)), db_[f.range].where);
             value elem = shape->as<array_v>().empty() ? value(rt_v{}) : shape->as<array_v>().get(0);
-            return abstract_loop(f.body, env, frame, f.var, elem);
+            const value* src = index_source(f, env);
+            return abstract_loop(f.body, env, frame, f.var, elem, src,
+                                 src ? db_.as<n_ident>(db_.as<n_member>(db_.as<n_call>(f.range).args[0]).object).name : symbol{});
         }
         if (!r.is<array_v>()) fail(std::format("for ожидает массив, получено {}", types_.describe(r)), db_[f.range].where);
         const auto& arr = r.as<array_v>();
@@ -602,7 +615,8 @@ private:
     // A cycle whose number of iterations is known only in runtime: the variables that
     // the body assigns are erased to type; the body is disassembled to a fixed point
     // of types (usually 1-2 passes).
-    flow abstract_loop(node_id body, const scope_ptr& env, u32 frame, symbol var, const value& elem) {
+    flow abstract_loop(node_id body, const scope_ptr& env, u32 frame, symbol var, const value& elem,
+                       const value* indexes = nullptr, symbol indexes_name = {}) {
         std::set<symbol> assigned;
         collect_assigned(body, assigned);
         for (symbol s : assigned)
@@ -613,13 +627,77 @@ private:
             auto inner    = std::make_shared<scope>();
             inner->parent = env;
             if (var) inner->declare(var, elem);
+            if (indexes) index_proofs_.push_back({inner->find(var), indexes, indexes_name});
             flow b = eval(body, inner, frame);
+            if (indexes) index_proofs_.pop_back();
             if (b.kind == flow_kind::ret) record_return(b);
             std::vector<std::string> after;
             for (symbol s : assigned) if (value* c = env->find(s)) { *c = erase(*c); after.push_back(types_.describe(*c)); }
             if (before == after) return ok();
         }
         fail("типы переменных цикла не сошлись", db_[body].where);
+    }
+
+    // Safe index
+// Cycle variable for(i: range(a.size)) is the array index a, while
+    // The body does not change either i or a completely and does not give a to change.
+    // The growth of a (push) proof does not break. Returns cell a or nullptr.
+    void note_index_proof(node_id n, const scope_ptr& env, bool write = false) {
+        if (!checking() || index_proofs_.empty()) return;
+        const auto&  i  = db_.as<n_index>(n);
+        const value* ix = peek(i.index, env);
+        const value* ar = peek(i.object, env);
+        // both cell and name: another name of the same cell (two aliases of the same
+        // array for this call) proves nothing for the instance as a whole.
+        for (const auto& [var_cell, arr_cell, arr_name] : index_proofs_)
+            if (ix && ix == var_cell && ar == arr_cell && db_.is<n_ident>(i.object) && db_.as<n_ident>(i.object).name == arr_name)
+                emit({report_event::proven, std::format("{}[{}]{}", str(db_.as<n_ident>(i.object).name), str(db_.as<n_ident>(i.index).name), write ? " (запись)" : ""),
+                      {}, {}, db_[n].where, {}, n.value()});
+    }
+
+    const value* index_source(const n_for& f, const scope_ptr& env) {
+        if (!db_.is<n_call>(f.range)) return nullptr;
+        const auto& c = db_.as<n_call>(f.range);
+        if (!db_.is<n_ident>(c.callee) || str(db_.as<n_ident>(c.callee).name) != "range" || c.args.size() != 1) return nullptr;
+        if (!db_.is<n_member>(c.args[0]) || str(db_.as<n_member>(c.args[0]).name) != "size") return nullptr;
+        node_id obj = db_.as<n_member>(c.args[0]).object;
+        if (!db_.is<n_ident>(obj)) return nullptr;
+        symbol       arr  = db_.as<n_ident>(obj).name;
+        const value* cell = peek(obj, env);
+        if (!cell || !shape_of(*cell) || !shape_of(*cell)->is<array_v>()) return nullptr;
+        return keeps_index(f.body, f.var, arr) ? cell : nullptr;
+    }
+
+    bool keeps_index(node_id n, symbol var, symbol arr) const {
+        if (!n) return true;
+        if (db_.is<n_lambda>(n)) return false; // The capture could change later.
+        if (db_.is<n_var>(n) && (db_.as<n_var>(n).name == var || db_.as<n_var>(n).name == arr)) return false; // shadow
+        if (db_.is<n_op>(n)) {
+            const auto& o  = db_.as<n_op>(n);
+            auto        op = str(o.op);
+            if ((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && !o.args.empty() && db_.is<n_ident>(o.args[0])) {
+                symbol t = db_.as<n_ident>(o.args[0]).name;
+                if (t == var || t == arr) return false;
+            }
+        }
+        if (db_.is<n_call>(n)) { // a as an argument for a changing parameter
+            const auto& c = db_.as<n_call>(n);
+            for (u32 k = 0; k < c.args.size(); ++k) {
+                if (!db_.is<n_ident>(c.args[k])) continue;
+                symbol a = db_.as<n_ident>(c.args[k]).name;
+                if (a != arr && a != var) continue;
+                if (!db_.is<n_ident>(c.callee)) return false;
+                auto it = functions_.find(db_.as<n_ident>(c.callee).name);
+                if (it == functions_.end()) continue; // Built-in functions don't change arguments
+                for (node_id fn : it->second) {
+                    const auto& ps = db_.as<n_fn>(fn).params;
+                    if (k < ps.size() && db_.as<n_param>(ps[k]).mode != param_mode::let) return false;
+                }
+            }
+        }
+        bool ok_ = true;
+        db_.for_each_child(n, [&](node_id ch) { ok_ = ok_ && keeps_index(ch, var, arr); });
+        return ok_;
     }
 
     void collect_assigned(node_id n, std::set<symbol>& out) const {
@@ -705,6 +783,7 @@ private:
 
     flow eval_node(node_id n, const n_index& i, const scope_ptr& env, u32 frame) {
         span where = db_[n].where;
+        note_index_proof(n, env);
         if (const value* arr = peek(i.object, env); arr && arr->is<array_v>()) {
             TZ_TRY(idx, eval(i.index, env, frame));
             if (idx.known()) return ok(arr->as<array_v>().get(checked_index(*arr, idx, where)));
@@ -782,6 +861,7 @@ private:
         }
         if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
             TZ_TRY(rhs, eval(o.args[1], env, frame));
+            if (db_.is<n_index>(o.args[0])) note_index_proof(o.args[0], env, true);
             if (!checking() && db_.is<n_index>(o.args[0])) { // entry into an element: set, not cell
                 const auto& ix  = db_.as<n_index>(o.args[0]);
                 value*      arr = place(ix.object, env, frame);
@@ -1434,6 +1514,9 @@ private:
     mutable std::unordered_map<u32, observation> observed_;
     mutable bool                            observed_dirty_ = false;
     std::set<u32>                           live_fns_;
+    std::set<u32>                           proven_;      // node Indexations Proven within Boundaries
+    std::vector<std::pair<span, std::string>> proven_list_;
+    std::vector<std::tuple<const value*, const value*, symbol>> index_proofs_; // (cell variable cycle, cell and array name)
     u64                                     effects_ = 0;
 };
 

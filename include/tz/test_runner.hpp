@@ -54,8 +54,8 @@ public:
 
 private:
     struct expect {
-        std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_errors;
-        std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled;
+        std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_lacks, check_errors;
+        std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, unknown;
         bool                     fmt_stable = false;
         bool                     store_roundtrip = false;
     };
@@ -84,7 +84,7 @@ private:
                 std::string        a;
                 while (as >> a) e.args.push_back(a);
             } else if (take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors)
-                       || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check:", e.check)
+                       || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check)
                        || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks)
                        || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks)
                        || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled)) {
@@ -92,6 +92,9 @@ private:
                 e.fmt_stable = true;
             } else if (body.starts_with("store-roundtrip")) {
                 e.store_roundtrip = true;
+            } else if (auto c = body.find(':'); c != std::string::npos && c > 0
+                       && std::ranges::all_of(body.substr(0, c), [](char ch) { return (ch >= 'a' && ch <= 'z') || ch == '-'; })) {
+                e.unknown.emplace_back(body.substr(0, c)); // a typo in the directive shall not silently turn off the check
             }
         }
         return e;
@@ -187,6 +190,7 @@ private:
         std::cin.rdbuf(old_in);
 
         std::string why;
+        for (auto& d : e.unknown) why += std::format("    неизвестная директива теста: {}\n", d);
         // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
         if (p.errors().empty()) {
             std::istringstream fake3(stdin_text);
@@ -211,7 +215,7 @@ private:
             if (first_loc(err3) != first_loc(errors) && !(errors.empty() && err3.empty()))
                 why += std::format("    JIT: ошибка отличается:\n{}против\n{}", err3, errors);
         }
-        if (!e.check.empty() || !e.check_errors.empty()) {
+        if (!e.check.empty() || !e.check_lacks.empty() || !e.check_errors.empty()) {
             std::string check_errors, report;
             if (p.errors().empty()) {
                 interpreter chk(db, root, {path.filename().string()}, mode::check);
@@ -224,6 +228,8 @@ private:
             }
             for (auto& want : e.check)
                 if (!report.contains(want)) why += std::format("    нет в отчёте check: {:?}\n{}", want, report);
+            for (auto& bad : e.check_lacks)
+                if (report.contains(bad)) why += std::format("    лишнее в отчёте check: {:?}\n{}", bad, report);
             for (auto& want : e.check_errors)
                 if (!check_errors.contains(want)) why += std::format("    нет ошибки check: {:?}; есть: {}\n", want, check_errors);
             if (e.check_errors.empty() && !check_errors.empty()) why += "    неожиданная ошибка check:\n" + check_errors;

@@ -96,6 +96,7 @@ struct jit_fn {
     std::string        reason; // why not compiled
     std::map<u32, u64> deps;   // revision of functions included in the code
     std::size_t        bytes = 0; // size
+    u32                unchecked = 0; // indexation without border checks (proven by parsing)
 };
 
 struct jit_unsupported {
@@ -126,7 +127,8 @@ public:
         for (const auto& [key, f] : cache_) {
             node_id fn(u32(std::stoul(key.substr(0, key.find('(')))));
             auto    name = db_.strings.text(db_.as<n_fn>(fn).name);
-            if (f->ok) out += std::format("  jit  {}({}) → {} байт машинного кода\n", name, types_str(f->params), f->bytes);
+            if (f->ok) out += std::format("  jit  {}({}) → {} байт машинного кода{}\n", name, types_str(f->params), f->bytes,
+                                   f->unchecked ? std::format(", без проверки границ: {}", f->unchecked) : "");
             else out += std::format("  интерпретатор  {}({}): {}\n", name, types_str(f->params), f->reason);
         }
         return out;
@@ -210,7 +212,8 @@ public:
         for (auto& st : stubs_) emit_stub(st);
 
         as_.patch32(frame_patch_, i32((u32(slots_) * 8 + 15) & ~15u));
-        out_.bytes = as_.size();
+        out_.bytes     = as_.size();
+        out_.unchecked = bce_;
         out_.code  = as_.finalize();
         out_.entry = out_.code.entry();
         out_.ok    = true;
@@ -242,19 +245,6 @@ private:
                 out.insert(db_.as<n_ident>(db_.as<n_index>(t).object).name);
         }
         db_.for_each_child(n, [&](node_id c) { collect_written_arrays(c, out); });
-    }
-
-    // Variables that the body assigns (to prove the bounds of indexes).
-    void collect_assigned_vars(node_id n, std::set<symbol>& out) const {
-        if (!n) return;
-        if (db_.is<n_op>(n)) {
-            auto op = db_.strings.text(db_.as<n_op>(n).op);
-            node_id t = db_.as<n_op>(n).args.empty() ? node_id{} : db_.as<n_op>(n).args[0];
-            if ((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && db_.is<n_ident>(t))
-                out.insert(db_.as<n_ident>(t).name);
-        }
-        if (db_.is<n_var>(n)) out.insert(db_.as<n_var>(n).name); // shadow
-        db_.for_each_child(n, [&](node_id c) { collect_assigned_vars(c, out); });
     }
 
     i32 alloc() { return -8 * i32(++slots_); }
@@ -397,19 +387,15 @@ private:
         return jt::i64_;
     }
 
-    // Index with check of borders (unsigned comparison catches and negative). Verification
-    // is not necessary if the index is a cycle variable for(i : range(a.size) ) over the
-    // same array and the body does not change it: the language knows that i < a.size
-    // ("top-up optimization"; the size of the array in the machine code does not change).
+    // Index with check of borders (unsigned comparison catches and negative). There is
+    // no verification if parsing has proven an index within bounds (safe index, §12.1):
+    // JIT does not prove itself, but takes language knowledge from parsing.
     void gen_checked_index(const slot& s, node_id index, node_id n) {
         using namespace x64;
-        if (db_.is<n_ident>(index)) {
-            for (auto& [var, arr_off] : proven_)
-                if (var == db_.as<n_ident>(index).name && arr_off == s.off) {
-                    gen_value(index);
-                    ++bce_;
-                    return;
-                }
+        if (an_.bounds_proven(n)) {
+            if (gen_value(index) != jt::i64_) throw jit_unsupported{index, "индекс не i64"};
+            ++bce_;
+            return;
         }
         if (gen_value(index) != jt::i64_) throw jit_unsupported{index, "индекс не i64"};
         as_.load(rcx, rbp, s.size_off);
@@ -740,17 +726,6 @@ private:
             if (gen_value(bound) != jt::i64_) throw jit_unsupported{f.range, "range(не i64)"};
             i32   limit = alloc();
             slot  var   = declare(f.var, jt::i64_);
-            // range(a.size), the body does not change the cycle variable → indexes a[var]
-            std::set<symbol> assigned;
-            collect_assigned_vars(f.body, assigned);
-            bool proven = false;
-            if (db_.is<n_member>(bound) && db_.strings.text(db_.as<n_member>(bound).name) == "size"
-                && db_.is<n_ident>(db_.as<n_member>(bound).object) && !assigned.contains(f.var)) {
-                if (const slot* a = find(db_.as<n_ident>(db_.as<n_member>(bound).object).name); a && is_array(a->type)) {
-                    proven_.push_back({f.var, a->off});
-                    proven = true;
-                }
-            }
             as_.store(rbp, limit, rax);
             as_.mov(rax, u64(0));
             as_.store(rbp, var.off, rax);
@@ -760,7 +735,6 @@ private:
             as_.cmp(rax, rcx);
             as_.jcc(ge, done);
             gen_value(f.body);
-            if (proven) proven_.pop_back();
             as_.load(rax, rbp, var.off);
             as_.mov(rcx, u64(1));
             as_.add(rax, rcx);
@@ -810,7 +784,6 @@ private:
     std::vector<std::unique_ptr<stub>>            stubs_;
     std::vector<std::vector<std::pair<symbol, slot>>> scopes_;
     u32                                           slots_ = 0;
-    std::vector<std::pair<symbol, i32>>           proven_; // (Cycle variable, array): index within boundaries
     u32                                           bce_ = 0; // stripped
     u32                                           depth_ = 0;
     u32                                           frame_patch_ = 0;
