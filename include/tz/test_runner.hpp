@@ -8,12 +8,18 @@
 // // instances: dot(...) expected instance
 // // check: substrate expected line of `tz check` report
 // Check-error: Predicted static parsing error
+// // residual: ab construct residual program for arguments
+// // residual-has: text... it has a line
+// // residual-lacks: text ... there is no line in it
+// // slice: function variable
+// // slice-has: text / slice-lacks: text
 // // fmt-stable check fmtffmt = fmt
 #pragma once
 
 #include "interp.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
+#include "views.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -45,6 +51,7 @@ public:
 private:
     struct expect {
         std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_errors;
+        std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks;
         bool                     fmt_stable = false;
     };
 
@@ -72,7 +79,10 @@ private:
                 std::string        a;
                 while (as >> a) e.args.push_back(a);
             } else if (take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors)
-                       || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check:", e.check)) {
+                       || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check:", e.check)
+                       || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks)
+                       || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks)
+                       || take("slice:", e.slice)) {
             } else if (body.starts_with("fmt-stable")) {
                 e.fmt_stable = true;
             }
@@ -141,6 +151,31 @@ private:
             for (auto& want : e.check_errors)
                 if (!check_errors.contains(want)) why += std::format("    нет ошибки check: {:?}; есть: {}\n", want, check_errors);
             if (e.check_errors.empty() && !check_errors.empty()) why += "    неожиданная ошибка check:\n" + check_errors;
+        }
+        if (!e.residual.empty() && p.errors().empty()) {
+            std::vector<std::string> args{path.filename().string()};
+            std::istringstream       as(e.residual[0]);
+            for (std::string a; as >> a;) args.push_back(a);
+            interpreter vm(db, root, args, mode::check, interpreter::known_inputs{});
+            try {
+                vm.run_main();
+            } catch (const diagnostic&) {
+            }
+            std::string text = residual_view(db, vm).print(root);
+            for (auto& want : e.residual_has)
+                if (!text.contains(want)) why += std::format("    нет в остаточной программе: {:?}\n{}", want, text);
+            for (auto& bad : e.residual_lacks)
+                if (text.contains(bad)) why += std::format("    лишнее в остаточной программе: {:?}\n{}", bad, text);
+        }
+        if (!e.slice.empty() && p.errors().empty()) {
+            std::istringstream fs(e.slice[0]);
+            std::string        fn, var;
+            fs >> fn >> var;
+            std::string text = slice_view(db).print(root, fn, var);
+            for (auto& want : e.slice_has)
+                if (!text.contains(want)) why += std::format("    нет в срезе: {:?}\n{}", want, text);
+            for (auto& bad : e.slice_lacks)
+                if (text.contains(bad)) why += std::format("    лишнее в срезе: {:?}\n{}", bad, text);
         }
         std::istringstream out_lines(out);
         std::string        line;

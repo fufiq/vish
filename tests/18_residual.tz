@@ -1,0 +1,47 @@
+// args: 5
+// stdin: 1 2 3
+// stdin: 4 5 6
+// out: 32.0
+// out: 32.0
+// out: 14
+// residual: 5
+// residual-has: print(32.0);
+// residual-has: print(14);
+// residual-has: auto s = 0.0;
+// residual-has: print(dot(xs, ys));
+// residual-lacks: auto u
+// residual-lacks: args.size > 1
+// residual-lacks: unless
+// residual-lacks: try(
+// известное свёрнуто,
+// развилки с известным условием — в ветку, мёртвое убрано.
+module demo;
+
+dot(a, b) {
+  require(a.size == b.size);
+  auto s = zero(typeof(a[0]));
+  for(auto i : range(a.size)) s = s + a[i] * b[i];
+  s
+}
+
+try(expr e) {
+  auto r = e;
+  if(r.is_err()) return(caller) r;
+  r.value
+}
+
+unless(c, expr body) { if(!c) body; }
+
+main() {
+  auto u = array{1.0, 2.0, 3.0};
+  auto v = array{4.0, 5.0, 6.0};
+  print(dot(u, v));
+  auto xs = read_floats(stdin);
+  auto ys = read_floats(stdin);
+  print(dot(xs, ys));
+  auto w = if(args.size > 1) array{1, 2, 3} else array{1.0, 2.0, 3.0};
+  print(dot(w, w));
+  auto p = try(parse_int(args[1]));
+  auto q = parse_int(args[1])?;
+  unless(p == q) { print("different"); }
+}

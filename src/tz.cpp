@@ -7,6 +7,7 @@
 #include "tz/dump.hpp"
 #include "tz/interp.hpp"
 #include "tz/test_runner.hpp"
+#include "tz/views.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -27,6 +28,8 @@ int usage() {
                          "  tz ast <файл.tz>   напечатать дерево AST\n"
                          "  tz run [--instances] <файл.tz> [аргументы...]   исполнить main()\n"
                          "  tz check <файл.tz>  статический разбор: стадии кт/рт, расщепления, экземпляры\n"
+                         "  tz residual <файл.tz> [--stdin СТРОКА]... [аргументы...]  программа для заданных входов\n"
+                         "  tz slice <файл.tz> <функция> <переменная>  только то, что связано с переменной\n"
                          "  tz test <каталог>  прогнать эталонные тесты");
     return 2;
 }
@@ -63,6 +66,35 @@ int main(int argc, char** argv) {
             }
             std::print("{}", vm.report(path, src));
             return code;
+        }
+        else if (cmd == "residual") {
+            if (!p.errors().empty()) return 1;
+            tz::interpreter::known_inputs known;
+            std::vector<std::string>      args{path};
+            for (int i = at; i < argc; ++i) {
+                if (std::string_view(argv[i]) == "--stdin" && i + 1 < argc) known.stdin_lines.push_back(argv[++i]);
+                else args.push_back(argv[i]);
+            }
+            tz::interpreter vm(db, root, args, tz::mode::check, known);
+            int code = 0;
+            try {
+                vm.run_main();
+            } catch (const tz::diagnostic& d) {
+                std::print(stderr, "{}", tz::render(d, path, src));
+                code = 1;
+            }
+            std::print("{}", tz::residual_view(db, vm).print(root));
+            return code;
+        }
+        else if (cmd == "slice") {
+            if (at + 1 >= argc) return usage();
+            auto out = tz::slice_view(db).print(root, argv[at], argv[at + 1]);
+            if (out.empty()) {
+                std::println(stderr, "не найдены функция {} или переменная {}", argv[at], argv[at + 1]);
+                return 1;
+            }
+            std::print("{}", out);
+            return 0;
         }
         else if (cmd == "run") {
             if (!p.errors().empty()) return 1; // We do not perform the whole hole - M0

@@ -25,6 +25,8 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <optional>
+#include <unordered_map>
 #include <set>
 #include <sstream>
 
@@ -66,15 +68,21 @@ enum class mode : u8 { run, check };
 
 class interpreter {
 public:
-    interpreter(ast_db& db, node_id module, std::vector<std::string> args, mode m = mode::run)
-        : db_(db), module_(module), mode_(m) {
+    // residual program inputs: known arguments and strings of stdin (§13.2).
+    struct known_inputs {
+        std::vector<std::string> stdin_lines;
+    };
+
+    interpreter(ast_db& db, node_id module, std::vector<std::string> args, mode m = mode::run,
+                std::optional<known_inputs> known = std::nullopt)
+        : db_(db), module_(module), mode_(m), known_inputs_(std::move(known)) {
         globals_ = std::make_shared<scope>();
         array_v a;
         for (auto& s : args) a.items.push_back(value(s));
         value args_v(std::move(a));
-        if (checking()) args_v = erase(value(array_v{{value(std::string("x"))}})); // arguments - runtime
+        if (checking() && !known_inputs_) args_v = erase(value(array_v{{value(std::string("x"))}})); // arguments - runtime
         globals_->declare(sym("args"), std::move(args_v));
-        globals_->declare(sym("stdin"), value(std::string("<stdin>")));
+        globals_->declare(sym("stdin"), value(agg_v{types_.named("stream"), {}})); // descriptor, no value
         for (node_id item : db_.as<n_module>(module).items)
             if (db_.is<n_fn>(item)) functions_[db_.as<n_fn>(item).name].push_back(item);
     }
@@ -86,6 +94,40 @@ public:
         call_site site{db_[module_].where, "main"};
         flow r = call_overloaded(it->second, {}, globals_, 0, site);
         return r.v.is<i64>() ? int(r.v.as<i64>()) : 0;
+    }
+
+    // Observations of node mode (for residual program).
+    struct observation {
+        value v;
+        bool  seen     = false; // knot was executed and gave meaning
+        bool  diverted = false; // At least go back/break.
+        bool  effect   = false; // The result was a runtime effect.
+        bool  present  = false; // knot
+    };
+
+    const observation* observed(node_id n) const {
+        build_observed();
+        auto it = observed_.find(n.value());
+        return it == observed_.end() ? nullptr : &it->second;
+    }
+
+    bool live(node_id fn) const { return live_fns_.contains(fn.value()); }
+
+    // Show the meaning as literal, if possible.
+    std::optional<std::string> literal(const value& v) const {
+        if (!v.known()) return std::nullopt;
+        if (v.is<i64>() || v.is<f64>() || v.is<bool>()) return show_v(v);
+        if (v.is<std::string>()) return std::format("{:?}", v.as<std::string>());
+        if (v.is<array_v>()) {
+            std::string s = "array{";
+            for (u32 i = 0; i < v.as<array_v>().items.size(); ++i) {
+                auto item = literal(v.as<array_v>().items[i]);
+                if (!item) return std::nullopt;
+                s += (i ? ", " : "") + *item;
+            }
+            return s + "}";
+        }
+        return std::nullopt;
     }
 
     // All print output is in line (for tests), otherwise in stdout.
@@ -167,7 +209,49 @@ private:
     value var = std::move(var##_f.v)
 
     flow eval(node_id n, const scope_ptr& env, u32 frame) {
-        return std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
+        if (!checking()) return std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
+        // Check mode: observation - what value the node received and whether there was a
+        // runtime effect (necessary for residual program, §13.2)
+        u64  effects_before = effects_;
+        flow f = std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
+        observe(n, f, effects_ != effects_before);
+        return f;
+    }
+
+    // Observations are written in journal: the call, completely folded into compile-time,
+    // rolls back its part - it will not be in runtime, and its values should not interfere
+    // with the convolution of living code.
+    struct obs_entry {
+        u32   node;
+        value v;
+        bool  seen, diverted, effect;
+    };
+
+    void observe(node_id n, const flow& f, bool effect) {
+        if (!f.normal()) journal_.push_back({n.value(), {}, false, true, effect});
+        else journal_.push_back({n.value(), f.v, true, false, effect});
+        observed_dirty_ = true;
+    }
+
+    void mark_executed(node_id n) {
+        journal_.push_back({n.value(), {}, false, false, false});
+        observed_dirty_ = true;
+    }
+
+    void build_observed() const {
+        if (!observed_dirty_) return;
+        observed_.clear();
+        for (const auto& e : journal_) {
+            auto& o = observed_[e.node];
+            o.effect |= e.effect;
+            o.diverted |= e.diverted;
+            o.present = true;
+            if (e.seen) {
+                o.v    = o.seen ? const_cast<interpreter*>(this)->merge(o.v, e.v) : e.v;
+                o.seen = true;
+            }
+        }
+        observed_dirty_ = false;
     }
 
     // The value of the variable; thunk (expr parameter) is calculated when mentioned.
@@ -291,6 +375,7 @@ private:
             node_id s = b.items[i];
             if (checking() && db_.is<n_var>(s)) {
                 const auto& v = db_.as<n_var>(s);
+                mark_executed(s); // instruction
                 TZ_TRY(init, eval(v.init, inner, frame));
                 if (init.is<split_v>()) return split_continuation(b, i, s, init, inner, frame);
                 declare_var(s, v, std::move(init), inner);
@@ -945,6 +1030,7 @@ private:
         }
 
         stack_.push_back(site);
+        std::size_t journal_mark = journal_.size();
         flow r;
         for (u32 pass = 0;; ++pass) {
             auto inner    = std::make_shared<scope>();
@@ -971,8 +1057,14 @@ private:
 
         // curled up in compile-time: all arguments and result known, runtime no effects
         bool folded = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect_;
-        if (folded) ++folded_[std::string(str(fn.name))];
-        else ++instances_[path_.empty() ? key : std::format("{}   {}", key, path_)];
+        if (folded) {
+            ++folded_[std::string(str(fn.name))];
+            journal_.resize(journal_mark); // There is no folded call in runtime.
+            observed_dirty_ = true;
+        } else {
+            ++instances_[path_.empty() ? key : std::format("{}   {}", key, path_)];
+            live_fns_.insert(f.value()); // I need runtime.
+        }
         return r; // return, addressed to the caller (semantic inlining), goes further
     }
 
@@ -1026,7 +1118,10 @@ private:
 
     // --- embedded functions (M0; later VM and stdlib services in language) ---
 
-    void rt_effect() { if (!frames_.empty()) frames_.back().rt_effect = true; }
+    void rt_effect() {
+        ++effects_;
+        if (!frames_.empty()) frames_.back().rt_effect = true;
+    }
 
     value builtin(symbol name, std::vector<value>& a, span where) {
         auto n = str(name);
@@ -1063,10 +1158,16 @@ private:
             return a[0].known() ? value(i64(a[0].as<f64>())) : erase(value(i64(1)));
         if (n == "read_floats") {
             rt_effect();
-            if (checking()) return erase(value(array_v{{value(f64(1))}}));
-            array_v     r;
             std::string line;
-            if (std::getline(std::cin, line)) {
+            bool        have = false;
+            if (checking()) {
+                if (!known_inputs_ || known_inputs_->stdin_lines.empty()) return erase(value(array_v{{value(f64(1))}}));
+                line = known_inputs_->stdin_lines.front(); // Entry is given - the value is known
+                known_inputs_->stdin_lines.erase(known_inputs_->stdin_lines.begin());
+                have = true;
+            }
+            array_v r;
+            if (have || std::getline(std::cin, line)) {
                 std::stringstream ss(line);
                 f64               x;
                 while (ss >> x) r.items.push_back(value(x));
@@ -1150,6 +1251,12 @@ private:
     std::vector<split_rec>                  splits_;
     std::string                             path_; // current continuation of splitting
     std::string*                            captured_ = nullptr;
+    std::optional<known_inputs>             known_inputs_;
+    std::vector<obs_entry>                  journal_;
+    mutable std::unordered_map<u32, observation> observed_;
+    mutable bool                            observed_dirty_ = false;
+    std::set<u32>                           live_fns_;
+    u64                                     effects_ = 0;
 };
 
 } // namespace tz

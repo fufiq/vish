@@ -8,6 +8,7 @@
 #include "ast.hpp"
 
 #include <functional>
+#include <optional>
 
 namespace tz {
 
@@ -16,7 +17,15 @@ public:
     // keep(n) == False - node drops out of projection (slice).
     using filter = std::function<bool(node_id)>;
 
-    explicit printer(const ast_db& db, filter keep = {}) : db_(db), keep_(std::move(keep)) {}
+    // Substitutions of residual program: instead of node, another node (folded branch)
+    // or finished text (known value).
+    struct substitution {
+        std::function<node_id(node_id)>                    node;
+        std::function<std::optional<std::string>(node_id)> text;
+    };
+
+    explicit printer(const ast_db& db, filter keep = {}, substitution subst = {})
+        : db_(db), keep_(std::move(keep)), subst_(std::move(subst)) {}
 
     std::string print(node_id n) {
         out_.clear();
@@ -36,6 +45,12 @@ private:
 
     void item(node_id n) {
         if (!n || !kept(n)) return;
+        if (subst_.node) {
+            if (node_id other = subst_.node(n); other && other != n) { item(other); return; }
+        }
+        if (subst_.text) {
+            if (auto t = subst_.text(n)) { out_ += *t; return; }
+        }
         std::visit([&](const auto& k) { print_node(n, k); }, db_[n].kind);
     }
 
@@ -285,6 +300,7 @@ private:
 
     const ast_db& db_;
     filter        keep_;
+    substitution  subst_;
     std::string   out_;
     u32           indent_ = 0;
 };
