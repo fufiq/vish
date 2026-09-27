@@ -23,6 +23,7 @@
 #include "views.hpp"
 #include "store.hpp"
 #include "session.hpp"
+#include "jit/jit.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -54,7 +55,7 @@ public:
 private:
     struct expect {
         std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_errors;
-        std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks;
+        std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled;
         bool                     fmt_stable = false;
         bool                     store_roundtrip = false;
     };
@@ -86,7 +87,7 @@ private:
                        || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check:", e.check)
                        || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks)
                        || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks)
-                       || take("slice:", e.slice)) {
+                       || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled)) {
             } else if (body.starts_with("fmt-stable")) {
                 e.fmt_stable = true;
             } else if (body.starts_with("store-roundtrip")) {
@@ -186,6 +187,30 @@ private:
         std::cin.rdbuf(old_in);
 
         std::string why;
+        // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
+        if (p.errors().empty()) {
+            std::istringstream fake3(stdin_text);
+            auto*              old3 = std::cin.rdbuf(fake3.rdbuf());
+            std::string        out3, err3;
+            std::vector<std::string> args{path.filename().string()};
+            args.insert(args.end(), e.args.begin(), e.args.end());
+            interpreter vm3(db, root, args);
+            jit_engine  jit(db, root);
+            vm3.use_jit(&jit);
+            vm3.capture_output(&out3);
+            try {
+                vm3.run_main();
+            } catch (const diagnostic& d) {
+                err3 = render(d, path.filename().string(), db);
+            }
+            std::cin.rdbuf(old3);
+            auto first_loc = [](const std::string& t) { return t.substr(0, t.find(": ошибка")); };
+            if (out3 != out) why += std::format("    JIT: вывод отличается: {:?} против {:?}\n{}", out3, out, jit.stats());
+            for (auto& fn : e.jit_compiled)
+                if (!jit.stats().contains(std::format("jit  {}(", fn))) why += std::format("    JIT не скомпилировал {}:\n{}", fn, jit.stats());
+            if (first_loc(err3) != first_loc(errors) && !(errors.empty() && err3.empty()))
+                why += std::format("    JIT: ошибка отличается:\n{}против\n{}", err3, errors);
+        }
         if (!e.check.empty() || !e.check_errors.empty()) {
             std::string check_errors, report;
             if (p.errors().empty()) {

@@ -22,6 +22,9 @@ struct type_v { type_id type; };
 // both the interpreter and the native JIT code without copying); the rest is a general
 // list of values, but the layout must be honest.
 //
+//
+// The repository is divided between copies and copied at the first record: a copy of the
+// array (transfer, assignment) costs O(1), the semantics of values is preserved.
 class array_v {
 public:
     enum class layout : u8 { generic, ints, floats };
@@ -34,20 +37,32 @@ public:
     value  get(u32 i) const;
     void   set(u32 i, value v);
     void   push(value v);
-    layout kind() const { return layout_; }
+    layout kind() const { return s_ ? s_->layout_ : layout::generic; }
 
-    i64*       ints() { return ints_.data(); }
-    f64*       floats() { return floats_.data(); }
-    value*     generic_cell(u32 i) { return layout_ == layout::generic ? &items_[i] : nullptr; }
+    const i64* ints() const { return s_->ints_.data(); }
+    const f64* floats() const { return s_->floats_.data(); }
+    i64*       ints_mut() { own(); return s_->ints_.data(); }     // recorder
+    f64*       floats_mut() { own(); return s_->floats_.data(); }
+    value*     generic_cell(u32 i) {
+        if (kind() != layout::generic) return nullptr;
+        own();
+        return &s_->items_[i];
+    }
 
 private:
+    struct storage {
+        layout             layout_ = layout::generic;
+        std::vector<value> items_;
+        std::vector<i64>   ints_;
+        std::vector<f64>   floats_;
+    };
+
+    void own(); // copy
     void to_generic();
 
-    layout             layout_ = layout::generic;
-    std::vector<value> items_;
-    std::vector<i64>   ints_;
-    std::vector<f64>   floats_;
+    std::shared_ptr<storage> s_;
 };
+
 struct agg_v { type_id type; std::vector<std::pair<symbol, value>> fields; };
 
 // Function as value: a set of overloads by name or lambda with environment.
@@ -98,48 +113,57 @@ inline array_v array_v::of(std::vector<value> items) {
     return a;
 }
 
+inline void array_v::own() {
+    if (!s_) s_ = std::make_shared<storage>();
+    else if (s_.use_count() > 1) s_ = std::make_shared<storage>(*s_);
+}
+
 inline u32 array_v::size() const {
-    switch (layout_) {
-    case layout::ints: return u32(ints_.size());
-    case layout::floats: return u32(floats_.size());
-    default: return u32(items_.size());
+    if (!s_) return 0;
+    switch (s_->layout_) {
+    case layout::ints: return u32(s_->ints_.size());
+    case layout::floats: return u32(s_->floats_.size());
+    default: return u32(s_->items_.size());
     }
 }
 
 inline value array_v::get(u32 i) const {
-    switch (layout_) {
-    case layout::ints: return value(ints_[i]);
-    case layout::floats: return value(floats_[i]);
-    default: return items_[i];
+    switch (s_->layout_) {
+    case layout::ints: return value(s_->ints_[i]);
+    case layout::floats: return value(s_->floats_[i]);
+    default: return s_->items_[i];
     }
 }
 
 inline void array_v::to_generic() {
-    if (layout_ == layout::generic) return;
+    own();
+    if (s_->layout_ == layout::generic) return;
     std::vector<value> items;
     for (u32 i = 0; i < size(); ++i) items.push_back(get(i));
-    ints_.clear();
-    floats_.clear();
-    items_  = std::move(items);
-    layout_ = layout::generic;
+    s_->ints_.clear();
+    s_->floats_.clear();
+    s_->items_  = std::move(items);
+    s_->layout_ = layout::generic;
 }
 
 inline void array_v::push(value v) {
-    if (size() == 0 && layout_ == layout::generic) { // first element selects the layout
-        if (v.is<i64>()) layout_ = layout::ints;
-        else if (v.is<f64>()) layout_ = layout::floats;
+    own();
+    if (size() == 0 && s_->layout_ == layout::generic) { // first element selects the layout
+        if (v.is<i64>()) s_->layout_ = layout::ints;
+        else if (v.is<f64>()) s_->layout_ = layout::floats;
     }
-    if (layout_ == layout::ints && v.is<i64>()) { ints_.push_back(v.as<i64>()); return; }
-    if (layout_ == layout::floats && v.is<f64>()) { floats_.push_back(v.as<f64>()); return; }
+    if (s_->layout_ == layout::ints && v.is<i64>()) { s_->ints_.push_back(v.as<i64>()); return; }
+    if (s_->layout_ == layout::floats && v.is<f64>()) { s_->floats_.push_back(v.as<f64>()); return; }
     to_generic();
-    items_.push_back(std::move(v));
+    s_->items_.push_back(std::move(v));
 }
 
 inline void array_v::set(u32 i, value v) {
-    if (layout_ == layout::ints && v.is<i64>()) { ints_[i] = v.as<i64>(); return; }
-    if (layout_ == layout::floats && v.is<f64>()) { floats_[i] = v.as<f64>(); return; }
+    own();
+    if (s_->layout_ == layout::ints && v.is<i64>()) { s_->ints_[i] = v.as<i64>(); return; }
+    if (s_->layout_ == layout::floats && v.is<f64>()) { s_->floats_[i] = v.as<f64>(); return; }
     to_generic();
-    items_[i] = std::move(v);
+    s_->items_[i] = std::move(v);
 }
 
 // Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the

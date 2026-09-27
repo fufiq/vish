@@ -159,6 +159,25 @@ public:
         return std::nullopt;
     }
 
+    // Static parsing of one instance (for JIT): parameters are erased values of given
+    // types; the result is the type (or compile-time) of the result.
+    value analyze_instance(node_id f, std::vector<value> args) {
+        const auto& fn    = db_.as<n_fn>(f);
+        auto        inner = std::make_shared<scope>();
+        inner->parent     = globals_;
+        for (u32 i = 0; i < fn.params.size() && i < args.size(); ++i) inner->declare(db_.as<n_param>(fn.params[i]).name, args[i]);
+        flow r = run_frame(fn.body, inner, fn.name, fn.outline);
+        return r.v;
+    }
+
+    // Static parsing step budget (for JIT: compiling calculations should not be
+    // unlimited).
+    void set_fuel(u64 steps) { fuel_ = steps; }
+
+    // Connect JIT (run mode): instance is executed by machine code, if JIT supports
+    // them, otherwise by the interpreter.
+    void use_jit(class jit_engine* jit) { jit_ = jit; }
+
     // All print output is in line (for tests), otherwise in stdout.
     void capture_output(std::string* to) { captured_ = to; }
 
@@ -244,6 +263,7 @@ private:
 
     flow eval(node_id n, const scope_ptr& env, u32 frame) {
         if (!checking()) return std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
+        if (fuel_ && --*fuel_ == 0) fail("бюджет статического разбора исчерпан", db_[n].where);
         // Check mode: observation - what value the node received and whether there was a
         // runtime effect (necessary for residual program, §13.2)
         u64  effects_before = effects_;
@@ -654,6 +674,7 @@ private:
     // --- field access ---
 
     flow eval_node(node_id n, const n_member& m, const scope_ptr& env, u32 frame) {
+        if (const value* o = peek(m.object, env); o && o->is<array_v>()) return ok(member(*o, m.name, db_[n].where));
         TZ_TRY(obj, eval(m.object, env, frame));
         return ok(lift(obj, [&](const value& o) { return member(o, m.name, db_[n].where); }));
     }
@@ -674,10 +695,22 @@ private:
         fail(std::format("у значения типа {} нет поля {}", types_.describe(obj), str(name)), where);
     }
 
+    // A variable cell without copying a value (an array by name is not copied for a
+    // single element or size).
+    const value* peek(node_id n, const scope_ptr& env) {
+        if (!db_.is<n_ident>(n)) return nullptr;
+        const value* c = env->find(db_.as<n_ident>(n).name);
+        return c && !c->is<thunk_v>() ? c : nullptr;
+    }
+
     flow eval_node(node_id n, const n_index& i, const scope_ptr& env, u32 frame) {
+        span where = db_[n].where;
+        if (const value* arr = peek(i.object, env); arr && arr->is<array_v>()) {
+            TZ_TRY(idx, eval(i.index, env, frame));
+            if (idx.known()) return ok(arr->as<array_v>().get(checked_index(*arr, idx, where)));
+        }
         TZ_TRY(obj, eval(i.object, env, frame));
         TZ_TRY(idx, eval(i.index, env, frame));
-        span where = db_[n].where;
         return ok(lift(obj, [&](const value& o) {
             if (o.is<rt_v>() || !idx.known()) return element_type(o, where);
             return o.as<array_v>().get(checked_index(o, idx, where));
@@ -1124,6 +1157,10 @@ private:
         if (memoize) { recording_.push_back(&recorded); deps_.emplace_back(); }
         if (checking() && !deps_.empty()) deps_.back()[f.value()] = db_.node_revision(f);
 
+        if (jit_ && !checking()) { // JIT: machine code instance, if any
+            if (auto r = try_jit(f, vals, args, env, key)) return *r;
+        }
+
         stack_.push_back(site);
         std::size_t journal_mark  = journal_.size();
         frame_floors_.push_back({frame_counter_, false});
@@ -1182,6 +1219,9 @@ private:
         }
         return r; // return, addressed to the caller (semantic inlining), goes further
     }
+
+    std::optional<flow> try_jit(node_id f, std::vector<value>& vals, const node_list& args, const scope_ptr& env,
+                                const std::string& key);
 
     bool valid(const check_cache::entry& e) const {
         for (const auto& [node, rev] : e.deps)
@@ -1272,6 +1312,12 @@ private:
                 for (i64 i = 0; i < a[0].as<i64>(); ++i) r.push(value(i));
                 return value(std::move(r));
             }
+        }
+        if (n == "fill" && a.size() == 2 && types_.describe(a[0]) == "i64") { // massif
+            if (!a[0].known() || !a[1].known()) return erase(value(array_v::of({a[1].known() ? a[1] : *shape_of(a[1])})));
+            array_v r;
+            for (i64 i = 0; i < a[0].as<i64>(); ++i) r.push(a[1]);
+            return value(std::move(r));
         }
         if (n == "f64" && a.size() == 1 && types_.describe(a[0]) == "i64")
             return a[0].known() ? value(f64(a[0].as<i64>())) : erase(value(f64(1)));
@@ -1376,6 +1422,8 @@ private:
     std::string                             path_; // current continuation of splitting
     std::string*                            captured_ = nullptr;
     check_cache*                            cache_ = nullptr;
+    class jit_engine*                       jit_   = nullptr;
+    std::optional<u64>                      fuel_;
     std::vector<std::pair<u32, bool>>       frame_floors_; // (The first frame of the call was a return to the outside)
     std::vector<std::vector<report_event>*> recording_;
     std::vector<std::map<u32, u64>>         deps_;

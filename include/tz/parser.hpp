@@ -543,6 +543,7 @@ private:
         expect_close(')');
         node_id then_ = branch();
         node_id else_;
+        if (is_op(";") && is_word("else", 1)) eat_op(";"); // if(c) x = 1; else x = 2;
         if (is_word("else")) {
             advance();
             else_ = branch();

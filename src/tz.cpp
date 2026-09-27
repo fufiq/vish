@@ -13,6 +13,7 @@
 #include "tz/views.hpp"
 #include "tz/store.hpp"
 #include "tz/session.hpp"
+#include "tz/jit/jit.hpp"
 
 #include <iostream>
 
@@ -33,7 +34,7 @@ int usage() {
     std::println(stderr, "использование (<программа> — файл .tz или база .tzdb):\n"
                          "  tz fmt <программа>        каноническая текстовая проекция\n"
                          "  tz ast <программа>        дерево AST\n"
-                         "  tz run [--instances] <программа> [аргументы...]   исполнить main()\n"
+                         "  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n"
                          "  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n"
                          "  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n"
                          "  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n"
@@ -85,8 +86,14 @@ int main(int argc, char** argv) {
         }
 
         int  at             = 2;
-        bool show_instances = false;
-        if (cmd == "run" && std::string_view(argv[at]) == "--instances") { show_instances = true; ++at; }
+        bool show_instances = false, use_jit = false, jit_stats = false;
+        while (cmd == "run" && at < argc && std::string_view(argv[at]).starts_with("--")) {
+            std::string_view f = argv[at++];
+            if (f == "--instances") show_instances = true;
+            else if (f == "--jit") use_jit = true;
+            else if (f == "--jit-stats") use_jit = jit_stats = true;
+            else return usage();
+        }
         if (at >= argc) return usage();
 
         program p;
@@ -137,6 +144,8 @@ int main(int argc, char** argv) {
             std::vector<std::string> args{p.path};
             args.insert(args.end(), argv + at, argv + argc);
             tz::interpreter vm(p.db, p.root, std::move(args));
+            tz::jit_engine  jit(p.db, p.root);
+            if (use_jit) vm.use_jit(&jit);
             int code = 0;
             try {
                 code = vm.run_main();
@@ -144,6 +153,7 @@ int main(int argc, char** argv) {
                 code = report_error(p, d);
             }
             if (show_instances) std::print(stderr, "экземпляры:\n{}", vm.instances());
+            if (jit_stats) std::print(stderr, "JIT:\n{}", jit.stats());
             return code;
         }
         if (cmd == "check") {
