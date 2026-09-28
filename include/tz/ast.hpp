@@ -42,6 +42,8 @@ struct n_param {
   node_id type;
   param_mode mode = param_mode::let;
   bool pack = false;
+  symbol clause; // the word of the clause, which belongs to the parameter: try(…) catch(…) (empty - head)
+  int64_t source = -1; // block parameter entered by the design: `auto x : xs` is the xs argument number in the call
 };
 struct n_var {
   symbol name;
@@ -68,6 +70,8 @@ struct n_str {
 struct n_call {
   node_id callee;
   node_list args;
+  std::vector<symbol> words; // The Word of Clause in Every Argument (Empty - Everything in Your Head)
+  bool tail = false; // The final argument is the tail unit / instruction
 };
 struct n_op {
   symbol op;
@@ -86,15 +90,13 @@ struct n_if {
   node_id then_;
   node_id else_;
 };
-struct n_for {
-  symbol var;
-  node_id range;
+// kernel cycle (§3.2): for/while is a library. Break/continue is the second exit
+// path that catches the loop (like throw-catch, just jmp).
+struct n_loop {
   node_id body;
 };
-struct n_while {
-  node_id cond;
-  node_id body;
-};
+struct n_break {};
+struct n_continue {};
 struct n_return {
   node_id value;
   node_id target;
@@ -105,19 +107,15 @@ struct n_require {
 struct n_try_compile {
   node_id body;
 }; // SFINAE block (§5.4)
-// Exceptions (§8.1): Two exit paths - throw -
-// expression.
+// Exceptions (§8.1): Two exit paths - throw - expression.
+// try/catch is a library over intercept (§8.1).
+//
 struct n_throw {
   node_id value;
 };
-struct n_catch {
-  node_id type; // type name; no - catches any (base)
-  symbol name; // name of the caught meaning; may not be
-  node_id body;
-};
-struct n_try {
-  node_id body;
-  node_list catches; // n_catch in order
+// Repeated call clause: catch(A a) {…} catch(B b) {…} is one argument.
+struct n_pack {
+  node_list items;
 };
 // Named aggregate (§5.1): nominal type; fields - n_var (type, name, default value).
 // Created positionally: Name {a, b}.
@@ -148,6 +146,7 @@ struct n_ct {
 struct n_lambda {
   node_list params;
   node_id body;
+  bool block = false; // construction block: for(auto x : xs) {…} - semantics inline, not closing
 };
 struct n_construct {
   node_id type;
@@ -160,8 +159,8 @@ struct n_hole {
 }; // undisassembled fragment (§4.1)
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
-    n_call, n_op, n_member, n_index, n_if, n_for, n_while, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_catch, n_try, n_struct, n_extend, n_quote, n_splice>;
+    n_call, n_op, n_member, n_index, n_if, n_loop, n_break, n_continue, n_return,
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_struct, n_extend, n_quote, n_splice>;
 
 struct node {
   node_kind kind;
@@ -237,6 +236,7 @@ struct ast_db {
   // Assign a parent to all descendants - bypass through reflection of node fields.
   void link_parents(node_id root) {
     ++revision;
+    if(is<n_module>(root) && as<n_module>(root).name && strings.text(as<n_module>(root).name) == "prelude") prelude = root;
     link_rec(root);
     log({j_link{root.value}});
   }
@@ -344,6 +344,8 @@ struct ast_db {
   }
 
   arena<node, node_tag> nodes;
+  node_id prelude; // prelude module: kernel designs written in language
+  bool loading_prelude = false;
   uint64_t revision = 0;
   std::vector<std::pair<uint32_t, journal_entry>> oplog; // (line interned at time, operation)
   std::deque<std::string> sources; // Deque: Text references are stable

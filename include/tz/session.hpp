@@ -66,7 +66,7 @@ struct vm_session {
     } catch(diagnostic const & d) {
       err = render(d, name, db);
     }
-    last_report = vm.report(name, db.source(0));
+    last_report = vm.report(name, db.source(db[root].where.source));
     std::string names;
     for(auto & n: cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
     return err + cat("check: пересчитано ", cache.recomputed, " экземпл. (", names.empty() ? "—" : names, "), из кэша ", cache.hits, "\n");

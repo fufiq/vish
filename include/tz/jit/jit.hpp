@@ -47,7 +47,7 @@ void * jit_array_data(array_v * a, uint64_t want) {
 uint64_t jit_array_size(array_v * a) { return a->size(); }
 
 // clang-format off
-enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, other };
+enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, other }; // range - range(n) : in the slot only n
 // clang-format on
 
 std::string_view jt_name(jt t) {
@@ -58,6 +58,7 @@ std::string_view jt_name(jt t) {
     case jt::bool_: return "bool";
     case jt::arr_i64: return "array<i64>";
     case jt::arr_f64: return "array<f64>";
+    case jt::range_: return "range";
     default: return "?";
   }
 }
@@ -304,7 +305,7 @@ struct jit_codegen {
   void weigh(node_id n, uint32_t w) {
     if(!n) return;
     if(db.is<n_ident>(n)) weights[db.as<n_ident>(n).name.value] += w;
-    if(db.is<n_for>(n) || db.is<n_while>(n)) w *= 8;
+    if(db.is<n_loop>(n) || (db.is<n_lambda>(n) && db.as<n_lambda>(n).block)) w *= 8; // block with parameters - the body of the structure-cycle
     db.for_each_child(n, [&](node_id c) { weigh(c, w); });
   }
 
@@ -335,7 +336,7 @@ struct jit_codegen {
     }
     if(!weight && name) weight = weights[name.value];
     if(weight >= 2) {
-      if(t == jt::i64_ || t == jt::bool_) s.reg = take_gpr(false);
+      if(t == jt::i64_ || t == jt::bool_ || t == jt::range_) s.reg = take_gpr(false);
       else if(t == jt::f64_) {
         s.xreg = take_xmm();
         if(s.xreg >= 0) live_xmm.push_back({s.xreg, s.off});
@@ -515,7 +516,7 @@ struct jit_codegen {
   // A constant if the value of node at parsing is known and pure ("top").
   bool try_constant(node_id n, jt & t) {
     using namespace x64;
-    if(db.is<n_var>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_for>(n) || db.is<n_while>(n)) return false;
+    if(db.is<n_var>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n)) return false;
     if(db.is<n_op>(n)) {
       auto op = db.strings.text(db.as<n_op>(n).op);
       if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") return false;
@@ -586,8 +587,19 @@ struct jit_codegen {
 
   jt gen(node_id n, n_member const & m) {
     if(db.strings.text(m.name) != "size") throw jit_unsupported{n, "поле"};
+    if(slot const * r = range_slot(m.object)) {
+      load_gpr(*r, x64::rax);
+      return jt::i64_;
+    }
     code.load(x64::rax, x64::rbp, array_slot(m.object).size_off);
     return jt::i64_;
+  }
+
+  // range(n) in variable: the slot stores only n (the array is not built).
+  slot const * range_slot(node_id obj) {
+    if(!db.is<n_ident>(obj)) return nullptr;
+    slot const * s = resolve(db.as<n_ident>(obj).name);
+    return s && s->type == jt::range_ ? s : nullptr;
   }
 
   // Index with check of borders (unsigned comparison catches and negative). There is
@@ -608,6 +620,17 @@ struct jit_codegen {
 
   jt gen(node_id n, n_index const & i) {
     using namespace x64;
+    if(slot const * r = range_slot(i.object)) { // range: element k is k
+      slot rs = *r;
+      if(gen_value(i.index) != jt::i64_) throw jit_unsupported{i.index, "индекс не i64"};
+      if(an.bounds_proven(n)) ++bce;
+      else {
+        load_gpr(rs, rcx);
+        code.cmp(rax, rcx);
+        code.jcc(ae, fault(jit_fault_kind::bounds, n));
+      }
+      return jt::i64_;
+    }
     slot s = array_slot(i.object);
     gen_checked_index(s, i.index, n);
     reg b = data_base(s, rcx);
@@ -667,7 +690,7 @@ struct jit_codegen {
 
   // node constant from observations parsing (pure, known).
   interpreter::observation const * constant_obs(node_id n) const {
-    if(db.is<n_var>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_for>(n) || db.is<n_while>(n) || db.is<n_op>(n) && is_assign(db.strings.text(db.as<n_op>(n).op))) return nullptr;
+    if(db.is<n_var>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n) || db.is<n_op>(n) && is_assign(db.strings.text(db.as<n_op>(n).op))) return nullptr;
     auto const * o = obs(n);
     if(!o || !o->seen || o->effect || o->diverted || !o->v.known()) return nullptr;
     if(!o->v.is<int64_t>() && !o->v.is<double>() && !o->v.is<bool>()) return nullptr;
@@ -914,13 +937,29 @@ struct jit_codegen {
       code.cvttsd2si(rax, xmm0);
       return jt::i64_;
     }
-    // User function: single candidate by name and arnost, without requiring
+    if(slot const * s = find(db.as<n_ident>(c.callee).name); s && s->thunk) return call_block(n, c, *s);
+    if(name == "range" && c.args.size() == 1) {
+      if(gen_value(c.args[0]) != jt::i64_) throw jit_unsupported{n, "range(не i64)"};
+      return jt::range_;
+    }
+    if(name == "is_index" && c.args.size() == 2) { // 0 <= k < size: one unsigned comparison
+      if(gen_value(c.args[0]) != jt::i64_) throw jit_unsupported{n, "is_index: индекс не i64"};
+      if(slot const * r = range_slot(c.args[1])) load_gpr(*r, rcx);
+      else code.load(rcx, rbp, array_slot(c.args[1]).size_off);
+      code.cmp(rax, rcx);
+      code.setcc(b, rax);
+      code.movzx_rax_al();
+      return jt::bool_;
+    }
+    if(name == "intercept") return gen_intercept(n, c);
+    // Language function (prelude or module): single candidate by name and arrogance without requiring
     node_id target;
-    for(node_id item: db.as<n_module>(eng.mod).items)
-      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name && db.as<n_fn>(item).params.size() == c.args.size()) {
-        if(target) throw jit_unsupported{n, cat("перегрузка ", name, " (M1a)")};
-        target = item;
-      }
+    for(node_id m: {db.prelude, eng.mod})
+      for(node_id item: m ? db.as<n_module>(m).items : node_list{})
+        if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name && db.as<n_fn>(item).params.size() == c.args.size()) {
+          if(target) throw jit_unsupported{n, cat("перегрузка ", name, " (M1a)")};
+          target = item;
+        }
     if(!target) throw jit_unsupported{n, cat("вызов ", name)};
     // Default semantic inlining (D10): the body is embedded in the context of the
     // call, the parameters are alias of the caller's seats, without ABI.
@@ -1102,69 +1141,69 @@ struct jit_codegen {
     return jt::unit;
   }
 
-  jt gen(node_id n, n_while const & w) {
+  // kernel cycle: break/continue - transition to the output/beginning of the nearest
+  // loop in the embedding chain (construction block - part of the caller: break from
+  // the body for leaves the loop inside for).
+  jt gen(node_id n, n_loop const & l) {
     using namespace x64;
     label top, done;
     code.bind(top);
-    if(gen_value(w.cond) != jt::bool_) throw jit_unsupported{w.cond, "условие не bool"};
-    code.test(rax, rax);
-    code.jcc(e, done);
-    gen_value(w.body);
+    loops.push_back({&top, &done, depth});
+    gen_value(l.body);
+    loops.pop_back();
     code.jmp(top);
     code.bind(done);
     return jt::unit;
   }
 
-  jt gen(node_id n, n_for const & f) {
-    using namespace x64;
-    scopes.emplace_back();
-    label top, done;
-    // For(i : range(n) ) - Counting cycle without array: language knows what range is
-    if(db.is<n_call>(f.range) && db.is<n_ident>(db.as<n_call>(f.range).callee) && db.strings.text(db.as<n_ident>(db.as<n_call>(f.range).callee).name) == "range" && db.as<n_call>(f.range).args.size() == 1) {
-      node_id bound = db.as<n_call>(f.range).args[0];
-      if(gen_value(bound) != jt::i64_) throw jit_unsupported{f.range, "range(не i64)"};
-      slot limit = declare(symbol{}, jt::i64_, 1u << 20); // boundary of the cycle - first in the register
-      slot var = declare(f.var, jt::i64_, std::max<uint32_t>(weights[f.var.value], 1u << 19));
-      store_var(limit);
-      code.mov(rax, uint64_t(0));
-      store_var(var);
-      code.bind(top);
-      load_var(var);
-      load_gpr(limit, rcx);
-      code.cmp(rax, rcx);
-      code.jcc(ge, done);
-      gen_value(f.body);
-      load_var(var);
-      code.mov(rcx, uint64_t(1));
-      code.add(rax, rcx);
-      store_var(var);
-      code.jmp(top);
-    } else { // variable array
-      slot arr = array_slot(f.range);
-      jt et = arr.type == jt::arr_f64 ? jt::f64_ : jt::i64_;
-      slot idx = declare(symbol{}, jt::i64_, 1u << 20);
-      slot var = declare(f.var, et, std::max<uint32_t>(weights[f.var.value], 1u << 19));
-      code.mov(rax, uint64_t(0));
-      store_var(idx);
-      code.bind(top);
-      load_var(idx);
-      code.load(rcx, rbp, arr.size_off);
-      code.cmp(rax, rcx);
-      code.jcc(ge, done);
-      reg b = data_base(arr, rcx);
-      if(et == jt::f64_) code.movsd_load_idx(xmm0, b, rax);
-      else code.load_idx(rax, b, rax);
-      store_var(var);
-      gen_value(f.body);
-      load_var(idx);
-      code.mov(rcx, uint64_t(1));
-      code.add(rax, rcx);
-      store_var(idx);
-      code.jmp(top);
-    }
-    code.bind(done);
-    pop_scopes(scopes.size() - 1);
+  jt gen(node_id n, n_break const &) { return jump_loop(n, true); }
+  jt gen(node_id n, n_continue const &) { return jump_loop(n, false); }
+
+  jt jump_loop(node_id n, bool brk) {
+    if(loops.empty()) throw jit_unsupported{n, "break/continue вне цикла машинного кода"};
+    loop_frame const & lf = loops.back();
+    if(depth > lf.depth) code.add_rsp(int32_t(8 * (depth - lf.depth))); // transient
+    code.jmp(brk ? *lf.done : *lf.top);
     return jt::unit;
+  }
+
+  // expr-parameter transmitted further than another design - up to the original expression.
+  slot resolve_thunk(slot th) {
+    while(th.thunk && db.is<n_ident>(th.thunk)) {
+      symbol name = db.as<n_ident>(th.thunk).name;
+      std::optional<slot> inner = in_context(th.ctx, [&]() -> std::optional<slot> {
+        slot const * s = find(name);
+        return s ? std::optional<slot>(*s) : std::nullopt;
+      });
+      if(!inner || !inner->thunk) break;
+      th = *inner;
+    }
+    return th;
+  }
+
+  // Design block call: body(xs[k]) - the block is embedded in the context of who caused
+  // the design, with parameters in its slots.
+  jt call_block(node_id n, n_call const & c, slot th) {
+    th = resolve_thunk(th);
+    if(!db.is<n_lambda>(th.thunk) || !db.as<n_lambda>(th.thunk).block) throw jit_unsupported{n, "вызов expr-параметра, который не блок"};
+    auto const & l = db.as<n_lambda>(th.thunk);
+    if(l.params.size() != c.args.size()) throw jit_unsupported{n, "арность блока"};
+    std::vector<std::pair<symbol, slot>> ps;
+    for(uint32_t i = 0; i < c.args.size(); ++i) {
+      symbol pname = db.as<n_param>(l.params[i]).name;
+      jt t = gen_value(c.args[i]);
+      if(t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{c.args[i], cat("аргумент блока типа ", jt_name(t))};
+      slot s = declare(symbol{}, t, std::max<uint32_t>(weights[pname.value], 1u << 19));
+      store_var(s);
+      s.owner = false; // The register is occupied by the call area, the block only sees it.
+      ps.push_back({pname, s});
+    }
+    return in_context(th.ctx, [&] {
+      scopes.emplace_back(std::move(ps));
+      jt r = gen_value(l.body);
+      pop_scopes(scopes.size() - 1);
+      return r;
+    });
   }
 
   // --- exceptions (§8.1 ) ---
@@ -1174,7 +1213,6 @@ struct jit_codegen {
   // So catch is selected when compiling: throw = write value + jmp. Not caught in machine
   // code - output "second way" (jit_thrown), then catches the interpreter.
   //
-
   static std::string_view scalar_name(jt t) { return t == jt::i64_ ? "i64" : t == jt::f64_ ? "f64"
         : t == jt::bool_                                                                   ? "bool"
                                                                                            : ""; }
@@ -1208,28 +1246,36 @@ struct jit_codegen {
     return jt::unit;
   }
 
-  jt gen(node_id n, n_try const & t) {
+  // intercept(тело, блоки) is the core of the library try/catch: blocks are n_pack
+  // packs from catch(E e) { … } clauses.
+  jt gen_intercept(node_id n, n_call const & c) {
     using namespace x64;
+    if(c.args.size() != 2 || !db.is<n_ident>(c.args[1])) throw jit_unsupported{n, "intercept(тело, блоки)"};
+    slot const * hs0 = find(db.as<n_ident>(c.args[1]).name);
+    if(!hs0 || !hs0->thunk) throw jit_unsupported{n, "intercept: блоки не expr-параметр"};
+    slot hs = resolve_thunk(*hs0);
+    node_list handlers = db.is<n_pack>(hs.thunk) ? db.as<n_pack>(hs.thunk).items : node_list{hs.thunk};
     auto const * o = obs(n);
     jt result = o && o->seen ? jt_of(o->v) : jt::unit;
     if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип try"};
     try_frame tf{{}, depth};
-    for(node_id cn: t.catches) {
-      auto const & c = db.as<n_catch>(cn);
+    for(node_id h: handlers) {
+      if(!db.is<n_lambda>(h) || db.as<n_lambda>(h).params.size() != 1) throw jit_unsupported{h, "catch не блок с параметром"};
+      auto const & p = db.as<n_param>(db.as<n_lambda>(h).params[0]);
       catch_info ci;
-      ci.type = c.type ? std::string(db.strings.text(db.as<n_ident>(c.type).name)) : std::string();
+      ci.type = p.type && db.is<n_ident>(p.type) ? std::string(db.strings.text(db.as<n_ident>(p.type).name)) : std::string();
       ci.at = &inline_exits.emplace_back();
-      ci.binds = c.name.valid() && db.strings.text(c.name) != "_";
+      ci.binds = db.strings.text(p.name) != "_";
       if(ci.binds) {
         jt vt = ci.type == "i64" ? jt::i64_ : ci.type == "f64" ? jt::f64_
             : ci.type == "bool"                                ? jt::bool_
                                                                : jt::other;
         if(vt == jt::other) {
-          // catch(e) without type or catch(агрегат e): the value of a type unknown in
+          // catch(auto e) or catch(агрегат e): The value of a type unknown in
           // machine code is only valid if the name is not used.
           uint32_t uses = 0;
-          weigh_uses(c.body, c.name, uses);
-          if(uses) throw jit_unsupported{cn, "catch использует значение, неизвестное машинному коду"};
+          weigh_uses(db.as<n_lambda>(h).body, p.name, uses);
+          if(uses) throw jit_unsupported{h, "catch использует значение, неизвестное машинному коду"};
           ci.binds = false;
         } else {
           ci.var.type = vt;
@@ -1240,19 +1286,22 @@ struct jit_codegen {
     }
     label * end = &inline_exits.emplace_back();
     tries.push_back(tf);
-    jt b = gen_value(t.body);
+    jt b = gen_value(c.args[0]);
     tries.pop_back();
     if(b != result && b != jt::unit) throw jit_unsupported{n, "тип тела try"};
     code.jmp(*end);
-    for(std::size_t k = 0; k < t.catches.size(); ++k) {
-      auto const & c = db.as<n_catch>(t.catches[k]);
+    for(std::size_t k = 0; k < handlers.size(); ++k) {
+      auto const & l = db.as<n_lambda>(handlers[k]);
       catch_info const & ci = tf.catches[k];
       code.bind(*ci.at);
-      scopes.emplace_back();
-      if(ci.binds) scopes.back().push_back({c.name, ci.var});
-      jt cb = gen_value(c.body);
-      pop_scopes(scopes.size() - 1);
-      if(cb != result && cb != jt::unit) throw jit_unsupported{t.catches[k], "тип catch"};
+      jt cb = in_context(hs.ctx, [&] {
+        scopes.emplace_back();
+        if(ci.binds) scopes.back().push_back({db.as<n_param>(l.params[0]).name, ci.var});
+        jt r = gen_value(l.body);
+        pop_scopes(scopes.size() - 1);
+        return r;
+      });
+      if(cb != result && cb != jt::unit) throw jit_unsupported{handlers[k], "тип catch"};
       code.jmp(*end);
     }
     code.bind(*end);
@@ -1286,6 +1335,12 @@ struct jit_codegen {
   uint32_t frame_patch = 0;
   uint32_t fn_base = 0; // first area of the current (built-in) function
   std::vector<try_frame> tries; // machine-coded
+  struct loop_frame {
+    x64::label * top;
+    x64::label * done;
+    uint32_t depth;
+  };
+  std::vector<loop_frame> loops; // loop-covering
   uint32_t throw_jumps = 0;
   uint32_t gpr_used = 0, xmm_used = 0; // occupied variable registers (pool bits)
   std::vector<std::pair<int8_t, int32_t>> live_xmm; // f64 in registers: (register, home slot)
@@ -1301,14 +1356,19 @@ struct jit_codegen {
 // disassembling (parsing can calculate a lot with compile-time).
 std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
   if(!n) return std::nullopt;
-  if(db.is<n_str>(n) || db.is<n_lambda>(n) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n))
+  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
-    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof"; // pure: convolution or code generator
-    for(node_id item: db.as<n_module>(module).items)
-      known = known || (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name);
+    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept"; // pure: convolution or code generator
+    for(node_id m: {db.prelude, module})
+      for(node_id item: m ? db.as<n_module>(m).items : node_list{})
+        known = known || (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name);
+    for(node_id p = db[n].parent; p && !known; p = db[p].parent) // expr-parameter is called: block of construction
+      if(db.is<n_fn>(p))
+        for(node_id pn: db.as<n_fn>(p).params)
+          known = known || db.as<n_param>(pn).name == db.as<n_ident>(db.as<n_call>(n).callee).name;
     if(!known) return std::pair{n, cat("вызов ", name)};
   }
   std::optional<std::pair<node_id, std::string>> found;

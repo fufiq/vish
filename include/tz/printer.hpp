@@ -90,7 +90,15 @@ struct printer {
       out += ' ';
     }
     out += str(f.name);
-    params(f.params);
+    // head and clauses: try(expr body) catch(expr... handlers)
+    for(uint32_t i = 0; i < f.params.size() || i == 0;) {
+      symbol word = f.params.empty() ? symbol{} : db.as<n_param>(f.params[i]).clause;
+      if(word) out += cat(" ", str(word));
+      node_list ps;
+      while(i < f.params.size() && db.as<n_param>(f.params[i]).clause == word) ps.push_back(f.params[i++]);
+      params(ps);
+      if(f.params.empty()) break;
+    }
     if(f.expr_body) {
       out += " => ";
       item(f.body);
@@ -116,6 +124,9 @@ struct printer {
     if(p.type) {
       item(p.type);
       out += p.pack ? "... " : " ";
+    } else if(p.pack) {
+      out.pop_back();
+      out += "... ";
     }
     out += str(p.name);
   }
@@ -153,12 +164,13 @@ struct printer {
   void terminate(node_id s) {
     if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
     if(db.is<n_hole>(s)) return; // The hole prints the source code as it is.
-    if(db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_try>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
+    if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
+    if(db.is<n_break>(s) || db.is<n_continue>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
     if(db.is<n_call>(s)) {
       auto const & c = db.as<n_call>(s);
-      if(!c.args.empty() && db.is<n_block>(c.args.back())) return;
+      if(!c.words.empty() || c.tail) return; // Block or tail instruction sets `;` itself
     }
     out += ';';
   }
@@ -168,7 +180,7 @@ struct printer {
     node_id last = i.else_ ? i.else_ : i.then_;
     if(db.is<n_if>(last)) return ends_in_block(last);
     // Branch-instruction itself puts `;`
-    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_require>(last);
+    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_require>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
   }
 
   void print_node(node_id, n_return const & r) {
@@ -253,40 +265,19 @@ struct printer {
     item(t.value);
   }
 
-  void print_node(node_id, n_try const & t) {
-    out += "try ";
-    item(t.body);
-    for(node_id c: t.catches) {
-      out += ' ';
-      item(c);
+  void print_node(node_id, n_loop const & l) {
+    out += "loop ";
+    item(l.body);
+  }
+
+  void print_node(node_id, n_break const &) { out += "break;"; }
+  void print_node(node_id, n_continue const &) { out += "continue;"; }
+
+  void print_node(node_id, n_pack const & p) { // PAC outside the call (not in the text)
+    for(uint32_t i = 0; i < p.items.size(); ++i) {
+      if(i) out += ' ';
+      item(p.items[i]);
     }
-  }
-
-  void print_node(node_id, n_catch const & c) {
-    out += "catch(";
-    if(c.type) {
-      item(c.type);
-      if(c.name.valid()) out += ' ';
-    }
-    if(c.name.valid()) out += str(c.name);
-    out += ") ";
-    item(c.body);
-  }
-
-  void print_node(node_id, n_for const & f) {
-    out += cat("for(auto ", str(f.var), " : ");
-    item(f.range);
-    out += ") ";
-    item(f.body);
-    if(!db.is<n_block>(f.body)) terminate(f.body);
-  }
-
-  void print_node(node_id, n_while const & w) {
-    out += "while(";
-    item(w.cond);
-    out += ") ";
-    item(w.body);
-    if(!db.is<n_block>(w.body)) terminate(w.body);
   }
 
   // --- expression ---
@@ -363,20 +354,78 @@ struct printer {
     return 9;
   }
 
+  // Challenge: head and clauses. The parameters of the construction block are printed in
+  // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
   void print_node(node_id, n_call const & c) {
     item(c.callee);
-    out += '(';
+    auto word = [&](uint32_t i) { return c.words.empty() ? symbol{} : c.words[i]; };
     uint32_t n = uint32_t(c.args.size());
-    bool trailing = n > 0 && db.is<n_block>(c.args.back());
-    for(uint32_t i = 0; i < n - (trailing ? 1 : 0); ++i) {
-      if(i) out += ", ";
-      item(c.args[i]);
+    uint32_t i = 0;
+    uint32_t head_end = 0;
+    while(head_end < n && !word(head_end)) ++head_end;
+    group(c, 0, head_end, c.tail, !c.words.empty());
+    for(i = head_end; i < n; ++i) {
+      if(db.is<n_pack>(c.args[i])) {
+        for(node_id x: db.as<n_pack>(c.args[i]).items) {
+          out += cat(" ", str(word(i)));
+          clause(x, {});
+        }
+        continue;
+      }
+      uint32_t from = i;
+      while(i + 1 < n && word(i + 1) == word(from) && !db.is<n_pack>(c.args[i + 1])) ++i;
+      out += cat(" ", str(word(from)));
+      group(c, from, i + 1, true, true);
     }
-    out += ')';
-    if(trailing) {
-      out += ' ';
-      item(c.args.back());
+  }
+
+  void group(n_call const & c, uint32_t from, uint32_t to, bool tail, bool bare_ok) {
+    node_list args(c.args.begin() + from, c.args.begin() + to - (tail && to > from ? 1 : 0));
+    node_id body = tail && to > from ? c.args[to - 1] : node_id{};
+    if(!tail) {
+      out += '(';
+      for(uint32_t k = 0; k < args.size(); ++k) {
+        if(k) out += ", ";
+        item(args[k]);
+      }
+      out += ')';
+      return;
     }
+    clause(body, args, bare_ok);
+  }
+
+  // (Arguments and parameters of the block) body
+  void clause(node_id body, node_list const & args, bool bare_ok = true) {
+    n_lambda const * lam = db.is<n_lambda>(body) && db.as<n_lambda>(body).block ? &db.as<n_lambda>(body) : nullptr;
+    std::vector<std::string> parts;
+    for(uint32_t k = 0; k < args.size(); ++k) {
+      std::string s;
+      if(lam)
+        for(node_id pn: lam->params)
+          if(db.as<n_param>(pn).source == int64_t(k)) s = cat(print_sub(pn), " : ");
+      parts.push_back(s + print_sub(args[k]));
+    }
+    if(lam)
+      for(node_id pn: lam->params)
+        if(db.as<n_param>(pn).source < 0) parts.push_back(print_sub(pn));
+    if(!parts.empty() || !bare_ok) {
+      out += '(';
+      for(uint32_t k = 0; k < parts.size(); ++k) {
+        if(k) out += ", ";
+        out += parts[k];
+      }
+      out += ')';
+    }
+    node_id b = lam ? lam->body : body;
+    out += ' ';
+    item(b);
+    if(!db.is<n_block>(b)) terminate(b);
+  }
+
+  std::string print_sub(node_id n) {
+    std::string saved = std::exchange(out, std::string());
+    item(n);
+    return std::exchange(out, std::move(saved));
   }
 
   void print_node(node_id, n_member const & m) {

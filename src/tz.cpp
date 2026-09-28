@@ -7,6 +7,7 @@
 #include "tz/lexer.hpp"
 #include "tz/ast.hpp"
 #include "tz/parser.hpp"
+#include "tz/prelude.hpp"
 #include "tz/printer.hpp"
 #include "tz/dump.hpp"
 #include "tz/interp.hpp"
@@ -33,7 +34,7 @@ struct program {
   std::vector<tz::diagnostic> parse_errors;
   std::string path;
 
-  std::string const & src() const { return db.source(0); }
+  std::string const & src() const { return db.source(db[root].where.source); }
 };
 
 void load(program & p, std::string const & path) {

@@ -1,0 +1,71 @@
+// args: 5
+// out: 8 15 1 0 2 10 20
+// out: 9
+// jit-compiled: sum_until
+// jit-compiled: nested
+// jit-compiled: first_neg
+// jit-compiled: safe_div
+
+// fmt-stable
+// store-roundtrip
+// Конструкции библиотекой (расширения, шаг 2): for/while/try — прелюдия на
+// языке поверх ядра (if, loop/break/continue, throw, intercept). 
+// 
+// своя конструкция с клаузой и
+// блоком объявляется так же, как for.
+
+// своя конструкция: голова и клауза, синтаксис вызова — из объявления
+when(auto c, expr yes) otherwise(expr no) => if(c) yes else no;
+
+// своя конструкция с блоком, вводящим имя: repeat(auto i : n) { … }
+repeat(auto n, expr body) {
+  auto i = 0;
+  loop {
+    if(i >= n) break;
+    auto k = i;
+    i = i + 1;
+    body(k);
+  }
+}
+
+// break/continue в теле for — из цикла внутри for (их ловит loop)
+sum_until(auto xs, auto limit) {
+  auto s = 0;
+  for(auto x : xs) {
+    if(x < 0) continue;
+    s += x;
+    if(s > limit) break;
+  }
+  s
+}
+
+// break выходит только из своего цикла
+nested(auto n) {
+  auto c = 0;
+  for(auto i : range(n)) for(auto j : range(n)) {
+    if(j > i) break;
+    c += 1;
+  }
+  c
+}
+
+// return из блока for — выход из функции, написавшей блок
+first_neg(auto xs) {
+  for(auto i : range(xs.size)) if(xs[i] < 0) return i;
+  -1
+}
+
+safe_div(auto a, auto b) => try { a / b } catch(div_by_zero e) { 0 };
+
+choose(auto c) => when(c > 2) { 10 } otherwise { 20 };
+
+main() {
+  auto n = parse_int(args[1]).value;
+  auto xs = array{1, -2, 3, 4, 5};
+  print(sum_until(xs, 6), nested(n), first_neg(xs), safe_div(n, 0), safe_div(10, n), choose(n), choose(1));
+  auto t = 0;
+  repeat(auto i : n) t += i;
+  auto w = 0;
+  while(w < t) w += 3;
+  print(w - 3);
+}

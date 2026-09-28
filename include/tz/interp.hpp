@@ -34,17 +34,44 @@ namespace tz {
 // Lexical scope. Variables are cells; alias indicates the caller cell rather than
 // copying it. Areas live in the interpreter arena (no pile on each and no reference
 // counters): block/call/iteration take the area and return it at the output; the area
-// captured by the lambda lives until the end of the run.
+// captured by the lambda lives until the end of the run. Cell Book (Verification Mode):
+// When the cell was born and when its value was last replaced entirely. On this stand
+// the facts about values (the index is valid until the array is replaced) and parsing
+// cycle (which cells born before iteration, it changes - including through blocks of
+// structures).
 //
+struct cell_book {
+  uint64_t clock = 0;
+  std::unordered_map<value const *, std::pair<uint64_t, uint64_t>> cells; // (birth, version)
+  std::vector<std::pair<uint64_t, std::set<value *>> *> logs; // (beginning of iteration, recorded cells)
+
+  void born(value const * c) {
+    ++clock;
+    cells[c] = {clock, clock};
+  }
+  uint64_t version(value const * c) const {
+    auto it = cells.find(c);
+    return it == cells.end() ? 0 : it->second.second;
+  }
+  void written(value * c, bool whole) {
+    auto & e = cells[c];
+    if(whole) e.second = ++clock;
+    for(auto * l: logs)
+      if(e.first <= l->first) l->second.insert(c);
+  }
+};
+
 struct scope {
   scope * parent = nullptr;
   std::vector<std::pair<symbol, value *>> vars;
   std::deque<value> storage;
   bool captured = false;
+  cell_book * book = nullptr;
 
   value * declare(symbol name, value v) {
     storage.push_back(std::move(v));
     vars.push_back({name, &storage.back()});
+    if(book) book->born(&storage.back());
     return &storage.back();
   }
 
@@ -77,6 +104,7 @@ struct report_event {
     excluded,
     live,
     proven,
+    unproven,
     throws } kind;
   std::string a, b, c; // meaning depends on the species
   span where;
@@ -106,6 +134,8 @@ struct interpreter {
   interpreter(ast_db & db, node_id module, std::vector<std::string> args, mode m = mode::run,
       std::optional<known_inputs> known = std::nullopt, check_cache * cache = nullptr)
       : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)) {
+    sym_intercept = sym("intercept");
+    sym_is_index = sym("is_index");
     globals = new_scope(nullptr);
     array_v a;
     for(auto & s: args) a.push(value(s));
@@ -113,8 +143,11 @@ struct interpreter {
     if(checking() && !inputs) args_v = erase(value(array_v::of({value(std::string("x"))}))); // arguments - runtime
     globals->declare(sym("args"), std::move(args_v));
     globals->declare(sym("stdin"), value(agg_v{types.named("stream"), {}})); // descriptor, no value
-    for(node_id item: db.as<n_module>(module).items)
-      if(!db.is<n_extend>(item)) register_item(item);
+    for(node_id m: {db.prelude, module}) { // prelude - first
+      if(!m || (m == db.prelude && m == module)) continue;
+      for(node_id item: db.as<n_module>(m).items)
+        if(!db.is<n_extend>(item)) register_item(item);
+    }
     for(node_id item: db.as<n_module>(module).items) // Expansion - after announcements
       if(db.is<n_extend>(item)) register_item(item);
   }
@@ -165,6 +198,7 @@ struct interpreter {
     call_site site{db[it->second.front()].where, "main"};
     flow r = call_overloaded(it->second, {}, globals, 0, site);
     if(r.kind == flow_kind::thr) uncaught(r);
+    if(r.kind == flow_kind::brk || r.kind == flow_kind::cont) fail("break/continue вне цикла", site.where);
     return r.v.is<int64_t>() ? int(r.v.as<int64_t>()) : 0;
   }
 
@@ -252,11 +286,16 @@ struct interpreter {
       auto const & label = db.source_label(w.source);
       return cat(label.empty() ? file : std::string_view(label), ":", lc.line);
     };
+    // The places inside prelude (body for/while/try) are not program code: the report
+    // shows its instance and exceptions, but not its stages and indexes.
+    auto mine = [&](span w) { return !db.prelude || w.source != db[db.prelude].where.source; };
     out += "стадии:\n";
-    for(auto const & s: stages) out += cat("  ", loc(s.where), " ", s.path, s.name, " = ", s.what, "\n");
+    for(auto const & s: stages)
+      if(mine(s.where)) out += cat("  ", loc(s.where), " ", s.path, s.name, " = ", s.what, "\n");
     if(!splits.empty()) {
       out += "расщепления:\n";
-      for(auto const & s: splits) out += cat("  ", loc(s.where), " ", s.name, " → ", s.alts.size(), " продолжения: ", join(s.alts), "\n");
+      for(auto const & s: splits)
+        if(mine(s.where)) out += cat("  ", loc(s.where), " ", s.name, " → ", s.alts.size(), " продолжения: ", join(s.alts), "\n");
     }
     if(!excluded.empty()) {
       out += "исключённые блоки try_compile:\n";
@@ -278,17 +317,18 @@ struct interpreter {
         out += cat("  ", inst, " бросает: ", list, "\n");
       }
     }
-    if(!proven_list.empty()) {
-      out += "индексы, доказанные в границах (проверка снята):\n";
-      for(auto const & [w, what]: proven_list) out += cat("  ", loc(w), " ", what, "\n");
-    }
+    std::string proofs;
+    for(auto const & [w, what, node]: proven_list)
+      if(mine(w) && !unproven.contains(node)) proofs += cat("  ", loc(w), " ", what, "\n");
+    if(!proofs.empty()) out += "индексы, доказанные в границах (проверка снята):\n" + proofs;
     out += "экземпляры (рантайм-часть):\n" + instances();
     return out;
   }
 
-  // Indexing proved by parsing within the array boundaries ("top-up optimization": the
-  // language knows the check is off and shows it in the report).
-  bool bounds_proven(node_id n) const { return proven.contains(n.value); }
+  // Indexing proved by parsing within the array boundaries (“top-up optimization”: the
+  // language knows that the check is removed, and shows it in the report). The index is
+  // proven in all disassembled calculations of node (JIT removes the check).
+  bool bounds_proven(node_id n) const { return proven.contains(n.value) && !unproven.contains(n.value); }
   // Does the function change its k parameter (inference, see writes_param).
   bool param_written(node_id f, uint32_t k) const { return writes_param(f, k); }
   // --- flow ---
@@ -311,6 +351,7 @@ struct interpreter {
     span where;
     std::string what;
     uint32_t node = 0; // call node: from the chain of such node is formed the context of embedding
+    uint32_t frame = 0; // call-point
   };
 
   bool checking() const { return run_mode == mode::check; }
@@ -359,6 +400,7 @@ struct interpreter {
       s = &scope_arena.emplace_back();
     }
     s->parent = parent;
+    s->book = checking() ? &book : nullptr;
     return s;
   }
 
@@ -388,13 +430,61 @@ struct interpreter {
     ~scope_hold() { vm.drop_scope(s); }
   };
 
-  struct proof_hold { // The proof of the index is removed when excluded.
+  // Iteration of the cycle writes in journal cells (removed and when excluded).
+  struct log_hold {
     interpreter & vm;
-    bool pushed;
-    ~proof_hold() {
-      if(pushed) vm.index_proofs.pop_back();
-    }
+    std::pair<uint64_t, std::set<value *>> * log;
+    ~log_hold() { std::erase(vm.book.logs, log); }
   };
+  struct loop_hold {
+    interpreter & vm;
+    ~loop_hold() { vm.loops.pop_back(); }
+  };
+
+  // --- facts about values (safe index, §12.1) ---
+  //
+  // 
+// Fact is tied.
+  // to the cell of the array, its name and version: replaced the array - the fact is
+  // invalid; the growth of the array does not break it.
+  struct fact {
+    enum kind_t : uint8_t { index_of,
+      size_of,
+      range_of } kind;
+    value const * cell;
+    symbol name;
+    uint64_t version;
+    auto operator<=>(fact const &) const = default;
+  };
+
+  uint32_t add_fact(fact f) {
+    auto [it, fresh] = fact_ids.try_emplace(f, uint32_t(facts.size() + 1));
+    if(fresh) facts.push_back(f);
+    return it->second;
+  }
+
+  fact const * fact_of(value const & v, fact::kind_t k) const {
+    if(!v.proof || facts[v.proof - 1].kind != k) return nullptr;
+    return &facts[v.proof - 1];
+  }
+
+  bool holds(fact const & f, value const * cell, symbol name) const {
+    return f.cell == cell && f.name == name && book.version(cell) == f.version;
+  }
+
+  // Write to place: The cell version (replacement of the whole), journal iteration, and the
+  // fact of the array-value itself (r - range(…)) is removed when the elements change.
+  void written(node_id target, scope * env) {
+    if(!checking()) return;
+    bool whole = db.is<n_ident>(target);
+    while(db.is<n_index>(target) || db.is<n_member>(target))
+      target = db.is<n_index>(target) ? db.as<n_index>(target).object : db.as<n_member>(target).object;
+    if(!db.is<n_ident>(target)) return;
+    value * cell = env->find(db.as<n_ident>(target).name);
+    if(!cell || cell->is<thunk_v>()) return;
+    if(!whole) cell->proof = 0;
+    book.written(cell, whole);
+  }
 
   flow eval(node_id n, scope * env, uint32_t frame) {
     if(!checking()) return std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
@@ -419,8 +509,9 @@ struct interpreter {
       case report_event::excluded: excluded.push_back({ev.where, ev.a, ev.b}); break;
       case report_event::live: live_fns.insert(ev.fn); break;
       case report_event::proven:
-        if(proven.insert(ev.fn).second) proven_list.push_back({ev.where, ev.a});
+        if(proven.insert(ev.fn).second) proven_list.push_back({ev.where, ev.a, ev.fn});
         break;
+      case report_event::unproven: unproven.insert(ev.fn); break;
       case report_event::throws: throws_of[ev.a].insert(ev.b); break;
     }
   }
@@ -470,6 +561,8 @@ struct interpreter {
   flow read(value * cell) {
     if(cell->is<thunk_v>()) {
       thunk_v t = cell->as<thunk_v>();
+      if(db.is<n_lambda>(t.expr) && db.as<n_lambda>(t.expr).block)
+        fail("блок конструкции вводит имена — его вызывают с аргументами: body(x)", db[t.expr].where);
       uint64_t saved = std::exchange(ctx, t.ctx); // expression of the caller in its context
       flow r;
       try {
@@ -568,21 +661,35 @@ struct interpreter {
     return true;
   }
 
-  // The result of the branching under run-time-condition: the branch with the return is
-  // registered as a possible return and does not continue.
+  // The result of branching under run-time-condition: a path that does not
+  // continue (return, throw, break) is registered as possible and does not go
+  // further; parsing continues along a different path.
   flow join_branches(flow a, flow b) {
-    bool a_cont = a.normal(), b_cont = b.normal();
+    if(a.normal() && b.normal()) return ok(merge(a.v, b.v));
     if(a.kind == flow_kind::thr && b.kind == flow_kind::thr) return flow{flow_kind::thr, merge(a.v, b.v), a.target};
-    if(a.kind == flow_kind::thr && b_cont) return record_throw(a.v), b; // throws one branch - the second way
-    if(b.kind == flow_kind::thr && a_cont) return record_throw(b.v), a;
     if(a.kind == flow_kind::ret && b.kind == flow_kind::ret && a.target == b.target)
       return flow{flow_kind::ret, merge(a.v, b.v), a.target};
-    if(!a_cont && a.kind == flow_kind::ret) record_return(a);
-    if(!b_cont && b.kind == flow_kind::ret) record_return(b);
-    if(a_cont && b_cont) return ok(merge(a.v, b.v));
-    if(a_cont) return a;
-    if(b_cont) return b;
-    return a; // Break/continue in both - M0 does not distinguish between
+    if(a.kind == b.kind && (a.kind == flow_kind::brk || a.kind == flow_kind::cont)) return a;
+    auto aside = [&](flow const & f) {
+      if(f.kind == flow_kind::thr) record_throw(f.v); // second
+      else if(f.kind == flow_kind::ret) record_return(f);
+      else if(f.kind == flow_kind::brk) may_break();
+      // continue: итерация кончилась раньше — следующая разбирается и так
+    };
+    if(a.normal()) return aside(b), a;
+    if(b.normal()) return aside(a), b;
+    // Both paths do not continue: the cycle flow (break/continue) is more important - it is local
+    bool a_loop = a.kind == flow_kind::brk || a.kind == flow_kind::cont;
+    bool b_loop = b.kind == flow_kind::brk || b.kind == flow_kind::cont;
+    if(b_loop && !a_loop) std::swap(a, b);
+    else if(!a_loop && b.kind == flow_kind::thr) std::swap(a, b);
+    aside(b);
+    return a;
+  }
+
+  void may_break() {
+    if(loops.empty()) fail("break вне цикла", {});
+    loops.back().may_break = true;
   }
 
   // --- node: Literaries and names ---
@@ -691,20 +798,22 @@ struct interpreter {
   // return(f) is the output from the external function f in the call chain;
   // return(caller) is the output from the calling function.
 // The outline boundary is not allowed: there is no inline.
+  // Chain - call locations, not stack: the call in for(…) { … } block is made from
+  // the function that wrote the block, not from the for itself.
   uint32_t return_target(symbol name, uint32_t frame, span where) {
-    int64_t here = -1;
-    for(int64_t i = int64_t(frames.size()) - 1; i >= 0; --i)
-      if(frames[i].id == frame) {
-        here = i;
-        break;
-      }
-    if(here < 0) fail("return вне функции", where);
+    auto at = [&](uint32_t id) -> frame_rec const * {
+      for(auto it = frames.rbegin(); it != frames.rend(); ++it)
+        if(it->id == id) return &*it;
+      return nullptr;
+    };
+    frame_rec const * cur = at(frame);
+    if(!cur) fail("return вне функции", where);
     bool to_caller = str(name) == "caller";
-    for(int64_t i = here - 1; i >= 0; --i) {
-      if(frames[i + 1].outline)
-        fail(cat("return(", str(name), ") через outline-функцию ", str(frames[i + 1].name), ": у неё нет семантики инлайна"),
-            where);
-      if(to_caller || frames[i].name == name) return frames[i].id;
+    while(frame_rec const * up = cur->caller ? at(cur->caller) : nullptr) {
+      if(cur->outline)
+        fail(cat("return(", str(name), ") через outline-функцию ", str(cur->name), ": у неё нет семантики инлайна"), where);
+      if(to_caller || up->name == name) return up->id;
+      cur = up;
     }
     fail(cat("return(", str(name), "): нет такой внешней функции в цепочке вызовов"), where);
   }
@@ -722,143 +831,126 @@ struct interpreter {
   flow eval_node(node_id n, n_if const & i, scope * env, uint32_t frame) {
     TZ_TRY(c, eval(i.cond, env, frame));
     auto b = known_bool(c, db[i.cond].where);
+    auto proof = index_check(i.cond, env);
+    auto then_ = [&] {
+      if(!proof || !proof->positive) return eval(i.then_, env, frame);
+      uint32_t saved = std::exchange(proof->cell->proof, proof->fact); // if(is_index(k, xs)) { xs[k] }
+      flow t = eval(i.then_, env, frame);
+      if(proof->cell->proof == proof->fact) proof->cell->proof = saved;
+      return t;
+    };
+    // if(! is_index(k, xs) ) output; - then k - safe index xs
+    auto after = [&](flow f, bool then_left) {
+      if(proof && !proof->positive && then_left && f.normal()) proof->cell->proof = proof->fact;
+      return f;
+    };
     if(b) {
-      if(*b) return eval(i.then_, env, frame);
-      return i.else_ ? eval(i.else_, env, frame) : ok();
+      if(*b) {
+        flow t = then_();
+        bool left = !t.normal();
+        return after(std::move(t), left);
+      }
+      return after(i.else_ ? eval(i.else_, env, frame) : ok(), true);
     }
     // run-time - Condition (only in check mode): both branches are disassembled
-    flow t = eval(i.then_, env, frame);
+    flow t = then_();
+    bool left = !t.normal();
     flow e = i.else_ ? eval(i.else_, env, frame) : ok();
-    return join_branches(std::move(t), std::move(e));
+    return after(join_branches(std::move(t), std::move(e)), left);
   }
 
-  flow eval_node(node_id n, n_while const & w, scope * env, uint32_t frame) {
+  // is_index(k, xs)/! is_index(k, xs) over names: check in runtime, after which k is
+  // the proven index xs (fact on the value of k).
+  struct index_proof {
+    value * cell;
+    uint32_t fact;
+    bool positive;
+  };
+  std::optional<index_proof> index_check(node_id cond, scope * env) {
+    if(!checking()) return std::nullopt;
+    bool positive = true;
+    if(db.is<n_op>(cond) && str(db.as<n_op>(cond).op) == "!" && db.as<n_op>(cond).args.size() == 1) {
+      positive = false;
+      cond = db.as<n_op>(cond).args[0];
+    }
+    if(!db.is<n_call>(cond)) return std::nullopt;
+    auto const & c = db.as<n_call>(cond);
+    if(!db.is<n_ident>(c.callee) || str(db.as<n_ident>(c.callee).name) != "is_index" || c.args.size() != 2) return std::nullopt;
+    if(functions.contains(db.as<n_ident>(c.callee).name)) return std::nullopt; // is_index is not a language test.
+    if(!db.is<n_ident>(c.args[0]) || !db.is<n_ident>(c.args[1])) return std::nullopt;
+    value * k = env->find(db.as<n_ident>(c.args[0]).name);
+    value * a = env->find(db.as<n_ident>(c.args[1]).name);
+    if(!k || !a || k->is<thunk_v>() || a->is<thunk_v>()) return std::nullopt;
+    return index_proof{k, add_fact({fact::index_of, a, db.as<n_ident>(c.args[1]).name, book.version(a)}), positive};
+  }
+
+  // The core cycle. Break/continue is the second exit path, it is caught by the loop. In
+  // check mode, iterations with a known outcome are executed; once the output depends on
+  // runtime (break by run-time-condition), the number of iterations is unknown: the
+  // cells that the iteration changes are erased to the type and the body is disassembled
+  // to a fixed point. Cells are assembled by entries, not by names in the text - so are
+  // the entries of construction blocks (for(…) { s += x; }).
+  flow eval_node(node_id n, n_loop const & l, scope * env, uint32_t frame) {
+    if(!checking()) {
+      for(;;) {
+        flow f = eval(l.body, env, frame);
+        if(f.kind == flow_kind::brk) return ok();
+        if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
+      }
+    }
+    loops.emplace_back();
+    loop_hold lh{*this};
     for(uint32_t guard = 0;; ++guard) {
-      TZ_TRY(c, eval(w.cond, env, frame));
-      auto b = known_bool(c, db[w.cond].where);
-      if(b && !*b) return ok();
-      if(!b) return abstract_loop(w.body, env, frame, {}, {});
-      flow f = eval(w.body, env, frame);
-      if(f.kind == flow_kind::brk) return ok();
-      if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
-      if(checking() && guard > 100000) fail("цикл не сошёлся при статическом разборе", db[n].where);
+      loops.back().may_break = false;
+      std::pair<uint64_t, std::set<value *>> log{book.clock, {}};
+      flow f;
+      {
+        book.logs.push_back(&log);
+        log_hold wh{*this, &log};
+        f = eval(l.body, env, frame);
+      }
+      if(!loops.back().may_break) {
+        if(f.kind == flow_kind::brk) return ok();
+        if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
+        if(guard > 100000) fail("цикл не сошёлся при статическом разборе", db[n].where);
+        continue;
+      }
+      if(f.kind == flow_kind::ret) record_return(f);
+      if(f.kind == flow_kind::thr) record_throw(f.v);
+      return abstract_loop(l.body, env, frame, std::move(log.second), n);
     }
   }
 
-  flow eval_node(node_id n, n_for const & f, scope * env, uint32_t frame) {
-    TZ_TRY(r, eval(f.range, env, frame));
-    if(r.is<rt_v>()) {
-      value const * shape = shape_of(r);
-      if(!shape || !shape->is<array_v>()) fail(cat("for ожидает массив, получено ", types.describe(r)), db[f.range].where);
-      value elem = shape->as<array_v>().empty() ? value(rt_v{}) : shape->as<array_v>().get(0);
-      value const * src = index_source(f, env);
-      return abstract_loop(f.body, env, frame, f.var, elem, src,
-          src ? db.as<n_ident>(db.as<n_member>(db.as<n_call>(f.range).args[0]).object).name : symbol{});
-    }
-    if(!r.is<array_v>()) fail(cat("for ожидает массив, получено ", types.describe(r)), db[f.range].where);
-    auto const & arr = r.as<array_v>();
-    for(uint32_t k = 0; k < arr.size(); ++k) {
-      scope * inner = new_scope(env);
-      scope_hold hold{*this, inner};
-      inner->declare(f.var, arr.get(k));
-      flow b = eval(f.body, inner, frame);
-      if(b.kind == flow_kind::brk) break;
-      if(b.kind == flow_kind::ret || b.kind == flow_kind::thr) return b;
-    }
-    return ok();
-  }
-
-  // A cycle whose number of iterations is known only in runtime: the variables that
-  // the body assigns are erased to type; the body is disassembled to a fixed point
-  // of types (usually 1-2 passes).
-  flow abstract_loop(node_id body, scope * env, uint32_t frame, symbol var, value const & elem,
-      value const * indexes = nullptr, symbol indexes_name = {}) {
-    std::set<symbol> assigned;
-    collect_assigned(body, assigned);
-    for(symbol s: assigned)
-      if(value * c = env->find(s)) *c = erase(*c);
-    for(uint32_t pass = 0; pass < 4; ++pass) {
+  flow abstract_loop(node_id body, scope * env, uint32_t frame, std::set<value *> cells, node_id n) {
+    for(uint32_t pass = 0; pass < 8; ++pass) {
       std::vector<std::string> before;
-      for(symbol s: assigned)
-        if(value * c = env->find(s)) before.push_back(types.describe(*c));
-      scope * inner = new_scope(env);
-      scope_hold hold{*this, inner};
-      if(var) inner->declare(var, elem);
-      proof_hold proof{*this, indexes != nullptr};
-      if(indexes) index_proofs.push_back({inner->find(var), indexes, indexes_name});
-      flow b = eval(body, inner, frame);
-      if(b.kind == flow_kind::ret) record_return(b);
-      if(b.kind == flow_kind::thr) record_throw(b.v); // Iteration can stop - the cycle can and will continue
+      for(value * c: cells) {
+        *c = erase(*c);
+        before.push_back(types.describe(*c));
+      }
+      std::pair<uint64_t, std::set<value *>> log{book.clock, {}};
+      flow f;
+      {
+        book.logs.push_back(&log);
+        log_hold wh{*this, &log};
+        f = eval(body, env, frame);
+      }
+      if(f.kind == flow_kind::ret) record_return(f);
+      if(f.kind == flow_kind::thr) record_throw(f.v);
+      std::size_t had = cells.size();
+      cells.insert(log.second.begin(), log.second.end());
       std::vector<std::string> after;
-      for(symbol s: assigned)
-        if(value * c = env->find(s)) {
-          *c = erase(*c);
-          after.push_back(types.describe(*c));
-        }
-      if(before == after) return ok();
-    }
-    fail("типы переменных цикла не сошлись", db[body].where);
-  }
-
-  // Safe index
-// Cycle variable for(i: range(a.size)) is the array index a, while
-  // The body does not change either i or a completely and does not give a to change.
-  // The growth of a (push) proof does not break. Returns cell a or nullptr.
-  void note_index_proof(node_id n, scope * env, bool write = false) {
-    if(!checking() || index_proofs.empty()) return;
-    auto const & i = db.as<n_index>(n);
-    value const * ix = peek(i.index, env);
-    value const * ar = peek(i.object, env);
-    // both cell and name: another name of the same cell (two aliases of the same
-    // array for this call) proves nothing for the instance as a whole.
-    for(auto const & [var_cell, arr_cell, arr_name]: index_proofs)
-      if(ix && ix == var_cell && ar == arr_cell && db.is<n_ident>(i.object) && db.as<n_ident>(i.object).name == arr_name)
-        emit({report_event::proven, cat(str(db.as<n_ident>(i.object).name), "[", str(db.as<n_ident>(i.index).name), "]", write ? " (запись)" : ""),
-            {}, {}, db[n].where, {}, n.value});
-  }
-
-  value const * index_source(n_for const & f, scope * env) {
-    if(!db.is<n_call>(f.range)) return nullptr;
-    auto const & c = db.as<n_call>(f.range);
-    if(!db.is<n_ident>(c.callee) || str(db.as<n_ident>(c.callee).name) != "range" || c.args.size() != 1) return nullptr;
-    if(!db.is<n_member>(c.args[0]) || str(db.as<n_member>(c.args[0]).name) != "size") return nullptr;
-    node_id obj = db.as<n_member>(c.args[0]).object;
-    if(!db.is<n_ident>(obj)) return nullptr;
-    symbol arr = db.as<n_ident>(obj).name;
-    value const * cell = peek(obj, env);
-    if(!cell || !shape_of(*cell) || !shape_of(*cell)->is<array_v>()) return nullptr;
-    return keeps_index(f.body, f.var, arr) ? cell : nullptr;
-  }
-
-  bool keeps_index(node_id n, symbol var, symbol arr) const {
-    if(!n) return true;
-    if(db.is<n_lambda>(n)) return false; // The capture could change later.
-    if(db.is<n_var>(n) && (db.as<n_var>(n).name == var || db.as<n_var>(n).name == arr)) return false; // shadow
-    if(db.is<n_op>(n)) {
-      auto const & o = db.as<n_op>(n);
-      auto op = str(o.op);
-      if((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && !o.args.empty() && db.is<n_ident>(o.args[0])) {
-        symbol t = db.as<n_ident>(o.args[0]).name;
-        if(t == var || t == arr) return false;
+      for(value * c: cells) after.push_back(types.describe(erase(*c)));
+      if(cells.size() == had && before == after) {
+        for(value * c: cells) *c = erase(*c); // after the cycle - the value of any iteration
+        return ok();
       }
     }
-    if(db.is<n_call>(n)) { // a as an argument for a changing parameter
-      auto const & c = db.as<n_call>(n);
-      for(uint32_t k = 0; k < c.args.size(); ++k) {
-        if(!db.is<n_ident>(c.args[k])) continue;
-        symbol a = db.as<n_ident>(c.args[k]).name;
-        if(a != arr && a != var) continue;
-        if(!db.is<n_ident>(c.callee)) return false;
-        auto it = functions.find(db.as<n_ident>(c.callee).name);
-        if(it == functions.end()) continue; // Built-in functions don't change arguments
-        for(node_id fn: it->second)
-          if(writes_param(fn, k)) return false;
-      }
-    }
-    bool ok_ = true;
-    db.for_each_child(n, [&](node_id ch) { ok_ = ok_ && keeps_index(ch, var, arr); });
-    return ok_;
+    fail("типы переменных цикла не сошлись", db[n].where);
   }
+
+  flow eval_node(node_id, n_break const &, scope *, uint32_t) { return flow{flow_kind::brk, {}, 0}; }
+  flow eval_node(node_id, n_continue const &, scope *, uint32_t) { return flow{flow_kind::cont, {}, 0}; }
 
   // Does the function change its k-th parameter (place of caller)? It is not forbidden
   // and does not require marking - it is displayed.
@@ -902,17 +994,19 @@ struct interpreter {
   // Does the code change the place with that name: assigning (including to an element/field)
   // or transferring to a parameter that changes the function being called? Shadow, stop.
   bool writes_name(node_id n, symbol name) const {
-    if(!n || db.is<n_fn>(n) || db.is<n_lambda>(n)) return false;
+    if(!n || db.is<n_fn>(n)) return false;
+    if(db.is<n_lambda>(n)) { // construction block - part of the code; closure - no
+      if(!db.as<n_lambda>(n).block) return false;
+      for(node_id pn: db.as<n_lambda>(n).params)
+        if(db.as<n_param>(pn).name == name) return false; // shadow
+      return writes_name(db.as<n_lambda>(n).body, name);
+    }
     if(db.is<n_block>(n)) {
       for(node_id k: db.as<n_block>(n).items) {
         if(writes_name(k, name)) return true;
         if(db.is<n_var>(k) && db.as<n_var>(k).name == name) return false;
       }
       return false;
-    }
-    if(db.is<n_for>(n)) {
-      if(writes_name(db.as<n_for>(n).range, name)) return true;
-      return db.as<n_for>(n).var != name && writes_name(db.as<n_for>(n).body, name);
     }
     if(db.is<n_op>(n)) {
       auto const & o = db.as<n_op>(n);
@@ -939,31 +1033,6 @@ struct interpreter {
     bool w = false;
     db.for_each_child(n, [&](node_id c) { w = w || writes_name(c, name); });
     return w;
-  }
-
-  void collect_assigned(node_id n, std::set<symbol> & out) const {
-    if(!n) return;
-    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) { // change-place
-      auto const & c = db.as<n_call>(n);
-      if(auto it = functions.find(db.as<n_ident>(c.callee).name); it != functions.end())
-        for(uint32_t k = 0; k < c.args.size(); ++k) {
-          node_id a = c.args[k];
-          while(db.is<n_index>(a)) a = db.as<n_index>(a).object;
-          if(!db.is<n_ident>(a)) continue;
-          for(node_id fn: it->second)
-            if(writes_param(fn, k)) out.insert(db.as<n_ident>(a).name);
-        }
-    }
-    if(db.is<n_op>(n)) {
-      auto const & o = db.as<n_op>(n);
-      auto op = str(o.op);
-      if((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && !o.args.empty()) {
-        node_id t = o.args[0];
-        while(db.is<n_index>(t)) t = db.as<n_index>(t).object;
-        if(db.is<n_ident>(t)) out.insert(db.as<n_ident>(t).name);
-      }
-    }
-    db.for_each_child(n, [&](node_id c) { collect_assigned(c, out); });
   }
 
   flow eval_node(node_id n, n_ct const & c, scope * env, uint32_t frame) {
@@ -1022,12 +1091,20 @@ struct interpreter {
     return flow{flow_kind::thr, std::move(v), n.value};
   }
 
-  flow eval_node(node_id n, n_try const & t, scope * env, uint32_t frame) {
+  // intercept(тело, блоки) is the exception kernel (§8.1), on it the library try { …
+  // } catch(E e) { … }: body and blocks are expr-arguments, blocks are n_pack pack
+  // from catch clauses. Catch the first block, whose parameter takes the type of
+  // value thrown (auto - any). Break/continue is no exception: they are caught by
+  // loop, catch(auto e) does not see them.
+  flow intercept(node_list const & args, scope * env, uint32_t frame, span where) {
+    if(args.size() != 2) fail("intercept(тело, блоки)", where);
+    thunk_v hs = thunk_arg(args[1], env, where);
+    node_list handlers = db.is<n_pack>(hs.expr) ? db.as<n_pack>(hs.expr).items : node_list{hs.expr};
     std::vector<value> thrown; // throws on the run-time-branches of the body (check mode)
     throw_sinks.push_back(&thrown);
     flow r;
     try {
-      r = eval(t.body, env, frame);
+      r = eval(args[0], env, frame);
     } catch(diagnostic const & d) {
       if(d.kind != diag_kind::runtime) {
         throw_sinks.pop_back();
@@ -1044,19 +1121,29 @@ struct interpreter {
     }
     flow result = has_normal ? r : flow{};
     bool have = has_normal;
-    for(node_id cn: t.catches) {
-      auto const & c = db.as<n_catch>(cn);
-      std::string want = c.type ? std::string(str(db.as<n_ident>(c.type).name)) : std::string();
+    for(node_id h: handlers) {
+      if(!db.is<n_lambda>(h) || db.as<n_lambda>(h).params.size() != 1) fail("catch: блок с одним параметром — catch(E e) { … }", db[h].where);
+      auto const & l = db.as<n_lambda>(h);
+      auto const & p = db.as<n_param>(l.params[0]);
+      std::string want = p.type && db.is<n_ident>(p.type) ? std::string(str(db.as<n_ident>(p.type).name)) : std::string();
       std::vector<value> hit, rest;
       for(auto & v: thrown) (want.empty() || exception_type(v) == want ? hit : rest).push_back(std::move(v));
       thrown = std::move(rest);
       if(hit.empty()) continue;
       value caught = hit[0];
       for(std::size_t k = 1; k < hit.size(); ++k) caught = merge(caught, hit[k]);
-      scope * inner = new_scope(env);
+      scope * inner = new_scope(hs.env);
       scope_hold hold{*this, inner};
-      if(c.name.valid() && str(c.name) != "_") inner->declare(c.name, caught);
-      flow cb = eval(c.body, inner, frame);
+      if(str(p.name) != "_") inner->declare(p.name, caught);
+      uint64_t saved = std::exchange(ctx, hs.ctx);
+      flow cb;
+      try {
+        cb = eval(l.body, inner, hs.frame);
+      } catch(...) {
+        ctx = saved;
+        throw;
+      }
+      ctx = saved;
       result = have ? join_branches(result, cb) : cb;
       have = true;
       if(!checking()) break; // in runtime throw one - caught first suitable catch
@@ -1072,7 +1159,43 @@ struct interpreter {
     return flow{flow_kind::thr, up, r.target};
   }
 
-  flow eval_node(node_id n, n_catch const &, scope *, uint32_t) { fail("catch вне try", db[n].where); }
+  // expr-argument by name: thunk, unfolded to the expression of the caller (a
+  // block transmitted further than another construction, too he).
+  thunk_v thunk_arg(node_id arg, scope * env, span where) {
+    value * cell = db.is<n_ident>(arg) ? env->find(db.as<n_ident>(arg).name) : nullptr;
+    if(!cell || !cell->is<thunk_v>()) fail("ожидался expr-параметр", where);
+    thunk_v t = cell->as<thunk_v>();
+    while(db.is<n_ident>(t.expr))
+      if(value * c = t.env->find(db.as<n_ident>(t.expr).name); c && c->is<thunk_v>()) t = c->as<thunk_v>();
+      else break;
+    return t;
+  }
+
+  // Calling a construction block with arguments: body(xs[k]) in for. The block is
+  // the part of the caller (semantics inline): return and break from it go further.
+  flow call_block(thunk_v const & t, node_list const & args, scope * env, uint32_t frame, span where) {
+    auto const & l = db.as<n_lambda>(t.expr);
+    if(l.params.size() != args.size()) fail(cat("блок ждёт ", l.params.size(), " аргументов, передано ", args.size()), where);
+    scope * inner = new_scope(t.env);
+    scope_hold hold{*this, inner};
+    for(uint32_t i = 0; i < args.size(); ++i) {
+      auto const & p = db.as<n_param>(l.params[i]);
+      TZ_TRY(v, eval(args[i], env, frame));
+      if(p.type && db.is<n_ident>(p.type)) check_type(v, db.as<n_ident>(p.type).name, db[args[i]].where);
+      inner->declare(p.name, std::move(v));
+    }
+    uint64_t saved = std::exchange(ctx, t.ctx);
+    flow r;
+    try {
+      r = eval(l.body, inner, t.frame);
+    } catch(...) {
+      ctx = saved;
+      throw;
+    }
+    ctx = saved;
+    return r;
+  }
+
   flow eval_node(node_id, n_struct const &, scope *, uint32_t) { return ok(); } // declaration
   flow eval_node(node_id, n_extend const &, scope *, uint32_t) { return ok(); } // Expansion - when loading the module
 
@@ -1173,9 +1296,17 @@ struct interpreter {
   // --- field access ---
 
   flow eval_node(node_id n, n_member const & m, scope * env, uint32_t frame) {
-    if(value const * o = peek(m.object, env); o && o->is<array_v>()) return ok(member(*o, m.name, db[n].where));
-    TZ_TRY(obj, eval(m.object, env, frame));
-    return ok(lift(obj, [&](value const & o) { return member(o, m.name, db[n].where); }));
+    value r;
+    if(value const * o = peek(m.object, env); o && o->is<array_v>()) r = member(*o, m.name, db[n].where);
+    else {
+      TZ_TRY(obj, eval(m.object, env, frame));
+      r = lift(obj, [&](value const & o) { return member(o, m.name, db[n].where); });
+    }
+    // xs.size - the size of this array (fact: range gives its indexes from it)
+    if(checking() && str(m.name) == "size" && db.is<n_ident>(m.object))
+      if(value const * cell = peek(m.object, env); cell && (cell->is<array_v>() || shape_of(*cell)))
+        r.proof = add_fact({fact::size_of, cell, db.as<n_ident>(m.object).name, book.version(cell)});
+    return ok(std::move(r));
   }
 
   value member(value const & obj, symbol name, span where) {
@@ -1204,13 +1335,23 @@ struct interpreter {
 
   flow eval_node(node_id n, n_index const & i, scope * env, uint32_t frame) {
     span where = db[n].where;
-    note_index_proof(n, env);
     if(value const * arr = peek(i.object, env); arr && arr->is<array_v>()) {
       TZ_TRY(idx, eval(i.index, env, frame));
-      if(idx.known()) return ok(arr->as<array_v>().get(checked_index(*arr, idx, where)));
+      if(idx.known()) {
+        value e = arr->as<array_v>().get(checked_index(*arr, idx, where));
+        if(checking()) e.proof = index_result(i, *arr, idx, env);
+        return ok(std::move(e));
+      }
+      return index_rt(n, i, *arr, idx, env);
     }
     TZ_TRY(obj, eval(i.object, env, frame));
     TZ_TRY(idx, eval(i.index, env, frame));
+    return index_rt(n, i, obj, idx, env);
+  }
+
+  flow index_rt(node_id n, n_index const & i, value const & obj, value const & idx, scope * env) {
+    span where = db[n].where;
+    bool proven_here = checking() && index_holds(i, idx, env);
     return ok(lift(obj, [&](value const & o) {
       if(o.is<rt_v>() && idx.known()) { // tuple by compile-time - the exact type of element
         value const * shape = shape_of(o);
@@ -1218,11 +1359,45 @@ struct interpreter {
           return erase(shape->as<array_v>().get(checked_index(*shape, idx, where)));
       }
       if(o.is<rt_v>() || !idx.known()) {
-        if(checking() && !bounds_proven(n)) record_throw(vm_error_shape("out_of_bounds")); // run-time-index not proven
-        return element_type(o, where);
+        if(checking()) {
+          note_index(n, proven_here);
+          if(!proven_here) record_throw(vm_error_shape("out_of_bounds")); // run-time-index not proven
+        }
+        value e = element_type(o, where);
+        if(checking()) e.proof = index_result(i, o, idx, env);
+        return e;
       }
-      return o.as<array_v>().get(checked_index(o, idx, where));
+      value e = o.as<array_v>().get(checked_index(o, idx, where));
+      if(checking()) e.proof = index_result(i, o, idx, env);
+      return e;
     }));
+  }
+
+  // An index is a safe index of this array (a fact on the value of the index).
+  bool index_holds(n_index const & i, value const & idx, scope * env) const {
+    fact const * f = fact_of(idx, fact::index_of);
+    if(!f || !db.is<n_ident>(i.object)) return false;
+    value const * cell = env->find(db.as<n_ident>(i.object).name);
+    return cell && holds(*f, cell, db.as<n_ident>(i.object).name);
+  }
+
+  // The range(xs.size) element on the safe index is the safe xs index.
+  uint32_t index_result(n_index const & i, value const & arr, value const & idx, scope * env) {
+    fact const * r = fact_of(arr, fact::range_of);
+    if(!r || !index_holds(i, idx, env)) return 0;
+    return add_fact({fact::index_of, r->cell, r->name, r->version});
+  }
+
+  void note_index(node_id n, bool proven_here) {
+    if(!proven_here) {
+      emit({report_event::unproven, {}, {}, {}, {}, {}, n.value});
+      return;
+    }
+    auto const & i = db.as<n_index>(n);
+    std::string text = db.is<n_ident>(i.object) && db.is<n_ident>(i.index)
+        ? cat(str(db.as<n_ident>(i.object).name), "[", str(db.as<n_ident>(i.index).name), "]", index_write == n ? " (запись)" : "")
+        : std::string("индекс");
+    emit({report_event::proven, text, {}, {}, db[n].where, {}, n.value});
   }
 
   // Type of element according to the run-time index. tuple - splitting by element
@@ -1303,7 +1478,7 @@ struct interpreter {
     }
     if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
       TZ_TRY(rhs, eval(o.args[1], env, frame));
-      if(db.is<n_index>(o.args[0])) note_index_proof(o.args[0], env, true);
+      written(o.args[0], env);
       if(!checking() && db.is<n_index>(o.args[0])) { // entry into an element: set, not cell
         auto const & ix = db.as<n_index>(o.args[0]);
         value * arr = place(ix.object, env, frame);
@@ -1317,7 +1492,11 @@ struct interpreter {
       value * target = place(o.args[0], env, frame);
       if(!target) {
         if(checking() && db.is<n_index>(o.args[0])) { // entry into the run-time-array element: type reconciliation
-          TZ_TRY(cur, eval(o.args[0], env, frame));
+          node_id saved_write = std::exchange(index_write, o.args[0]);
+          flow cur_f = eval(o.args[0], env, frame);
+          index_write = saved_write;
+          if(!cur_f.normal()) return cur_f;
+          value cur = std::move(cur_f.v);
           value res = op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
           if(!unknown(cur) && !unknown(res) && types.describe(cur) != types.describe(res))
             fail(cat("элемент массива типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)),
@@ -1442,9 +1621,25 @@ struct interpreter {
     if(db.is<n_ident>(c.callee)) {
       symbol name = db.as<n_ident>(c.callee).name;
       if(value * cell = env->find(name)) {
+        if(cell->is<thunk_v>()) {
+          thunk_v t = thunk_arg(c.callee, env, where);
+          if(db.is<n_lambda>(t.expr) && db.as<n_lambda>(t.expr).block) return call_block(t, c.args, env, frame, where);
+        }
         TZ_TRY(fv, read(cell));
         return call_value(fv, c.args, env, frame, where, n.value);
       }
+      if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
+      if(name == sym_is_index && c.args.size() == 2 && !functions.contains(name))
+        if(value const * arr = peek(c.args[1], env)) { // array by name - without a copy
+          TZ_TRY(k, eval(c.args[0], env, frame));
+          std::vector<value> a{std::move(k), value()};
+          if(arr->is<array_v>() && a[0].is<int64_t>()) {
+            int64_t i = a[0].as<int64_t>();
+            return ok(value(i >= 0 && uint64_t(i) < arr->as<array_v>().size()));
+          }
+          a[1] = *arr;
+          return ok(builtin_lifted(name, a, 0, where));
+        }
       return call_named(name, c.args, env, frame, where, n.value);
     }
     TZ_TRY(fv, eval(c.callee, env, frame));
@@ -1473,14 +1668,14 @@ struct interpreter {
       TZ_TRY(v, eval(args[i], env, frame));
       inner->declare(p.name, std::move(v));
     }
-    return run_frame(body, inner, db.is<n_fn>(f.lambda) ? db.as<n_fn>(f.lambda).name : symbol{}, false);
+    return run_frame(body, inner, db.is<n_fn>(f.lambda) ? db.as<n_fn>(f.lambda).name : symbol{}, false, frame);
   }
 
   // Execute body function in a new frame. The result of the verification mode is a
   // merger of the usual result and all possible returns over run-time branches.
-  flow run_frame(node_id body, scope * inner, symbol name, bool outline) {
+  flow run_frame(node_id body, scope * inner, symbol name, bool outline, uint32_t caller = 0) {
     uint32_t me = ++frame_counter;
-    frames.push_back({me, name, outline, false});
+    frames.push_back({me, name, outline, false, caller});
     flow r = eval(body, inner, me);
     bool effect = frames.back().rt_effect;
     frames.pop_back();
@@ -1500,7 +1695,7 @@ struct interpreter {
 
   flow call_named(symbol name, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
     if(auto it = functions.find(name); it != functions.end())
-      return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node});
+      return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node, frame});
     std::vector<value> vals;
     for(node_id a: args) {
       TZ_TRY(v, eval(a, env, frame));
@@ -1672,7 +1867,11 @@ struct interpreter {
     std::string active_key = key;
     if(checking()) {
       active_key += "|";
-      for(auto & v: vals) active_key += v.known() && !v.is<thunk_v>() ? show_v(v) + "|" : "·|";
+      // The expr-argument is the code of the caller: the nested for(…) for(…) is not
+      // recursion, the internal has another block; recursion transmits the same node further.
+      for(auto & v: vals)
+        active_key += v.is<thunk_v>() ? cat("expr", v.as<thunk_v>().expr.value, "|") : v.known() ? show_v(v) + "|"
+                                                                                                 : "·|";
       if(active.contains(active_key)) {
         recursed.insert(active_key);
         auto it = approx.find(active_key);
@@ -1724,7 +1923,7 @@ struct interpreter {
         std::vector<value> escaped; // "painting": exceptions to instance
         throw_sinks.push_back(&escaped);
         try {
-          r = run_frame(fn.body, inner, fn.name, fn.outline);
+          r = run_frame(fn.body, inner, fn.name, fn.outline, site.frame);
         } catch(...) {
           throw_sinks.pop_back();
           throw;
@@ -1928,12 +2127,31 @@ struct interpreter {
       fail(cat("zero не определён для ", t), where);
     }
     if(n == "range" && a.size() == 1) {
-      if(!a[0].known() && types.describe(a[0]) == "i64") return erase(value(array_v::of({value(int64_t(0))})));
-      if(a[0].is<int64_t>()) {
-        array_v r;
-        for(int64_t i = 0; i < a[0].as<int64_t>(); ++i) r.push(value(i));
-        return value(std::move(r));
+      value r;
+      if(!a[0].known() && types.describe(a[0]) == "i64") r = erase(value(array_v::of({value(int64_t(0))})));
+      else if(a[0].is<int64_t>()) {
+        array_v xs;
+        for(int64_t i = 0; i < a[0].as<int64_t>(); ++i) xs.push(value(i));
+        r = value(std::move(xs));
       }
+      if(!r.is<unit_v>()) {
+        if(checking() && a[0].proof && facts[a[0].proof - 1].kind == fact::size_of) { // range(xs.size) - xs indices
+          fact f = facts[a[0].proof - 1];
+          f.kind = fact::range_of;
+          r.proof = add_fact(f);
+        }
+        return r;
+      }
+    }
+    if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
+      if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
+      if(a[0].is<int64_t>() && a[1].is<array_v>()) {
+        int64_t k = a[0].as<int64_t>();
+        return value(k >= 0 && uint64_t(k) < a[1].as<array_v>().size());
+      }
+      if(!a[1].is<array_v>() && !(shape_of(a[1]) && shape_of(a[1])->is<array_v>()))
+        fail(cat("is_index: ожидался массив, получено ", types.describe(a[1])), where);
+      return erase(value(true));
     }
     if(n == "fill" && a.size() == 2 && types.describe(a[0]) == "i64") { // massif
       if(!a[0].known() || !a[1].known()) return erase(value(array_v::of({a[1].known() ? a[1] : *shape_of(a[1])})));
@@ -2010,6 +2228,7 @@ struct interpreter {
     symbol name;
     bool outline;
     bool rt_effect; // in the frame was runtime - effect (I/O) - the call does not fold
+    uint32_t caller = 0; // the frame in which the call was calculated (the block of the design is the frame of its calling)
   };
 
   struct stage_rec {
@@ -2076,8 +2295,17 @@ struct interpreter {
   mutable std::set<uint64_t> writes_open;
   mutable bool writes_guess_used = false;
   std::set<uint32_t> proven; // node Indexations Proven within Boundaries
-  std::vector<std::pair<span, std::string>> proven_list;
-  std::vector<std::tuple<value const *, value const *, symbol>> index_proofs; // (cell variable cycle, cell and array name)
+  std::vector<std::tuple<span, std::string, uint32_t>> proven_list; // (place, text, node)
+  std::set<uint32_t> unproven; // node indexation where the index has not been proven
+  cell_book book;
+  struct loop_state {
+    bool may_break = false; // exit from the run-time cycle
+  };
+  std::vector<loop_state> loops;
+  std::vector<fact> facts;
+  std::map<fact, uint32_t> fact_ids;
+  node_id index_write; // This is the entry of this element.
+  symbol sym_intercept, sym_is_index; // kernel forms analyzed prior to the calculation of arguments
   uint64_t effects = 0;
 };
 

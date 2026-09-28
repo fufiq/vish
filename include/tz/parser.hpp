@@ -18,10 +18,13 @@
 
 namespace tz {
 
+node_id load_prelude(ast_db & db); // prelude.hpp: a module of constructions written in the language
+
 struct parser {
   // The parser reads a copy of the text stored by the database when importing: tokens and
   // holes refer to it, not to the caller string (which may be temporary).
   parser(ast_db & db, std::string_view text, std::string label = {}) : db(db) {
+    load_prelude(db); // before import: node of this text from this import
     source = db.record_import(std::string(text), std::move(label));
     src = db.source(source);
     try {
@@ -31,6 +34,51 @@ struct parser {
       toks.assign(1, token{});
     }
     match_brackets();
+    for(uint32_t i = 0; i < db.size(); ++i)
+      if(db.is<n_fn>(node_id(i))) learn(db.as<n_fn>(node_id(i)));
+  }
+
+  // --- designs declared code (§4.4) ---
+  //
+  // The syntax of the call is taken from the ads in the area:
+// Function
+  // try(expr body) catch(expr... hs) makes `catch` a try call clause, a function with the
+  // latest expr parameter - tail design: while(c) instruction.
+  struct construct {
+    std::vector<std::pair<symbol, bool>> clauses; // Clause word; repeated (pak)
+    bool tail = false; // The tail of the head can be an instruction, not just a block.
+    bool bare = false; // head without brackets: try { … }
+  };
+
+  void learn(n_fn const & f) {
+    if(!f.name) return;
+    bool any_clause = false;
+    uint32_t head = 0;
+    bool last_expr = false;
+    for(node_id pn: f.params) {
+      auto const & p = db.as<n_param>(pn);
+      if(p.clause) any_clause = true;
+      else {
+        ++head;
+        last_expr = p.mode == param_mode::expr;
+      }
+    }
+    if(!any_clause && !last_expr) return;
+    construct & c = constructs[f.name.value];
+    if(last_expr) c.tail = true;
+    if(head == 1 && last_expr) c.bare = true;
+    for(node_id pn: f.params) {
+      auto const & p = db.as<n_param>(pn);
+      if(!p.clause) continue;
+      bool known = std::ranges::any_of(c.clauses, [&](auto const & w) { return w.first == p.clause; });
+      if(!known) c.clauses.push_back({p.clause, p.pack});
+    }
+  }
+
+  construct const * construct_of(node_id callee) const {
+    if(!db.is<n_ident>(callee)) return nullptr;
+    auto it = constructs.find(db.as<n_ident>(callee).name.value);
+    return it == constructs.end() ? nullptr : &it->second;
   }
 
   node_id parse_module() {
@@ -293,10 +341,15 @@ struct parser {
     if(ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
     else if(!in_block && ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
     else return std::nullopt;
-    // after ) shall be => or {
+    // after ) - clauses word(...) and then => or {
     uint32_t close = match[pos + name_at + 1];
     if(close == ~uint32_t{0}) return std::nullopt;
     uint32_t after = close + 1 - pos;
+    while(ahead(after).kind == tok::ident && is_open('(', after + 1) && !is_keyword(ahead(after).text)) {
+      uint32_t c2 = match[pos + after + 1];
+      if(c2 == ~uint32_t{0}) return std::nullopt;
+      after = c2 + 1 - pos;
+    }
     if(!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
 
     uint32_t start = here().where.begin;
@@ -307,6 +360,10 @@ struct parser {
     if(name_at == (outline ? 2u : 1u)) f.result_type = type_expr();
     f.name = ident();
     f.params = param_list();
+    while(here().kind == tok::ident && is_open('(', 1)) { // Clause: catch(expr... hs)
+      symbol word = ident();
+      for(node_id pn: param_list(word)) f.params.push_back(pn); // word before being added to the database (journal)
+    }
     if(is_op("=>")) {
       eat_op("=>");
       f.body = expression();
@@ -315,18 +372,19 @@ struct parser {
     } else {
       f.body = block();
     }
+    learn(f);
     return db.add(std::move(f), {start, toks[pos - 1].where.end});
   }
 
   static bool is_keyword(std::string_view w) {
-    return w == "if" || w == "for" || w == "while" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module" || w == "throw" || w == "catch" || w == "struct";
+    return w == "if" || w == "loop" || w == "break" || w == "continue" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module" || w == "throw" || w == "struct";
   }
 
-  node_list param_list() {
+  node_list param_list(symbol clause = {}) {
     expect_open('(');
     node_list ps;
     while(!is_close(')')) {
-      ps.push_back(param());
+      ps.push_back(param(clause));
       if(is_op(",")) eat_op(",");
       else break;
     }
@@ -334,9 +392,10 @@ struct parser {
     return ps;
   }
 
-  node_id param() {
+  node_id param(symbol clause = {}) {
     uint32_t start = here().where.begin;
     n_param p;
+    p.clause = clause;
     if(is_word("mut")) {
       p.mode = param_mode::mut;
       advance();
@@ -352,6 +411,10 @@ struct parser {
     } else if(is_word("ct")) {
       p.mode = param_mode::ct;
       advance();
+    }
+    if(p.mode != param_mode::let && is_op("...")) { // expr. hs - pack (repeated clause)
+      eat_op("...");
+      p.pack = true;
     }
     // [type] [...] name | name
     if(here().kind == tok::ident && (ahead(1).kind == tok::ident || is_op("...", 1))) {
@@ -421,26 +484,36 @@ struct parser {
       advance();
       return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
     }
-    if(is_word("for") && is_open('(', 1)) return for_statement();
-    if(is_word("while") && is_open('(', 1)) {
+    if(is_word("break") || is_word("continue")) {
+      bool brk = is_word("break");
       advance();
-      expect_open('(');
-      node_id c = expression();
-      expect_close(')');
-      node_id body = statement_or_block();
-      return db.add(n_while{c, body}, {start, toks[pos - 1].where.end});
+      end_statement();
+      return brk ? db.add(n_break{}, {start, toks[pos - 1].where.end}) : db.add(n_continue{}, {start, toks[pos - 1].where.end});
     }
     if(auto v = try_var_decl()) return *v;
 
+    uint32_t head_saved = std::exchange(statement_head, here().where.begin); // Tail instruction - only at the call at the beginning of the instruction
     node_id e = expression();
+    statement_head = head_saved;
+    if(tail_statement) { // The tail instructions ate their own `;`.
+      tail_statement = false;
+      return e;
+    }
     if(is_op(";")) eat_op(";");
     else if(is_close('}')) last_was_value = true;
     else if(!ends_with_block(e)) throw diagnostic("ожидалось ';'", here().where);
     return e;
   }
 
+  bool if_closed(node_id n) const {
+    auto const & i = db.as<n_if>(n);
+    node_id last = i.else_ ? i.else_ : i.then_;
+    if(db.is<n_if>(last)) return if_closed(last);
+    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_require>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
+  }
+
   bool ends_with_block(node_id e) const {
-    return db.is<n_if>(e) || db.is<n_try>(e) || (db.is<n_ct>(e) && db.is<n_block>(db.as<n_ct>(e).body)) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e) || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
+    return db.is<n_if>(e) || db.is<n_loop>(e) || (db.is<n_ct>(e) && db.is<n_block>(db.as<n_ct>(e).body)) || db.is<n_block>(e) || (db.is<n_call>(e) && (db.as<n_call>(e).tail || !db.as<n_call>(e).words.empty()));
   }
 
   void end_statement() {
@@ -474,19 +547,6 @@ struct parser {
     v.init = expression();
     end_statement();
     return db.add(std::move(v), {start, toks[pos - 1].where.end});
-  }
-
-  node_id for_statement() {
-    uint32_t start = here().where.begin;
-    advance();
-    expect_open('(');
-    if(is_word("auto")) advance();
-    symbol var = ident();
-    expect_op(":");
-    node_id range = expression();
-    expect_close(')');
-    node_id body = statement_or_block();
-    return db.add(n_for{var, range, body}, {start, toks[pos - 1].where.end});
   }
 
   // --- Expression: parsing by priority n ---
@@ -528,7 +588,9 @@ struct parser {
 
   node_id expression(int min_prec = 0) {
     node_id lhs = unary();
-    while(auto b = peek_binop()) {
+    // if(c) return x; / if(c) { … } - branch finished the instruction: `-1` further - new instruction
+    bool closed = tail_statement || (db.is<n_if>(lhs) && if_closed(lhs));
+    while(auto b = closed ? std::nullopt : peek_binop()) {
       if(b->prec < min_prec) break;
       uint32_t start = db[lhs].where.begin;
       eat_op(b->op);
@@ -564,10 +626,10 @@ struct parser {
     for(;;) {
       uint32_t start = db[e].where.begin;
       if(is_open('(') && here().glued) {
-        node_list args = call_args();
-        // tail unit: f(x) { ... } - last expr argument (§4.4)
-        if(is_open('{')) args.push_back(block());
-        e = db.add(n_call{e, std::move(args)}, {start, toks[pos - 1].where.end});
+        e = call(e, start);
+        if(tail_statement) return e; // Instruction-tail completed the instruction
+      } else if(is_open('{') && !here().glued && construct_of(e) && construct_of(e)->bare) { // try { … }
+        e = call(e, start);
       } else if(is_open('[') && here().glued) {
         advance();
         node_id i = expression();
@@ -588,16 +650,111 @@ struct parser {
     }
   }
 
-  node_list call_args() {
-    expect_open('(');
-    node_list args;
-    while(!is_close(')')) {
-      args.push_back(expression());
-      if(is_op(",")) eat_op(",");
-      else break;
+  // Call: head (arguments) [tail] and clauses word (arguments) { … } from the
+  // design announcement.
+//  
+// announcement in brackets - `auto x: xs`, `E e` is a parameter
+  // The tailblock, not the expression.
+  node_id call(node_id callee, uint32_t start) {
+    construct const * con = construct_of(callee);
+    bool head_of_statement = db[callee].where.begin == statement_head;
+    n_call c;
+    c.callee = callee;
+    group(c, symbol{}, con, head_of_statement);
+    while(con && !tail_statement && here().kind == tok::ident && (is_open('(', 1) || is_open('{', 1))) {
+      symbol word = db.strings.intern(here().text);
+      if(std::ranges::none_of(con->clauses, [&](auto const & w) { return w.first == word; })) break;
+      advance();
+      group(c, word, con, false);
     }
-    expect_close(')');
-    return args;
+    // repetitive clause - one argument-pack in place of the first
+    if(con)
+      for(auto [word, pack]: con->clauses) {
+        if(!pack) continue;
+        n_pack pk;
+        uint32_t at = ~uint32_t{0};
+        span w{};
+        for(uint32_t i = 0; i < c.args.size();)
+          if(c.words[i] == word) {
+            if(at == ~uint32_t{0}) at = i, w = db[c.args[i]].where;
+            w.end = db[c.args[i]].where.end;
+            pk.items.push_back(c.args[i]);
+            c.args.erase(c.args.begin() + i);
+            c.words.erase(c.words.begin() + i);
+          } else ++i;
+        if(at == ~uint32_t{0}) continue;
+        c.args.insert(c.args.begin() + at, db.add(std::move(pk), w));
+        c.words.insert(c.words.begin() + at, word);
+      }
+    if(std::ranges::all_of(c.words, [](symbol w) { return !w; })) c.words.clear();
+    return db.add(std::move(c), {start, toks[pos - 1].where.end});
+  }
+
+  // One group of call: (arguments) and tail - block or (at the beginning of the
+  // instruction) instruction.
+  void group(n_call & c, symbol word, construct const * con, bool head_of_statement) {
+    std::vector<n_param> binders;
+    std::vector<span> binder_at;
+    uint32_t first = uint32_t(c.args.size());
+    if(is_open('(')) {
+      advance();
+      while(!is_close(')')) {
+        if(auto b = binder()) {
+          span at{b->second, 0};
+          if(is_op(":")) {
+            eat_op(":");
+            b->first.source = int64_t(c.args.size() - first);
+            c.args.push_back(expression());
+            c.words.push_back(word);
+          }
+          at.end = toks[pos - 1].where.end;
+          binders.push_back(std::move(b->first));
+          binder_at.push_back(at);
+        } else {
+          c.args.push_back(expression());
+          c.words.push_back(word);
+        }
+        if(is_op(",")) eat_op(",");
+        else break;
+      }
+      expect_close(')');
+    }
+    bool packed = word && con && std::ranges::any_of(con->clauses, [&](auto const & w) { return w.first == word && w.second; });
+    if(packed && c.args.size() > first) // Repetitive Clause - a block with parameters: catch(E e), catch(auto e)
+      throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только объявления: ", db.strings.text(word), "(auto e)"), db[c.args[first]].where);
+    node_id body;
+    if(is_open('{')) body = block();
+    else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && !is_word("else")) {
+      body = statement();
+      tail_statement = true;
+    }
+    if(!body) {
+      if(!binders.empty()) throw diagnostic("объявление в скобках вводит имя в блок — нужен блок", here().where);
+      if(word) throw diagnostic(cat("после клаузы ", db.strings.text(word), " ожидался блок"), here().where);
+      return;
+    }
+    if(!binders.empty()) {
+      n_lambda l;
+      for(std::size_t k = 0; k < binders.size(); ++k) l.params.push_back(db.add(std::move(binders[k]), binder_at[k]));
+      l.body = body;
+      l.block = true;
+      body = db.add(std::move(l), db[body].where);
+    }
+    c.args.push_back(body);
+    c.words.push_back(word);
+    if(!word) c.tail = true; // The block is always the last.
+  }
+
+  // auto x | Type x before `:`, `,` or `)` is a block parameter (not added to the base).
+  std::optional<std::pair<n_param, uint32_t>> binder() {
+    if(ahead(0).kind != tok::ident || ahead(1).kind != tok::ident) return std::nullopt;
+    bool ends = is_op(":", 2) || is_op(",", 2) || (ahead(2).kind == tok::close && ahead(2).ch() == ')');
+    if(!ends) return std::nullopt;
+    uint32_t start = here().where.begin;
+    n_param p;
+    p.type = type_expr();
+    p.name = ident();
+    return std::pair{std::move(p), start};
   }
 
   node_list brace_items() {
@@ -630,7 +787,11 @@ struct parser {
       }
       case tok::ident: {
         if(t.text == "if" && is_open('(', 1)) return if_expression();
-        if(t.text == "try" && is_open('{', 1)) return try_expression();
+        if(t.text == "loop" && is_open('{', 1)) {
+          advance();
+          node_id body = block();
+          return db.add(n_loop{body}, {start, toks[pos - 1].where.end});
+        }
         if(t.text == "quote" && is_open('{', 1)) { // quote { announcements }
           advance();
           expect_open('{');
@@ -671,35 +832,6 @@ struct parser {
     throw diagnostic("ожидалось выражение", t.where);
   }
 
-  // try { … } catch(T e) { … } ... is an expression as if; try( … ) remains a function call
-  node_id try_expression() {
-    uint32_t start = here().where.begin;
-    advance();
-    n_try t;
-    t.body = block();
-    while(is_word("catch")) {
-      uint32_t c0 = here().where.begin;
-      advance();
-      n_catch c;
-      expect_open('(');
-      if(!is_close(')')) { // catch(e) - any; catch(T e) - by type; catch(T _) - by type without name
-        uint32_t t0 = here().where.begin;
-        symbol first = ident();
-        if(!is_close(')')) {
-          c.type = db.add(n_ident{first}, {t0, toks[pos - 1].where.end});
-          c.name = ident();
-        } else {
-          c.name = first;
-        }
-      }
-      expect_close(')');
-      c.body = block();
-      t.catches.push_back(db.add(std::move(c), {c0, toks[pos - 1].where.end}));
-    }
-    if(t.catches.empty()) throw diagnostic("после try { … } ожидался catch", here().where);
-    return db.add(std::move(t), {start, toks[pos - 1].where.end});
-  }
-
   node_id if_expression() {
     uint32_t start = here().where.begin;
     advance();
@@ -719,7 +851,7 @@ struct parser {
   // Branch if: Block, nested if or expression/instruction.
   node_id branch() {
     if(is_open('{')) return block();
-    if(is_word("return") || is_word("require")) return statement();
+    if(is_word("return") || is_word("require") || is_word("break") || is_word("continue")) return statement();
     return expression();
   }
 
@@ -771,6 +903,9 @@ struct parser {
   std::vector<uint32_t> match;
   uint32_t pos = 0;
   bool last_was_value = false;
+  uint32_t statement_head = ~uint32_t{0}; // starting-point
+  bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
+  std::unordered_map<uint32_t, construct> constructs; // head-name
   std::vector<diagnostic> diags;
 };
 

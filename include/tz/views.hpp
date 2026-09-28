@@ -15,13 +15,19 @@
 
 namespace tz {
 
-// Instruction: A block/module element or a cycle/branch body that is not a block.
+// The tail of the design instruction: while(c) x = 1; - x = 1 is the instruction.
+bool is_tail(ast_db const & db, node_id call, node_id n) {
+  auto const & c = db.as<n_call>(call);
+  return c.tail && !c.args.empty() && c.args.back() == n;
+}
+
+// Instruction means a block/module element or a structure/branch body that is not a block.
 bool is_statement(ast_db const & db, node_id n) {
   node_id p = db[n].parent;
   if(!p) return false;
   if(db.is<n_block>(p) || db.is<n_module>(p)) return true;
-  if(db.is<n_for>(p)) return db.as<n_for>(p).body == n;
-  if(db.is<n_while>(p)) return db.as<n_while>(p).body == n;
+  if(db.is<n_call>(p)) return is_tail(db, p, n) && !db.is<n_lambda>(n);
+  if(db.is<n_lambda>(p)) return db.as<n_lambda>(p).block && db.as<n_lambda>(p).body == n;
   if(db.is<n_if>(p)) {
     auto const & i = db.as<n_if>(p);
     return (i.then_ == n || i.else_ == n) && is_statement(db, p);
@@ -143,7 +149,7 @@ struct residual_view {
 
   // Do not replace: the purpose of assignment, called, announcements and parameters.
   bool foldable_position(node_id n) const {
-    if(db.is<n_var>(n) || db.is<n_fn>(n) || db.is<n_param>(n) || db.is<n_lambda>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_require>(n) || db.is<n_for>(n) || db.is<n_while>(n))
+    if(db.is<n_var>(n) || db.is<n_fn>(n) || db.is<n_param>(n) || db.is<n_lambda>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_require>(n) || db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n) || db.is<n_pack>(n))
       return false;
     node_id p = db[n].parent;
     if(!p) return false;
@@ -273,7 +279,7 @@ struct slice_view {
     }
     // nested instructions (block bodies, branches, cycles)
     db.for_each_child(n, [&](node_id c) {
-      if(!db.is<n_lambda>(c) && !db.is<n_fn>(c)) collect(c);
+      if(!(db.is<n_lambda>(c) && !db.as<n_lambda>(c).block) && !db.is<n_fn>(c)) collect(c);
     });
   }
 
@@ -281,14 +287,10 @@ struct slice_view {
     if(db.is<n_var>(n)) {
       s.defs.insert(db.as<n_var>(n).name);
       uses(db.as<n_var>(n).init, s.uses);
-    } else if(db.is<n_for>(n)) {
-      // The cycle variable is visible only in his body: the cycle enters slice as
-      // encompassing the construction of stored instructions, not by name.
-      uses(db.as<n_for>(n).range, s.uses);
     } else if(db.is<n_if>(n)) {
       uses(db.as<n_if>(n).cond, s.uses);
-    } else if(db.is<n_while>(n)) {
-      uses(db.as<n_while>(n).cond, s.uses);
+    } else if(db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n)) {
+      // The cycle enters slice as encompassing the construction of stored instructions.
     } else if(db.is<n_op>(n) && is_assign(db.as<n_op>(n))) {
       auto const & o = db.as<n_op>(n);
       node_id t = o.args[0];
@@ -303,8 +305,9 @@ struct slice_view {
       uses(o.args[1], s.uses);
     } else {
       uses(n, s.uses);
-      // The call can change the arguments - alias (§6.2)
-      if(db.is<n_call>(n))
+      // The call can change the arguments - alias (§6.2); the design (for, while) action -
+      // in its block, it is cut separately.
+      if(db.is<n_call>(n) && !db.as<n_call>(n).tail && db.as<n_call>(n).words.empty())
         for(node_id a: db.as<n_call>(n).args)
           if(db.is<n_ident>(a)) s.defs.insert(db.as<n_ident>(a).name);
     }
@@ -323,7 +326,11 @@ struct slice_view {
       return;
     }
     if(db.is<n_block>(n) || db.is<n_lambda>(n)) return; // blocks have their own instructions
-    db.for_each_child(n, [&](node_id c) { uses(c, out); });
+    // the parameters of the construction block are visible only in the block:
+    // `for(auto x : xs)` - the construction falls into slice as covering, not by name
+    db.for_each_child(n, [&](node_id c) {
+      if(!(db.is<n_call>(n) && is_tail(db, n, c))) uses(c, out);
+    });
   }
 
   ast_db const & db;

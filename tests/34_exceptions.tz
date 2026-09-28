@@ -11,7 +11,7 @@
 // store-roundtrip
 // Исключения (§8.1, M2a): второй путь выхода — 
 // throw и try — выражения;
-// catch(T e) ловит по типу, catch(e) — любое (база); ошибки VM — исключения
+// catch(T e) ловит по типу, catch(auto e) — любое (база); ошибки VM — исключения
 // своих типов (out_of_bounds, div_by_zero, require_failed); типы исключений
 // функции выводятся и видны в отчёте check.
 struct http_error { i64 code; }
@@ -45,6 +45,6 @@ main() {
   auto v = try { throw 5; 0 } catch(i64 x) { x * 2 };
   print(v);
   auto p = point{7};
-  p.y = try { guarded() } catch(e) { p.x };
+  p.y = try { guarded() } catch(auto e) { p.x };
   print(p.y);
 }

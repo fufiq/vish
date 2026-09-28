@@ -136,6 +136,10 @@ struct split_v {
 
 struct value {
   std::variant<unit_v, bool, int64_t, double, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v> v;
+  // Proof of meaning (check mode): fact number +1 -
+// , "r - range(xs.size)." A copy of the meaning carries a fact.
+  // The new value (i + 1) is not.
+  uint32_t proof = 0;
 
   value() : v(unit_v{}) {}
   value(auto x) : v(std::move(x)) {}

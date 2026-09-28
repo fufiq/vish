@@ -1,0 +1,37 @@
+module prelude;
+
+// Конструкции, написанные на языке поверх ядра (спека §3.2): в ядре — if,
+// loop/break/continue, throw, intercept. 
+//  
+// 
+// 
+//.
+
+// while(c) тело — условие вычисляется на каждой итерации (expr).
+while(expr c, expr body) {
+  loop {
+    if(!c) break;
+    body;
+  }
+}
+
+// for(auto x : xs) тело — по массиву или range. Индекс становится безопасным
+// после проверки is_index: 
+// 
+// Шаг — до тела:
+// continue в теле не пропускает его.
+for(auto xs, expr body) {
+  auto i = 0;
+  loop {
+    if(!is_index(i, xs)) break;
+    auto k = i;
+    i = i + 1;
+    body(xs[k]);
+  }
+}
+
+// try { … } catch(E e) { … } … — 
+// 
+// catch.
+// intercept выбирает первый блок, чей параметр принимает брошенное значение.
+try(expr body) catch(expr... handlers) => intercept(body, handlers);
