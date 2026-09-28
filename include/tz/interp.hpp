@@ -211,6 +211,10 @@ public:
             out += "свёрнуто в кт:\n";
             for (const auto& [name, count] : folded_) out += std::format("  {}  ×{}\n", name, count);
         }
+        if (!param_writes_.empty()) {
+            out += "функции меняют параметры (место вызывающего):\n";
+            for (const auto& w : param_writes_) out += std::format("  {}\n", w);
+        }
         if (!proven_list_.empty()) {
             out += "индексы, доказанные в границах (проверка снята):\n";
             for (const auto& [w, what] : proven_list_) out += std::format("  {} {}\n", loc(w), what);
@@ -222,6 +226,8 @@ public:
     // Indexing proved by parsing within the array boundaries ("top-up optimization": the
     // language knows the check is off and shows it in the report).
     bool bounds_proven(node_id n) const { return proven_.contains(n.value()); }
+    // Does the function change its k parameter (inference, see writes_param).
+    bool param_written(node_id f, u32 k) const { return writes_param(f, k); }
 
 private:
     // --- flow ---
@@ -689,10 +695,8 @@ private:
                 if (!db_.is<n_ident>(c.callee)) return false;
                 auto it = functions_.find(db_.as<n_ident>(c.callee).name);
                 if (it == functions_.end()) continue; // Built-in functions don't change arguments
-                for (node_id fn : it->second) {
-                    const auto& ps = db_.as<n_fn>(fn).params;
-                    if (k < ps.size() && db_.as<n_param>(ps[k]).mode != param_mode::let) return false;
-                }
+                for (node_id fn : it->second)
+                    if (writes_param(fn, k)) return false;
             }
         }
         bool ok_ = true;
@@ -700,31 +704,56 @@ private:
         return ok_;
     }
 
-    // The parameter x / auto x / T x - alias is read-only by this function (§6.2); you
-    // can only change the location of the caller via mut/out.
-    void check_param_writes(node_id f) {
-        std::set<symbol> readonly;
-        for (node_id p : db_.as<n_fn>(f).params) {
-            auto m = db_.as<n_param>(p).mode;
-            if (m == param_mode::let || m == param_mode::ct) readonly.insert(db_.as<n_param>(p).name);
+    // Does the function change its k-th parameter (place of caller)? It is not forbidden
+    // and does not require marking - it is displayed.
+//  и
+    // Seen in the check report. Mut is an optional explicit mark.
+    bool writes_param(node_id f, u32 k) const {
+        const auto& fn = db_.as<n_fn>(f);
+        if (k >= fn.params.size()) return false;
+        auto m = db_.as<n_param>(fn.params[k]).mode;
+        if (m == param_mode::mut || m == param_mode::out || m == param_mode::own || m == param_mode::expr) return true;
+        if (m == param_mode::ct) return false;
+        u64 key = (u64(f.value()) << 32) | k;
+        if (auto it = writes_.find(key); it != writes_.end()) {
+            if (writes_open_.contains(key)) writes_guess_used_ = true;
+            return it->second;
         }
-        if (!readonly.empty()) check_param_writes(db_.as<n_fn>(f).body, readonly);
+        // Recursion: fixed point at the bottom. The counted key is “not changing” yet;
+        // “changing” only grows, so the top call is recalculated while the guesses were
+        // read and the set “changes” grew.
+        auto compute = [&] {
+            writes_[key] = false;
+            writes_open_.insert(key);
+            bool w = writes_name(fn.body, db_.as<n_param>(fn.params[k]).name);
+            writes_open_.erase(key);
+            writes_[key] = w;
+        };
+        if (!writes_open_.empty()) { compute(); return writes_[key]; }
+        auto trues = [&] { return std::ranges::count_if(writes_, [](const auto& e) { return e.second; }); };
+        for (;;) {
+            auto before        = trues();
+            writes_guess_used_ = false;
+            std::erase_if(writes_, [](const auto& e) { return !e.second; });
+            compute();
+            if (!writes_guess_used_ || trues() == before) return writes_[key];
+        }
     }
 
-    void check_param_writes(node_id n, std::set<symbol> readonly) { // copy: shadows local to the block
-        if (!n || readonly.empty() || db_.is<n_fn>(n) || db_.is<n_lambda>(n)) return;
+    // Does the code change the place with that name: assigning (including to an element/field)
+    // or transferring to a parameter that changes the function being called? Shadow, stop.
+    bool writes_name(node_id n, symbol name) const {
+        if (!n || db_.is<n_fn>(n) || db_.is<n_lambda>(n)) return false;
         if (db_.is<n_block>(n)) {
             for (node_id k : db_.as<n_block>(n).items) {
-                check_param_writes(k, readonly);
-                if (db_.is<n_var>(k)) readonly.erase(db_.as<n_var>(k).name); // Next is the local variable.
+                if (writes_name(k, name)) return true;
+                if (db_.is<n_var>(k) && db_.as<n_var>(k).name == name) return false;
             }
-            return;
+            return false;
         }
         if (db_.is<n_for>(n)) {
-            check_param_writes(db_.as<n_for>(n).range, readonly);
-            readonly.erase(db_.as<n_for>(n).var);
-            check_param_writes(db_.as<n_for>(n).body, readonly);
-            return;
+            if (writes_name(db_.as<n_for>(n).range, name)) return true;
+            return db_.as<n_for>(n).var != name && writes_name(db_.as<n_for>(n).body, name);
         }
         if (db_.is<n_op>(n)) {
             const auto& o  = db_.as<n_op>(n);
@@ -733,12 +762,24 @@ private:
                 node_id t = o.args[0];
                 while (db_.is<n_index>(t) || db_.is<n_member>(t))
                     t = db_.is<n_index>(t) ? db_.as<n_index>(t).object : db_.as<n_member>(t).object;
-                if (db_.is<n_ident>(t) && readonly.contains(db_.as<n_ident>(t).name))
-                    fail(std::format("параметр {} — алиас только для чтения; чтобы менять, объявите его mut", str(db_.as<n_ident>(t).name)),
-                         db_[o.args[0]].where);
+                if (db_.is<n_ident>(t) && db_.as<n_ident>(t).name == name) return true;
             }
         }
-        db_.for_each_child(n, [&](node_id c) { check_param_writes(c, readonly); });
+        if (db_.is<n_call>(n) && db_.is<n_ident>(db_.as<n_call>(n).callee)) {
+            const auto& c = db_.as<n_call>(n);
+            if (auto it = functions_.find(db_.as<n_ident>(c.callee).name); it != functions_.end())
+                for (u32 k = 0; k < c.args.size(); ++k) {
+                    node_id a = c.args[k];
+                    while (db_.is<n_index>(a) || db_.is<n_member>(a))
+                        a = db_.is<n_index>(a) ? db_.as<n_index>(a).object : db_.as<n_member>(a).object;
+                    if (!db_.is<n_ident>(a) || db_.as<n_ident>(a).name != name) continue;
+                    for (node_id fn : it->second)
+                        if (writes_param(fn, k)) return true;
+                }
+        }
+        bool w = false;
+        db_.for_each_child(n, [&](node_id c) { w = w || writes_name(c, name); });
+        return w;
     }
 
     void collect_assigned(node_id n, std::set<symbol>& out) const {
@@ -750,11 +791,8 @@ private:
                     node_id a = c.args[k];
                     while (db_.is<n_index>(a)) a = db_.as<n_index>(a).object;
                     if (!db_.is<n_ident>(a)) continue;
-                    for (node_id fn : it->second) {
-                        const auto& ps = db_.as<n_fn>(fn).params;
-                        if (k < ps.size() && db_.as<n_param>(ps[k]).mode != param_mode::let && db_.as<n_param>(ps[k]).mode != param_mode::ct)
-                            out.insert(db_.as<n_ident>(a).name);
-                    }
+                    for (node_id fn : it->second)
+                        if (writes_param(fn, k)) out.insert(db_.as<n_ident>(a).name);
                 }
         }
         if (db_.is<n_op>(n)) {
@@ -1244,7 +1282,10 @@ private:
         const auto& fn = db_.as<n_fn>(f);
         if (fn.outline && inline_required(f))
             fail(std::format("{} помечена outline, но использует семантику инлайна", site.what), db_[f].where);
-        if (param_writes_checked_.insert(f.value()).second) check_param_writes(f);
+        if (checking() && param_writes_checked_.insert(f.value()).second)
+            for (u32 k = 0; k < fn.params.size(); ++k)
+                if (db_.as<n_param>(fn.params[k]).mode != param_mode::expr && writes_param(f, k))
+                    param_writes_.push_back(std::format("{}: меняет {}", describe_fn(f), str(db_.as<n_param>(fn.params[k]).name)));
 
         // instance key : only runtime is part of the argument
         bool        all_known = true;
@@ -1571,6 +1612,10 @@ private:
     mutable bool                            observed_dirty_ = false;
     std::set<u32>                           live_fns_;
     std::set<u32>                           param_writes_checked_;
+    std::vector<std::string>                param_writes_; // What functions change the parameters
+    mutable std::map<u64, bool>             writes_;
+    mutable std::set<u64>                   writes_open_;
+    mutable bool                            writes_guess_used_ = false;
     std::set<u32>                           proven_;      // node Indexations Proven within Boundaries
     std::vector<std::pair<span, std::string>> proven_list_;
     std::vector<std::tuple<const value*, const value*, symbol>> index_proofs_; // (cell variable cycle, cell and array name)

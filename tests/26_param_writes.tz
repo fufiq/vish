@@ -1,0 +1,39 @@
+// out: 5 [1, 0] 2
+// out: 2 7
+// check: setp(c): меняет c
+// check: fill0(a): меняет a
+// check: via(x): меняет x
+// check: ping(p, n): меняет p
+// check: pong(q, n): меняет q
+// check-lacks: shadow(a): меняет
+// check-lacks: reads(r): меняет
+// Параметр — алиас места вызывающего; функция может его менять без пометки
+// 
+// Разбор выводит, какие параметры функция меняет — напрямую, через
+// вызов и через взаимную рекурсию, — и показывает это в отчёте check.
+setp(c) { c = 5; }
+fill0(auto a) { a[0] = 1; }
+via(auto x) { setp(x); }
+
+ping(auto p, auto n) { if(n > 0) pong(p, n - 1); }
+pong(auto q, auto n) { if(n > 0) ping(q, n - 1) else q += 1; }
+
+shadow(auto a) {
+  auto a = 1;
+  a = 2;
+  a
+}
+reads(auto r) => r + 1
+
+main() {
+  auto v = 1;
+  auto xs = array{0, 0};
+  auto k = 1;
+  setp(v);
+  fill0(xs);
+  ping(k, 3);
+  print(v, xs, k);
+  auto w = 0;
+  via(w);
+  print(shadow(9), reads(w) + 1);
+}

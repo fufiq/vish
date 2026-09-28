@@ -174,8 +174,8 @@ public:
             const auto& p = db_.as<n_param>(f.params[i]);
             if (p.mode == param_mode::expr || p.mode == param_mode::out || p.mode == param_mode::own)
                 throw jit_unsupported{f.params[i], "режим параметра"};
-            if (p.mode == param_mode::mut && !is_array(out_.params[i])) // scalar: there is no reverse entry in the caller
-                throw jit_unsupported{f.params[i], "mut-скаляр"};
+            if (!is_array(out_.params[i]) && an_.param_written(fn_, i)) // The scalar is transmitted by the value: there is no return record
+                throw jit_unsupported{f.params[i], "меняет скалярный параметр (только встраивание)"};
             slot s = declare(p.name, out_.params[i]);
             as_.load(rax, rdi, i32(8 * i));
             as_.store(rbp, s.off, rax);
@@ -961,14 +961,15 @@ inline void jit_engine::compile(node_id fn, jit_fn& out) {
 // Call instance by machine code from the interpreter (run mode).
 inline std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value>& vals, const node_list& args,
                                                              const scope_ptr& env, const std::string& key) {
-    // expr/own/out and mut-scalars - semantics of inline/feedback while interpreter; mut-array
-    // possible: machine code gets pointer to the array of caller
+    // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
+    // variable array possible: machine code receives an array of caller
     for (const auto& v : vals) if (v.is<thunk_v>()) return std::nullopt;
     const auto& params = db_.as<n_fn>(f).params;
     for (u32 i = 0; i < params.size(); ++i) {
         auto m = db_.as<n_param>(params[i]).mode;
         if (m == param_mode::expr || m == param_mode::own || m == param_mode::out) return std::nullopt;
-        if (m == param_mode::mut && !vals[i].is<array_v>()) return std::nullopt;
+        // scalar that the function changes: there is no return entry from the interpreter
+        if (!vals[i].is<array_v>() && writes_param(f, i)) return std::nullopt;
     }
     std::vector<jt> types;
     for (const auto& v : vals) {
