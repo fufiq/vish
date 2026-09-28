@@ -1,0 +1,12 @@
+// out: 2 3
+// jit-compiled: count
+// Тип массива — его раскладка: array{1, 2} — array<i64> (машинный код),
+// array{1, 2.0, 3} — смешанный, не array<i64>, поэтому интерпретатор, а не
+// деоптимизация.
+count(auto a) {
+  auto k = 0;
+  for(auto i : range(a.size)) k += 1;
+  k
+}
+
+main() { print(count(array{1, 2}), count(array{1, 2.0, 3})); }

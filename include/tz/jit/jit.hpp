@@ -25,7 +25,7 @@ namespace tz {
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-enum class jit_fault_kind : u64 { none = 0, bounds = 1, div_zero = 2, require = 3, deopt = 4 };
+enum class jit_fault_kind : u64 { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4 };
 inline u64 jit_fault      = 0;
 inline u64 jit_fault_node = 0;
 
@@ -61,11 +61,11 @@ inline jt jt_of(const value& v) {
     if (x->is<i64>()) return jt::i64_;
     if (x->is<f64>()) return jt::f64_;
     if (x->is<bool>()) return jt::bool_;
-    if (x->is<array_v>()) {
+    if (x->is<array_v>()) { // Array type - its layout: mixed array not array<i64 >>
         const auto& a = x->as<array_v>();
-        if (a.empty()) return jt::other;
-        jt e = jt_of(a.get(0));
-        return e == jt::i64_ ? jt::arr_i64 : e == jt::f64_ ? jt::arr_f64 : jt::other;
+        if (a.kind() == array_v::layout::ints) return jt::arr_i64;
+        if (a.kind() == array_v::layout::floats) return jt::arr_f64;
+        return jt::other;
     }
     return jt::other;
 }
@@ -187,7 +187,7 @@ public:
             as_.mov(rsi, u64(s.type == jt::arr_i64 ? 1 : 2));
             call_native(reinterpret_cast<void*>(&jit_array_data));
             as_.test(rax, rax);
-            as_.jcc(e, fault(jit_fault_kind::deopt, f.params[i]));
+            as_.jcc(e, fault(jit_fault_kind::layout, f.params[i])); // Type parsing guaranteed: we don't get here
             as_.store(rbp, s.data_off, rax);
             as_.load(rdi, rbp, s.off);
             call_native(reinterpret_cast<void*>(&jit_array_size));
@@ -653,7 +653,7 @@ private:
         // 
         // . Recursion and outline are a real challenge.
         bool recursive = std::ranges::any_of(frames_, [&](const frame& f) { return f.fn == target; });
-        if (!recursive && !db_.as<n_fn>(target).outline && frames_.size() < 64) return inline_call(n, c, target);
+        if (!recursive && !db_.as<n_fn>(target).outline) return inline_call(n, c, target);
         std::vector<jt> types;
         for (node_id a : c.args) {
             jt t = type_of(a);
@@ -994,10 +994,13 @@ inline std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vec
     auto entry     = reinterpret_cast<u64 (*)(const u64*)>(code->entry);
     u64  bits      = entry(raw.data());
     auto fault     = jit_fault_kind(jit_fault);
-    if (fault == jit_fault_kind::deopt) { jit_fault = 0; return std::nullopt; } // The wrong book is the interpreter.
+    // No Deoptimizations: Type - Contract for the entire program
+// The mismatch is a VM error.
     if (fault != jit_fault_kind::none) {
         node_id at{u32(jit_fault_node)};
         jit_fault = 0;
+        if (fault == jit_fault_kind::layout)
+            throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db_[at].where);
         const char* what = fault == jit_fault_kind::bounds ? "индекс вне границ массива (машинный код)"
                          : fault == jit_fault_kind::div_zero ? "деление на ноль (машинный код)"
                                                             : "нарушено требование require (машинный код)";
