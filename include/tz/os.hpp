@@ -9,8 +9,13 @@
 
 #include "base.hpp"
 
+#include <arpa/inet.h>
+#include <cerrno>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -98,6 +103,89 @@ line_reader & host_stdin() {
   static line_reader r{0};
   return r;
 }
+
+// --- host (M3b): non-blocking sockets and epoll ---
+//
+// The program sees only the blocker read/write streams; the expectation of readiness is
+// here at the VM scheduler.
+//
+
+void nonblocking(int fd) { ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
+
+// Listener socket at 127.0.0.1:port (0 - choose free); -1 - error.
+int listen_tcp(int port) {
+  int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if(fd < 0) return -1;
+  int one = 1;
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(uint16_t(port));
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if(::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 || ::listen(fd, 128) != 0) {
+    ::close(fd);
+    return -1;
+  }
+  nonblocking(fd);
+  return fd;
+}
+
+int bound_port(int fd) {
+  sockaddr_in a{};
+  socklen_t n = sizeof a;
+  ::getsockname(fd, reinterpret_cast<sockaddr *>(&a), &n);
+  return ntohs(a.sin_port);
+}
+
+// Begin connection (non-blocking); readiness - on record.
+int connect_tcp(std::string const & host, int port) {
+  int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if(fd < 0) return -1;
+  nonblocking(fd);
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(uint16_t(port));
+  if(::inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) {
+    ::close(fd);
+    return -1;
+  }
+  if(::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 && errno != EINPROGRESS) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+int socket_error(int fd) {
+  int e = 0;
+  socklen_t n = sizeof e;
+  ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &n);
+  return e;
+}
+
+// Waiting for descriptors: the key is the waiting fiber number.
+struct poller {
+  int ep = ::epoll_create1(EPOLL_CLOEXEC);
+  ~poller() {
+    if(ep >= 0) ::close(ep);
+  }
+  void wait_for(int fd, bool write, uint32_t key) {
+    epoll_event ev{};
+    ev.events = (write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
+    ev.data.u32 = key;
+    if(::epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) != 0) ::epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
+  }
+  void forget(int fd) { ::epoll_ctl(ep, EPOLL_CTL_DEL, fd, nullptr); }
+  std::vector<uint32_t> wait() {
+    epoll_event evs[64];
+    int n;
+    do n = ::epoll_wait(ep, evs, 64, -1);
+    while(n < 0 && errno == EINTR);
+    std::vector<uint32_t> out;
+    for(int i = 0; i < n; ++i) out.push_back(evs[i].data.u32);
+    return out;
+  }
+};
 
 } // namespace tz::os
 

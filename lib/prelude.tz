@@ -91,3 +91,9 @@ for(stream s, expr body) {
     body(read(s));
   }
 }
+
+// Сеть (M3b): сокет — тот же поток байтов (str); ожидание готовности — у VM.
+listen(i64 p) => stream_listen(p);
+port(stream l) => stream_port(l);
+accept(stream l) => stream_accept(l);
+connect(str host, i64 p) => stream_connect(host, p);

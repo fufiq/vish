@@ -532,6 +532,9 @@ struct interpreter {
     std::deque<uint32_t> readers, writers;
     value shape; // parsing: type of elements
     bool typed = false;
+    int fd = -1; // Socket host (M3b): stream of bytes; listener
+    bool listener = false;
+    bool eof = false;
   };
 
   bool checking() const { return run_mode == mode::check; }
@@ -2113,6 +2116,10 @@ struct interpreter {
   void schedule() {
     fiber_rec & me = running();
     while(!ready_queue.empty() && fibers[ready_queue.front()].state != fiber_rec::ready) ready_queue.pop_front();
+    while(ready_queue.empty() && fd_waiters > 0 && me.state != fiber_rec::ready) { // Everyone is waiting for host: sleep on epoll
+      for(uint32_t id: poll.wait()) wake(id);
+      while(!ready_queue.empty() && fibers[ready_queue.front()].state != fiber_rec::ready) ready_queue.pop_front();
+    }
     if(ready_queue.empty()) {
       if(me.state == fiber_rec::ready) return;
       // No One Wakes Up: The Error Gets the Basic fiber
@@ -2195,13 +2202,115 @@ struct interpreter {
     return uint32_t(id.as<int64_t>());
   }
 
+  void wait_fd(int fd, bool write) {
+    poll.wait_for(fd, write, running().id);
+    ++fd_waiters;
+    struct dec {
+      uint32_t & n;
+      ~dec() { --n; }
+    } d{fd_waiters};
+    park();
+  }
+
+  value new_stream(int fd, bool listener) {
+    streams.emplace_back();
+    streams.back().fd = fd;
+    streams.back().listener = listener;
+    if(checking()) {
+      streams.back().shape = erase(value(std::string("x")));
+      streams.back().typed = true;
+    }
+    return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(streams.size() - 1))}}});
+  }
+
+  // Socket: more is data (or wait); zero bytes is the end.
+  bool socket_more(stream_rec & s, span where) {
+    while(s.buf.empty() && !s.eof) {
+      char chunk[65536];
+      auto n = ::read(s.fd, chunk, sizeof chunk);
+      if(n > 0) s.buf.push_back(value(std::string(chunk, std::size_t(n))));
+      else if(n == 0) s.eof = true;
+      else if(errno == EAGAIN || errno == EWOULDBLOCK) wait_fd(s.fd, false);
+      else fail_rt("io_error", cat("чтение сокета: ", std::strerror(errno)), where);
+    }
+    return !s.buf.empty();
+  }
+
+  value socket_op(std::string_view n, stream_rec & s, std::vector<value> & a, span where) {
+    if(n == "stream_accept") {
+      if(!s.listener) fail("accept: ожидался слушающий поток", where);
+      for(;;) {
+        int c = ::accept4(s.fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if(c >= 0) return new_stream(c, false);
+        if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) wait_fd(s.fd, false);
+        else fail_rt("io_error", cat("accept: ", std::strerror(errno)), where);
+      }
+    }
+    if(n == "stream_port") return value(int64_t(os::bound_port(s.fd)));
+    if(n == "stream_write") {
+      if(!a[1].is<std::string>()) fail(cat("запись в сокет: ожидались байты (str), получено ", types.describe(a[1])), where);
+      std::string_view rest = a[1].as<std::string>();
+      while(!rest.empty()) {
+        auto k = ::write(s.fd, rest.data(), rest.size());
+        if(k > 0) rest.remove_prefix(std::size_t(k));
+        else if(k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) wait_fd(s.fd, true);
+        else fail_rt("closed_stream", cat("запись в сокет: ", std::strerror(errno)), where);
+      }
+      return value();
+    }
+    if(n == "stream_more") return value(socket_more(s, where));
+    if(n == "stream_read") {
+      if(!socket_more(s, where)) fail_rt("closed_stream", "чтение из закрытого сокета", where);
+      value v = std::move(s.buf.front());
+      s.buf.pop_front();
+      return v;
+    }
+    if(n == "stream_close") {
+      if(s.fd >= 0) {
+        poll.forget(s.fd);
+        ::close(s.fd);
+        s.fd = -1;
+      }
+      s.eof = true;
+      return value();
+    }
+    fail(cat("операция ", n, " не для сокета"), where);
+  }
+
   value stream_op(std::string_view n, std::vector<value> & a, span where) {
+    if(n == "stream_listen" || n == "stream_connect") {
+      if(checking()) {
+        rt_effect();
+        rt_check("io_error", where);
+        return new_stream(-1, n == "stream_listen");
+      }
+      if(n == "stream_listen") {
+        if(a.size() != 1 || !a[0].is<int64_t>()) fail("listen(порт)", where);
+        int fd = os::listen_tcp(int(a[0].as<int64_t>()));
+        if(fd < 0) fail_rt("io_error", cat("listen: ", std::strerror(errno)), where);
+        return new_stream(fd, true);
+      }
+      if(a.size() != 2 || !a[0].is<std::string>() || !a[1].is<int64_t>()) fail("connect(адрес, порт)", where);
+      int fd = os::connect_tcp(a[0].as<std::string>(), int(a[1].as<int64_t>()));
+      if(fd < 0) fail_rt("io_error", cat("connect: ", std::strerror(errno)), where);
+      wait_fd(fd, true);
+      if(int e = os::socket_error(fd)) {
+        ::close(fd);
+        fail_rt("io_error", cat("connect: ", std::strerror(e)), where);
+      }
+      return new_stream(fd, false);
+    }
     if(n == "stream_new") {
       streams.emplace_back();
       if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) streams.back().cap = std::size_t(a[0].as<int64_t>());
       return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(streams.size() - 1))}}});
     }
     stream_rec & s = streams[stream_id(a[0], where)];
+    if(checking() && (n == "stream_accept" || n == "stream_port")) {
+      rt_effect();
+      return n == "stream_accept" ? new_stream(-1, false) : erase(value(int64_t(1)));
+    }
+    if(!checking() && (s.fd >= 0 || s.listener || n == "stream_accept" || n == "stream_port")) return socket_op(n, s, a, where);
     if(checking()) { // parsing: type only; flow operation - runtime effect
       rt_effect();
       if(n == "stream_write") {
@@ -3217,6 +3326,8 @@ struct interpreter {
       return erase(value(true));
     }
     if(n.starts_with("stream_")) return stream_op(n, a, where);
+    if(n == "text" && a.size() == 1) // text of value (bytes): number - decimal record
+      return a[0].known() ? value(a[0].is<std::string>() ? a[0].as<std::string>() : show_v(a[0])) : erase(value(std::string("x")));
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
       if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
@@ -3382,6 +3493,8 @@ struct interpreter {
   std::deque<uint32_t> ready_queue;
   std::vector<uint32_t> joiners;
   std::deque<stream_rec> streams;
+  os::poller poll; // expectation of host descriptors
+  uint32_t fd_waiters = 0;
   void const * host_bottom = nullptr;
   std::size_t host_size = 0;
   std::deque<interpreter> level_runs;
