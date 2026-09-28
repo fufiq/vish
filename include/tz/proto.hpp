@@ -199,3 +199,76 @@ client_msg parse_client(std::string_view line) {
 }
 
 } // namespace tz::proto
+
+namespace tz::proto {
+
+// --- scheme ---
+//
+// Message description as data: The client (JS) decodes the frames with one generalized
+// reader in a diagram - like a writer/reader here, without code for each type:
+// 
+// Types: "bool" "u8" "u32" "u64" "i64" "f64" "string" "node" (u32, ~0 - no node),
+// ["vector", T], ["variant", T...], the name of the unit.
+
+struct schema_builder {
+  std::string types;
+  std::vector<std::string_view> seen;
+
+  void type(std::string & out, auto t) {
+    using T = typename decltype(t)::type;
+    if constexpr(std::is_same_v<T, bool>) out += "\"bool\"";
+    else if constexpr(std::is_enum_v<T>) type(out, std::type_identity<std::underlying_type_t<T>>{});
+    else if constexpr(std::is_same_v<T, uint8_t>) out += "\"u8\"";
+    else if constexpr(std::is_same_v<T, uint32_t>) out += "\"u32\"";
+    else if constexpr(std::is_same_v<T, uint64_t>) out += "\"u64\"";
+    else if constexpr(std::is_same_v<T, int64_t>) out += "\"i64\"";
+    else if constexpr(std::is_same_v<T, double>) out += "\"f64\"";
+    else if constexpr(std::is_same_v<T, node_id>) out += "\"node\"";
+    else if constexpr(is_id<T>::value) out += "\"u32\"";
+    else if constexpr(std::is_same_v<T, std::string>) out += "\"string\"";
+    else if constexpr(is_vector<T>::value) {
+      out += "[\"vector\", ";
+      type(out, std::type_identity<typename T::value_type>{});
+      out += ']';
+    } else if constexpr(is_variant<T>::value) {
+      out += "[\"variant\"";
+      alternatives(out, t, std::make_index_sequence<std::variant_size_v<T>>{});
+      out += ']';
+    } else {
+      static_assert(std::is_aggregate_v<T>, "в схеме — агрегаты");
+      constexpr std::string_view name = std::meta::identifier_of(std::meta::dealias(^^T));
+      out += cat("\"", name, "\"");
+      if(std::ranges::contains(seen, name)) return;
+      seen.push_back(name);
+      std::string fields;
+      template for(constexpr auto m: fields_of<T>()) {
+        if(!fields.empty()) fields += ", ";
+        fields += cat("[\"", std::meta::identifier_of(m), "\", ");
+        type(fields, std::type_identity<typename [:std::meta::type_of(m):]>{});
+        fields += ']';
+      }
+      types += cat(types.empty() ? "" : ",\n", "    \"", name, "\": [", fields, "]");
+    }
+  }
+
+  void alternatives(std::string & out, auto t, auto seq) {
+    using T = typename decltype(t)::type;
+    [&]<std::size_t... I>(std::index_sequence<I...>) {
+      ((out += ", ", type(out, std::type_identity<std::variant_alternative_t<I, T>>{})), ...);
+    }(seq);
+  }
+};
+
+std::string schema() {
+  schema_builder b;
+  std::string client, server, kinds;
+  b.type(client, std::type_identity<client_msg>{});
+  b.type(server, std::type_identity<server_msg>{});
+  [&]<std::size_t... I>(std::index_sequence<I...>) {
+    ((kinds += cat(I ? ", " : "", "\"", std::meta::identifier_of(std::meta::dealias(^^std::variant_alternative_t<I, node_kind>)), "\"")), ...);
+  }(std::make_index_sequence<std::variant_size_v<node_kind>>{});
+  return cat("{\n  \"version\": ", version, ",\n  \"client\": ", client, ",\n  \"server\": ", server,
+      ",\n  \"node_kinds\": [", kinds, "],\n  \"types\": {\n", b.types, "\n  }\n}\n");
+}
+
+} // namespace tz::proto
