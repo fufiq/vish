@@ -969,7 +969,7 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
-    bool known = name == "f64" || name == "i64" || name == "range";
+    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof"; // pure: convolution or code generator
     for(node_id item: db.as<n_module>(module).items)
       known = known || (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name);
     if(!known) return std::pair{n, cat("вызов ", name)};

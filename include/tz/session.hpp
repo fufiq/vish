@@ -8,7 +8,8 @@
 // check static parsing; prints what is recalculated and what from the cache
 // Full report from the last check
 // stdin <line> string stdin for the next run (queue; session stdin - not process stdin)
-// run [arguments] to perform main()
+// run [arguments] execute main() (machine code - JIT session)
+// jit instance JIT: compiled and reasons for failure
 // Residual [arguments] program for given arguments
 // fmt text projection
 // edit <function> then the lines of the new function, the end is a line from one point
@@ -16,6 +17,7 @@
 #pragma once
 
 #include "interp.hpp"
+#include "jit/jit.hpp"
 #include "os.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
@@ -41,6 +43,7 @@ struct vm_session {
         return {};
       }
       if(cmd == "report") return last_report;
+      if(cmd == "jit") return jit.stats();
       if(cmd == "run") return run(args);
       if(cmd == "residual") return residual(args);
       if(cmd == "fmt") return printer(db).print(root);
@@ -74,6 +77,7 @@ struct vm_session {
     std::vector<std::string> a{name};
     a.insert(a.end(), args.begin(), args.end());
     interpreter vm(db, root, a, mode::run, interpreter::known_inputs{stdin_lines});
+    vm.use_jit(&jit);
     std::string out;
     vm.capture_output(&out);
     try {
@@ -130,6 +134,10 @@ struct vm_session {
   ast_db & db;
   node_id root;
   std::string name;
+  // The machine code lives throughout the session: instance checks the revisions of the
+  // functions included in it (including embedded ones), and after editing it is recompiled.
+  // There are no de-optimizations - this is a recompilation of the new version (§10, M1).
+  jit_engine jit{db, root};
   check_cache cache;
   std::vector<std::string> stdin_lines;
   uint32_t edits = 0;
