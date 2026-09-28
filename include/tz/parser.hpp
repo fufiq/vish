@@ -440,7 +440,7 @@ struct parser {
   }
 
   bool ends_with_block(node_id e) const {
-    return db.is<n_if>(e) || db.is<n_try>(e) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e) || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
+    return db.is<n_if>(e) || db.is<n_try>(e) || (db.is<n_ct>(e) && db.is<n_block>(db.as<n_ct>(e).body)) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e) || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
   }
 
   void end_statement() {
@@ -540,6 +540,11 @@ struct parser {
 
   node_id unary() {
     uint32_t start = here().where.begin;
+    if(is_op("#") && ahead(1).kind == tok::ident) { // #x - inserting a value into a quote
+      eat_op("#");
+      symbol name = ident();
+      return db.add(n_splice{name}, {start, toks[pos - 1].where.end});
+    }
     if(is_word("throw")) { // throw
       advance();
       node_id x = expression();
@@ -626,6 +631,14 @@ struct parser {
       case tok::ident: {
         if(t.text == "if" && is_open('(', 1)) return if_expression();
         if(t.text == "try" && is_open('{', 1)) return try_expression();
+        if(t.text == "quote" && is_open('{', 1)) { // quote { announcements }
+          advance();
+          expect_open('{');
+          n_quote q;
+          while(!is_close('}') && !at_end()) q.items.push_back(recover_statement([&] { return item(); }));
+          expect_close('}');
+          return db.add(std::move(q), {start, toks[pos - 1].where.end});
+        }
         if(t.text == "ct") {
           advance();
           node_id body = is_open('{') ? block() : unary();

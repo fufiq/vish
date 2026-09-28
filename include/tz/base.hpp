@@ -100,7 +100,9 @@ struct arena {
   auto begin() const { return items.begin(); }
   auto end() const { return items.end(); }
   void clear() { items.clear(); }
-  std::vector<T> items;
+  // deque: ссылки на элементы стабильны при росте — база растёт и во время
+  // performances (quote/emit generate node) as long as the
+  std::deque<T> items;
 };
 
 // Internated line: Comparison - Comparison of numbers.

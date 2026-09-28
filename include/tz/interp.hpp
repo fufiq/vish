@@ -114,17 +114,35 @@ struct interpreter {
     globals->declare(sym("args"), std::move(args_v));
     globals->declare(sym("stdin"), value(agg_v{types.named("stream"), {}})); // descriptor, no value
     for(node_id item: db.as<n_module>(module).items)
-      if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
-      else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
-    // entity extensions: fields and attributes to entity, functions to overload
-    for(node_id item: db.as<n_module>(module).items)
-      if(db.is<n_extend>(item)) {
-        auto const & e = db.as<n_extend>(item);
-        for(node_id a: e.attrs) ext_attrs[e.name].push_back(a);
-        for(node_id i: e.items) {
-          if(db.is<n_fn>(i)) functions[db.as<n_fn>(i).name].push_back(i);
-          else ext_fields[e.name].push_back(i);
-        }
+      if(!db.is<n_extend>(item)) register_item(item);
+    for(node_id item: db.as<n_module>(module).items) // Expansion - after announcements
+      if(db.is<n_extend>(item)) register_item(item);
+  }
+
+  // Announcement in current elaboration: from a module or generated emit.
+  void register_item(node_id item) {
+    if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
+    else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
+    else if(db.is<n_extend>(item)) { // fields and attributes to entity, functions to overload
+      auto const & e = db.as<n_extend>(item);
+      for(node_id a: e.attrs) ext_attrs[e.name].push_back(a);
+      for(node_id i: e.items) {
+        if(db.is<n_fn>(i)) functions[db.as<n_fn>(i).name].push_back(i);
+        else ext_fields[e.name].push_back(i);
+      }
+    }
+  }
+
+  // Elaboration: Modular ct { } is executed once, in module order, before main and
+  // before parsing (order instantiation, D14). They can generate ads (emit) - those
+  // are registered in this elaboration.
+  void elaborate() {
+    if(elaborated) return;
+    elaborated = true;
+    for(node_id item: db.as<n_module>(mod).items)
+      if(db.is<n_ct>(item)) {
+        flow f = eval(db.as<n_ct>(item).body, globals, 0);
+        if(f.kind == flow_kind::thr) uncaught(f);
       }
   }
 
@@ -142,6 +160,8 @@ struct interpreter {
   int run_main() {
     auto it = functions.find(sym("main"));
     if(it == functions.end()) throw diagnostic("нет функции main", {});
+    elaborate();
+    it = functions.find(sym("main"));
     call_site site{db[it->second.front()].where, "main"};
     flow r = call_overloaded(it->second, {}, globals, 0, site);
     if(r.kind == flow_kind::thr) uncaught(r);
@@ -196,6 +216,7 @@ struct interpreter {
   // Static parsing of one instance (for JIT): parameters are erased values of given
   // types; the result is the type (or compile-time) of the result.
   value analyze_instance(node_id f, std::vector<value> args) {
+    elaborate();
     auto const & fn = db.as<n_fn>(f);
     scope * inner = new_scope(globals);
     scope_hold hold{*this, inner};
@@ -1055,6 +1076,56 @@ struct interpreter {
   flow eval_node(node_id, n_struct const &, scope *, uint32_t) { return ok(); } // declaration
   flow eval_node(node_id, n_extend const &, scope *, uint32_t) { return ok(); } // Expansion - when loading the module
 
+  // --- code as a value (§7.4) ---
+
+  value code_value(node_id n) {
+    agg_v c{types.named("code"), {}};
+    c.fields.push_back({sym("node"), value(int64_t(n.value))});
+    return value(std::move(c));
+  }
+
+  node_id code_node(value const & v, span where) {
+    if(v.is<agg_v>() && types.name(v.as<agg_v>().type) == "code") return node_id(uint32_t(v.as<agg_v>().fields[0].second.as<int64_t>()));
+    fail("ожидался код (quote)", where);
+  }
+
+  // The value > node for inserting #x.
+  node_id value_node(value const & v, span where) {
+    if(v.is<int64_t>()) return db.add(n_int{v.as<int64_t>()}, where);
+    if(v.is<double>()) return db.add(n_float{v.as<double>()}, where);
+    if(v.is<std::string>()) return db.add(n_str{v.as<std::string>()}, where);
+    if(v.is<bool>()) return db.add(n_ident{sym(v.as<bool>() ? "true" : "false")}, where);
+    if(v.is<type_v>()) return db.add(n_ident{sym(types.name(v.as<type_v>().type))}, where);
+    if(v.is<fn_v>() && v.as<fn_v>().name) return db.add(n_ident{v.as<fn_v>().name}, where);
+    if(v.is<agg_v>() && types.name(v.as<agg_v>().type) == "code") return code_node(v, where);
+    fail(cat("#: значение типа ", types.describe(v), " нельзя вставить в код"), where);
+  }
+
+  bool has_splice(node_id n) const {
+    if(!n) return false;
+    if(db.is<n_splice>(n)) return true;
+    bool found = false;
+    db.for_each_child(n, [&](node_id c) { found = found || has_splice(c); });
+    return found;
+  }
+
+  flow eval_node(node_id n, n_quote const &, scope * env, uint32_t frame) {
+    if(!has_splice(n)) return ok(code_value(n)); // without inserts - the node itself, without a copy
+    std::string err;
+    node_id copy = db.clone(n, [&](node_id x) -> std::optional<node_id> {
+      if(!db.is<n_splice>(x)) return std::nullopt;
+      symbol name = db.as<n_splice>(x).name;
+      value * cell = env->find(name);
+      if(!cell) fail(cat("#", str(name), ": нет такого значения"), db[x].where);
+      flow v = read(cell);
+      if(!v.v.known()) fail(cat("#", str(name), ": значение неизвестно при компиляции"), db[x].where);
+      return value_node(v.v, db[x].where);
+    });
+    return ok(code_value(copy));
+  }
+
+  flow eval_node(node_id n, n_splice const & s, scope *, uint32_t) { fail(cat("#", str(s.name), " вне quote"), db[n].where); }
+
   flow eval_node(node_id n, n_try_compile const & t, scope * env, uint32_t frame) {
     auto saved_may = may_return;
     try {
@@ -1802,6 +1873,12 @@ struct interpreter {
       return {};
     }
     // --- entity compiler as value (§7.4) ---
+    if(n == "emit" && a.size() == 1) { // Advertisements from quote to current elaboration
+      node_id q = code_node(a[0], where);
+      if(!db.is<n_quote>(q)) fail("emit: ожидался quote { объявления }", where);
+      for(node_id item: db.as<n_quote>(q).items) register_item(item);
+      return value();
+    }
     if(n == "attrs" && a.size() == 1) { // [[…]] attributes of a function or type - values
       std::vector<node_id> nodes;
       symbol owner;
@@ -1960,6 +2037,7 @@ struct interpreter {
   bool last_rt_effect = false;
   std::map<uint32_t, std::vector<value>> may_return;
   std::map<symbol, node_id> structs; // named units of the module
+  bool elaborated = false;
   std::map<symbol, std::vector<node_id>> ext_fields, ext_attrs; // Extensions Name { … }
   std::vector<std::vector<value> *> throw_sinks; // run-time branch shooters: try and instance
   std::map<std::string, std::set<std::string>> throws_of; // instance → Types of Exceptions (Report)

@@ -134,6 +134,14 @@ struct n_extend {
   node_list items;
   node_list attrs;
 };
+// Code as value (§7.4): quote { объявления } and insert #x.
+//
+struct n_quote {
+  node_list items;
+};
+struct n_splice {
+  symbol name;
+};
 struct n_ct {
   node_id body;
 }; // ct e / ct { }
@@ -153,7 +161,7 @@ struct n_hole {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_index, n_if, n_for, n_while, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_catch, n_try, n_struct, n_extend>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_catch, n_try, n_struct, n_extend, n_quote, n_splice>;
 
 struct node {
   node_kind kind;
@@ -303,6 +311,24 @@ struct ast_db {
       nodes[child].parent = root;
       link_rec(child);
     });
+  }
+
+  // A copy of a subtree; subst(n) can return a node replacement (#x insert).
+  node_id clone(node_id n, auto && subst) {
+    if(!n) return n;
+    if(auto r = subst(n)) return *r;
+    node_kind k = nodes[n].kind; // Copy: Arena could move out
+    span w = nodes[n].where;
+    std::visit([&](auto & x) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if constexpr(std::is_same_v<field_t, node_id>) x.[:m:] = clone(x.[:m:], subst);
+        else if constexpr(std::is_same_v<field_t, node_list>)
+          for(node_id & c: x.[:m:]) c = clone(c, subst);
+      }
+    },
+        k);
+    return add(std::move(k), w);
   }
 
   static void for_each_child_of(auto const & k, auto & f) {

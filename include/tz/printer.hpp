@@ -154,6 +154,7 @@ struct printer {
     if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
     if(db.is<n_hole>(s)) return; // The hole prints the source code as it is.
     if(db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_try>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
+    if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
     if(db.is<n_call>(s)) {
       auto const & c = db.as<n_call>(s);
@@ -234,6 +235,18 @@ struct printer {
     }
     out += " }";
   }
+
+  void print_node(node_id, n_quote const & q) {
+    out += "quote {";
+    for(node_id i: q.items) {
+      out += ' ';
+      item(i);
+      terminate(i);
+    }
+    out += " }";
+  }
+
+  void print_node(node_id, n_splice const & s) { out += cat("#", str(s.name)); }
 
   void print_node(node_id, n_throw const & t) {
     out += "throw ";
