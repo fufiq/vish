@@ -1,0 +1,40 @@
+# Оформление по коду автора R. ( §3, §6):
+# отступ 2; if(/for(/while(/switch( без пробела; for(auto && x: xs);
+# auto && x, T const & (квалификатор справа); template<typename T>;
+# без выравнивания колонками;
+# существующие переносы строк не трогаем (ColumnLimit 0).
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: Latest
+IndentWidth: 2
+ContinuationIndentWidth: 4
+ColumnLimit: 0
+SpaceBeforeParens: Never
+SpaceAfterTemplateKeyword: false
+SpaceBeforeRangeBasedForLoopColon: false
+PointerAlignment: Middle
+ReferenceAlignment: Middle
+QualifierAlignment: Right
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortLambdasOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: true
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: None
+AlignTrailingComments: false
+AlignOperands: DontAlign
+AlignAfterOpenBracket: DontAlign
+SortIncludes: Never
+NamespaceIndentation: None
+IndentCaseLabels: true
+AccessModifierOffset: -2
+FixNamespaceComments: false
+ReflowComments: false
+InsertBraces: false
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+AllowShortEnumsOnASingleLine: true

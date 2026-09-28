@@ -26,115 +26,115 @@
 namespace tz {
 
 struct vm_session {
-    vm_session(ast_db& db, node_id root, std::string name) : db(db), root(root), name(std::move(name)) {}
+  vm_session(ast_db & db, node_id root, std::string name) : db(db), root(root), name(std::move(name)) {}
 
-    // Execute one command; to edit transfer the body to `body`.
-    std::string exec(const std::string& line, const std::string& body = {}) {
-        std::istringstream in(line);
-        std::string        cmd;
-        in >> cmd;
-        std::vector<std::string> args;
-        for (std::string a; in >> a;) args.push_back(a);
-        try {
-            if (cmd == "check") return check();
-            if (cmd == "stdin") {
-                stdin_lines.push_back(line.size() > 6 ? line.substr(6) : "");
-                return {};
-            }
-            if (cmd == "report") return last_report;
-            if (cmd == "run") return run(args);
-            if (cmd == "residual") return residual(args);
-            if (cmd == "fmt") return printer(db).print(root);
-            if (cmd == "edit" && args.size() == 1) return edit(args[0], body);
-            if (cmd == "save" && args.size() == 1) {
-                save_db(db, root, args[0]);
-                return cat("сохранено: ", args[0], "\n");
-            }
-        } catch (const diagnostic& d) {
-            return render(d, name, db);
-        }
-        return cat("неизвестная команда: ", line, "\n");
+  // Execute one command; to edit transfer the body to `body`.
+  std::string exec(std::string const & line, std::string const & body = {}) {
+    std::istringstream in(line);
+    std::string cmd;
+    in >> cmd;
+    std::vector<std::string> args;
+    for(std::string a; in >> a;) args.push_back(a);
+    try {
+      if(cmd == "check") return check();
+      if(cmd == "stdin") {
+        stdin_lines.push_back(line.size() > 6 ? line.substr(6) : "");
+        return {};
+      }
+      if(cmd == "report") return last_report;
+      if(cmd == "run") return run(args);
+      if(cmd == "residual") return residual(args);
+      if(cmd == "fmt") return printer(db).print(root);
+      if(cmd == "edit" && args.size() == 1) return edit(args[0], body);
+      if(cmd == "save" && args.size() == 1) {
+        save_db(db, root, args[0]);
+        return cat("сохранено: ", args[0], "\n");
+      }
+    } catch(diagnostic const & d) {
+      return render(d, name, db);
     }
-    std::string check() {
-        cache.hits = cache.recomputed = 0;
-        cache.recomputed_names.clear();
-        interpreter vm(db, root, {name}, mode::check, std::nullopt, &cache);
-        std::string err;
-        try {
-            vm.run_main();
-        } catch (const diagnostic& d) {
-            err = render(d, name, db);
-        }
-        last_report = vm.report(name, db.source(0));
-        std::string names;
-        for (auto& n : cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
-        return err + cat("check: пересчитано ", cache.recomputed, " экземпл. (", names.empty() ? "—" : names, "), из кэша ", cache.hits, "\n");
+    return cat("неизвестная команда: ", line, "\n");
+  }
+  std::string check() {
+    cache.hits = cache.recomputed = 0;
+    cache.recomputed_names.clear();
+    interpreter vm(db, root, {name}, mode::check, std::nullopt, &cache);
+    std::string err;
+    try {
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      err = render(d, name, db);
     }
+    last_report = vm.report(name, db.source(0));
+    std::string names;
+    for(auto & n: cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
+    return err + cat("check: пересчитано ", cache.recomputed, " экземпл. (", names.empty() ? "—" : names, "), из кэша ", cache.hits, "\n");
+  }
 
-    std::string run(const std::vector<std::string>& args) {
-        std::vector<std::string> a{name};
-        a.insert(a.end(), args.begin(), args.end());
-        interpreter vm(db, root, a, mode::run, interpreter::known_inputs{stdin_lines});
-        std::string out;
-        vm.capture_output(&out);
-        try {
-            vm.run_main();
-        } catch (const diagnostic& d) {
-            out += render(d, name, db);
-        }
-        return out;
+  std::string run(std::vector<std::string> const & args) {
+    std::vector<std::string> a{name};
+    a.insert(a.end(), args.begin(), args.end());
+    interpreter vm(db, root, a, mode::run, interpreter::known_inputs{stdin_lines});
+    std::string out;
+    vm.capture_output(&out);
+    try {
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      out += render(d, name, db);
     }
+    return out;
+  }
 
-    std::string residual(const std::vector<std::string>& args) {
-        std::vector<std::string> a{name};
-        a.insert(a.end(), args.begin(), args.end());
-        interpreter vm(db, root, a, mode::check, interpreter::known_inputs{});
-        std::string err;
-        try {
-            vm.run_main();
-        } catch (const diagnostic& d) {
-            err = render(d, name, db);
-        }
-        return err + residual_view(db, vm).print(root);
+  std::string residual(std::vector<std::string> const & args) {
+    std::vector<std::string> a{name};
+    a.insert(a.end(), args.begin(), args.end());
+    interpreter vm(db, root, a, mode::check, interpreter::known_inputs{});
+    std::string err;
+    try {
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      err = render(d, name, db);
     }
+    return err + residual_view(db, vm).print(root);
+  }
 
-    // Function correction: the text is disassembled into the base (new import), the node of the old
-    // function is replaced with new content - id and all references to the function are saved.
-    std::string edit(const std::string& fn_name, const std::string& text) {
-        parser  p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
-        node_id snippet = p.parse_module();
-        auto    errs    = p.errors();
-        if (!errs.empty()) {
-            std::string out;
-            for (auto& e : errs) out += render(e, cat("правка ", fn_name), db);
-            return out + "правка отклонена\n";
-        }
-        node_id fresh;
-        for (node_id item : db.as<n_module>(snippet).items)
-            if (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) fresh = item;
-        if (!fresh) return cat("в тексте правки нет функции ", fn_name, "\n");
+  // Function correction: the text is disassembled into the base (new import), the node of the old
+  // function is replaced with new content - id and all references to the function are saved.
+  std::string edit(std::string const & fn_name, std::string const & text) {
+    parser p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
+    node_id snippet = p.parse_module();
+    auto errs = p.errors();
+    if(!errs.empty()) {
+      std::string out;
+      for(auto & e: errs) out += render(e, cat("правка ", fn_name), db);
+      return out + "правка отклонена\n";
+    }
+    node_id fresh;
+    for(node_id item: db.as<n_module>(snippet).items)
+      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) fresh = item;
+    if(!fresh) return cat("в тексте правки нет функции ", fn_name, "\n");
 
-        for (node_id item : db.as<n_module>(root).items)
-            if (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) {
-                db.replace(item, db[fresh].kind);
-                db.link_parents(root);
-                return cat("функция ", fn_name, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
-            }
-        // No new function was added to the module (changes the set of overloads)
-        auto m = db.as<n_module>(root);
-        m.items.push_back(fresh);
-        db.replace(root, m);
+    for(node_id item: db.as<n_module>(root).items)
+      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) {
+        db.replace(item, db[fresh].kind);
         db.link_parents(root);
-        return cat("функция ", fn_name, " добавлена\n");
-    }
+        return cat("функция ", fn_name, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
+      }
+    // No new function was added to the module (changes the set of overloads)
+    auto m = db.as<n_module>(root);
+    m.items.push_back(fresh);
+    db.replace(root, m);
+    db.link_parents(root);
+    return cat("функция ", fn_name, " добавлена\n");
+  }
 
-    ast_db&     db;
-    node_id     root;
-    std::string name;
-    check_cache              cache;
-    std::vector<std::string> stdin_lines;
-    uint32_t                      edits = 0;
-    std::string last_report;
+  ast_db & db;
+  node_id root;
+  std::string name;
+  check_cache cache;
+  std::vector<std::string> stdin_lines;
+  uint32_t edits = 0;
+  std::string last_report;
 };
 
 } // namespace tz

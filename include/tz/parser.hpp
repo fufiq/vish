@@ -19,584 +19,628 @@
 namespace tz {
 
 struct parser {
-    // The parser reads a copy of the text stored by the database when importing: tokens and
-    // holes refer to it, not to the caller string (which may be temporary).
-    parser(ast_db& db, std::string_view text, std::string label = {}) : db(db) {
-        source = db.record_import(std::string(text), std::move(label));
-        src    = db.source(source);
-        try {
-            toks = lexer(src).run();
-        } catch (const diagnostic& d) {
-            diags.push_back(with_source(d));
-            toks.assign(1, token{});
+  // The parser reads a copy of the text stored by the database when importing: tokens and
+  // holes refer to it, not to the caller string (which may be temporary).
+  parser(ast_db & db, std::string_view text, std::string label = {}) : db(db) {
+    source = db.record_import(std::string(text), std::move(label));
+    src = db.source(source);
+    try {
+      toks = lexer(src).run();
+    } catch(diagnostic const & d) {
+      diags.push_back(with_source(d));
+      toks.assign(1, token{});
+    }
+    match_brackets();
+  }
+
+  node_id parse_module() {
+    uint32_t start = here().where.begin;
+    n_module m;
+    if(is_word("module")) {
+      advance();
+      m.name = db.strings.intern(dotted_name());
+      expect_op(";");
+    }
+    while(!at_end()) m.items.push_back(recover_statement([&] { return item(); }));
+    auto id = db.add(std::move(m), {start, here().where.end});
+    db.link_parents(id);
+    return id;
+  }
+
+  // parsing errors with import number in positions.
+  std::vector<diagnostic> errors() const {
+    std::vector<diagnostic> out;
+    for(auto d: diags) out.push_back(with_source(d));
+    return out;
+  }
+  // --- Phase 1: paired brackets ---
+
+  void match_brackets() {
+    match.assign(toks.size(), ~uint32_t{0});
+    std::vector<uint32_t> stack;
+    for(uint32_t i = 0; i < toks.size(); ++i) {
+      if(toks[i].kind == tok::open) stack.push_back(i);
+      else if(toks[i].kind == tok::close) {
+        // Unpaired Closing: Remove unclosed openers until suitable so that one lost `(`
+        // does not break the enveloping `{ }`.
+        auto fits = [&](uint32_t o) { return pairs(toks[o].ch(), toks[i].ch()); };
+        if(std::ranges::none_of(stack, fits)) {
+          diags.push_back(diagnostic("непарная скобка", toks[i].where));
+          continue;
         }
-        match_brackets();
-    }
-
-    node_id parse_module() {
-        uint32_t       start = here().where.begin;
-        n_module  m;
-        if (is_word("module")) {
-            advance();
-            m.name = db.strings.intern(dotted_name());
-            expect_op(";");
+        while(!fits(stack.back())) {
+          diags.push_back(diagnostic("незакрытая скобка", toks[stack.back()].where));
+          stack.pop_back();
         }
-        while (!at_end()) m.items.push_back(recover_statement([&] { return item(); }));
-        auto id = db.add(std::move(m), {start, here().where.end});
-        db.link_parents(id);
-        return id;
+        match[stack.back()] = i;
+        match[i] = stack.back();
+        stack.pop_back();
+      }
     }
+    for(uint32_t i: stack) diags.push_back(diagnostic("незакрытая скобка", toks[i].where));
+  }
 
-    // parsing errors with import number in positions.
-    std::vector<diagnostic> errors() const {
-        std::vector<diagnostic> out;
-        for (auto d : diags) out.push_back(with_source(d));
-        return out;
+  static bool pairs(char o, char c) { return (o == '(' && c == ')') || (o == '[' && c == ']') || (o == '{' && c == '}'); }
+
+  // --- navigation ---
+
+  token const & here() const { return toks[pos]; }
+  token const & ahead(uint32_t k) const { return toks[std::min<uint32_t>(pos + k, toks.size() - 1)]; }
+  bool at_end() const { return here().kind == tok::end; }
+  void advance() {
+    if(!at_end()) ++pos;
+  }
+
+  bool is_word(std::string_view w, uint32_t k = 0) const { return ahead(k).kind == tok::ident && ahead(k).text == w; }
+  bool is_open(char c, uint32_t k = 0) const { return ahead(k).kind == tok::open && ahead(k).ch() == c; }
+  bool is_close(char c) const { return here().kind == tok::close && here().ch() == c; }
+
+  // The operator in position k is the longest matching of glued symbols (`==` is
+  // not read as `=` `=`, `=>` is not read as `=` `>`).
+  bool is_op(std::string_view op, uint32_t k = 0) const { return longest_op(k) == op; }
+
+  std::string_view longest_op(uint32_t k) const {
+    static constexpr std::array ops{"...", "==", "!=", "<=", ">=", "&&", "||", "=>", "+=", "-=", "*=", "/=",
+        "..", "=", "<", ">", "+", "-", "*", "/", "%", "!", "~", "?", ":",
+        ".", ",", ";", "&", "|", "^", "@", "#", "$", "\\"};
+    for(std::string_view o: ops) {
+      bool ok = true;
+      for(uint32_t i = 0; i < o.size() && ok; ++i) {
+        token const & t = ahead(k + i);
+        ok = t.kind == tok::op && t.ch() == o[i] && (i == 0 || t.glued);
+      }
+      if(ok) return o;
     }
-    // --- Phase 1: paired brackets ---
+    return {};
+  }
 
-    void match_brackets() {
-        match.assign(toks.size(), ~uint32_t{0});
-        std::vector<uint32_t> stack;
-        for (uint32_t i = 0; i < toks.size(); ++i) {
-            if (toks[i].kind == tok::open) stack.push_back(i);
-            else if (toks[i].kind == tok::close) {
-                // Unpaired Closing: Remove unclosed openers until suitable so that one lost `(`
-                // does not break the enveloping `{ }`.
-                auto fits = [&](uint32_t o) { return pairs(toks[o].ch(), toks[i].ch()); };
-                if (std::ranges::none_of(stack, fits)) {
-                    diags.push_back(diagnostic("непарная скобка", toks[i].where));
-                    continue;
-                }
-                while (!fits(stack.back())) {
-                    diags.push_back(diagnostic("незакрытая скобка", toks[stack.back()].where));
-                    stack.pop_back();
-                }
-                match[stack.back()] = i;
-                match[i]            = stack.back();
-                stack.pop_back();
-            }
+  void eat_op(std::string_view op) {
+    for(uint32_t i = 0; i < op.size(); ++i) advance();
+  }
+
+  void expect_op(std::string_view op) {
+    if(!is_op(op)) throw diagnostic(cat("ожидалось '", op, "'"), here().where);
+    eat_op(op);
+  }
+
+  void expect_open(char c) {
+    if(!is_open(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
+    advance();
+  }
+
+  void expect_close(char c) {
+    if(!is_close(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
+    advance();
+  }
+
+  symbol ident() {
+    if(here().kind != tok::ident) throw diagnostic("ожидалось имя", here().where);
+    auto s = db.strings.intern(here().text);
+    advance();
+    return s;
+  }
+
+  std::string dotted_name() {
+    std::string name(here().text);
+    ident();
+    while(is_op(".")) {
+      advance();
+      name += '.';
+      name += here().text;
+      ident();
+    }
+    return name;
+  }
+
+  // --- Recovery: a hole instead of a failure ---
+
+  // Disassemble one structure; in case of an error - n_hole to the end of the structure
+  // (up to `;` at this level of brackets or to the end of the nearest group).
+  node_id recover_statement(auto && f) {
+    uint32_t start_tok = pos;
+    try {
+      return f();
+    } catch(diagnostic const & d) {
+      diags.push_back(d);
+      uint32_t start = toks[start_tok].where.begin;
+      pos = start_tok;
+      skip_to_statement_end();
+      uint32_t end = toks[pos > 0 ? pos - 1 : 0].where.end;
+      return db.add(n_hole{std::string(src.substr(start, end - start)), d.what()}, {start, end});
+    }
+  }
+
+  void skip_to_statement_end() {
+    while(!at_end()) {
+      if(here().kind == tok::close) return; // terminus
+      if(here().kind == tok::open) { // skip the whole group
+        uint32_t m = match[pos];
+        if(m == ~uint32_t{0}) {
+          advance();
+          continue;
         }
-        for (uint32_t i : stack) diags.push_back(diagnostic("незакрытая скобка", toks[i].where));
+        pos = m + 1;
+        if(toks[m].ch() == '}') return; // block completes the design
+        continue;
+      }
+      bool semi = is_op(";");
+      advance();
+      if(semi) return;
     }
+  }
 
-    static bool pairs(char o, char c) { return (o == '(' && c == ')') || (o == '[' && c == ']') || (o == '{' && c == '}'); }
+  // --- module elements and instructions ---
 
-    // --- navigation ---
+  node_id item() {
+    if(auto f = try_fn_decl(false)) return *f;
+    return statement();
+  }
 
-    const token& here() const { return toks[pos]; }
-    const token& ahead(uint32_t k) const { return toks[std::min<uint32_t>(pos + k, toks.size() - 1)]; }
-    bool         at_end() const { return here().kind == tok::end; }
-    void         advance() { if (!at_end()) ++pos; }
-
-    bool is_word(std::string_view w, uint32_t k = 0) const { return ahead(k).kind == tok::ident && ahead(k).text == w; }
-    bool is_open(char c, uint32_t k = 0) const { return ahead(k).kind == tok::open && ahead(k).ch() == c; }
-    bool is_close(char c) const { return here().kind == tok::close && here().ch() == c; }
-
-    // The operator in position k is the longest matching of glued symbols (`==` is
-    // not read as `=` `=`, `=>` is not read as `=` `>`).
-    bool is_op(std::string_view op, uint32_t k = 0) const { return longest_op(k) == op; }
-
-    std::string_view longest_op(uint32_t k) const {
-        static constexpr std::array ops{"...", "==", "!=", "<=", ">=", "&&", "||", "=>", "+=", "-=", "*=", "/=",
-                                        "..", "=", "<", ">", "+", "-", "*", "/", "%", "!", "~", "?", ":",
-                                        ".", ",", ";", "&", "|", "^", "@", "#", "$", "\\"};
-        for (std::string_view o : ops) {
-            bool ok = true;
-            for (uint32_t i = 0; i < o.size() && ok; ++i) {
-                const token& t = ahead(k + i);
-                ok = t.kind == tok::op && t.ch() == o[i] && (i == 0 || t.glued);
-            }
-            if (ok) return o;
-        }
-        return {};
+  // Announcement of function: [outline] [type] name(s) (=> e; | { ... }) On the
+  // upper level, a form without the type on the left is allowed; in the block, only
+  // with the sign of the declaration (§4.2).
+  std::optional<node_id> try_fn_decl(bool in_block) {
+    uint32_t k = 0;
+    bool outline = false;
+    if(is_word("outline")) {
+      outline = true;
+      ++k;
     }
+    // [type] name
+    uint32_t name_at;
+    if(ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
+    else if(!in_block && ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
+    else return std::nullopt;
+    // after ) shall be => or {
+    uint32_t close = match[pos + name_at + 1];
+    if(close == ~uint32_t{0}) return std::nullopt;
+    uint32_t after = close + 1 - pos;
+    if(!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
 
-    void eat_op(std::string_view op) { for (uint32_t i = 0; i < op.size(); ++i) advance(); }
-
-    void expect_op(std::string_view op) {
-        if (!is_op(op)) throw diagnostic(cat("ожидалось '", op, "'"), here().where);
-        eat_op(op);
+    uint32_t start = here().where.begin;
+    n_fn f;
+    f.outline = outline;
+    if(outline) advance();
+    if(name_at == (outline ? 2u : 1u)) f.result_type = type_expr();
+    f.name = ident();
+    f.params = param_list();
+    if(is_op("=>")) {
+      eat_op("=>");
+      f.body = expression();
+      f.expr_body = true;
+      if(is_op(";")) eat_op(";");
+    } else {
+      f.body = block();
     }
+    return db.add(std::move(f), {start, toks[pos - 1].where.end});
+  }
 
-    void expect_open(char c) {
-        if (!is_open(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
+  static bool is_keyword(std::string_view w) {
+    return w == "if" || w == "for" || w == "while" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module";
+  }
+
+  node_list param_list() {
+    expect_open('(');
+    node_list ps;
+    while(!is_close(')')) {
+      ps.push_back(param());
+      if(is_op(",")) eat_op(",");
+      else break;
+    }
+    expect_close(')');
+    return ps;
+  }
+
+  node_id param() {
+    uint32_t start = here().where.begin;
+    n_param p;
+    if(is_word("mut")) {
+      p.mode = param_mode::mut;
+      advance();
+    } else if(is_word("own")) {
+      p.mode = param_mode::own;
+      advance();
+    } else if(is_word("out")) {
+      p.mode = param_mode::out;
+      advance();
+    } else if(is_word("expr")) {
+      p.mode = param_mode::expr;
+      advance();
+    } else if(is_word("ct")) {
+      p.mode = param_mode::ct;
+      advance();
+    }
+    // [type] [...] name | name
+    if(here().kind == tok::ident && (ahead(1).kind == tok::ident || is_op("...", 1))) {
+      p.type = type_expr();
+      if(is_op("...")) {
+        eat_op("...");
+        p.pack = true;
+      }
+    }
+    p.name = ident();
+    return db.add(std::move(p), {start, toks[pos - 1].where.end});
+  }
+
+  node_id type_expr() {
+    uint32_t start = here().where.begin;
+    if(is_word("auto")) {
+      advance();
+      return db.add(n_auto{}, {start, toks[pos - 1].where.end});
+    }
+    return db.add(n_ident{ident()}, {start, toks[pos - 1].where.end});
+  }
+
+  node_id block() {
+    uint32_t start = here().where.begin;
+    expect_open('{');
+    n_block b;
+    while(!is_close('}') && !at_end()) {
+      node_id s = recover_statement([&] { return statement(); });
+      b.items.push_back(s);
+      if(is_close('}') && last_was_value) b.has_value = true;
+    }
+    expect_close('}');
+    return db.add(std::move(b), {start, toks[pos - 1].where.end});
+  }
+
+  // Instructions. last_was_value_ is an expression without `;`.
+  node_id statement() {
+    last_was_value = false;
+    uint32_t start = here().where.begin;
+
+    if(auto f = try_fn_decl(true)) return *f;
+
+    if(is_word("return")) {
+      advance();
+      // return(цель) value - close; return (x) with space - value
+      node_id target;
+      if(is_open('(') && here().glued) {
         advance();
-    }
-
-    void expect_close(char c) {
-        if (!is_close(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
-        advance();
-    }
-
-    symbol ident() {
-        if (here().kind != tok::ident) throw diagnostic("ожидалось имя", here().where);
-        auto s = db.strings.intern(here().text);
-        advance();
-        return s;
-    }
-
-    std::string dotted_name() {
-        std::string name(here().text);
-        ident();
-        while (is_op(".")) {
-            advance();
-            name += '.';
-            name += here().text;
-            ident();
-        }
-        return name;
-    }
-
-    // --- Recovery: a hole instead of a failure ---
-
-    // Disassemble one structure; in case of an error - n_hole to the end of the structure
-    // (up to `;` at this level of brackets or to the end of the nearest group).
-    node_id recover_statement(auto&& f) {
-        uint32_t start_tok = pos;
-        try {
-            return f();
-        } catch (const diagnostic& d) {
-            diags.push_back(d);
-            uint32_t start = toks[start_tok].where.begin;
-            pos      = start_tok;
-            skip_to_statement_end();
-            uint32_t end = toks[pos > 0 ? pos - 1 : 0].where.end;
-            return db.add(n_hole{std::string(src.substr(start, end - start)), d.what()}, {start, end});
-        }
-    }
-
-    void skip_to_statement_end() {
-        while (!at_end()) {
-            if (here().kind == tok::close) return;             // terminus
-            if (here().kind == tok::open) {                    // skip the whole group
-                uint32_t m = match[pos];
-                if (m == ~uint32_t{0}) { advance(); continue; }
-                pos = m + 1;
-                if (toks[m].ch() == '}') return;              // block completes the design
-                continue;
-            }
-            bool semi = is_op(";");
-            advance();
-            if (semi) return;
-        }
-    }
-
-    // --- module elements and instructions ---
-
-    node_id item() {
-        if (auto f = try_fn_decl(false)) return *f;
-        return statement();
-    }
-
-    // Announcement of function: [outline] [type] name(s) (=> e; | { ... }) On the
-    // upper level, a form without the type on the left is allowed; in the block, only
-    // with the sign of the declaration (§4.2).
-    std::optional<node_id> try_fn_decl(bool in_block) {
-        uint32_t  k       = 0;
-        bool outline = false;
-        if (is_word("outline")) { outline = true; ++k; }
-        // [type] name
-        uint32_t name_at;
-        if (ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
-        else if (!in_block && ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
-        else return std::nullopt;
-        // after ) shall be => or {
-        uint32_t close = match[pos + name_at + 1];
-        if (close == ~uint32_t{0}) return std::nullopt;
-        uint32_t after = close + 1 - pos;
-        if (!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
-
-        uint32_t  start = here().where.begin;
-        n_fn f;
-        f.outline = outline;
-        if (outline) advance();
-        if (name_at == (outline ? 2u : 1u)) f.result_type = type_expr();
-        f.name = ident();
-        f.params = param_list();
-        if (is_op("=>")) {
-            eat_op("=>");
-            f.body      = expression();
-            f.expr_body = true;
-            if (is_op(";")) eat_op(";");
-        } else {
-            f.body = block();
-        }
-        return db.add(std::move(f), {start, toks[pos - 1].where.end});
-    }
-
-    static bool is_keyword(std::string_view w) {
-        return w == "if" || w == "for" || w == "while" || w == "return" || w == "require" || w == "try_compile"
-            || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module";
-    }
-
-    node_list param_list() {
-        expect_open('(');
-        node_list ps;
-        while (!is_close(')')) {
-            ps.push_back(param());
-            if (is_op(",")) eat_op(",");
-            else break;
-        }
+        uint32_t t0 = here().where.begin;
+        target = db.add(n_ident{ident()}, {t0, toks[pos - 1].where.end});
         expect_close(')');
-        return ps;
+      }
+      node_id v;
+      if(!is_op(";") && !is_close('}')) v = expression();
+      end_statement();
+      return db.add(n_return{v, target}, {start, toks[pos - 1].where.end});
     }
-
-    node_id param() {
-        uint32_t     start = here().where.begin;
-        n_param p;
-        if (is_word("mut")) { p.mode = param_mode::mut; advance(); }
-        else if (is_word("own")) { p.mode = param_mode::own; advance(); }
-        else if (is_word("out")) { p.mode = param_mode::out; advance(); }
-        else if (is_word("expr")) { p.mode = param_mode::expr; advance(); }
-        else if (is_word("ct")) { p.mode = param_mode::ct; advance(); }
-        // [type] [...] name | name
-        if (here().kind == tok::ident && (ahead(1).kind == tok::ident || is_op("...", 1))) {
-            p.type = type_expr();
-            if (is_op("...")) { eat_op("..."); p.pack = true; }
-        }
-        p.name = ident();
-        return db.add(std::move(p), {start, toks[pos - 1].where.end});
+    if(is_word("require") && is_open('(', 1)) {
+      advance();
+      expect_open('(');
+      node_id c = expression();
+      expect_close(')');
+      end_statement();
+      return db.add(n_require{c}, {start, toks[pos - 1].where.end});
     }
-
-    node_id type_expr() {
-        uint32_t start = here().where.begin;
-        if (is_word("auto")) {
-            advance();
-            return db.add(n_auto{}, {start, toks[pos - 1].where.end});
-        }
-        return db.add(n_ident{ident()}, {start, toks[pos - 1].where.end});
+    if(is_word("try_compile") && is_open('{', 1)) {
+      advance();
+      return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
     }
-
-    node_id block() {
-        uint32_t start = here().where.begin;
-        expect_open('{');
-        n_block b;
-        while (!is_close('}') && !at_end()) {
-            node_id s = recover_statement([&] { return statement(); });
-            b.items.push_back(s);
-            if (is_close('}') && last_was_value) b.has_value = true;
-        }
-        expect_close('}');
-        return db.add(std::move(b), {start, toks[pos - 1].where.end});
+    if(is_word("for") && is_open('(', 1)) return for_statement();
+    if(is_word("while") && is_open('(', 1)) {
+      advance();
+      expect_open('(');
+      node_id c = expression();
+      expect_close(')');
+      node_id body = statement_or_block();
+      return db.add(n_while{c, body}, {start, toks[pos - 1].where.end});
     }
+    if(auto v = try_var_decl()) return *v;
 
-    // Instructions. last_was_value_ is an expression without `;`.
-    node_id statement() {
-        last_was_value = false;
-        uint32_t start       = here().where.begin;
+    node_id e = expression();
+    if(is_op(";")) eat_op(";");
+    else if(is_close('}')) last_was_value = true;
+    else if(!ends_with_block(e)) throw diagnostic("ожидалось ';'", here().where);
+    return e;
+  }
 
-        if (auto f = try_fn_decl(true)) return *f;
+  bool ends_with_block(node_id e) const {
+    return db.is<n_if>(e) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e) || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
+  }
 
-        if (is_word("return")) {
-            advance();
-            // return(цель) value - close; return (x) with space - value
-            node_id target;
-            if (is_open('(') && here().glued) {
-                advance();
-                uint32_t t0 = here().where.begin;
-                target = db.add(n_ident{ident()}, {t0, toks[pos - 1].where.end});
-                expect_close(')');
-            }
-            node_id v;
-            if (!is_op(";") && !is_close('}')) v = expression();
-            end_statement();
-            return db.add(n_return{v, target}, {start, toks[pos - 1].where.end});
-        }
-        if (is_word("require") && is_open('(', 1)) {
-            advance();
-            expect_open('(');
-            node_id c = expression();
-            expect_close(')');
-            end_statement();
-            return db.add(n_require{c}, {start, toks[pos - 1].where.end});
-        }
-        if (is_word("try_compile") && is_open('{', 1)) {
-            advance();
-            return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
-        }
-        if (is_word("for") && is_open('(', 1)) return for_statement();
-        if (is_word("while") && is_open('(', 1)) {
-            advance();
-            expect_open('(');
-            node_id c = expression();
-            expect_close(')');
-            node_id body = statement_or_block();
-            return db.add(n_while{c, body}, {start, toks[pos - 1].where.end});
-        }
-        if (auto v = try_var_decl()) return *v;
+  void end_statement() {
+    if(is_op(";")) eat_op(";");
+    else if(!is_close('}')) throw diagnostic("ожидалось ';'", here().where);
+  }
 
-        node_id e = expression();
-        if (is_op(";")) eat_op(";");
-        else if (is_close('}')) last_was_value = true;
-        else if (!ends_with_block(e)) throw diagnostic("ожидалось ';'", here().where);
-        return e;
+  node_id statement_or_block() {
+    if(is_open('{')) return block();
+    node_id s = statement();
+    return s;
+  }
+
+  // [const] (auto | type) name = expression;
+  std::optional<node_id> try_var_decl() {
+    uint32_t k = 0;
+    bool is_const = false;
+    if(is_word("const")) {
+      is_const = true;
+      ++k;
     }
+    bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
+    if(!typed) return std::nullopt;
+    uint32_t start = here().where.begin;
+    if(is_const) advance();
+    n_var v;
+    v.is_const = is_const;
+    v.type = type_expr();
+    v.name = ident();
+    expect_op("=");
+    v.init = expression();
+    end_statement();
+    return db.add(std::move(v), {start, toks[pos - 1].where.end});
+  }
 
-    bool ends_with_block(node_id e) const {
-        return db.is<n_if>(e) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e)
-            || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
-    }
+  node_id for_statement() {
+    uint32_t start = here().where.begin;
+    advance();
+    expect_open('(');
+    if(is_word("auto")) advance();
+    symbol var = ident();
+    expect_op(":");
+    node_id range = expression();
+    expect_close(')');
+    node_id body = statement_or_block();
+    return db.add(n_for{var, range, body}, {start, toks[pos - 1].where.end});
+  }
 
-    void end_statement() {
-        if (is_op(";")) eat_op(";");
-        else if (!is_close('}')) throw diagnostic("ожидалось ';'", here().where);
-    }
+  // --- Expression: parsing by priority n ---
 
-    node_id statement_or_block() {
-        if (is_open('{')) return block();
-        node_id s = statement();
-        return s;
-    }
+  struct binop {
+    std::string_view op;
+    int prec;
+    bool right = false;
+  };
 
-    // [const] (auto | type) name = expression;
-    std::optional<node_id> try_var_decl() {
-        uint32_t  k        = 0;
-        bool is_const = false;
-        if (is_word("const")) { is_const = true; ++k; }
-        bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
-        if (!typed) return std::nullopt;
-        uint32_t start = here().where.begin;
-        if (is_const) advance();
-        n_var v;
-        v.is_const = is_const;
-        v.type     = type_expr();
-        v.name     = ident();
-        expect_op("=");
-        v.init = expression();
-        end_statement();
-        return db.add(std::move(v), {start, toks[pos - 1].where.end});
-    }
-
-    node_id for_statement() {
-        uint32_t start = here().where.begin;
-        advance();
-        expect_open('(');
-        if (is_word("auto")) advance();
-        symbol var = ident();
-        expect_op(":");
-        node_id range = expression();
-        expect_close(')');
-        node_id body = statement_or_block();
-        return db.add(n_for{var, range, body}, {start, toks[pos - 1].where.end});
-    }
-
-    // --- Expression: parsing by priority n ---
-
-    struct binop {
-        std::string_view op;
-        int              prec;
-        bool             right = false;
+  // M0: A stitched group table (§4.4). More connects more.
+  std::optional<binop> peek_binop() const {
+    static constexpr std::array table{
+        binop{"=", 1, true},
+        binop{"+=", 1, true},
+        binop{"-=", 1, true},
+        binop{"*=", 1, true},
+        binop{"/=", 1, true},
+        binop{"||", 2},
+        binop{"&&", 3},
+        binop{"==", 4},
+        binop{"!=", 4},
+        binop{"<=", 4},
+        binop{">=", 4},
+        binop{"<", 4},
+        binop{">", 4},
+        binop{"+", 6},
+        binop{"-", 6},
+        binop{"*", 7},
+        binop{"/", 7},
+        binop{"%", 7},
     };
+    std::string_view longest = longest_op(0);
+    if(longest.empty()) return std::nullopt;
+    for(auto const & b: table)
+      if(b.op == longest) return b;
+    return std::nullopt;
+  }
 
-    // M0: A stitched group table (§4.4). More connects more.
-    std::optional<binop> peek_binop() const {
-        static constexpr std::array table{
-            binop{"=", 1, true},  binop{"+=", 1, true}, binop{"-=", 1, true}, binop{"*=", 1, true},
-            binop{"/=", 1, true}, binop{"||", 2},       binop{"&&", 3},       binop{"==", 4},
-            binop{"!=", 4},       binop{"<=", 4},       binop{">=", 4},       binop{"<", 4},
-            binop{">", 4},        binop{"+", 6},        binop{"-", 6},        binop{"*", 7},
-            binop{"/", 7},        binop{"%", 7},
-        };
-        std::string_view longest = longest_op(0);
-        if (longest.empty()) return std::nullopt;
-        for (const auto& b : table)
-            if (b.op == longest) return b;
-        return std::nullopt;
+  node_id expression(int min_prec = 0) {
+    node_id lhs = unary();
+    while(auto b = peek_binop()) {
+      if(b->prec < min_prec) break;
+      uint32_t start = db[lhs].where.begin;
+      eat_op(b->op);
+      node_id rhs = expression(b->right ? b->prec : b->prec + 1);
+      lhs = db.add(n_op{db.strings.intern(b->op), {lhs, rhs}}, {start, db[rhs].where.end});
     }
+    return lhs;
+  }
 
-    node_id expression(int min_prec = 0) {
-        node_id lhs = unary();
-        while (auto b = peek_binop()) {
-            if (b->prec < min_prec) break;
-            uint32_t start = db[lhs].where.begin;
-            eat_op(b->op);
-            node_id rhs = expression(b->right ? b->prec : b->prec + 1);
-            lhs = db.add(n_op{db.strings.intern(b->op), {lhs, rhs}}, {start, db[rhs].where.end});
-        }
-        return lhs;
+  node_id unary() {
+    uint32_t start = here().where.begin;
+    for(std::string_view op: {"-", "!", "~"}) {
+      if(is_op(op) && !is_op("=>")) {
+        eat_op(op);
+        node_id x = unary();
+        return db.add(n_op{db.strings.intern(op), {x}}, {start, db[x].where.end});
+      }
     }
+    return postfix(primary());
+  }
 
-    node_id unary() {
-        uint32_t start = here().where.begin;
-        for (std::string_view op : {"-", "!", "~"}) {
-            if (is_op(op) && !is_op("=>")) {
-                eat_op(op);
-                node_id x = unary();
-                return db.add(n_op{db.strings.intern(op), {x}}, {start, db[x].where.end});
-            }
-        }
-        return postfix(primary());
-    }
-
-    node_id postfix(node_id e) {
-        for (;;) {
-            uint32_t start = db[e].where.begin;
-            if (is_open('(') && here().glued) {
-                node_list args = call_args();
-                // tail unit: f(x) { ... } - last expr argument (§4.4)
-                if (is_open('{')) args.push_back(block());
-                e = db.add(n_call{e, std::move(args)}, {start, toks[pos - 1].where.end});
-            } else if (is_open('[') && here().glued) {
-                advance();
-                node_id i = expression();
-                expect_close(']');
-                e = db.add(n_index{e, i}, {start, toks[pos - 1].where.end});
-            } else if (is_open('{') && here().glued && db.is<n_ident>(e)) {
-                e = db.add(n_construct{e, brace_items()}, {start, toks[pos - 1].where.end});
-            } else if (is_op(".") && !is_op("..")) {
-                advance();
-                symbol name = ident();
-                e = db.add(n_member{e, name}, {start, toks[pos - 1].where.end});
-            } else if (is_op("?") && here().glued) {
-                advance();
-                e = db.add(n_op{db.strings.intern("?"), {e}}, {start, toks[pos - 1].where.end});
-            } else {
-                return e;
-            }
-        }
-    }
-
-    node_list call_args() {
-        expect_open('(');
-        node_list args;
-        while (!is_close(')')) {
-            args.push_back(expression());
-            if (is_op(",")) eat_op(",");
-            else break;
-        }
-        expect_close(')');
-        return args;
-    }
-
-    node_list brace_items() {
-        expect_open('{');
-        node_list items;
-        while (!is_close('}')) {
-            items.push_back(expression());
-            if (is_op(",")) eat_op(",");
-            else break;
-        }
-        expect_close('}');
-        return items;
-    }
-
-    node_id primary() {
-        const token& t     = here();
-        uint32_t          start = t.where.begin;
-        switch (t.kind) {
-        case tok::int_lit: {
-            advance();
-            return db.add(n_int{parse_int(t.text)}, t.where);
-        }
-        case tok::float_lit: {
-            advance();
-            return db.add(n_float{parse_float(t.text)}, t.where);
-        }
-        case tok::str_lit: {
-            advance();
-            return db.add(n_str{unescape(t.text)}, t.where);
-        }
-        case tok::ident: {
-            if (t.text == "if" && is_open('(', 1)) return if_expression();
-            if (t.text == "ct") {
-                advance();
-                node_id body = is_open('{') ? block() : unary();
-                return db.add(n_ct{body}, {start, toks[pos - 1].where.end});
-            }
-            advance();
-            return db.add(n_ident{db.strings.intern(t.text)}, t.where);
-        }
-        case tok::open: {
-            if (t.ch() == '{') return block();
-            if (t.ch() == '(') {
-                // lambda: (parameters) => body
-                uint32_t close = match[pos];
-                if (close != ~uint32_t{0} && is_op("=>", close + 1 - pos)) {
-                    n_lambda l;
-                    l.params = param_list();
-                    eat_op("=>");
-                    l.body = is_open('{') ? block() : expression();
-                    return db.add(std::move(l), {start, toks[pos - 1].where.end});
-                }
-                advance();
-                node_id e = expression();
-                expect_close(')');
-                return e;
-            }
-            break;
-        }
-        default: break;
-        }
-        throw diagnostic("ожидалось выражение", t.where);
-    }
-
-    node_id if_expression() {
-        uint32_t start = here().where.begin;
+  node_id postfix(node_id e) {
+    for(;;) {
+      uint32_t start = db[e].where.begin;
+      if(is_open('(') && here().glued) {
+        node_list args = call_args();
+        // tail unit: f(x) { ... } - last expr argument (§4.4)
+        if(is_open('{')) args.push_back(block());
+        e = db.add(n_call{e, std::move(args)}, {start, toks[pos - 1].where.end});
+      } else if(is_open('[') && here().glued) {
         advance();
-        expect_open('(');
-        node_id c = expression();
-        expect_close(')');
-        node_id then_ = branch();
-        node_id else_;
-        if (is_op(";") && is_word("else", 1)) eat_op(";"); // if(c) x = 1; else x = 2;
-        if (is_word("else")) {
-            advance();
-            else_ = branch();
+        node_id i = expression();
+        expect_close(']');
+        e = db.add(n_index{e, i}, {start, toks[pos - 1].where.end});
+      } else if(is_open('{') && here().glued && db.is<n_ident>(e)) {
+        e = db.add(n_construct{e, brace_items()}, {start, toks[pos - 1].where.end});
+      } else if(is_op(".") && !is_op("..")) {
+        advance();
+        symbol name = ident();
+        e = db.add(n_member{e, name}, {start, toks[pos - 1].where.end});
+      } else if(is_op("?") && here().glued) {
+        advance();
+        e = db.add(n_op{db.strings.intern("?"), {e}}, {start, toks[pos - 1].where.end});
+      } else {
+        return e;
+      }
+    }
+  }
+
+  node_list call_args() {
+    expect_open('(');
+    node_list args;
+    while(!is_close(')')) {
+      args.push_back(expression());
+      if(is_op(",")) eat_op(",");
+      else break;
+    }
+    expect_close(')');
+    return args;
+  }
+
+  node_list brace_items() {
+    expect_open('{');
+    node_list items;
+    while(!is_close('}')) {
+      items.push_back(expression());
+      if(is_op(",")) eat_op(",");
+      else break;
+    }
+    expect_close('}');
+    return items;
+  }
+
+  node_id primary() {
+    token const & t = here();
+    uint32_t start = t.where.begin;
+    switch(t.kind) {
+      case tok::int_lit: {
+        advance();
+        return db.add(n_int{parse_int(t.text)}, t.where);
+      }
+      case tok::float_lit: {
+        advance();
+        return db.add(n_float{parse_float(t.text)}, t.where);
+      }
+      case tok::str_lit: {
+        advance();
+        return db.add(n_str{unescape(t.text)}, t.where);
+      }
+      case tok::ident: {
+        if(t.text == "if" && is_open('(', 1)) return if_expression();
+        if(t.text == "ct") {
+          advance();
+          node_id body = is_open('{') ? block() : unary();
+          return db.add(n_ct{body}, {start, toks[pos - 1].where.end});
         }
-        return db.add(n_if{c, then_, else_}, {start, toks[pos - 1].where.end});
-    }
-
-    // Branch if: Block, nested if or expression/instruction.
-    node_id branch() {
-        if (is_open('{')) return block();
-        if (is_word("return") || is_word("require")) return statement();
-        return expression();
-    }
-
-    // --- literary ---
-
-    static int64_t parse_int(std::string_view s) {
-        int64_t v = 0;
-        for (char c : s) if (c != '_') v = v * 10 + (c - '0');
-        return v;
-    }
-
-    static double parse_float(std::string_view s) {
-        std::string clean;
-        for (char c : s) if (c != '_') clean += c;
-        return std::stod(clean);
-    }
-
-    static std::string unescape(std::string_view s) {
-        std::string out;
-        for (uint32_t i = 1; i + 1 < s.size(); ++i) {
-            if (s[i] == '\\' && i + 2 < s.size()) {
-                char n = s[++i];
-                out += n == 'n' ? '\n' : n == 't' ? '\t' : n;
-            } else {
-                out += s[i];
-            }
+        advance();
+        return db.add(n_ident{db.strings.intern(t.text)}, t.where);
+      }
+      case tok::open: {
+        if(t.ch() == '{') return block();
+        if(t.ch() == '(') {
+          // lambda: (parameters) => body
+          uint32_t close = match[pos];
+          if(close != ~uint32_t{0} && is_op("=>", close + 1 - pos)) {
+            n_lambda l;
+            l.params = param_list();
+            eat_op("=>");
+            l.body = is_open('{') ? block() : expression();
+            return db.add(std::move(l), {start, toks[pos - 1].where.end});
+          }
+          advance();
+          node_id e = expression();
+          expect_close(')');
+          return e;
         }
-        return out;
+        break;
+      }
+      default: break;
     }
+    throw diagnostic("ожидалось выражение", t.where);
+  }
 
-    diagnostic with_source(diagnostic d) const {
-        span w   = d.where;
-        w.source = source;
-        diagnostic out(d.what(), w, d.kind);
-        for (auto f : d.trace) { f.where.source = source; out.note(f.what, f.where); }
-        return out;
+  node_id if_expression() {
+    uint32_t start = here().where.begin;
+    advance();
+    expect_open('(');
+    node_id c = expression();
+    expect_close(')');
+    node_id then_ = branch();
+    node_id else_;
+    if(is_op(";") && is_word("else", 1)) eat_op(";"); // if(c) x = 1; else x = 2;
+    if(is_word("else")) {
+      advance();
+      else_ = branch();
     }
+    return db.add(n_if{c, then_, else_}, {start, toks[pos - 1].where.end});
+  }
 
-    ast_db&                 db;
-    uint32_t                     source = 0;
-    std::string_view        src;
-    std::vector<token>      toks;
-    std::vector<uint32_t>        match;
-    uint32_t                     pos = 0;
-    bool                    last_was_value = false;
-    std::vector<diagnostic> diags;
+  // Branch if: Block, nested if or expression/instruction.
+  node_id branch() {
+    if(is_open('{')) return block();
+    if(is_word("return") || is_word("require")) return statement();
+    return expression();
+  }
+
+  // --- literary ---
+
+  static int64_t parse_int(std::string_view s) {
+    int64_t v = 0;
+    for(char c: s)
+      if(c != '_') v = v * 10 + (c - '0');
+    return v;
+  }
+
+  static double parse_float(std::string_view s) {
+    std::string clean;
+    for(char c: s)
+      if(c != '_') clean += c;
+    return std::stod(clean);
+  }
+
+  static std::string unescape(std::string_view s) {
+    std::string out;
+    for(uint32_t i = 1; i + 1 < s.size(); ++i) {
+      if(s[i] == '\\' && i + 2 < s.size()) {
+        char n = s[++i];
+        out += n == 'n' ? '\n' : n == 't' ? '\t'
+                                          : n;
+      } else {
+        out += s[i];
+      }
+    }
+    return out;
+  }
+
+  diagnostic with_source(diagnostic d) const {
+    span w = d.where;
+    w.source = source;
+    diagnostic out(d.what(), w, d.kind);
+    for(auto f: d.trace) {
+      f.where.source = source;
+      out.note(f.what, f.where);
+    }
+    return out;
+  }
+
+  ast_db & db;
+  uint32_t source = 0;
+  std::string_view src;
+  std::vector<token> toks;
+  std::vector<uint32_t> match;
+  uint32_t pos = 0;
+  bool last_was_value = false;
+  std::vector<diagnostic> diags;
 };
 
 } // namespace tz

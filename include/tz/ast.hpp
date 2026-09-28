@@ -17,210 +17,305 @@ struct node_tag;
 using node_id = id<node_tag>;
 using node_list = std::vector<node_id>;
 
-// Parameter mode (§6.2 steak).
+// Parameter mode (§6.2 steak)
+// clang-format off
 enum class param_mode : uint8_t { let, mut, own, out, expr, ct };
+// clang-format on
 
 // --- node ---
 
-struct n_module   { symbol name; node_list items; };
-struct n_fn       { symbol name; node_list params; node_id result_type; node_id body; bool outline = false; bool expr_body = false; };
-struct n_param    { symbol name; node_id type; param_mode mode = param_mode::let; bool pack = false; };
-struct n_var      { symbol name; node_id type; node_id init; bool is_const = false; };
-struct n_block    { node_list items; bool has_value = false; }; // has_value: Last expression without `;`
-struct n_ident    { symbol name; };
-struct n_int      { int64_t value = 0; };
-struct n_float    { double value = 0; };
-struct n_str      { std::string value; };
-struct n_call     { node_id callee; node_list args; };
-struct n_op       { symbol op; node_list args; };        // operator = operator entity call (§4.4)
-struct n_member   { node_id object; symbol name; };
-struct n_index    { node_id object; node_id index; };
-struct n_if       { node_id cond; node_id then_; node_id else_; };
-struct n_for      { symbol var; node_id range; node_id body; };
-struct n_while    { node_id cond; node_id body; };
-struct n_return   { node_id value; node_id target; };   // return(f) x is the output from the external function f; return(caller) x is the output from the calling function (§6.1)
-struct n_require  { node_id cond; };
-struct n_try_compile { node_id body; };                   // SFINAE block (§5.4)
-struct n_ct       { node_id body; };                      // ct e / ct { }
-struct n_lambda   { node_list params; node_id body; };
-struct n_construct{ node_id type; node_list items; };     // array{1, 2, 3}
-struct n_auto     { };                                    // `auto` in type position
-struct n_hole     { std::string text; std::string reason; }; // undisassembled fragment (§4.1)
+struct n_module {
+  symbol name;
+  node_list items;
+};
+struct n_fn {
+  symbol name;
+  node_list params;
+  node_id result_type;
+  node_id body;
+  bool outline = false;
+  bool expr_body = false;
+};
+struct n_param {
+  symbol name;
+  node_id type;
+  param_mode mode = param_mode::let;
+  bool pack = false;
+};
+struct n_var {
+  symbol name;
+  node_id type;
+  node_id init;
+  bool is_const = false;
+};
+struct n_block {
+  node_list items;
+  bool has_value = false;
+}; // has_value: Last expression without `;`
+struct n_ident {
+  symbol name;
+};
+struct n_int {
+  int64_t value = 0;
+};
+struct n_float {
+  double value = 0;
+};
+struct n_str {
+  std::string value;
+};
+struct n_call {
+  node_id callee;
+  node_list args;
+};
+struct n_op {
+  symbol op;
+  node_list args;
+}; // operator = operator entity call (§4.4)
+struct n_member {
+  node_id object;
+  symbol name;
+};
+struct n_index {
+  node_id object;
+  node_id index;
+};
+struct n_if {
+  node_id cond;
+  node_id then_;
+  node_id else_;
+};
+struct n_for {
+  symbol var;
+  node_id range;
+  node_id body;
+};
+struct n_while {
+  node_id cond;
+  node_id body;
+};
+struct n_return {
+  node_id value;
+  node_id target;
+}; // return(f) x is the output from the external function f; return(caller) x is the output from the calling function (§6.1)
+struct n_require {
+  node_id cond;
+};
+struct n_try_compile {
+  node_id body;
+}; // SFINAE block (§5.4)
+struct n_ct {
+  node_id body;
+}; // ct e / ct { }
+struct n_lambda {
+  node_list params;
+  node_id body;
+};
+struct n_construct {
+  node_id type;
+  node_list items;
+}; // array{1, 2, 3}
+struct n_auto {}; // `auto` in type position
+struct n_hole {
+  std::string text;
+  std::string reason;
+}; // undisassembled fragment (§4.1)
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
-                               n_call, n_op, n_member, n_index, n_if, n_for, n_while, n_return,
-                               n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole>;
+    n_call, n_op, n_member, n_index, n_if, n_for, n_while, n_return,
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole>;
 
 struct node {
-    node_kind kind;
-    span      where;
-    node_id   parent;
+  node_kind kind;
+  span where;
+  node_id parent;
 };
 
 // journal of base operations (§3.1):
 // 
 // The base state is the reproduction of journal;
 // journal is the history of change.
-struct j_intern  { uint32_t id; std::string text; };
-struct j_add     { uint32_t id; node_kind kind; span where; };
-struct j_replace { uint32_t id; node_kind kind; };
-struct j_link    { uint32_t root; }; // Put the parent in the subtree (deterministically)
-struct j_import  { std::string text; std::string label; }; // projection: span node - position in it
+struct j_intern {
+  uint32_t id;
+  std::string text;
+};
+struct j_add {
+  uint32_t id;
+  node_kind kind;
+  span where;
+};
+struct j_replace {
+  uint32_t id;
+  node_kind kind;
+};
+struct j_link {
+  uint32_t root;
+}; // Put the parent in the subtree (deterministically)
+struct j_import {
+  std::string text;
+  std::string label;
+}; // projection: span node - position in it
 using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import>;
 
 struct journal_entry {
-    uint64_t        revision;
-    journal_op op;
+  uint64_t revision;
+  journal_op op;
 };
 
 struct ast_db {
-    node_id add(node_kind k, span where) {
-        ++revision;
-        where.source = uint32_t(sources.empty() ? 0 : sources.size() - 1);
-        node_id id   = nodes.add(node{std::move(k), where, {}});
-        node_rev.push_back(revision);
-        log({j_add{id.value, nodes[id].kind, where}});
-        return id;
+  node_id add(node_kind k, span where) {
+    ++revision;
+    where.source = uint32_t(sources.empty() ? 0 : sources.size() - 1);
+    node_id id = nodes.add(node{std::move(k), where, {}});
+    node_rev.push_back(revision);
+    log({j_add{id.value, nodes[id].kind, where}});
+    return id;
+  }
+
+  // node revision - when it was last changed (for reactive disability).
+  uint64_t node_revision(node_id n) const { return node_rev[n.value]; }
+
+  node_id add(auto k, span where) {
+    return add(node_kind(std::move(k)), where);
+  }
+
+  node & operator[](node_id n) { return nodes[n]; }
+  node const & operator[](node_id n) const { return nodes[n]; }
+
+  template<typename kind>
+  bool is(node_id n) const { return n && std::holds_alternative<kind>(nodes[n].kind); }
+  template<typename kind>
+  kind & as(node_id n) { return std::get<kind>(nodes[n].kind); }
+  template<typename kind>
+  kind const & as(node_id n) const { return std::get<kind>(nodes[n].kind); }
+
+  void replace(node_id n, node_kind k) {
+    ++revision;
+    nodes[n].kind = std::move(k);
+    node_rev[n.value] = revision;
+    log({j_replace{n.value, nodes[n].kind}});
+  }
+
+  // Assign a parent to all descendants - bypass through reflection of node fields.
+  void link_parents(node_id root) {
+    ++revision;
+    link_rec(root);
+    log({j_link{root.value}});
+  }
+
+  // Text input - operation on the base (§3.1): the text is stored in journal, the
+  // positions node (span) indicate it.
+  uint32_t record_import(std::string text, std::string label = {}) {
+    sources.push_back(text);
+    labels.push_back(label);
+    log({j_import{std::move(text), std::move(label)}});
+    return uint32_t(sources.size() - 1);
+  }
+
+  // Import tag for diagnostics (empty - main file).
+  std::string const & source_label(uint32_t i) const {
+    static std::string const empty;
+    return i < labels.size() ? labels[i] : empty;
+  }
+
+  std::string const & source(uint32_t i = 0) const {
+    static std::string const empty;
+    return i < sources.size() ? sources[i] : empty;
+  }
+
+  // journal with new strings before each operation.
+  std::vector<journal_entry> journal() const {
+    std::vector<journal_entry> out;
+    uint32_t emitted = 0;
+    for(auto const & [strings_count, e]: oplog) {
+      for(; emitted < strings_count; ++emitted)
+        out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
+      out.push_back(e);
     }
+    for(; emitted < strings.size(); ++emitted)
+      out.push_back({revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
+    return out;
+  }
 
-    // node revision - when it was last changed (for reactive disability).
-    uint64_t node_revision(node_id n) const { return node_rev[n.value]; }
-
-    node_id add(auto k, span where) {
-        return add(node_kind(std::move(k)), where);
-    }
-
-    node&       operator[](node_id n)       { return nodes[n]; }
-    const node& operator[](node_id n) const { return nodes[n]; }
-
-    template <class kind> bool        is(node_id n) const { return n && std::holds_alternative<kind>(nodes[n].kind); }
-    template <class kind> kind&       as(node_id n)       { return std::get<kind>(nodes[n].kind); }
-    template <class kind> const kind& as(node_id n) const { return std::get<kind>(nodes[n].kind); }
-
-    void replace(node_id n, node_kind k) {
-        ++revision;
-        nodes[n].kind        = std::move(k);
-        node_rev[n.value]  = revision;
-        log({j_replace{n.value, nodes[n].kind}});
-    }
-
-    // Assign a parent to all descendants - bypass through reflection of node fields.
-    void link_parents(node_id root) {
-        ++revision;
-        link_rec(root);
-        log({j_link{root.value}});
-    }
-
-    // Text input - operation on the base (§3.1): the text is stored in journal, the
-    // positions node (span) indicate it.
-    uint32_t record_import(std::string text, std::string label = {}) {
-        sources.push_back(text);
-        labels.push_back(label);
-        log({j_import{std::move(text), std::move(label)}});
-        return uint32_t(sources.size() - 1);
-    }
-
-    // Import tag for diagnostics (empty - main file).
-    const std::string& source_label(uint32_t i) const {
-        static const std::string empty;
-        return i < labels.size() ? labels[i] : empty;
-    }
-
-    const std::string& source(uint32_t i = 0) const {
-        static const std::string empty;
-        return i < sources.size() ? sources[i] : empty;
-    }
-
-    // journal with new strings before each operation.
-    std::vector<journal_entry> journal() const {
-        std::vector<journal_entry> out;
-        uint32_t                        emitted = 0;
-        for (const auto& [strings_count, e] : oplog) {
-            for (; emitted < strings_count; ++emitted)
-                out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
-            out.push_back(e);
+  // Play journal to an empty database.
+  void replay(std::vector<journal_entry> const & entries) {
+    for(auto const & e: entries) {
+      std::visit([&](auto const & op) {
+        using T = std::remove_cvref_t<decltype(op)>;
+        if constexpr(std::is_same_v<T, j_intern>) {
+          if(strings.intern(op.text).value != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
+        } else if constexpr(std::is_same_v<T, j_add>) {
+          if(add(op.kind, op.where).value != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
+        } else if constexpr(std::is_same_v<T, j_replace>) {
+          replace(node_id(op.id), op.kind);
+        } else if constexpr(std::is_same_v<T, j_link>) {
+          link_parents(node_id(op.root));
+        } else {
+          record_import(op.text, op.label);
         }
-        for (; emitted < strings.size(); ++emitted)
-            out.push_back({revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
-        return out;
+      },
+          e.op);
     }
+  }
 
-    // Play journal to an empty database.
-    void replay(const std::vector<journal_entry>& entries) {
-        for (const auto& e : entries) {
-            std::visit([&](const auto& op) {
-                using T = std::remove_cvref_t<decltype(op)>;
-                if constexpr (std::is_same_v<T, j_intern>) {
-                    if (strings.intern(op.text).value != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
-                } else if constexpr (std::is_same_v<T, j_add>) {
-                    if (add(op.kind, op.where).value != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
-                } else if constexpr (std::is_same_v<T, j_replace>) {
-                    replace(node_id(op.id), op.kind);
-                } else if constexpr (std::is_same_v<T, j_link>) {
-                    link_parents(node_id(op.root));
-                } else {
-                    record_import(op.text, op.label);
-                }
-            }, e.op);
-        }
+  // All daughter node_id node: One realization for all species through reflection.
+  void for_each_child(node_id n, auto && f) const {
+    std::visit([&](auto const & k) { for_each_child_of(k, f); }, nodes[n].kind);
+  }
+
+  uint32_t size() const { return nodes.size(); }
+
+  interner strings;
+  void log(journal_op op) { oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}}); }
+
+  void link_rec(node_id root) {
+    for_each_child(root, [&](node_id child) {
+      nodes[child].parent = root;
+      link_rec(child);
+    });
+  }
+
+  static void for_each_child_of(auto const & k, auto & f) {
+    template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
+      using field_t = [:std::meta::type_of(m):];
+      if constexpr(std::is_same_v<field_t, node_id>) {
+        if(k.[:m:]) f(k.[:m:]);
+      } else if constexpr(std::is_same_v<field_t, node_list>) {
+        for(node_id c: k.[:m:])
+          if(c) f(c);
+      }
     }
+  }
 
-    // All daughter node_id node: One realization for all species through reflection.
-    void for_each_child(node_id n, auto&& f) const {
-        std::visit([&](const auto& k) { for_each_child_of(k, f); }, nodes[n].kind);
-    }
-
-    uint32_t size() const { return nodes.size(); }
-
-    interner strings;
-    void log(journal_op op) { oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}}); }
-
-    void link_rec(node_id root) {
-        for_each_child(root, [&](node_id child) {
-            nodes[child].parent = root;
-            link_rec(child);
-        });
-    }
-
-    static void for_each_child_of(const auto& k, auto& f) {
-        template for (constexpr auto m : fields_of<std::remove_cvref_t<decltype(k)>>()) {
-            using field_t = [:std::meta::type_of(m):];
-            if constexpr (std::is_same_v<field_t, node_id>) {
-                if (k.[:m:]) f(k.[:m:]);
-            } else if constexpr (std::is_same_v<field_t, node_list>) {
-                for (node_id c : k.[:m:]) if (c) f(c);
-            }
-        }
-    }
-
-    arena<node, node_tag>                            nodes;
-    uint64_t                                              revision = 0;
-    std::vector<std::pair<uint32_t, journal_entry>>       oplog; // (line interned at time, operation)
-    std::deque<std::string>                          sources; // Deque: Text references are stable
-    std::vector<std::string>                         labels;
-    std::vector<uint64_t>                                 node_rev;
+  arena<node, node_tag> nodes;
+  uint64_t revision = 0;
+  std::vector<std::pair<uint32_t, journal_entry>> oplog; // (line interned at time, operation)
+  std::deque<std::string> sources; // Deque: Text references are stable
+  std::vector<std::string> labels;
+  std::vector<uint64_t> node_rev;
 };
 
 // Diagnostics on the basis: the text is taken from the import to which the node belongs.
-std::string render(const diagnostic& d, std::string_view file, const ast_db& db) {
-    auto name = [&](span w) -> std::string_view {
-        const auto& l = db.source_label(w.source);
-        return l.empty() ? file : std::string_view(l);
-    };
-    auto lc  = locate(db.source(d.where.source), d.where.begin);
-    auto out = cat(name(d.where), ":", lc.line, ":", lc.col, ": ошибка: ", d.what(), "\n");
-    for (const auto& f : d.trace) {
-        auto l = locate(db.source(f.where.source), f.where.begin);
-        out += cat("  ", name(f.where), ":", l.line, ":", l.col, ": ", f.what, "\n");
-    }
-    return out;
+std::string render(diagnostic const & d, std::string_view file, ast_db const & db) {
+  auto name = [&](span w) -> std::string_view {
+    auto const & l = db.source_label(w.source);
+    return l.empty() ? file : std::string_view(l);
+  };
+  auto lc = locate(db.source(d.where.source), d.where.begin);
+  auto out = cat(name(d.where), ":", lc.line, ":", lc.col, ": ошибка: ", d.what(), "\n");
+  for(auto const & f: d.trace) {
+    auto l = locate(db.source(f.where.source), f.where.begin);
+    out += cat("  ", name(f.where), ":", l.line, ":", l.col, ": ", f.what, "\n");
+  }
+  return out;
 }
 
 // The name node is for debugging (through reflection, without manual tables).
-std::string_view kind_name(const node& n) {
-    return std::visit([](const auto& k) -> std::string_view {
-        return std::meta::identifier_of(std::meta::remove_cvref(^^decltype(k)));
-    }, n.kind);
+std::string_view kind_name(node const & n) {
+  return std::visit([](auto const & k) -> std::string_view {
+    return std::meta::identifier_of(std::meta::remove_cvref(^^decltype(k)));
+  },
+      n.kind);
 }
 
 } // namespace tz
