@@ -74,3 +74,20 @@ checked(expr body) {
   using operator (i64 a) * (i64 b) => mul_checked(a, b);
   body
 }
+
+// Файберы и потоки (§8.3): spawn { … } — стековая корутина; поток — блокирующие
+// write/read: 
+// Значение уходит в поток перемещением (own).
+spawn(expr body) => fiber_start(body);
+stream() => stream_new(16);
+stream(i64 cap) => stream_new(cap);
+write(stream s, own auto x) => stream_write(s, x);
+read(stream s) => stream_read(s);
+more(stream s) => stream_more(s);
+close(stream s) => stream_close(s);
+for(stream s, expr body) {
+  loop {
+    if(!more(s)) break;
+    body(read(s));
+  }
+}

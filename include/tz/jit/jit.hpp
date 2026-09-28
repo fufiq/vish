@@ -957,14 +957,38 @@ struct jit_codegen {
       return jt::bool_;
     }
     if(name == "intercept") return gen_intercept(n, c);
-    // Language function (prelude or module): single candidate by name and arrogance without requiring
+    // Language function (prelude or module): single candidate by name and arnost, without requiring
+    // candidates by name and arnost; typed parameters are cut off by argument types from parsing, with
+    // equality more precisely - with a large number of types
     node_id target;
+    int best = -1;
+    bool tie = false;
     for(node_id m: {db.prelude, eng.mod})
-      for(node_id item: m ? db.as<n_module>(m).items : node_list{})
-        if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name && db.as<n_fn>(item).params.size() == c.args.size()) {
-          if(target) throw jit_unsupported{n, cat("перегрузка ", name, " (M1a)")};
-          target = item;
+      for(node_id item: m ? db.as<n_module>(m).items : node_list{}) {
+        if(!db.is<n_fn>(item) || db.strings.text(db.as<n_fn>(item).name) != name || db.as<n_fn>(item).params.size() != c.args.size()) continue;
+        int score = 0;
+        bool fits = true;
+        auto const & ps = db.as<n_fn>(item).params;
+        for(std::size_t k = 0; k < ps.size() && fits; ++k) {
+          auto const & p = db.as<n_param>(ps[k]);
+          if(!p.type || !db.is<n_ident>(p.type)) continue;
+          auto const * o = obs(c.args[k]);
+          if(p.mode == param_mode::expr || !o || !o->seen) {
+            fits = false;
+            continue;
+          }
+          auto want = db.strings.text(db.as<n_ident>(p.type).name);
+          if(an.types.describe(o->v) != want && an.types.name(an.types.of(o->v)) != want) fits = false;
+          else ++score;
         }
+        if(!fits) continue;
+        if(score > best) {
+          best = score;
+          target = item;
+          tie = false;
+        } else if(score == best) tie = true;
+      }
+    if(tie) throw jit_unsupported{n, cat("перегрузка ", name, " (неоднозначно для машинного кода)")};
     if(!target) throw jit_unsupported{n, cat("вызов ", name)};
     // Default semantic inlining (D10): the body is embedded in the context of the
     // call, the parameters are alias of the caller's seats, without ABI.

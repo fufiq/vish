@@ -1,0 +1,36 @@
+// out: got 0
+// out: got 10
+// out: got 20
+// out: got 30
+// out: got 40
+// out: t 7
+// out: t 8
+// out: 100
+// out: moved 1
+// Файберы и потоки (§8.3, M3a): spawn — стековая корутина со своим стеком
+//;
+// обмен — блокирующие write/read вместо каналов и future (
+//). Поток ёмкости 2: писатель ждёт, пока
+// читатель заберёт. Значение уходит в поток перемещением (own).
+main() {
+  auto s = stream(2);
+  spawn {
+    for(auto i : range(5)) write(s, i * 10);
+    close(s);
+  }
+  auto t = stream();
+  spawn {
+    write(t, 7);
+    yield();
+    write(t, 8);
+    close(t);
+  }
+  auto sum = 0;
+  for(auto x : s) print("got", x);
+  for(auto y : t) print("t", y);
+  auto u = stream();
+  auto v = array{1, 2};
+  spawn { write(u, v); }
+  print(sum + 100);
+  print("moved", read(u)[0]);
+}
