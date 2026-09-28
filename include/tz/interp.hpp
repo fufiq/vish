@@ -910,17 +910,28 @@ private:
         TZ_TRY(obj, eval(i.object, env, frame));
         TZ_TRY(idx, eval(i.index, env, frame));
         return ok(lift(obj, [&](const value& o) {
+            if (o.is<rt_v>() && idx.known()) { // tuple by compile-time - the exact type of element
+                const value* shape = shape_of(o);
+                if (shape && shape->is<array_v>() && is_tuple(shape->as<array_v>()))
+                    return erase(shape->as<array_v>().get(checked_index(*shape, idx, where)));
+            }
             if (o.is<rt_v>() || !idx.known()) return element_type(o, where);
             return o.as<array_v>().get(checked_index(o, idx, where));
         }));
     }
 
+    // Type of element according to the run-time index. tuple - splitting by element
+    // type: the sequel is understood for each.
     value element_type(const value& arr, span where) {
         if (unknown(arr)) return arr;
         const value* shape = shape_of(arr);
         if (!shape || !shape->is<array_v>()) fail(std::format("индексация значения типа {}", types_.describe(arr)), where);
-        if (shape->as<array_v>().empty()) return value(rt_v{});
-        return erase(shape->as<array_v>().get(0));
+        const auto& a = shape->as<array_v>();
+        if (a.empty()) return value(rt_v{});
+        value t = erase(a.get(0));
+        if (is_tuple(a))
+            for (u32 i = 1; i < a.size(); ++i) t = merge(t, erase(a.get(i)));
+        return t;
     }
 
     // Proven index of the array element: OutOfBounds (§12.1) - runtime - error.

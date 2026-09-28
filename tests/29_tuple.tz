@@ -1,0 +1,29 @@
+// args: 1
+// out: tuple array i64 f64
+// out: f64 2.0
+// out: i64 3 f64 4.5
+// out: 2
+// check: t2 = рт tuple<i64, f64>
+// check: u = кт [3, 4]
+// check: show(рт i64)  ×
+// check: show(рт f64)  ×
+// check: first(рт tuple<i64, f64>)  ×1
+// Массив с элементами разных типов — тапл 
+// тапл с одним типом — массив.
+// Кт-индекс даёт точный тип элемента, рт-индекс расщепляет продолжение по
+// типам элементов: foo => [T0 => bar, T1 => bar].
+show(auto x) { print(typeof(x), x); }
+
+first(auto p) => p[0]
+
+main() {
+  auto t = array{1, 2.0};
+  auto u = array{3, 4};
+  print(typeof(t), typeof(u), typeof(t[0]), typeof(t[1]));
+  auto i = parse_int(args[1]).value;
+  show(t[i]);
+  auto t2 = if(i > 5) array{1, 2.5} else array{3, 4.5};
+  auto a = first(t2);
+  print(typeof(a), a, typeof(t2[1]), t2[1]);
+  print(t2.size);
+}

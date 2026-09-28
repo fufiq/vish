@@ -185,6 +185,20 @@ inline void array_v::set(u32 i, value v) {
     items_[i] = std::move(v);
 }
 
+// Whether the samples are the same types (structurally, without values).
+inline bool same_shape(const value& a, const value& b);
+
+// The array, whose elements are of different types, is tuple
+// tuple with one type - it is an array.
+inline bool is_tuple(const array_v& a) {
+    if (a.kind() != array_v::layout::generic) return false;
+    for (u32 i = 1; i < a.size(); ++i)
+        if (!same_shape(a.get(0), a.get(i))) return true;
+    return false;
+}
+
+inline value erase(const value& x);
+
 // Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the
 // type of the result of the operation on the samples does not rest on the division by zero.
 inline value erase(const value& x) {
@@ -194,9 +208,11 @@ inline value erase(const value& x) {
     else if (x.is<f64>()) shape = value(f64(1));
     else if (x.is<bool>()) shape = value(true);
     else if (x.is<std::string>()) shape = value(std::string("x"));
-    else if (x.is<array_v>()) {
-        array_v a;
-        if (!x.as<array_v>().empty()) a.push(erase(x.as<array_v>().get(0)));
+    else if (x.is<array_v>()) { // Array - a sample of one element; tuple - samples of all
+        const auto& src = x.as<array_v>();
+        array_v     a;
+        if (is_tuple(src)) for (u32 i = 0; i < src.size(); ++i) a.push(erase(src.get(i)));
+        else if (!src.empty()) a.push(erase(src.get(0)));
         shape = value(std::move(a));
     } else if (x.is<agg_v>()) {
         agg_v g{x.as<agg_v>().type, {}};
@@ -214,11 +230,41 @@ inline const value* shape_of(const value& x) {
     return &x;
 }
 
+inline bool same_shape(const value& a, const value& b) {
+    const value* x = shape_of(a);
+    const value* y = shape_of(b);
+    if (!x || !y) return x == y;
+    if (x->v.index() != y->v.index()) return false;
+    if (x->is<array_v>()) {
+        const auto& p = x->as<array_v>();
+        const auto& q = y->as<array_v>();
+        bool tp = is_tuple(p), tq = is_tuple(q);
+        if (tp != tq) return false;
+        if (tp) {
+            if (p.size() != q.size()) return false;
+            for (u32 i = 0; i < p.size(); ++i)
+                if (!same_shape(p.get(i), q.get(i))) return false;
+            return true;
+        }
+        if (p.empty() || q.empty()) return p.empty() == q.empty();
+        return same_shape(p.get(0), q.get(0));
+    }
+    if (x->is<agg_v>()) {
+        const auto& p = x->as<agg_v>();
+        const auto& q = y->as<agg_v>();
+        if (p.type != q.type || p.fields.size() != q.fields.size()) return false;
+        for (u32 i = 0; i < p.fields.size(); ++i)
+            if (!same_shape(p.fields[i].second, q.fields[i].second)) return false;
+        return true;
+    }
+    return true;
+}
+
 // Register of types: closed system of types VM - id instead of strings (§5.1, §9.2).
 class type_registry {
 public:
     type_registry() {
-        for (auto n : {"unit", "bool", "i64", "f64", "str", "type", "array", "fn", "expr"}) intern_builtin(n);
+        for (auto n : {"unit", "bool", "i64", "f64", "str", "type", "array", "fn", "expr", "tuple"}) intern_builtin(n);
     }
 
     type_id builtin(std::string_view name) const {
@@ -244,7 +290,7 @@ public:
             else if constexpr (std::is_same_v<T, f64>) return type_id(3);
             else if constexpr (std::is_same_v<T, std::string>) return type_id(4);
             else if constexpr (std::is_same_v<T, type_v>) return type_id(5);
-            else if constexpr (std::is_same_v<T, array_v>) return type_id(6);
+            else if constexpr (std::is_same_v<T, array_v>) return type_id(is_tuple(a) ? 9 : 6);
             else if constexpr (std::is_same_v<T, fn_v>) return type_id(7);
             else if constexpr (std::is_same_v<T, thunk_v>) return type_id(8);
             else if constexpr (std::is_same_v<T, agg_v>) return a.type;
@@ -262,6 +308,11 @@ public:
         }
         if (x.is<array_v>()) {
             const auto& a = x.as<array_v>();
+            if (is_tuple(a)) {
+                std::string s;
+                for (u32 i = 0; i < a.size(); ++i) s += (i ? ", " : "") + describe(a.get(i));
+                return std::format("tuple<{}>", s);
+            }
             return std::format("array<{}>", a.empty() ? std::string("?") : describe(a.get(0)));
         }
         return std::string(name(of(x)));
