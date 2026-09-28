@@ -192,16 +192,73 @@ struct parser {
   // --- module elements and instructions ---
 
   node_id item() {
-    if(is_word("struct") && ahead(1).kind == tok::ident && is_open('{', 2)) return struct_decl();
-    if(auto f = try_fn_decl(false)) return *f;
+    uint32_t start = here().where.begin;
+    node_list attrs = attributes();
+    // Attributes enter the node before being added to the database, otherwise journal will not see them.
+    if(is_word("struct") && ahead(1).kind == tok::ident && is_open('{', 2)) return struct_decl(std::move(attrs));
+    if(auto f = try_fn_decl(false, attrs)) return *f;
+    if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
+    // Name { … } - extension of entity
+    if(ahead(0).kind == tok::ident && !is_keyword(ahead(0).text) && is_open('{', 1)) return extension(start);
     return statement();
   }
 
+  // [[a, b]] [[c]] - Attributes: Common expressions, computed in compilation
+  node_list attributes() {
+    node_list out;
+    while(is_open('[') && is_open('[', 1)) {
+      advance();
+      advance();
+      while(!is_close(']')) {
+        out.push_back(expression());
+        if(is_op(",")) eat_op(",");
+        else break;
+      }
+      expect_close(']');
+      expect_close(']');
+    }
+    return out;
+  }
+
+  node_id extension(uint32_t start) {
+    n_extend e;
+    e.name = ident();
+    expect_open('{');
+    while(!is_close('}') && !at_end()) {
+      uint32_t i0 = here().where.begin;
+      node_list attrs = attributes();
+      if(auto f = try_fn_decl(false, attrs)) {
+        e.items.push_back(*f);
+        continue;
+      }
+      if(ahead(0).kind == tok::ident && ahead(1).kind == tok::ident) { // field: T name [= v];
+        n_var v;
+        v.type = db.add(n_ident{ident()}, {i0, toks[pos - 1].where.end});
+        v.name = ident();
+        if(is_op("=")) {
+          eat_op("=");
+          v.init = expression();
+        }
+        end_statement();
+        e.items.push_back(db.add(std::move(v), {i0, toks[pos - 1].where.end}));
+        for(node_id a: attrs) e.attrs.push_back(a);
+        continue;
+      }
+      if(attrs.empty()) throw diagnostic("в расширении ожидались поле, функция или [[атрибут]]", here().where);
+      for(node_id a: attrs) e.attrs.push_back(a);
+      if(is_op(";")) eat_op(";");
+    }
+    expect_close('}');
+    if(is_op(";")) eat_op(";");
+    return db.add(std::move(e), {start, toks[pos - 1].where.end});
+  }
+
   // struct Name { T поле [= значение]; … } [;]
-  node_id struct_decl() {
+  node_id struct_decl(node_list attrs = {}) {
     uint32_t start = here().where.begin;
     advance();
     n_struct st;
+    st.attrs = std::move(attrs);
     st.name = ident();
     expect_open('{');
     while(!is_close('}')) {
@@ -224,7 +281,7 @@ struct parser {
   // Announcement of function: [outline] [type] name(s) (=> e; | { ... }) On the
   // upper level, a form without the type on the left is allowed; in the block, only
   // with the sign of the declaration (§4.2).
-  std::optional<node_id> try_fn_decl(bool in_block) {
+  std::optional<node_id> try_fn_decl(bool in_block, node_list attrs = {}) {
     uint32_t k = 0;
     bool outline = false;
     if(is_word("outline")) {
@@ -244,6 +301,7 @@ struct parser {
 
     uint32_t start = here().where.begin;
     n_fn f;
+    f.attrs = std::move(attrs);
     f.outline = outline;
     if(outline) advance();
     if(name_at == (outline ? 2u : 1u)) f.result_type = type_expr();

@@ -72,7 +72,18 @@ struct printer {
     }
   }
 
+  void attrs(node_list const & as) {
+    if(as.empty()) return;
+    out += "[[";
+    for(uint32_t i = 0; i < as.size(); ++i) {
+      if(i) out += ", ";
+      item(as[i]);
+    }
+    out += "]] ";
+  }
+
   void print_node(node_id, n_fn const & f) {
+    attrs(f.attrs);
     if(f.outline) out += "outline ";
     if(f.result_type) {
       item(f.result_type);
@@ -142,7 +153,7 @@ struct printer {
   void terminate(node_id s) {
     if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
     if(db.is<n_hole>(s)) return; // The hole prints the source code as it is.
-    if(db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_try>(s) || db.is<n_struct>(s)) return;
+    if(db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_try>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
     if(db.is<n_call>(s)) {
       auto const & c = db.as<n_call>(s);
@@ -184,7 +195,31 @@ struct printer {
     item(t.body);
   }
 
+  void print_node(node_id, n_extend const & e) {
+    out += cat(str(e.name), " {");
+    if(!e.attrs.empty()) {
+      out += ' ';
+      attrs(e.attrs);
+      out.pop_back();
+    }
+    for(node_id i: e.items) {
+      out += ' ';
+      if(db.is<n_var>(i)) {
+        auto const & v = db.as<n_var>(i);
+        item(v.type);
+        out += cat(" ", str(v.name));
+        if(v.init) {
+          out += " = ";
+          item(v.init);
+        }
+        out += ';';
+      } else item(i);
+    }
+    out += " }";
+  }
+
   void print_node(node_id, n_struct const & st) {
+    attrs(st.attrs);
     out += cat("struct ", str(st.name), " {");
     for(node_id f: st.fields) {
       auto const & v = db.as<n_var>(f);

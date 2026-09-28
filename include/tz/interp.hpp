@@ -116,6 +116,26 @@ struct interpreter {
     for(node_id item: db.as<n_module>(module).items)
       if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
       else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
+    // entity extensions: fields and attributes to entity, functions to overload
+    for(node_id item: db.as<n_module>(module).items)
+      if(db.is<n_extend>(item)) {
+        auto const & e = db.as<n_extend>(item);
+        for(node_id a: e.attrs) ext_attrs[e.name].push_back(a);
+        for(node_id i: e.items) {
+          if(db.is<n_fn>(i)) functions[db.as<n_fn>(i).name].push_back(i);
+          else ext_fields[e.name].push_back(i);
+        }
+      }
+  }
+
+  // Unit fields: declaration + extension (in module order).
+  std::vector<node_id> fields_of_struct(symbol name) const {
+    std::vector<node_id> out;
+    if(auto it = structs.find(name); it != structs.end())
+      for(node_id f: db.as<n_struct>(it->second).fields) out.push_back(f);
+    if(auto it = ext_fields.find(name); it != ext_fields.end())
+      for(node_id f: it->second) out.push_back(f);
+    return out;
   }
 
   // Launch main(). Returns the exit code.
@@ -555,6 +575,7 @@ struct interpreter {
     if(str(x.name) == "true") return ok(value(true));
     if(str(x.name) == "false") return ok(value(false));
     if(auto t = types.builtin(str(x.name))) return ok(value(type_v{t}));
+    if(structs.contains(x.name)) return ok(value(type_v{types.named(str(x.name))})); // entity struct - value
     if(auto it = functions.find(x.name); it != functions.end()) {
       for(node_id f: it->second)
         if(inline_required(f))
@@ -1032,6 +1053,7 @@ struct interpreter {
 
   flow eval_node(node_id n, n_catch const &, scope *, uint32_t) { fail("catch вне try", db[n].where); }
   flow eval_node(node_id, n_struct const &, scope *, uint32_t) { return ok(); } // declaration
+  flow eval_node(node_id, n_extend const &, scope *, uint32_t) { return ok(); } // Expansion - when loading the module
 
   flow eval_node(node_id n, n_try_compile const & t, scope * env, uint32_t frame) {
     auto saved_may = may_return;
@@ -1058,11 +1080,11 @@ struct interpreter {
     }
     auto tname = str(db.as<n_ident>(c.type).name);
     if(auto it = structs.find(db.as<n_ident>(c.type).name); it != structs.end()) { // Name {a, b} - by position n
-      auto const & st = db.as<n_struct>(it->second);
-      if(items.size() > st.fields.size()) fail(cat(tname, ": полей ", st.fields.size(), ", значений ", items.size()), db[n].where);
+      auto all = fields_of_struct(it->first);
+      if(items.size() > all.size()) fail(cat(tname, ": полей ", all.size(), ", значений ", items.size()), db[n].where);
       agg_v g{types.named(tname), {}};
-      for(std::size_t k = 0; k < st.fields.size(); ++k) {
-        auto const & f = db.as<n_var>(st.fields[k]);
+      for(std::size_t k = 0; k < all.size(); ++k) {
+        auto const & f = db.as<n_var>(all[k]);
         if(k < items.size()) g.fields.push_back({f.name, std::move(items[k])});
         else if(f.init) {
           TZ_TRY(d, eval(f.init, globals, frame));
@@ -1282,6 +1304,10 @@ struct interpreter {
       if(op == "+") return value(a.as<std::string>() + b.as<std::string>());
       if(op == "==") return value(a.as<std::string>() == b.as<std::string>());
       if(op == "!=") return value(a.as<std::string>() != b.as<std::string>());
+    }
+    if(a.is<type_v>() && b.is<type_v>()) { // Types - values: tag = number (§5.1)
+      if(op == "==") return value(a.as<type_v>().type == b.as<type_v>().type);
+      if(op == "!=") return value(a.as<type_v>().type != b.as<type_v>().type);
     }
     if(a.is<bool>() && b.is<bool>()) {
       if(op == "==") return value(a.as<bool>() == b.as<bool>());
@@ -1775,6 +1801,45 @@ struct interpreter {
       else put(stdout, cat(line, "\n"));
       return {};
     }
+    // --- entity compiler as value (§7.4) ---
+    if(n == "attrs" && a.size() == 1) { // [[…]] attributes of a function or type - values
+      std::vector<node_id> nodes;
+      symbol owner;
+      if(a[0].is<fn_v>() && a[0].as<fn_v>().name) {
+        owner = a[0].as<fn_v>().name;
+        if(auto it = functions.find(owner); it != functions.end())
+          for(node_id f: it->second)
+            for(node_id x: db.as<n_fn>(f).attrs) nodes.push_back(x);
+      } else if(a[0].is<type_v>()) {
+        owner = sym(types.name(a[0].as<type_v>().type));
+        if(auto it = structs.find(owner); it != structs.end())
+          for(node_id x: db.as<n_struct>(it->second).attrs) nodes.push_back(x);
+      } else fail("attrs: ожидалась функция или тип", where);
+      if(auto it = ext_attrs.find(owner); it != ext_attrs.end())
+        for(node_id x: it->second) nodes.push_back(x);
+      std::vector<value> vs;
+      for(node_id x: nodes) {
+        flow f = eval(x, globals, 0);
+        if(!f.normal()) fail("атрибут не вычислился", db[x].where);
+        vs.push_back(std::move(f.v));
+      }
+      return value(array_v::of(std::move(vs)));
+    }
+    if(n == "fields" && a.size() == 1 && a[0].is<type_v>()) { // aggregate field: {name, type}
+      symbol owner = sym(types.name(a[0].as<type_v>().type));
+      if(!structs.contains(owner)) fail(cat("fields: ", str(owner), " — не агрегат"), where);
+      std::vector<value> vs;
+      for(node_id f: fields_of_struct(owner)) {
+        auto const & v = db.as<n_var>(f);
+        auto tn = str(db.as<n_ident>(v.type).name);
+        type_id t = types.builtin(tn) ? types.builtin(tn) : types.named(tn);
+        agg_v d{types.named("field"), {}};
+        d.fields.push_back({sym("name"), value(std::string(str(v.name)))});
+        d.fields.push_back({sym("type"), value(type_v{t})});
+        vs.push_back(value(std::move(d)));
+      }
+      return value(array_v::of(std::move(vs)));
+    }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);
       return value(type_v{types.of(a[0])});
@@ -1895,6 +1960,7 @@ struct interpreter {
   bool last_rt_effect = false;
   std::map<uint32_t, std::vector<value>> may_return;
   std::map<symbol, node_id> structs; // named units of the module
+  std::map<symbol, std::vector<node_id>> ext_fields, ext_attrs; // Extensions Name { … }
   std::vector<std::vector<value> *> throw_sinks; // run-time branch shooters: try and instance
   std::map<std::string, std::set<std::string>> throws_of; // instance → Types of Exceptions (Report)
   std::vector<call_site> throw_stack; // last-throw

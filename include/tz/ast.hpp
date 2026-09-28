@@ -35,6 +35,7 @@ struct n_fn {
   node_id body;
   bool outline = false;
   bool expr_body = false;
+  node_list attrs; // [[…]] - values calculated during compilation (§7.4)
 };
 struct n_param {
   symbol name;
@@ -123,6 +124,15 @@ struct n_try {
 struct n_struct {
   symbol name;
   node_list fields;
+  node_list attrs;
+};
+// Extension of entity:
+//  
+// Fields (n_var), functions (n_fn), and attributes added to the Name.
+struct n_extend {
+  symbol name;
+  node_list items;
+  node_list attrs;
 };
 struct n_ct {
   node_id body;
@@ -143,7 +153,7 @@ struct n_hole {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_index, n_if, n_for, n_while, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_catch, n_try, n_struct>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_catch, n_try, n_struct, n_extend>;
 
 struct node {
   node_kind kind;
