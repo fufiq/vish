@@ -20,8 +20,8 @@ template <class T> struct is_id<id<T>> : std::true_type {};
 
 class writer {
 public:
-    template <class T>
-    void put(const T& x) {
+    void put(const auto& x) {
+        using T = std::remove_cvref_t<decltype(x)>;
         if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) {
             raw(&x, sizeof x);
         } else if constexpr (is_id<T>::value) {

@@ -26,9 +26,8 @@ private:
         std::visit([&](const auto& k) { children(k, depth + 1); }, db_[n].kind);
     }
 
-    template <class kind>
-    void scalars(const kind& k) {
-        template for (constexpr auto m : fields_of<kind>()) {
+    void scalars(const auto& k) {
+        template for (constexpr auto m : fields_of<std::remove_cvref_t<decltype(k)>>()) {
             using field_t = [:std::meta::type_of(m):];
             constexpr auto name = std::meta::identifier_of(m);
             if constexpr (std::is_same_v<field_t, symbol>) {
@@ -45,9 +44,8 @@ private:
         }
     }
 
-    template <class kind>
-    void children(const kind& k, uint32_t depth) {
-        template for (constexpr auto m : fields_of<kind>()) {
+    void children(const auto& k, uint32_t depth) {
+        template for (constexpr auto m : fields_of<std::remove_cvref_t<decltype(k)>>()) {
             using field_t = [:std::meta::type_of(m):];
             if constexpr (std::is_same_v<field_t, node_id>) {
                 if (k.[:m:]) {

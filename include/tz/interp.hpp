@@ -402,8 +402,7 @@ private:
     }
 
     // Apply f to each split value alternative.
-    template <class fn>
-    value lift(const value& x, fn&& f) {
+    value lift(const value& x, auto&& f) {
         if (!x.is<split_v>()) return f(x);
         value out;
         bool  first = true;
@@ -948,8 +947,7 @@ private:
         fail(std::format("исполнение неразобранного фрагмента: {}", h.reason), db_[n].where);
     }
 
-    template <class other>
-    flow eval_node(node_id n, const other&, const scope_ptr&, uint32_t) {
+    flow eval_node(node_id n, const auto&, const scope_ptr&, uint32_t) {
         fail(std::format("узел {} нельзя исполнить", kind_name(db_[n])), db_[n].where);
     }
 
@@ -1089,8 +1087,7 @@ private:
         return compare(op, x, y, where);
     }
 
-    template <class T>
-    value compare(std::string_view op, T x, T y, span where) {
+    value compare(std::string_view op, auto x, decltype(x) y, span where) {
         if (op == "==") return value(x == y);
         if (op == "!=") return value(x != y);
         if (op == "<") return value(x < y);

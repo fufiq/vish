@@ -155,8 +155,7 @@ private:
 
     // Disassemble one structure; in case of an error - n_hole to the end of the structure
     // (up to `;` at this level of brackets or to the end of the nearest group).
-    template <class fn>
-    node_id recover_statement(fn&& f) {
+    node_id recover_statement(auto&& f) {
         uint32_t start_tok = pos_;
         try {
             return f();

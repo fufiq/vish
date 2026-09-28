@@ -87,8 +87,7 @@ public:
     // node revision - when it was last changed (for reactive disability).
     uint64_t node_revision(node_id n) const { return node_rev_[n.value()]; }
 
-    template <class kind>
-    node_id add(kind k, span where) {
+    node_id add(auto k, span where) {
         return add(node_kind(std::move(k)), where);
     }
 
@@ -168,8 +167,7 @@ public:
     }
 
     // All daughter node_id node: One realization for all species through reflection.
-    template <class fn>
-    void for_each_child(node_id n, fn&& f) const {
+    void for_each_child(node_id n, auto&& f) const {
         std::visit([&](const auto& k) { for_each_child_of(k, f); }, nodes_[n].kind);
     }
 
@@ -188,9 +186,8 @@ private:
         });
     }
 
-    template <class kind, class fn>
-    static void for_each_child_of(const kind& k, fn& f) {
-        template for (constexpr auto m : fields_of<kind>()) {
+    static void for_each_child_of(const auto& k, auto& f) {
+        template for (constexpr auto m : fields_of<std::remove_cvref_t<decltype(k)>>()) {
             using field_t = [:std::meta::type_of(m):];
             if constexpr (std::is_same_v<field_t, node_id>) {
                 if (k.[:m:]) f(k.[:m:]);
@@ -209,7 +206,7 @@ private:
 };
 
 // Diagnostics on the basis: the text is taken from the import to which the node belongs.
-inline std::string render(const diagnostic& d, std::string_view file, const ast_db& db) {
+std::string render(const diagnostic& d, std::string_view file, const ast_db& db) {
     auto name = [&](span w) -> std::string_view {
         const auto& l = db.source_label(w.source);
         return l.empty() ? file : std::string_view(l);
@@ -224,7 +221,7 @@ inline std::string render(const diagnostic& d, std::string_view file, const ast_
 }
 
 // The name node is for debugging (through reflection, without manual tables).
-inline std::string_view kind_name(const node& n) {
+std::string_view kind_name(const node& n) {
     return std::visit([](const auto& k) -> std::string_view {
         return std::meta::identifier_of(std::meta::remove_cvref(^^decltype(k)));
     }, n.kind);

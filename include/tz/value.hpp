@@ -119,7 +119,7 @@ struct value {
     std::variant<unit_v, bool, int64_t, double, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v> v;
 
     value() : v(unit_v{}) {}
-    template <class T> value(T x) : v(std::move(x)) {}
+    value(auto x) : v(std::move(x)) {}
 
     template <class T> bool     is() const { return std::holds_alternative<T>(v); }
     template <class T> T&       as()       { return std::get<T>(v); }
@@ -130,13 +130,13 @@ struct value {
 
 // --- array_v: definitions after value ---
 
-inline array_v array_v::of(std::vector<value> items) {
+array_v array_v::of(std::vector<value> items) {
     array_v a;
     for (auto& x : items) a.push(std::move(x));
     return a;
 }
 
-inline uint32_t array_v::size() const {
+uint32_t array_v::size() const {
     const array_v& a = r();
     switch (a.layout_) {
     case layout::ints: return uint32_t(a.ints_.size());
@@ -145,7 +145,7 @@ inline uint32_t array_v::size() const {
     }
 }
 
-inline value array_v::get(uint32_t i) const {
+value array_v::get(uint32_t i) const {
     const array_v& a = r();
     switch (a.layout_) {
     case layout::ints: return value(a.ints_[i]);
@@ -154,7 +154,7 @@ inline value array_v::get(uint32_t i) const {
     }
 }
 
-inline void array_v::to_generic() {
+void array_v::to_generic() {
     own();
     if (layout_ == layout::generic) return;
     std::vector<value> items;
@@ -165,7 +165,7 @@ inline void array_v::to_generic() {
     layout_ = layout::generic;
 }
 
-inline void array_v::push(value v) {
+void array_v::push(value v) {
     own();
     if (size() == 0 && layout_ == layout::generic) { // first element selects the layout
         if (v.is<int64_t>()) layout_ = layout::ints;
@@ -177,7 +177,7 @@ inline void array_v::push(value v) {
     items_.push_back(std::move(v));
 }
 
-inline void array_v::set(uint32_t i, value v) {
+void array_v::set(uint32_t i, value v) {
     own();
     if (layout_ == layout::ints && v.is<int64_t>()) { ints_[i] = v.as<int64_t>(); return; }
     if (layout_ == layout::floats && v.is<double>()) { floats_[i] = v.as<double>(); return; }
@@ -186,22 +186,22 @@ inline void array_v::set(uint32_t i, value v) {
 }
 
 // Whether the samples are the same types (structurally, without values).
-inline bool same_shape(const value& a, const value& b);
+bool same_shape(const value& a, const value& b);
 
 // The array, whose elements are of different types, is tuple
 // tuple with one type - it is an array.
-inline bool is_tuple(const array_v& a) {
+bool is_tuple(const array_v& a) {
     if (a.kind() != array_v::layout::generic) return false;
     for (uint32_t i = 1; i < a.size(); ++i)
         if (!same_shape(a.get(0), a.get(i))) return true;
     return false;
 }
 
-inline value erase(const value& x);
+value erase(const value& x);
 
 // Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the
 // type of the result of the operation on the samples does not rest on the division by zero.
-inline value erase(const value& x) {
+value erase(const value& x) {
     if (x.is<rt_v>() || x.is<split_v>()) return x;
     value shape;
     if (x.is<int64_t>()) shape = value(int64_t(1));
@@ -225,12 +225,12 @@ inline value erase(const value& x) {
 }
 
 // Sample type of erased value (for operations on run-time).
-inline const value* shape_of(const value& x) {
+const value* shape_of(const value& x) {
     if (x.is<rt_v>()) return x.as<rt_v>().shape.get();
     return &x;
 }
 
-inline bool same_shape(const value& a, const value& b) {
+bool same_shape(const value& a, const value& b) {
     const value* x = shape_of(a);
     const value* y = shape_of(b);
     if (!x || !y) return x == y;
@@ -327,7 +327,7 @@ private:
     std::vector<std::string> names_;
 };
 
-inline std::string show(const value& x, const type_registry& types, const interner& strings) {
+std::string show(const value& x, const type_registry& types, const interner& strings) {
     return std::visit([&](const auto& a) -> std::string {
         using T = std::remove_cvref_t<decltype(a)>;
         if constexpr (std::is_same_v<T, unit_v>) return "()";

@@ -132,7 +132,7 @@ struct line_col {
     uint32_t col  = 1;
 };
 
-inline line_col locate(std::string_view text, uint32_t offset) {
+line_col locate(std::string_view text, uint32_t offset) {
     line_col lc;
     for (uint32_t i = 0; i < offset && i < text.size(); ++i) {
         if (text[i] == '\n') { ++lc.line; lc.col = 1; }
@@ -141,7 +141,7 @@ inline line_col locate(std::string_view text, uint32_t offset) {
     return lc;
 }
 
-inline std::string render(const diagnostic& d, std::string_view file, std::string_view text) {
+std::string render(const diagnostic& d, std::string_view file, std::string_view text) {
     auto lc  = locate(text, d.where().begin);
     auto out = std::format("{}:{}:{}: ошибка: {}\n", file, lc.line, lc.col, d.what());
     for (const auto& f : d.trace()) {

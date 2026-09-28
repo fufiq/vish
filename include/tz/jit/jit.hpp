@@ -26,23 +26,23 @@ namespace tz {
 // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4 };
-inline uint64_t jit_fault      = 0;
-inline uint64_t jit_fault_node = 0;
+uint64_t jit_fault      = 0;
+uint64_t jit_fault_node = 0;
 
 // Pointer to a dense array buffer of the desired layout; nullptr - layout is not the
 // same (deoptimization: the interpreter will perform).
 // want: 1 — i64, 2 — f64. Машинный код получает массив вызывающего (алиас).
-inline void* jit_array_data(array_v* a, uint64_t want) {
+void* jit_array_data(array_v* a, uint64_t want) {
     if (a->empty()) return reinterpret_cast<void*>(8); // Empty array: no access
     if (want == 1 && a->kind() == array_v::layout::ints) return a->ints_mut();
     if (want == 2 && a->kind() == array_v::layout::floats) return a->floats_mut();
     return nullptr;
 }
-inline uint64_t jit_array_size(array_v* a) { return a->size(); }
+uint64_t jit_array_size(array_v* a) { return a->size(); }
 
 enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, other };
 
-inline std::string_view jt_name(jt t) {
+std::string_view jt_name(jt t) {
     switch (t) {
     case jt::unit: return "unit";
     case jt::i64_: return "i64";
@@ -54,7 +54,7 @@ inline std::string_view jt_name(jt t) {
     }
 }
 
-inline jt jt_of(const value& v) {
+jt jt_of(const value& v) {
     const value* x = shape_of(v);
     if (!x || v.is<split_v>()) return jt::other;
     if (x->is<unit_v>()) return jt::unit;
@@ -71,7 +71,7 @@ inline jt jt_of(const value& v) {
 }
 
 // Sample erased value of type t (for static parsing instance).
-inline value jt_shape(jt t) {
+value jt_shape(jt t) {
     switch (t) {
     case jt::i64_: return erase(value(int64_t(1)));
     case jt::f64_: return erase(value(double(1)));
@@ -272,8 +272,7 @@ private:
 
     // Perform gen in the context of the caller (for the expr parameter): areas and
     // frames that appear after the embedding point are removed at this time.
-    template <class F>
-    auto in_context(uint32_t ctx, F&& f) {
+    auto in_context(uint32_t ctx, auto&& f) {
         const context& c = contexts_[ctx];
         std::vector<std::vector<std::pair<symbol, slot>>> scopes(std::make_move_iterator(scopes_.begin() + c.scopes),
                                                                  std::make_move_iterator(scopes_.end()));
@@ -892,8 +891,7 @@ private:
 
     jt gen(node_id n, const n_ct& c) { return gen_value(c.body); }
 
-    template <class other>
-    jt gen(node_id n, const other&) {
+    jt gen(node_id n, const auto&) {
         throw jit_unsupported{n, std::format("узел {}", kind_name(db_[n]))};
     }
 
@@ -919,7 +917,7 @@ private:
 
 // Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth
 // disassembling (parsing can calculate a lot with compile-time).
-inline std::optional<std::pair<node_id, std::string>> jit_prefilter(const ast_db& db, node_id module, node_id n) {
+std::optional<std::pair<node_id, std::string>> jit_prefilter(const ast_db& db, node_id module, node_id n) {
     if (!n) return std::nullopt;
     if (db.is<n_str>(n) || db.is<n_lambda>(n) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n))
         return std::pair{n, std::format("узел {}", kind_name(db[n]))};
@@ -936,7 +934,7 @@ inline std::optional<std::pair<node_id, std::string>> jit_prefilter(const ast_db
     return found;
 }
 
-inline void jit_engine::compile(node_id fn, jit_fn& out) {
+void jit_engine::compile(node_id fn, jit_fn& out) {
     out.deps[fn.value()]      = db_.node_revision(fn);
     out.deps[module_.value()] = db_.node_revision(module_);
     if (auto bad = jit_prefilter(db_, module_, db_.as<n_fn>(fn).body)) {
@@ -967,7 +965,7 @@ inline void jit_engine::compile(node_id fn, jit_fn& out) {
 }
 
 // Call instance by machine code from the interpreter (run mode).
-inline std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value>& vals, const node_list& args,
+std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value>& vals, const node_list& args,
                                                              const scope_ptr& env, const std::string& key) {
     // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
     // variable array possible: machine code receives an array of caller

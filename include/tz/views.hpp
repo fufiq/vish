@@ -16,7 +16,7 @@
 namespace tz {
 
 // Instruction: A block/module element or a cycle/branch body that is not a block.
-inline bool is_statement(const ast_db& db, node_id n) {
+bool is_statement(const ast_db& db, node_id n) {
     node_id p = db[n].parent;
     if (!p) return false;
     if (db.is<n_block>(p) || db.is<n_module>(p)) return true;

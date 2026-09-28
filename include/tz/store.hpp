@@ -12,9 +12,9 @@
 
 namespace tz {
 
-inline constexpr std::string_view tzdb_magic = "TZDB0001";
+constexpr std::string_view tzdb_magic = "TZDB0001";
 
-inline void save_db(const ast_db& db, node_id root, const std::string& path) {
+void save_db(const ast_db& db, node_id root, const std::string& path) {
     writer w;
     for (char c : tzdb_magic) w.put(c);
     w.put(root.value());
@@ -24,7 +24,7 @@ inline void save_db(const ast_db& db, node_id root, const std::string& path) {
     out << w.bytes();
 }
 
-inline std::vector<journal_entry> read_journal(const std::string& path, node_id& root) {
+std::vector<journal_entry> read_journal(const std::string& path, node_id& root) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw diagnostic(std::format("не могу открыть {}", path), {});
     std::stringstream ss;
@@ -39,14 +39,14 @@ inline std::vector<journal_entry> read_journal(const std::string& path, node_id&
     return entries;
 }
 
-inline node_id load_db(ast_db& db, const std::string& path) {
+node_id load_db(ast_db& db, const std::string& path) {
     node_id root;
     db.replay(read_journal(path, root));
     return root;
 }
 
 // journal in text.
-inline std::string describe_journal(const std::vector<journal_entry>& entries) {
+std::string describe_journal(const std::vector<journal_entry>& entries) {
     std::string out;
     for (const auto& e : entries) {
         out += std::format("r{:<5} ", e.revision);
