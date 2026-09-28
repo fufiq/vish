@@ -538,9 +538,20 @@ struct interpreter {
     std::deque<fiber_rec *> readers, writers;
     value shape; // parsing: type of elements
     bool typed = false;
-    int fd = -1; // Socket host (M3b): stream of bytes; listener
-    bool listener = false;
-    bool eof = false;
+    // host (M3b): network - event stream, connections - peers; file - stream of pieces
+    struct peer {
+      int fd = -1;
+      bool open = true;
+      std::deque<std::string> out; // outgoing: held until completion of the application
+      std::size_t sent = 0;
+      bool sending = false;
+    };
+    bool net = false, connected = false, file_write = false, io_busy = false;
+    int listen_fd = -1, file_fd = -1;
+    std::vector<peer> peers;
+    sockaddr_in addr{};
+    uint64_t offset = 0;
+    std::string io_buf;
   };
   struct proc_meta_rec {
     interpreter * vm = nullptr;
@@ -2164,8 +2175,8 @@ struct interpreter {
       while(!r.ready.empty() && r.ready.front()->state != fiber_rec::ready) r.ready.pop_front();
     };
     drop_stale();
-    while(r.ready.empty() && r.fd_waiters > 0 && me.state != fiber_rec::ready) { // Everyone is waiting for host: sleep on epoll
-      for(uint32_t k: r.poll.wait()) wake(r.fd_wait[k]);
+    while(r.ready.empty() && r.io_pending > 0 && me.state != fiber_rec::ready) { // We are all waiting for host: sleep in io_uring
+      for(auto const & c: r.ring->wait()) io_complete(c);
       drop_stale();
     }
     if(r.ready.empty()) {
@@ -2341,6 +2352,169 @@ struct interpreter {
     return value(m.error);
   }
 
+  // --- host : io_uring (M3b) ---
+  //
+  //
+// 
+// 
+// 
+// The net.
+  // one event stream{peer, kind, data} per process listener; sending - send(net, peer,
+  // data) without waiting; files are streams of pieces. Applications - io uring, the
+  // scheduler waits for completions when there are no ready-made filters.
+
+  enum io_op : uint64_t { op_accept = 1,
+    op_recv,
+    op_send,
+    op_connect,
+    op_fread,
+    op_fwrite };
+  static uint64_t io_tag(io_op op, std::size_t stream, std::size_t peer) { return (uint64_t(op) << 56) | (uint64_t(stream) << 24) | uint64_t(peer); }
+
+  os::uring & io() {
+    auto & r = *root;
+    if(!r.ring) r.ring.emplace();
+    if(!r.ring->ok) fail_rt("io_error", "io_uring недоступен в этой системе", {});
+    return *r.ring;
+  }
+
+  value make_event(int64_t peer, std::string_view kind, std::string data) {
+    return value(agg_v{types.named("event"), {{sym("peer"), value(peer)}, {sym("kind"), value(std::string(kind))}, {sym("data"), value(std::move(data))}}});
+  }
+
+  void deliver(stream_rec & s, value v) {
+    s.buf.push_back(std::move(v));
+    if(!s.readers.empty()) {
+      wake(s.readers.front());
+      s.readers.pop_front();
+    }
+  }
+
+  void peer_closed(stream_rec & s, std::size_t p, std::string why = {}) {
+    auto & pr = s.peers[p];
+    if(!pr.open) return;
+    pr.open = false;
+    if(pr.fd >= 0) {
+      ::close(pr.fd);
+      pr.fd = -1;
+    }
+    if(!s.closed) deliver(s, make_event(int64_t(p), "close", std::move(why)));
+  }
+
+  void send_next(std::size_t sid, std::size_t p) {
+    auto & pr = root->streams[sid].peers[p];
+    if(pr.sending || pr.out.empty() || pr.fd < 0) return;
+    pr.sending = true;
+    ++root->io_pending;
+    io().send(pr.fd, pr.out.front().data() + pr.sent, pr.out.front().size() - pr.sent, io_tag(op_send, sid, p));
+  }
+
+  void arm_recv(std::size_t sid, std::size_t p) {
+    auto & pr = root->streams[sid].peers[p];
+    if(pr.fd < 0) return;
+    ++root->io_pending;
+    io().recv_all(pr.fd, io_tag(op_recv, sid, p));
+  }
+
+  // The completion of the kernel application is an event in the stream, the awakening of those waiting.
+  void io_complete(os::uring::completion const & c) {
+    if(!c.tag) return; // cancellation
+    auto op = io_op(c.tag >> 56);
+    std::size_t sid = (c.tag >> 24) & 0xFFFFFFFF, p = c.tag & 0xFFFFFF;
+    bool more = c.flags & IORING_CQE_F_MORE;
+    if(!more) --root->io_pending;
+    stream_rec & s = root->streams[sid];
+    switch(op) {
+      case op_accept:
+        if(c.res >= 0 && !s.closed) {
+          s.peers.push_back({c.res});
+          deliver(s, make_event(int64_t(s.peers.size() - 1), "open", {}));
+          arm_recv(sid, s.peers.size() - 1);
+        } else if(c.res >= 0) ::close(c.res);
+        if(!more && !s.closed && s.listen_fd >= 0) {
+          ++root->io_pending;
+          io().accept_all(s.listen_fd, io_tag(op_accept, sid, 0));
+        }
+        break;
+      case op_recv: {
+        auto & pr = s.peers[p];
+        if(c.res > 0) {
+          unsigned bid = c.flags >> IORING_CQE_BUFFER_SHIFT;
+          std::string data(root->ring->buffer(bid), std::size_t(c.res));
+          root->ring->give_back(bid);
+          if(pr.open && !s.closed) deliver(s, make_event(int64_t(p), "data", std::move(data)));
+          if(!more && pr.open) arm_recv(sid, p);
+        } else if(c.res == -ENOBUFS) {
+          if(!more && pr.open) arm_recv(sid, p);
+        } else if(!more) peer_closed(s, p, c.res < 0 ? std::string(std::strerror(-c.res)) : std::string());
+        break;
+      }
+      case op_send: {
+        auto & pr = s.peers[p];
+        pr.sending = false;
+        if(c.res < 0) {
+          peer_closed(s, p, std::strerror(-c.res));
+          break;
+        }
+        pr.sent += std::size_t(c.res);
+        if(pr.sent >= pr.out.front().size()) {
+          pr.out.pop_front();
+          pr.sent = 0;
+        }
+        send_next(sid, p);
+        break;
+      }
+      case op_connect:
+        if(c.res < 0) {
+          s.peers[0].open = false;
+          ::close(s.peers[0].fd);
+          s.peers[0].fd = -1;
+          deliver(s, make_event(0, "close", std::strerror(-c.res)));
+          break;
+        }
+        s.connected = true;
+        deliver(s, make_event(0, "open", {}));
+        arm_recv(sid, 0);
+        send_next(sid, 0);
+        break;
+      case op_fread:
+        s.io_busy = false;
+        if(c.res > 0) {
+          s.offset += uint64_t(c.res);
+          deliver(s, value(std::string(s.io_buf.data(), std::size_t(c.res))));
+        } else {
+          s.closed = true; // end of file (or reading error)
+          for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
+        }
+        break;
+      case op_fwrite:
+        s.io_busy = false;
+        if(c.res > 0) {
+          s.offset += uint64_t(c.res);
+          s.peers[0].sent += std::size_t(c.res);
+          if(s.peers[0].sent >= s.peers[0].out.front().size()) {
+            s.peers[0].out.pop_front();
+            s.peers[0].sent = 0;
+          }
+        } else if(!s.peers[0].out.empty()) s.peers[0].out.clear(); // record
+        file_write_next(sid);
+        break;
+    }
+  }
+
+  void file_write_next(std::size_t sid) {
+    stream_rec & s = root->streams[sid];
+    auto & q = s.peers[0];
+    if(s.io_busy || q.out.empty()) {
+      if(q.out.empty())
+        for(fiber_rec * w: std::exchange(s.writers, {})) wake(w);
+      return;
+    }
+    s.io_busy = true;
+    ++root->io_pending;
+    io().write(s.file_fd, q.out.front().data() + q.sent, q.out.front().size() - q.sent, s.offset, io_tag(op_fwrite, sid, 0));
+  }
+
   uint32_t stream_id(value const & s, span where) {
     value const * v = shape_of(s);
     if(!v || !v->is<agg_v>() || types.name(v->as<agg_v>().type) != "stream" || v->as<agg_v>().fields.empty()) fail("ожидался поток", where);
@@ -2349,127 +2523,119 @@ struct interpreter {
     return uint32_t(id.as<int64_t>());
   }
 
-  void wait_fd(int fd, bool write) {
-    interpreter & r = *root;
-    uint32_t k = uint32_t(r.fd_wait.size());
-    for(uint32_t i = 0; i < r.fd_wait.size(); ++i)
-      if(!r.fd_wait[i]) k = i;
-    if(k == r.fd_wait.size()) r.fd_wait.push_back(nullptr);
-    r.fd_wait[k] = &running();
-    r.poll.wait_for(fd, write, k);
-    ++r.fd_waiters;
-    struct dec {
-      interpreter & r;
-      uint32_t k;
-      ~dec() {
-        --r.fd_waiters;
-        r.fd_wait[k] = nullptr;
-      }
-    } d{r, k};
-    park();
-  }
+  value stream_value(std::size_t id) { return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(id))}}}); }
 
-  value new_stream(int fd, bool listener) {
+  // Network and file operations (net *, file *): in parsing, only types.
+  value io_op_call(std::string_view n, std::vector<value> & a, span where) {
     auto & ss = root->streams;
-    ss.emplace_back();
-    ss.back().fd = fd;
-    ss.back().listener = listener;
     if(checking()) {
-      ss.back().shape = erase(value(std::string("x")));
-      ss.back().typed = true;
-    }
-    return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(ss.size() - 1))}}});
-  }
-
-  // Socket: more is data (or wait); zero bytes is the end.
-  bool socket_more(stream_rec & s, span where) {
-    while(s.buf.empty() && !s.eof) {
-      char chunk[65536];
-      auto n = ::read(s.fd, chunk, sizeof chunk);
-      if(n > 0) s.buf.push_back(value(std::string(chunk, std::size_t(n))));
-      else if(n == 0) s.eof = true;
-      else if(errno == EAGAIN || errno == EWOULDBLOCK) wait_fd(s.fd, false);
-      else fail_rt("io_error", cat("чтение сокета: ", std::strerror(errno)), where);
-    }
-    return !s.buf.empty();
-  }
-
-  value socket_op(std::string_view n, stream_rec & s, std::vector<value> & a, span where) {
-    if(n == "stream_accept") {
-      if(!s.listener) fail("accept: ожидался слушающий поток", where);
-      for(;;) {
-        int c = ::accept4(s.fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if(c >= 0) return new_stream(c, false);
-        if(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) wait_fd(s.fd, false);
-        else fail_rt("io_error", cat("accept: ", std::strerror(errno)), where);
+      rt_effect();
+      rt_check("io_error", where);
+      if(n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create") {
+        ss.emplace_back();
+        ss.back().typed = true;
+        ss.back().shape = n.starts_with("net_") ? erase(make_event(0, "x", "x")) : erase(value(std::string("x")));
+        return stream_value(ss.size() - 1);
       }
+      if(n == "net_port") return erase(value(int64_t(1)));
+      return value();
     }
-    if(n == "stream_port") return value(int64_t(os::bound_port(s.fd)));
-    if(n == "stream_write") {
-      if(!a[1].is<std::string>()) fail(cat("запись в сокет: ожидались байты (str), получено ", types.describe(a[1])), where);
-      std::string_view rest = a[1].as<std::string>();
-      while(!rest.empty()) {
-        auto k = ::write(s.fd, rest.data(), rest.size());
-        if(k > 0) rest.remove_prefix(std::size_t(k));
-        else if(k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) wait_fd(s.fd, true);
-        else fail_rt("closed_stream", cat("запись в сокет: ", std::strerror(errno)), where);
+    if(n == "net_listen") {
+      if(a.size() != 1 || !a[0].is<int64_t>()) fail("listen(порт)", where);
+      int fd = os::listen_tcp(int(a[0].as<int64_t>()));
+      if(fd < 0) fail_rt("io_error", cat("listen: ", std::strerror(errno)), where);
+      ss.emplace_back();
+      ss.back().listen_fd = fd;
+      ss.back().net = true;
+      ++root->io_pending;
+      io().accept_all(fd, io_tag(op_accept, ss.size() - 1, 0));
+      return stream_value(ss.size() - 1);
+    }
+    if(n == "net_connect") {
+      if(a.size() != 2 || !a[0].is<std::string>() || !a[1].is<int64_t>()) fail("connect(адрес, порт)", where);
+      ss.emplace_back();
+      stream_rec & s = ss.back();
+      s.net = true;
+      if(!os::ipv4(a[0].as<std::string>(), int(a[1].as<int64_t>()), s.addr)) fail_rt("io_error", "connect: неверный адрес", where);
+      int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+      if(fd < 0) fail_rt("io_error", cat("connect: ", std::strerror(errno)), where);
+      s.peers.push_back({fd});
+      ++root->io_pending;
+      io().connect(fd, &s.addr, io_tag(op_connect, ss.size() - 1, 0));
+      return stream_value(ss.size() - 1);
+    }
+    if(n == "file_open" || n == "file_create") {
+      if(a.size() != 1 || !a[0].is<std::string>()) fail(cat(n == "file_open" ? "open" : "create", "(путь)"), where);
+      int fd = n == "file_open" ? ::open(a[0].as<std::string>().c_str(), O_RDONLY | O_CLOEXEC)
+                                : ::open(a[0].as<std::string>().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+      if(fd < 0) fail_rt("io_error", cat(a[0].as<std::string>(), ": ", std::strerror(errno)), where);
+      ss.emplace_back();
+      ss.back().file_fd = fd;
+      ss.back().file_write = n == "file_create";
+      ss.back().peers.push_back({});
+      return stream_value(ss.size() - 1);
+    }
+    std::size_t sid = stream_id(a[0], where);
+    stream_rec & s = ss[sid];
+    if(n == "net_port") return value(int64_t(s.listen_fd >= 0 ? os::bound_port(s.listen_fd) : 0));
+    if(n == "net_send") { // In the outgoing stream: does not wait (the core will send)
+      if(a.size() != 3 || !a[1].is<int64_t>() || !a[2].is<std::string>()) fail("send(сеть, peer, байты)", where);
+      auto p = std::size_t(a[1].as<int64_t>());
+      if(!s.net || p >= s.peers.size()) fail_rt("io_error", cat("send: нет соединения ", p), where);
+      if(!s.peers[p].open) return value(false);
+      s.peers[p].out.push_back(std::move(a[2].as<std::string>()));
+      if(s.connected || s.listen_fd >= 0) send_next(sid, p);
+      return value(true);
+    }
+    if(n == "net_drop") {
+      auto p = std::size_t(a[1].as<int64_t>());
+      if(p < s.peers.size() && s.peers[p].fd >= 0) {
+        io().cancel_fd(s.peers[p].fd);
+        s.peers[p].open = false;
+        ::close(s.peers[p].fd);
+        s.peers[p].fd = -1;
       }
       return value();
     }
-    if(n == "stream_more") return value(socket_more(s, where));
-    if(n == "stream_read") {
-      if(!socket_more(s, where)) fail_rt("closed_stream", "чтение из закрытого сокета", where);
-      value v = std::move(s.buf.front());
-      s.buf.pop_front();
-      return v;
-    }
-    if(n == "stream_close") {
-      if(s.fd >= 0) {
-        root->poll.forget(s.fd);
-        ::close(s.fd);
-        s.fd = -1;
+    fail(cat("неизвестная операция ", n), where);
+  }
+
+  // Flow host: Closing cancels orders; file adds queue.
+  void close_host(std::size_t sid) {
+    stream_rec & s = root->streams[sid];
+    if(s.file_fd >= 0 && s.file_write) {
+      while(!s.peers[0].out.empty()) {
+        s.writers.push_back(&running());
+        park();
       }
-      s.eof = true;
-      return value();
     }
-    fail(cat("операция ", n, " не для сокета"), where);
+    if(s.listen_fd >= 0) {
+      io().cancel_fd(s.listen_fd);
+      ::close(s.listen_fd);
+      s.listen_fd = -1;
+    }
+    for(auto & pr: s.peers)
+      if(pr.fd >= 0) {
+        io().cancel_fd(pr.fd);
+        ::close(pr.fd);
+        pr.fd = -1;
+        pr.open = false;
+      }
+    if(s.file_fd >= 0) {
+      ::close(s.file_fd);
+      s.file_fd = -1;
+    }
   }
 
   value stream_op(std::string_view n, std::vector<value> & a, span where) {
-    if(n == "stream_listen" || n == "stream_connect") {
-      if(checking()) {
-        rt_effect();
-        rt_check("io_error", where);
-        return new_stream(-1, n == "stream_listen");
-      }
-      if(n == "stream_listen") {
-        if(a.size() != 1 || !a[0].is<int64_t>()) fail("listen(порт)", where);
-        int fd = os::listen_tcp(int(a[0].as<int64_t>()));
-        if(fd < 0) fail_rt("io_error", cat("listen: ", std::strerror(errno)), where);
-        return new_stream(fd, true);
-      }
-      if(a.size() != 2 || !a[0].is<std::string>() || !a[1].is<int64_t>()) fail("connect(адрес, порт)", where);
-      int fd = os::connect_tcp(a[0].as<std::string>(), int(a[1].as<int64_t>()));
-      if(fd < 0) fail_rt("io_error", cat("connect: ", std::strerror(errno)), where);
-      wait_fd(fd, true);
-      if(int e = os::socket_error(fd)) {
-        ::close(fd);
-        fail_rt("io_error", cat("connect: ", std::strerror(e)), where);
-      }
-      return new_stream(fd, false);
-    }
     if(n == "stream_new") {
       auto & ss = root->streams;
       ss.emplace_back();
       if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) ss.back().cap = std::size_t(a[0].as<int64_t>());
-      return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(ss.size() - 1))}}});
+      return stream_value(ss.size() - 1);
     }
-    stream_rec & s = root->streams[stream_id(a[0], where)];
-    if(checking() && (n == "stream_accept" || n == "stream_port")) {
-      rt_effect();
-      return n == "stream_accept" ? new_stream(-1, false) : erase(value(int64_t(1)));
-    }
-    if(!checking() && (s.fd >= 0 || s.listener || n == "stream_accept" || n == "stream_port")) return socket_op(n, s, a, where);
+    std::size_t sid = stream_id(a[0], where);
+    stream_rec & s = root->streams[sid];
     if(checking()) { // parsing: type only; flow operation - runtime effect
       rt_effect();
       if(n == "stream_write") {
@@ -2488,6 +2654,14 @@ struct interpreter {
     }
     fiber_rec * me = &running();
     if(n == "stream_write") {
+      if(s.net) fail("в сеть — send(сеть, peer, байты)", where);
+      if(s.file_fd >= 0) {
+        if(!s.file_write) fail("файл открыт на чтение", where);
+        if(!a[1].is<std::string>()) fail(cat("в файл — байты (str), получено ", types.describe(a[1])), where);
+        s.peers[0].out.push_back(std::move(a[1].as<std::string>()));
+        file_write_next(sid);
+        return value();
+      }
       if(!transferable(a[1])) fail(cat("в поток — только данные: ", types.describe(a[1])), where);
       while(s.buf.size() >= s.cap && !s.closed) {
         s.writers.push_back(me);
@@ -2503,6 +2677,12 @@ struct interpreter {
     }
     if(n == "stream_read" || n == "stream_more") {
       while(s.buf.empty() && !s.closed) {
+        if(s.file_fd >= 0 && !s.file_write && !s.io_busy) { // File: The next piece is the application
+          s.io_busy = true;
+          s.io_buf.resize(65536);
+          ++root->io_pending;
+          io().read(s.file_fd, s.io_buf.data(), s.io_buf.size(), s.offset, io_tag(op_fread, sid, 0));
+        }
         s.readers.push_back(me);
         park();
       }
@@ -2517,6 +2697,7 @@ struct interpreter {
       return v;
     }
     if(n == "stream_close") {
+      close_host(sid);
       s.closed = true;
       for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
       for(fiber_rec * w: std::exchange(s.writers, {})) wake(w);
@@ -3496,6 +3677,7 @@ struct interpreter {
       return erase(value(true));
     }
     if(n.starts_with("stream_")) return stream_op(n, a, where);
+    if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
     if(n == "text" && a.size() == 1) // text of value (bytes): number - decimal record
       return a[0].known() ? value(a[0].is<std::string>() ? a[0].as<std::string>() : show_v(a[0])) : erase(value(std::string("x")));
@@ -3668,9 +3850,8 @@ struct interpreter {
   std::deque<fiber_rec *> ready;
   std::vector<fiber_rec *> joiners;
   std::deque<stream_rec> streams;
-  os::poller poll; // expectation of host descriptors
-  uint32_t fd_waiters = 0;
-  std::vector<fiber_rec *> fd_wait; // epoll key: fiber
+  std::optional<os::uring> ring; // io_uring host (as required)
+  uint32_t io_pending = 0; // nucleus
   std::deque<interpreter> procs;
   std::deque<proc_meta_rec> proc_meta;
   void const * host_bottom = nullptr;

@@ -92,11 +92,21 @@ for(stream s, expr body) {
   }
 }
 
-// Сеть (M3b): сокет — тот же поток байтов (str); ожидание готовности — у VM.
-listen(i64 p) => stream_listen(p);
-port(stream l) => stream_port(l);
-accept(stream l) => stream_accept(l);
-connect(str host, i64 p) => stream_connect(host, p);
+// Сеть (M3b):
+// listen — один поток событий по всем
+// соединениям: event{peer, kind: "open" | "data" | "close", data}; send — в
+// исходящий поток, без ожидания; connect — такой же поток для одного peer (0).
+struct event { i64 peer; str kind; str data; }
+listen(i64 p) => net_listen(p);
+connect(str host, i64 p) => net_connect(host, p);
+port(stream n) => net_port(n);
+send(stream n, i64 peer, str data) => net_send(n, peer, data);
+send(stream n, str data) => net_send(n, 0, data);
+drop(stream n, i64 peer) => net_drop(n, peer);
+
+// Файлы: open — поток кусков (чтение заявками io_uring), create — запись.
+open(str path) => file_open(path);
+create(str path) => file_create(path);
 
 // Процессы VM (M3c): process(f, аргументы…) — изолированный процесс, между
 // процессами — только данные перемещением. wait — дождаться; false — процесс

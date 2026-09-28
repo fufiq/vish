@@ -1,0 +1,15 @@
+// out: записано 3 строки
+// out: прочитано 45 байт: строка 0|строка 1|строка 2|
+// Файлы (M3b): create/open — потоки; запись и чтение — заявки io_uring,
+// файбер ждёт только завершения своей заявки.
+main() {
+  f = create("out/io_test.txt");
+  for(i : range(3)) write(f, "строка " + text(i) + "|");
+  close(f);
+  print("записано 3 строки");
+  g = open("out/io_test.txt");
+  all = "";
+  for(chunk : g) all = all + chunk;
+  close(g);
+  print("прочитано " + text(all.size) + " байт: " + all);
+}

@@ -13,7 +13,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/epoll.h>
+#include <liburing.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -104,13 +104,15 @@ line_reader & host_stdin() {
   return r;
 }
 
-// --- host (M3b): non-blocking sockets and epoll ---
+// --- host I/O via io_uring (M3b) ---
 //
-// The program sees only the blocker read/write streams; the expectation of readiness is
-// here at the VM scheduler.
+// The kernel delivers events and data in a stream, rather than through blocking sockets:
+// 
+// 
+// 
+// Multishot accept and recv with a ring of kernel buffers (as in): one
+// application - as many events as you want. The socket program doesn't see.
 //
-
-void nonblocking(int fd) { ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
 
 // Listener socket at 127.0.0.1:port (0 - choose free); -1 - error.
 int listen_tcp(int port) {
@@ -122,11 +124,10 @@ int listen_tcp(int port) {
   a.sin_family = AF_INET;
   a.sin_port = htons(uint16_t(port));
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if(::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 || ::listen(fd, 128) != 0) {
+  if(::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 || ::listen(fd, 512) != 0) {
     ::close(fd);
     return -1;
   }
-  nonblocking(fd);
   return fd;
 }
 
@@ -137,56 +138,125 @@ int bound_port(int fd) {
   return ntohs(a.sin_port);
 }
 
-// Begin connection (non-blocking); readiness - on record.
-int connect_tcp(std::string const & host, int port) {
-  int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if(fd < 0) return -1;
-  nonblocking(fd);
-  sockaddr_in a{};
+bool ipv4(std::string const & host, int port, sockaddr_in & a) {
+  a = {};
   a.sin_family = AF_INET;
   a.sin_port = htons(uint16_t(port));
-  if(::inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) {
-    ::close(fd);
-    return -1;
-  }
-  if(::connect(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 && errno != EINPROGRESS) {
-    ::close(fd);
-    return -1;
-  }
-  return fd;
+  return ::inet_pton(AF_INET, host.c_str(), &a.sin_addr) == 1;
 }
 
-int socket_error(int fd) {
-  int e = 0;
-  socklen_t n = sizeof e;
-  ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &n);
-  return e;
-}
+// The io_uring ring and the common ring of reception buffers (Group 0).
+struct uring {
+  static constexpr unsigned buf_count = 256, buf_size = 16384;
+  io_uring ring{};
+  io_uring_buf_ring * bufs = nullptr;
+  std::vector<char> backing;
+  bool ok = false;
 
-// Waiting for descriptors: the key is the waiting fiber number.
-struct poller {
-  int ep = ::epoll_create1(EPOLL_CLOEXEC);
-  ~poller() {
-    if(ep >= 0) ::close(ep);
+  uring() {
+    if(io_uring_queue_init(512, &ring, 0) < 0) return;
+    ok = true;
   }
-  void wait_for(int fd, bool write, uint32_t key) {
-    epoll_event ev{};
-    ev.events = (write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT | EPOLLRDHUP;
-    ev.data.u32 = key;
-    if(::epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) != 0) ::epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
+  ~uring() {
+    if(bufs) io_uring_free_buf_ring(&ring, bufs, buf_count, 0);
+    if(ok) io_uring_queue_exit(&ring);
   }
-  void forget(int fd) { ::epoll_ctl(ep, EPOLL_CTL_DEL, fd, nullptr); }
-  std::vector<uint32_t> wait() {
-    epoll_event evs[64];
-    int n;
-    do n = ::epoll_wait(ep, evs, 64, -1);
-    while(n < 0 && errno == EINTR);
-    std::vector<uint32_t> out;
-    for(int i = 0; i < n; ++i) out.push_back(evs[i].data.u32);
+
+  // Reception buffers - as needed (not every program needs a network).
+  void ensure_bufs() {
+    if(bufs || !ok) return;
+    int err = 0;
+    bufs = io_uring_setup_buf_ring(&ring, buf_count, 0, 0, &err);
+    if(!bufs) throw diagnostic(cat("io_uring: кольцо буферов: ", std::strerror(-err)), {});
+    backing.resize(std::size_t(buf_count) * buf_size);
+    for(unsigned i = 0; i < buf_count; ++i) io_uring_buf_ring_add(bufs, backing.data() + std::size_t(i) * buf_size, buf_size, uint16_t(i), io_uring_buf_ring_mask(buf_count), int(i));
+    io_uring_buf_ring_advance(bufs, int(buf_count));
+  }
+
+  char const * buffer(unsigned id) const { return backing.data() + std::size_t(id) * buf_size; }
+  void give_back(unsigned id) {
+    io_uring_buf_ring_add(bufs, backing.data() + std::size_t(id) * buf_size, buf_size, uint16_t(id), io_uring_buf_ring_mask(buf_count), 0);
+    io_uring_buf_ring_advance(bufs, 1);
+  }
+
+  io_uring_sqe * sqe() {
+    io_uring_sqe * s = io_uring_get_sqe(&ring);
+    if(!s) {
+      io_uring_submit(&ring);
+      s = io_uring_get_sqe(&ring);
+    }
+    if(!s) throw diagnostic("io_uring: очередь заявок полна", {});
+    return s;
+  }
+
+  void accept_all(int fd, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_multishot_accept(s, fd, nullptr, nullptr, SOCK_CLOEXEC);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  void recv_all(int fd, uint64_t tag) {
+    ensure_bufs();
+    io_uring_sqe * s = sqe();
+    io_uring_prep_recv_multishot(s, fd, nullptr, 0, 0);
+    s->flags |= IOSQE_BUFFER_SELECT;
+    s->buf_group = 0;
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  void send(int fd, char const * p, std::size_t n, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_send(s, fd, p, n, MSG_NOSIGNAL);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  void connect(int fd, sockaddr_in const * a, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_connect(s, fd, reinterpret_cast<sockaddr const *>(a), sizeof *a);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  void read(int fd, char * p, std::size_t n, uint64_t off, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_read(s, fd, p, unsigned(n), off);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  void write(int fd, char const * p, std::size_t n, uint64_t off, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_write(s, fd, p, unsigned(n), off);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  void cancel_fd(int fd) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_cancel_fd(s, fd, IORING_ASYNC_CANCEL_ALL);
+    io_uring_sqe_set_data64(s, 0);
+    io_uring_submit(&ring);
+  }
+
+  struct completion {
+    uint64_t tag;
+    int res;
+    unsigned flags;
+  };
+  // Wait for at least one finish and pick up all the finished ones.
+  std::vector<completion> wait() {
+    std::vector<completion> out;
+    io_uring_cqe * c = nullptr;
+    int r;
+    do r = io_uring_wait_cqe(&ring, &c);
+    while(r == -EINTR);
+    if(r < 0) return out;
+    unsigned head, n = 0;
+    io_uring_for_each_cqe(&ring, head, c) {
+      out.push_back({io_uring_cqe_get_data64(c), c->res, c->flags});
+      ++n;
+    }
+    io_uring_cq_advance(&ring, n);
     return out;
   }
 };
-
 } // namespace tz::os
 
 namespace tz {
