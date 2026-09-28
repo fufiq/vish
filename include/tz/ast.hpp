@@ -36,6 +36,7 @@ struct n_fn {
   bool outline = false;
   bool expr_body = false;
   node_list attrs; // [[…]] - values calculated during compilation (§7.4)
+  bool scoped = false; // Using Operator - Redefinition in Context (§8.2)
 };
 struct n_param {
   symbol name;

@@ -840,6 +840,10 @@ struct interpreter {
   }
 
   flow eval_node(node_id n, n_fn const & f, scope * env, uint32_t) {
+    if(f.scoped) { // using operator ... - to the end of the frame of the function-context, for all executable
+      overrides.push_back({f.name, n, frames.empty() ? symbol{} : frames.back().name});
+      return ok();
+    }
     capture(env);
     env->declare(f.name, value(fn_v{{}, n, env})); // local function = lambda with a name
     return ok();
@@ -1945,6 +1949,34 @@ struct interpreter {
       TZ_TRY(x, eval(o.args[0], env, frame));
       return ok(lift(x, [&](value const & a) { return unary(op, a, where); }));
     }
+    // redefinition of context (checked { … }): the nearest, whose parameters assume types
+    if(!overrides.empty() && override_depth == 0 && o.args.size() == 2 && op != "&&" && op != "||" && !(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=")) {
+      symbol f = operator_entity(o);
+      if(std::ranges::any_of(overrides, [&](override_rec const & r) { return r.entity == f; })) {
+        std::vector<value> vals;
+        for(node_id a: o.args) {
+          TZ_TRY(v, eval(a, env, frame));
+          vals.push_back(std::move(v));
+        }
+        for(auto it = overrides.rbegin(); it != overrides.rend(); ++it) {
+          if(it->entity != f) continue;
+          auto const & ps = db.as<n_fn>(it->fn).params;
+          bool fits = true;
+          for(std::size_t k = 0; k < ps.size() && fits; ++k) {
+            auto const & p = db.as<n_param>(ps[k]);
+            if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != types.describe(vals[k])) fits = false;
+          }
+          if(!fits) continue;
+          ++override_depth; // Redefinition Body - Normal Operations
+          struct depth_hold {
+            uint32_t & d;
+            ~depth_hold() { --d; }
+          } dh{override_depth};
+          return dispatch_split({it->fn}, vals, 0, o.args, env, frame, {where, std::string(str(f)), n.value, frame});
+        }
+        return ok(binary(op, vals[0], vals[1], where));
+      }
+    }
     if(op == "&&" || op == "||") {
       TZ_TRY(a, eval(o.args[0], env, frame));
       auto av = known_bool(a, db[o.args[0]].where);
@@ -2210,6 +2242,11 @@ struct interpreter {
   flow run_frame(node_id body, scope * inner, symbol name, bool outline, uint32_t caller = 0) {
     uint32_t me = ++frame_counter;
     frames.push_back({me, name, outline, false, caller});
+    struct overrides_hold { // The redefinition of context lives to the end of his frame
+      std::vector<override_rec> & v;
+      std::size_t n;
+      ~overrides_hold() { v.resize(n); }
+    } ov{overrides, overrides.size()};
     flow r = eval(body, inner, me);
     bool effect = frames.back().rt_effect;
     frames.pop_back();
@@ -2405,6 +2442,12 @@ struct interpreter {
       }
     }
     key += ")";
+    if(!overrides.empty()) { // instance is specialized in context:
+      std::vector<std::string> ctxs;
+      for(auto const & o: overrides)
+        if(std::ranges::find(ctxs, std::string(str(o.context))) == ctxs.end()) ctxs.push_back(std::string(str(o.context)));
+      for(auto const & c: ctxs) key += cat("[", c, "]");
+    }
 
     // Recursion in static parsing. According to known values, the usual execution:
     // “recursion stops the condition”; the activity key includes CT values. By mouth
@@ -2453,7 +2496,7 @@ struct interpreter {
     }
     if(checking() && !deps.empty()) deps.back()[f.value] = db.node_revision(f);
 
-    if(jit && !checking()) { // JIT: machine code instance, if any
+    if(jit && !checking() && overrides.empty()) { // JIT: machine code instance, if any (in context, as long as the interpreter)
       if(auto r = try_jit(f, vals, args, env, key)) return *r;
     }
 
@@ -2767,6 +2810,21 @@ struct interpreter {
     for(auto [name, op]: prim2)
       if(n == name && a.size() == 2) return binary(op, a[0], a[1], where);
     if((n == "neg" || n == "not") && a.size() == 1) return unary(n == "neg" ? "-" : "!", a[0], where);
+    // overflow check arithmetic (context checked, §8.2)
+    if((n == "add_checked" || n == "sub_checked" || n == "mul_checked") && a.size() == 2) {
+      std::string_view op = n == "add_checked" ? "+" : n == "sub_checked" ? "-"
+                                                                          : "*";
+      if(a[0].is<int64_t>() && a[1].is<int64_t>()) {
+        int64_t r;
+        int64_t x = a[0].as<int64_t>(), y = a[1].as<int64_t>();
+        bool bad = op == "+" ? __builtin_add_overflow(x, y, &r) : op == "-" ? __builtin_sub_overflow(x, y, &r)
+                                                                            : __builtin_mul_overflow(x, y, &r);
+        if(bad) fail_rt("overflow", cat("переполнение i64: ", x, " ", op, " ", y), where);
+        return value(r);
+      }
+      if(checking() && types.describe(a[0]) == "i64" && types.describe(a[1]) == "i64") record_throw(vm_error_shape("overflow")); // run-time - may throw
+      return binary(op, a[0], a[1], where);
+    }
     if((n == "and" || n == "or") && a.size() == 2) {
       auto x = known_bool(a[0], where), y = known_bool(a[1], where);
       if(x && y) return value(n == "and" ? *x && *y : *x || *y);
@@ -2935,6 +2993,15 @@ struct interpreter {
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
   symbol sym_intercept, sym_is_index, sym_append; // kernel forms analyzed prior to the calculation of arguments
+  // Redefinition of context operations (§8.2):
+//.
+  struct override_rec {
+    symbol entity; // infix+
+    node_id fn; // using operator …
+    symbol context; // function-context (checked)
+  };
+  std::vector<override_rec> overrides;
+  uint32_t override_depth = 0;
   uint64_t array_gen = 0; // generation of array buffers (performance)
   std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
   std::unordered_map<uint64_t, symbol> op_entities;

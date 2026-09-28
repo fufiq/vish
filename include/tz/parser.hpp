@@ -491,6 +491,10 @@ struct parser {
       advance();
       return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
     }
+    if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
+      advance();
+      return operator_decl({}, true);
+    }
     if(is_word("hide") && ahead(1).kind == tok::ident) {
       advance();
       symbol name = ident();
@@ -601,11 +605,12 @@ struct parser {
   // operator -(a) ... | operator (a) + (b) ... | operator (a)++ ... - the ad repeats the
   // entry: the parameter is on the side of its branch (
 // ). entity is a function of infix+/prefix-/postfix++.
-  node_id operator_decl(node_list attrs) {
+  node_id operator_decl(node_list attrs, bool scoped = false) {
     uint32_t start = here().where.begin;
     advance();
     n_fn f;
     f.attrs = std::move(attrs);
+    f.scoped = scoped;
     std::string role, sym;
     if(is_open('(')) {
       f.params = param_list();

@@ -1,0 +1,24 @@
+// args: 3
+// out: 12 9
+// out: overflow
+// out: 9223372036854775807 1
+// fmt-stable
+// store-roundtrip
+// Контекст checked (§8.2, M2d): переопределяет операции для всего, что
+// выполняется в блоке, включая вызванные функции — 
+// 
+// 
+// Вне контекста арифметика — модульная (§5.8).
+sq(auto x) => x * x;
+
+big(auto n) => 9223372036854775807 - (n - n);
+
+main() {
+  auto n = parse_int(args[1]).value;
+  auto a = checked { (n * 4) + 0 };
+  auto b = checked { sq(n) };
+  print(a, b);
+  auto r = try { checked { sq(big(n)) } } catch(overflow e) { -1 };
+  if(r == -1) print("overflow");
+  print(big(n), sq(big(n)));
+}

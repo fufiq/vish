@@ -93,7 +93,7 @@ struct printer {
     for(std::string_view role: {"infix", "prefix", "postfix"})
       if(name.size() > role.size() && name.starts_with(role) && !std::isalnum(static_cast<unsigned char>(name[role.size()])) && name[role.size()] != '_') {
         auto sym = name.substr(role.size());
-        out += "operator ";
+        out += f.scoped ? "using operator " : "operator ";
         if(role == "prefix") out += sym;
         params({f.params[0]});
         if(role == "postfix") out += sym;

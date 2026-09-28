@@ -63,3 +63,14 @@ try(expr body) catch(expr... handlers) => intercept(body, handlers);
 // недействительны (
 //). Семантика — атрибутом библиотеки.
 [[invalidates(xs)]] push(mut auto xs, auto x) => append(xs, x);
+
+// checked { … } — контекст: арифметика i64 с проверкой переполнения для всего,
+// что выполняется внутри блока, включая вызванные функции (их экземпляры —
+// свои для контекста): 
+//.
+checked(expr body) {
+  using operator (i64 a) + (i64 b) => add_checked(a, b);
+  using operator (i64 a) - (i64 b) => sub_checked(a, b);
+  using operator (i64 a) * (i64 b) => mul_checked(a, b);
+  body
+}
