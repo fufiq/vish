@@ -1262,7 +1262,9 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     char const * what = fault == jit_fault_kind::bounds ? "индекс вне границ массива (машинный код)"
         : fault == jit_fault_kind::div_zero             ? "деление на ноль (машинный код)"
                                                         : "нарушено требование require (машинный код)";
-    fail(what, db[at].where, diag_kind::runtime);
+    char const * type = fault == jit_fault_kind::bounds ? "out_of_bounds" : fault == jit_fault_kind::div_zero ? "div_by_zero"
+                                                                                                              : "require_failed";
+    fail_rt(type, what, db[at].where);
   }
   emit({report_event::instance, key, {}, {}, {}, {}});
   switch(code->result) {

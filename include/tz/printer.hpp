@@ -142,7 +142,7 @@ struct printer {
   void terminate(node_id s) {
     if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
     if(db.is<n_hole>(s)) return; // The hole prints the source code as it is.
-    if(db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s)) return;
+    if(db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_try>(s) || db.is<n_struct>(s)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
     if(db.is<n_call>(s)) {
       auto const & c = db.as<n_call>(s);
@@ -182,6 +182,47 @@ struct printer {
   void print_node(node_id, n_try_compile const & t) {
     out += "try_compile ";
     item(t.body);
+  }
+
+  void print_node(node_id, n_struct const & st) {
+    out += cat("struct ", str(st.name), " {");
+    for(node_id f: st.fields) {
+      auto const & v = db.as<n_var>(f);
+      out += ' ';
+      item(v.type);
+      out += cat(" ", str(v.name));
+      if(v.init) {
+        out += " = ";
+        item(v.init);
+      }
+      out += ';';
+    }
+    out += " }";
+  }
+
+  void print_node(node_id, n_throw const & t) {
+    out += "throw ";
+    item(t.value);
+  }
+
+  void print_node(node_id, n_try const & t) {
+    out += "try ";
+    item(t.body);
+    for(node_id c: t.catches) {
+      out += ' ';
+      item(c);
+    }
+  }
+
+  void print_node(node_id, n_catch const & c) {
+    out += "catch(";
+    if(c.type) {
+      item(c.type);
+      if(c.name.valid()) out += ' ';
+    }
+    if(c.name.valid()) out += str(c.name);
+    out += ") ";
+    item(c.body);
   }
 
   void print_node(node_id, n_for const & f) {

@@ -192,8 +192,33 @@ struct parser {
   // --- module elements and instructions ---
 
   node_id item() {
+    if(is_word("struct") && ahead(1).kind == tok::ident && is_open('{', 2)) return struct_decl();
     if(auto f = try_fn_decl(false)) return *f;
     return statement();
+  }
+
+  // struct Name { T поле [= значение]; … } [;]
+  node_id struct_decl() {
+    uint32_t start = here().where.begin;
+    advance();
+    n_struct st;
+    st.name = ident();
+    expect_open('{');
+    while(!is_close('}')) {
+      uint32_t f0 = here().where.begin;
+      n_var f;
+      f.type = db.add(n_ident{ident()}, {f0, toks[pos - 1].where.end});
+      f.name = ident();
+      if(is_op("=")) {
+        eat_op("=");
+        f.init = expression();
+      }
+      end_statement();
+      st.fields.push_back(db.add(std::move(f), {f0, toks[pos - 1].where.end}));
+    }
+    expect_close('}');
+    if(is_op(";")) eat_op(";");
+    return db.add(std::move(st), {start, toks[pos - 1].where.end});
   }
 
   // Announcement of function: [outline] [type] name(s) (=> e; | { ... }) On the
@@ -236,7 +261,7 @@ struct parser {
   }
 
   static bool is_keyword(std::string_view w) {
-    return w == "if" || w == "for" || w == "while" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module";
+    return w == "if" || w == "for" || w == "while" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module" || w == "throw" || w == "catch" || w == "struct";
   }
 
   node_list param_list() {
@@ -357,7 +382,7 @@ struct parser {
   }
 
   bool ends_with_block(node_id e) const {
-    return db.is<n_if>(e) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e) || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
+    return db.is<n_if>(e) || db.is<n_try>(e) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e) || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
   }
 
   void end_statement() {
@@ -457,6 +482,11 @@ struct parser {
 
   node_id unary() {
     uint32_t start = here().where.begin;
+    if(is_word("throw")) { // throw
+      advance();
+      node_id x = expression();
+      return db.add(n_throw{x}, {start, db[x].where.end});
+    }
     for(std::string_view op: {"-", "!", "~"}) {
       if(is_op(op) && !is_op("=>")) {
         eat_op(op);
@@ -537,6 +567,7 @@ struct parser {
       }
       case tok::ident: {
         if(t.text == "if" && is_open('(', 1)) return if_expression();
+        if(t.text == "try" && is_open('{', 1)) return try_expression();
         if(t.text == "ct") {
           advance();
           node_id body = is_open('{') ? block() : unary();
@@ -567,6 +598,35 @@ struct parser {
       default: break;
     }
     throw diagnostic("ожидалось выражение", t.where);
+  }
+
+  // try { … } catch(T e) { … } ... is an expression as if; try( … ) remains a function call
+  node_id try_expression() {
+    uint32_t start = here().where.begin;
+    advance();
+    n_try t;
+    t.body = block();
+    while(is_word("catch")) {
+      uint32_t c0 = here().where.begin;
+      advance();
+      n_catch c;
+      expect_open('(');
+      if(!is_close(')')) { // catch(e) - any; catch(T e) - by type; catch(T _) - by type without name
+        uint32_t t0 = here().where.begin;
+        symbol first = ident();
+        if(!is_close(')')) {
+          c.type = db.add(n_ident{first}, {t0, toks[pos - 1].where.end});
+          c.name = ident();
+        } else {
+          c.name = first;
+        }
+      }
+      expect_close(')');
+      c.body = block();
+      t.catches.push_back(db.add(std::move(c), {c0, toks[pos - 1].where.end}));
+    }
+    if(t.catches.empty()) throw diagnostic("после try { … } ожидался catch", here().where);
+    return db.add(std::move(t), {start, toks[pos - 1].where.end});
   }
 
   node_id if_expression() {

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <charconv>
 #include <concepts>
 #include <cstdio>
@@ -120,7 +121,7 @@ struct interner {
   std::string_view text(symbol s) const {
     return s.valid() ? std::string_view(strings[s.value]) : std::string_view("<none>");
   }
-  std::vector<std::string> strings;
+  std::deque<std::string> strings; // Line addresses are stable: string_view from text() does not hang when growing
   std::unordered_map<std::string, symbol> index;
 };
 
@@ -157,6 +158,7 @@ struct diagnostic : std::runtime_error {
   span where;
   diag_kind kind;
   std::vector<frame> trace;
+  std::string type; // runtime - VM error as language exception: out_of_bounds, div_by_zero
 };
 
 // The line / column for span - only when output to a person.

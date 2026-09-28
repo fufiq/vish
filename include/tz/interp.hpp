@@ -76,7 +76,8 @@ struct report_event {
     split,
     excluded,
     live,
-    proven } kind;
+    proven,
+    throws } kind;
   std::string a, b, c; // meaning depends on the species
   span where;
   std::vector<std::string> alts;
@@ -114,6 +115,7 @@ struct interpreter {
     globals->declare(sym("stdin"), value(agg_v{types.named("stream"), {}})); // descriptor, no value
     for(node_id item: db.as<n_module>(module).items)
       if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
+      else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
   }
 
   // Launch main(). Returns the exit code.
@@ -122,6 +124,7 @@ struct interpreter {
     if(it == functions.end()) throw diagnostic("нет функции main", {});
     call_site site{db[it->second.front()].where, "main"};
     flow r = call_overloaded(it->second, {}, globals, 0, site);
+    if(r.kind == flow_kind::thr) uncaught(r);
     return r.v.is<int64_t>() ? int(r.v.as<int64_t>()) : 0;
   }
 
@@ -226,6 +229,14 @@ struct interpreter {
       out += "функции меняют параметры (место вызывающего):\n";
       for(auto const & w: param_writes) out += cat("  ", w, "\n");
     }
+    if(!throws_of.empty()) {
+      out += "исключения (выведены «покраской»):\n";
+      for(auto const & [inst, ts]: throws_of) {
+        std::string list;
+        for(auto const & t: ts) list += (list.empty() ? "" : ", ") + t;
+        out += cat("  ", inst, " бросает: ", list, "\n");
+      }
+    }
     if(!proven_list.empty()) {
       out += "индексы, доказанные в границах (проверка снята):\n";
       for(auto const & [w, what]: proven_list) out += cat("  ", loc(w), " ", what, "\n");
@@ -242,7 +253,7 @@ struct interpreter {
   // --- flow ---
 
   // clang-format off
-  enum class flow_kind : uint8_t { normal, ret, brk, cont };
+  enum class flow_kind : uint8_t { normal, ret, brk, cont, thr }; // thr - second exit path (exception)
   // clang-format on
 
   struct flow {
@@ -264,6 +275,15 @@ struct interpreter {
   bool checking() const { return run_mode == mode::check; }
 
   // --- call-trace errors ---
+
+  // runtime - VM error - exclusion of the language of its type (caught catch(T e)).
+  [[noreturn]] void fail_rt(std::string_view type, std::string msg, span where) {
+    diagnostic d(std::move(msg), where, diag_kind::runtime);
+    d.type = type;
+    if(!path.empty()) d.note(cat("в продолжении ", path), where);
+    for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+    throw d;
+  }
 
   [[noreturn]] void fail(std::string msg, span where, diag_kind kind = diag_kind::instantiation) {
     diagnostic d(std::move(msg), where, kind);
@@ -360,6 +380,7 @@ struct interpreter {
       case report_event::proven:
         if(proven.insert(ev.fn).second) proven_list.push_back({ev.where, ev.a});
         break;
+      case report_event::throws: throws_of[ev.a].insert(ev.b); break;
     }
   }
 
@@ -510,6 +531,9 @@ struct interpreter {
   // registered as a possible return and does not continue.
   flow join_branches(flow a, flow b) {
     bool a_cont = a.normal(), b_cont = b.normal();
+    if(a.kind == flow_kind::thr && b.kind == flow_kind::thr) return flow{flow_kind::thr, merge(a.v, b.v), a.target};
+    if(a.kind == flow_kind::thr && b_cont) return record_throw(a.v), b; // throws one branch - the second way
+    if(b.kind == flow_kind::thr && a_cont) return record_throw(b.v), a;
     if(a.kind == flow_kind::ret && b.kind == flow_kind::ret && a.target == b.target)
       return flow{flow_kind::ret, merge(a.v, b.v), a.target};
     if(!a_cont && a.kind == flow_kind::ret) record_return(a);
@@ -646,7 +670,8 @@ struct interpreter {
   flow eval_node(node_id n, n_require const & r, scope * env, uint32_t frame) {
     TZ_TRY(c, eval(r.cond, env, frame));
     auto b = known_bool(c, db[r.cond].where);
-    if(b && !*b) fail("нарушено требование require", db[n].where, diag_kind::runtime);
+    if(b && !*b) fail_rt("require_failed", "нарушено требование require", db[n].where);
+    if(checking() && !b) record_throw(vm_error_shape("require_failed"));
     return ok(); // run-time - Condition: runtime (§5.4)
   }
 
@@ -673,7 +698,7 @@ struct interpreter {
       if(!b) return abstract_loop(w.body, env, frame, {}, {});
       flow f = eval(w.body, env, frame);
       if(f.kind == flow_kind::brk) return ok();
-      if(f.kind == flow_kind::ret) return f;
+      if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
       if(checking() && guard > 100000) fail("цикл не сошёлся при статическом разборе", db[n].where);
     }
   }
@@ -696,7 +721,7 @@ struct interpreter {
       inner->declare(f.var, arr.get(k));
       flow b = eval(f.body, inner, frame);
       if(b.kind == flow_kind::brk) break;
-      if(b.kind == flow_kind::ret) return b;
+      if(b.kind == flow_kind::ret || b.kind == flow_kind::thr) return b;
     }
     return ok();
   }
@@ -721,6 +746,7 @@ struct interpreter {
       if(indexes) index_proofs.push_back({inner->find(var), indexes, indexes_name});
       flow b = eval(body, inner, frame);
       if(b.kind == flow_kind::ret) record_return(b);
+      if(b.kind == flow_kind::thr) record_throw(b.v); // Iteration can stop - the cycle can and will continue
       std::vector<std::string> after;
       for(symbol s: assigned)
         if(value * c = env->find(s)) {
@@ -906,6 +932,107 @@ struct interpreter {
 
   // SFINAE block (§5.4):
 // runtime - errors don't get jammed.
+  // --- exceptions (§8.1 ) ---
+  //
+  // Second exit:
+// In the interpreter, this is the view
+  // Flow as address return; in run-time check mode, the cast is recorded in the
+  // nearest try collector, and parsing goes both ways.
+
+  void record_throw(value const & v) {
+    if(!throw_sinks.empty()) throw_sinks.back()->push_back(v);
+  }
+
+  // Exclusion Type for catch(T e): The name of the value tag (aggregate is its type).
+  std::string exception_type(value const & v) const {
+    value const * s = shape_of(v);
+    if(!s) return "?";
+    return std::string(types.name(types.of(*s)));
+  }
+
+  // runtime is a VM error as an exception value: an aggregate of its type with a message.
+  value vm_error_value(diagnostic const & d) {
+    agg_v e{types.named(d.type.empty() ? "vm_error" : d.type), {}};
+    e.fields.push_back({sym("message"), value(std::string(d.what()))});
+    return value(std::move(e));
+  }
+
+  // Sample VM error for “painting” (message - runtime).
+  value vm_error_shape(std::string_view type) {
+    agg_v e{types.named(type), {}};
+    e.fields.push_back({sym("message"), erase(value(std::string("x")))});
+    return value(std::move(e));
+  }
+
+  [[noreturn]] void uncaught(flow const & r) {
+    std::vector<std::string> names;
+    for(auto const & alt: r.v.is<split_v>() ? r.v.as<split_v>().alts : std::vector<value>{r.v}) names.push_back(exception_type(alt));
+    std::string what = checking() ? cat("возможно непойманное исключение ", join(names)) : cat("непойманное исключение ", join(names), ": ", show_v(r.v));
+    diagnostic d(what, r.target ? db[node_id(r.target)].where : span{}, diag_kind::runtime);
+    for(auto it = throw_stack.rbegin(); it != throw_stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+    throw d;
+  }
+
+  flow eval_node(node_id n, n_throw const & t, scope * env, uint32_t frame) {
+    TZ_TRY(v, eval(t.value, env, frame));
+    rt_effect();
+    throw_stack = stack; // trailing
+    return flow{flow_kind::thr, std::move(v), n.value};
+  }
+
+  flow eval_node(node_id n, n_try const & t, scope * env, uint32_t frame) {
+    std::vector<value> thrown; // throws on the run-time-branches of the body (check mode)
+    throw_sinks.push_back(&thrown);
+    flow r;
+    try {
+      r = eval(t.body, env, frame);
+    } catch(diagnostic const & d) {
+      if(d.kind != diag_kind::runtime) {
+        throw_sinks.pop_back();
+        throw;
+      }
+      r = flow{flow_kind::thr, vm_error_value(d), 0}; // VM error: language exclusion
+    }
+    throw_sinks.pop_back();
+    bool has_normal = r.kind != flow_kind::thr;
+    if(r.kind == flow_kind::thr) {
+      if(r.v.is<split_v>())
+        for(auto const & a: r.v.as<split_v>().alts) thrown.push_back(a);
+      else thrown.push_back(r.v);
+    }
+    flow result = has_normal ? r : flow{};
+    bool have = has_normal;
+    for(node_id cn: t.catches) {
+      auto const & c = db.as<n_catch>(cn);
+      std::string want = c.type ? std::string(str(db.as<n_ident>(c.type).name)) : std::string();
+      std::vector<value> hit, rest;
+      for(auto & v: thrown) (want.empty() || exception_type(v) == want ? hit : rest).push_back(std::move(v));
+      thrown = std::move(rest);
+      if(hit.empty()) continue;
+      value caught = hit[0];
+      for(std::size_t k = 1; k < hit.size(); ++k) caught = merge(caught, hit[k]);
+      scope * inner = new_scope(env);
+      scope_hold hold{*this, inner};
+      if(c.name.valid() && str(c.name) != "_") inner->declare(c.name, caught);
+      flow cb = eval(c.body, inner, frame);
+      result = have ? join_branches(result, cb) : cb;
+      have = true;
+      if(!checking()) break; // in runtime throw one - caught first suitable catch
+    }
+    if(thrown.empty()) return have ? result : ok();
+    // Not caught here - further down the second path
+    value up = thrown[0];
+    for(std::size_t k = 1; k < thrown.size(); ++k) up = merge(up, thrown[k]);
+    if(have) {
+      for(auto const & v: thrown) record_throw(v);
+      return result;
+    }
+    return flow{flow_kind::thr, up, r.target};
+  }
+
+  flow eval_node(node_id n, n_catch const &, scope *, uint32_t) { fail("catch вне try", db[n].where); }
+  flow eval_node(node_id, n_struct const &, scope *, uint32_t) { return ok(); } // declaration
+
   flow eval_node(node_id n, n_try_compile const & t, scope * env, uint32_t frame) {
     auto saved_may = may_return;
     try {
@@ -930,6 +1057,20 @@ struct interpreter {
       items.push_back(std::move(x));
     }
     auto tname = str(db.as<n_ident>(c.type).name);
+    if(auto it = structs.find(db.as<n_ident>(c.type).name); it != structs.end()) { // Name {a, b} - by position n
+      auto const & st = db.as<n_struct>(it->second);
+      if(items.size() > st.fields.size()) fail(cat(tname, ": полей ", st.fields.size(), ", значений ", items.size()), db[n].where);
+      agg_v g{types.named(tname), {}};
+      for(std::size_t k = 0; k < st.fields.size(); ++k) {
+        auto const & f = db.as<n_var>(st.fields[k]);
+        if(k < items.size()) g.fields.push_back({f.name, std::move(items[k])});
+        else if(f.init) {
+          TZ_TRY(d, eval(f.init, globals, frame));
+          g.fields.push_back({f.name, std::move(d)});
+        } else fail(cat(tname, ": не задано поле ", str(f.name)), db[n].where);
+      }
+      return ok(value(std::move(g)));
+    }
     if(tname != "array") fail(cat("конструктор ", tname, "{} пока не поддержан"), db[n].where);
     for(auto const & x: items)
       if(!x.known()) return ok(erase(value(array_v::of({x})))); // At least one run-time element is an array of run-time
@@ -983,7 +1124,10 @@ struct interpreter {
         if(shape && shape->is<array_v>() && is_tuple(shape->as<array_v>()))
           return erase(shape->as<array_v>().get(checked_index(*shape, idx, where)));
       }
-      if(o.is<rt_v>() || !idx.known()) return element_type(o, where);
+      if(o.is<rt_v>() || !idx.known()) {
+        if(checking() && !bounds_proven(n)) record_throw(vm_error_shape("out_of_bounds")); // run-time-index not proven
+        return element_type(o, where);
+      }
       return o.as<array_v>().get(checked_index(o, idx, where));
     }));
   }
@@ -1008,7 +1152,7 @@ struct interpreter {
     if(!idx.is<int64_t>()) fail("индекс должен быть i64", where);
     int64_t k = idx.as<int64_t>();
     uint32_t n = arr.as<array_v>().size();
-    if(k < 0 || uint64_t(k) >= n) fail(cat("индекс ", k, " вне границ массива размера ", n), where, diag_kind::runtime);
+    if(k < 0 || uint64_t(k) >= n) fail_rt("out_of_bounds", cat("индекс ", k, " вне границ массива размера ", n), where);
     return uint32_t(k);
   }
 
@@ -1033,6 +1177,14 @@ struct interpreter {
       flow idx = eval(i.index, env, frame);
       if(!arr || arr->is<rt_v>() || !idx.v.known()) return nullptr;
       return arr->as<array_v>().generic_cell(checked_index(*arr, idx.v, db[n].where));
+    }
+    if(db.is<n_member>(n)) { // field
+      auto const & m = db.as<n_member>(n);
+      value * obj = place(m.object, env, frame);
+      if(!obj || !obj->is<agg_v>()) return nullptr;
+      for(auto & [k, v]: obj->as<agg_v>().fields)
+        if(k == m.name) return &v;
+      fail(cat("у значения типа ", types.describe(*obj), " нет поля ", str(m.name)), db[n].where);
     }
     return nullptr;
   }
@@ -1114,8 +1266,11 @@ struct interpreter {
     if(a.is<split_v>()) return lift(a, [&](value const & x) { return binary(op, x, b, where); });
     if(b.is<split_v>()) return lift(b, [&](value const & y) { return binary(op, a, y, where); });
     if(unknown(a) || unknown(b)) return value(rt_v{}); // type is still being removed (recursion)
-    if(!a.known() || !b.known())
+    if(!a.known() || !b.known()) {
+      // whole division into run-time - the divider can drop div_by_zero - "painting"
+      if(checking() && (op == "/" || op == "%") && !b.known() && types.describe(b) == "i64") record_throw(vm_error_shape("div_by_zero"));
       return erase(arith(op, *shape_or_fail(erase(a), where), *shape_or_fail(erase(b), where), where));
+    }
     return arith(op, a, b, where);
   }
 
@@ -1141,7 +1296,7 @@ struct interpreter {
     if(op == "-") return w(uint64_t(x) - uint64_t(y));
     if(op == "*") return w(uint64_t(x) * uint64_t(y));
     if(op == "/" || op == "%") {
-      if(y == 0) fail("деление на ноль", where, diag_kind::runtime); // certain exception, not UB
+      if(y == 0) fail_rt("div_by_zero", "деление на ноль", where); // certain exception, not UB
       return value(op == "/" ? x / y : x % y);
     }
     return compare(op, x, y, where);
@@ -1469,7 +1624,22 @@ struct interpreter {
       bind_values(fn.params, vals, args, env, inner);
       if(checking()) active.insert(active_key);
       try {
-        r = run_frame(fn.body, inner, fn.name, fn.outline);
+        std::vector<value> escaped; // "painting": exceptions to instance
+        throw_sinks.push_back(&escaped);
+        try {
+          r = run_frame(fn.body, inner, fn.name, fn.outline);
+        } catch(...) {
+          throw_sinks.pop_back();
+          throw;
+        }
+        throw_sinks.pop_back();
+        if(checking()) {
+          for(auto const & v: escaped) emit({report_event::throws, key, exception_type(v), {}, {}, {}});
+          if(r.kind == flow_kind::thr)
+            for(auto const & a: r.v.is<split_v>() ? r.v.as<split_v>().alts : std::vector<value>{r.v})
+              emit({report_event::throws, key, exception_type(a), {}, {}, {}});
+        }
+        for(auto const & v: escaped) record_throw(v);
       } catch(...) {
         stack.pop_back();
         ctx = ctx_saved;
@@ -1724,6 +1894,10 @@ struct interpreter {
   uint32_t frame_counter = 0;
   bool last_rt_effect = false;
   std::map<uint32_t, std::vector<value>> may_return;
+  std::map<symbol, node_id> structs; // named units of the module
+  std::vector<std::vector<value> *> throw_sinks; // run-time branch shooters: try and instance
+  std::map<std::string, std::set<std::string>> throws_of; // instance → Types of Exceptions (Report)
+  std::vector<call_site> throw_stack; // last-throw
   std::map<std::string, uint32_t> instance_counts;
   std::map<std::string, uint32_t> folded;
   std::set<std::string> active;

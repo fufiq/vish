@@ -104,6 +104,26 @@ struct n_require {
 struct n_try_compile {
   node_id body;
 }; // SFINAE block (§5.4)
+// Exceptions (§8.1): Two exit paths - throw -
+// expression.
+struct n_throw {
+  node_id value;
+};
+struct n_catch {
+  node_id type; // type name; no - catches any (base)
+  symbol name; // name of the caught meaning; may not be
+  node_id body;
+};
+struct n_try {
+  node_id body;
+  node_list catches; // n_catch in order
+};
+// Named aggregate (§5.1): nominal type; fields - n_var (type, name, default value).
+// Created positionally: Name {a, b}.
+struct n_struct {
+  symbol name;
+  node_list fields;
+};
 struct n_ct {
   node_id body;
 }; // ct e / ct { }
@@ -123,7 +143,7 @@ struct n_hole {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_index, n_if, n_for, n_while, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_catch, n_try, n_struct>;
 
 struct node {
   node_kind kind;
