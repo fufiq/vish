@@ -3,25 +3,25 @@
 // Лямбда переживает свою область: окружение захватывается и остаётся в арене
 // интерпретатора, остальные области возвращаются в арену на выходе 
 //.
-adder(auto base) {
-  auto k = base + 1;
-  (auto x) => x + k
+adder(base) {
+  k = base + 1;
+  (x) => x + k
 }
 
 counter() {
-  auto n = 0;
-  auto inc = (auto by) => { n += by; n };
+  n = 0;
+  inc = (by) => { n += by; n };
   inc(1);
   inc(2);
   n
 }
 
 main() {
-  auto f = adder(4);
-  auto g = adder(6);
+  f = adder(4);
+  g = adder(6);
   // между созданием и вызовом — много других областей (переиспользование арены)
-  auto s = 0;
-  for(auto i : range(100)) { auto t = i * 2; s += t; }
+  s = 0;
+  for(i : range(100)) { t = i * 2; s += t; }
   print(f(10), g(10));
   print(counter());
 }

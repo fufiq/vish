@@ -11,8 +11,8 @@ run
 // expect: 2.5
 edit mean
 mean(xs) {
-  auto s = 0.0;
-  for(auto x : xs) s = s + x;
+  s = 0.0;
+  for(x : xs) s = s + x;
   (s / f64(xs.size)) * 2.0
 }
 .

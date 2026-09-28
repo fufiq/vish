@@ -19,13 +19,13 @@ operator (vec a) * (i64 k) => vec{a.x * k, a.y * k};
 operator (mut i64 a)++ { a += 1; }
 
 // типы решают: (i % 2) == 0 — единственный разбор (i % (2 == 0) не инстанцируется)
-pick(auto i) => if(i % 2 == 0) 1 else 2;
+pick(i) => if(i % 2 == 0) 1 else 2;
 
 // одинаковый ассоциативный оператор подряд — одно дерево
-sum3(auto a, auto b, auto c) => a + b + c;
+sum3(a, b, c) => a + b + c;
 
 // своя конструкция и сущность, живущая только в её блоке
-[[inside(transaction)]] commit(mut auto log) { log += 1; }
+[[inside(transaction)]] commit(mut log) { log += 1; }
 
 transaction(expr body) {
   body;
@@ -33,13 +33,13 @@ transaction(expr body) {
 }
 
 main() {
-  auto n = parse_int(args[1]).value;
-  auto v = vec{1, 2} + vec{n, 4};
-  auto w = vec{1, 2} * (n + 3);
+  n = parse_int(args[1]).value;
+  v = vec{1, 2} + vec{n, 4};
+  w = vec{1, 2} * (n + 3);
   print(v.x, v.y, w.y, n > 1 && pick(n) == 2, sum3(1, 2, n + 1), pick(n));
-  auto c = n;
+  c = n;
   c++;
-  auto log = 0;
+  log = 0;
   transaction { commit(log); }
   print(n, c, log);
 }

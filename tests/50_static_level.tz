@@ -8,22 +8,22 @@
 //,
 //  
 // Требование — обычный require над значением static_level(f).
-sum(auto xs) {
-  auto s = 0;
-  for(auto i : range(xs.size)) s += xs[i];
+sum(xs) {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
   s
 }
 
-pick(auto xs, auto i) => xs[i];
+pick(xs, i) => xs[i];
 
 ct {
-  auto l = static_level(sum);
+  l = static_level(sum);
   require(l.checks == 0);
   require(l.throws == 0);
 }
 
 main() {
-  auto n = parse_int(args[1]).value;
-  auto xs = fill(n, 2);
+  n = parse_int(args[1]).value;
+  xs = fill(n, 2);
   print(sum(xs), pick(array{1, 4}, n - 2), static_level(pick).checks - 1);
 }

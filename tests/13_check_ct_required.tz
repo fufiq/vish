@@ -1,5 +1,5 @@
 // check-error: ct: значение не вычислимо при компиляции
 // ct e — требование вычислить при компиляции (§7.1).
 main() {
-  auto n = ct args.size;
+  n = ct args.size;
 }

@@ -11,8 +11,8 @@ jit
 edit dot
 dot(a, b) {
   require(a.size == b.size);
-  auto s = zero(typeof(a[0]));
-  for(auto i : range(a.size)) s = s + (a[i] * b[i] * 2.0);
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i] * 2.0);
   s
 }
 .

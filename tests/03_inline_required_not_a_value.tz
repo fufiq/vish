@@ -1,11 +1,11 @@
 // error: использует семантику инлайна
 // Функция с expr-параметром / return(caller) не может быть значением (§6.1).
 try(expr e) {
-  auto r = e;
+  r = e;
   if(r.is_err()) return(caller) r;
   r.value
 }
 
 main() {
-  auto t = try;
+  t = try;
 }

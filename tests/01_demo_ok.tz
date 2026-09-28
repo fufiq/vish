@@ -13,13 +13,13 @@ module demo;
 
 dot(a, b) {
   require(a.size == b.size);
-  auto s = zero(typeof(a[0]));
-  for(auto i : range(a.size)) s = s + (a[i] * b[i]);
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
   s
 }
 
 try(expr e) {
-  auto r = e;
+  r = e;
   if(r.is_err()) return(caller) r;
   r.value
 }
@@ -27,15 +27,15 @@ try(expr e) {
 unless(c, expr body) { if(!c) body; }
 
 main() {
-  auto u = array{1.0, 2.0, 3.0};
-  auto v = array{4.0, 5.0, 6.0};
+  u = array{1.0, 2.0, 3.0};
+  v = array{4.0, 5.0, 6.0};
   print(dot(u, v));
-  auto xs = read_floats(stdin);
-  auto ys = read_floats(stdin);
+  xs = read_floats(stdin);
+  ys = read_floats(stdin);
   print(dot(xs, ys));
-  auto w = if(args.size > 1) array{1, 2, 3} else array{1.0, 2.0, 3.0};
+  w = if(args.size > 1) array{1, 2, 3} else array{1.0, 2.0, 3.0};
   print(dot(w, w));
-  auto p = try(parse_int(args[1]));
-  auto q = parse_int(args[1])?;
+  p = try(parse_int(args[1]));
+  q = parse_int(args[1])?;
   unless(p == q) { print("different"); }
 }

@@ -5,11 +5,11 @@
 // Echo-сервер на файберах (§8.3, критерий M3): сокет — тот же поток, что и
 // между файберами; read/write блокируют файбер, а не VM 
 // ожидание сокетов — у планировщика VM.
-serve(auto l, auto n, auto served) {
-  for(auto k : range(n)) {
-    auto c = accept(l);
+serve(l, n, served) {
+  for(k : range(n)) {
+    c = accept(l);
     spawn { // соединение — свой файбер
-      for(auto chunk : c) write(c, chunk);
+      for(chunk : c) write(c, chunk);
       close(c);
       write(served, 1);
     }
@@ -17,17 +17,17 @@ serve(auto l, auto n, auto served) {
 }
 
 main() {
-  auto l = listen(0);
-  auto p = port(l);
-  auto served = stream(8);
+  l = listen(0);
+  p = port(l);
+  served = stream(8);
   spawn { serve(l, 3, served); }
-  for(auto i : range(3)) {
-    auto c = connect("127.0.0.1", p);
+  for(i : range(3)) {
+    c = connect("127.0.0.1", p);
     write(c, "ping " + text(i));
     print("ответ " + text(i) + ": " + read(c));
     close(c);
   }
-  auto total = 0;
-  for(auto k : range(3)) total += read(served);
+  total = 0;
+  for(k : range(3)) total += read(served);
   print("сервер обслужил", total);
 }

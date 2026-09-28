@@ -346,7 +346,7 @@ struct parser {
     // [type] name
     uint32_t name_at;
     if(ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
-    else if(!in_block && ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
+    else if(ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
     else return std::nullopt;
     // after ) - clauses word(...) and then => or {
     uint32_t close = match[pos + name_at + 1];
@@ -358,6 +358,7 @@ struct parser {
       after = c2 + 1 - pos;
     }
     if(!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
+    if(in_block && name_at == k && !is_op("=>", after)) return std::nullopt; // f(x) { … } in the block - a call with a tail
 
     uint32_t start = here().where.begin;
     n_fn f;
@@ -424,6 +425,7 @@ struct parser {
       p.pack = true;
     }
     // [type] [...] name | name
+    if(is_word("auto") && ahead(1).kind == tok::ident) throw diagnostic("auto не нужен: параметр без типа принимает всё", here().where);
     if(here().kind == tok::ident && (ahead(1).kind == tok::ident || is_op("...", 1))) {
       p.type = type_expr();
       if(is_op("...")) {
@@ -552,16 +554,22 @@ struct parser {
       is_const = true;
       ++k;
     }
+    // T x = e is a statement with a restriction; const x = e is a qualifier (type is
+    // derived); &e = v[i] is a reference; x = e without a sign is an announcement if
+    // there is no name (interpreter parses):
+    //
     bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
-    bool ref = ahead(k).kind == tok::ident && is_op("&", k + 1) && ahead(k + 2).kind == tok::ident && is_op("=", k + 3); // auto& e = v[i]
-    if(!typed && !ref) return std::nullopt;
+    bool qualified = is_const && ahead(k).kind == tok::ident && is_op("=", k + 1);
+    bool ref = k == 0 && is_op("&") && ahead(1).kind == tok::ident && is_op("=", 2);
+    if(!typed && !qualified && !ref) return std::nullopt;
+    if(typed && is_word("auto", k)) throw diagnostic("auto не нужен: x = … объявляет с выводом типа", ahead(k).where);
     uint32_t start = here().where.begin;
     if(is_const) advance();
     n_var v;
     v.is_const = is_const;
     v.ref = ref;
-    v.type = type_expr();
     if(ref) eat_op("&");
+    if(typed) v.type = type_expr();
     v.name = ident();
     expect_op("=");
     v.init = expression();
@@ -872,10 +880,11 @@ struct parser {
     std::vector<n_param> binders;
     std::vector<span> binder_at;
     uint32_t first = uint32_t(c.args.size());
+    bool packed = word && con && std::ranges::any_of(con->clauses, [&](auto const & w) { return w.first == word && w.second; });
     if(is_open('(')) {
       advance();
       while(!is_close(')')) {
-        if(auto b = binder()) {
+        if(auto b = binder(packed)) {
           span at{b->second, 0};
           if(is_op(":")) {
             eat_op(":");
@@ -895,9 +904,8 @@ struct parser {
       }
       expect_close(')');
     }
-    bool packed = word && con && std::ranges::any_of(con->clauses, [&](auto const & w) { return w.first == word && w.second; });
     if(packed && c.args.size() > first) // Repetitive Clause - a block with parameters: catch(E e), catch(auto e)
-      throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только объявления: ", db.strings.text(word), "(auto e)"), db[c.args[first]].where);
+      throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только имена: ", db.strings.text(word), "(e)"), db[c.args[first]].where);
     node_id body;
     if(is_open('{')) body = block();
     else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && !is_word("else")) {
@@ -922,13 +930,19 @@ struct parser {
   }
 
   // auto x | Type x before `:`, `,` or `)` is a block parameter (not added to the base).
-  std::optional<std::pair<n_param, uint32_t>> binder() {
-    if(ahead(0).kind != tok::ident || ahead(1).kind != tok::ident) return std::nullopt;
-    bool ends = is_op(":", 2) || is_op(",", 2) || (ahead(2).kind == tok::close && ahead(2).ch() == ')');
-    if(!ends) return std::nullopt;
+  // The block parameter in the call brackets: `x : xs`, `T x : xs`; in the block-close
+  // (catch) - and `e`, `T e` (type is not written - it is output:).
+  //
+  std::optional<std::pair<n_param, uint32_t>> binder(bool packed) {
+    if(ahead(0).kind != tok::ident) return std::nullopt;
+    auto closes = [&](uint32_t k) { return is_op(",", k) || (ahead(k).kind == tok::close && ahead(k).ch() == ')'); };
+    bool typed = ahead(1).kind == tok::ident && (is_op(":", 2) || closes(2));
+    bool bare = is_op(":", 1) || (packed && closes(1));
+    if(!typed && !bare) return std::nullopt;
+    if(is_word("auto")) throw diagnostic("auto не нужен: тип выводится (x : xs)", here().where);
     uint32_t start = here().where.begin;
     n_param p;
-    p.type = type_expr();
+    if(typed) p.type = type_expr();
     p.name = ident();
     return std::pair{std::move(p), start};
   }

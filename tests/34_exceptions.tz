@@ -11,25 +11,25 @@
 // store-roundtrip
 // Исключения (§8.1, M2a): второй путь выхода — 
 // throw и try — выражения;
-// catch(T e) ловит по типу, catch(auto e) — любое (база); ошибки VM — исключения
+// catch(T e) ловит по типу, catch(e) — любое (база); ошибки VM — исключения
 // своих типов (out_of_bounds, div_by_zero, require_failed); типы исключений
 // функции выводятся и видны в отчёте check.
 struct http_error { i64 code; }
 struct point { i64 x; i64 y = 0; }
 
-parse_code(auto s) {
-  auto r = parse_int(s);
+parse_code(s) {
+  r = parse_int(s);
   if(r.is_err()) throw http_error{400};
   r.value
 }
 
-safe_div(auto a, auto b) {
+safe_div(a, b) {
   try { a / b } catch(div_by_zero e) { -1 }
 }
 
 guarded() {
-  auto xs = array{1, 2};
-  auto i = parse_int(args[1]).value;
+  xs = array{1, 2};
+  i = parse_int(args[1]).value;
   xs[i]
 }
 
@@ -41,10 +41,10 @@ main() {
   } catch(http_error e) {
     print("bad", e.code);
   }
-  try { auto xs = array{1, 2}; print(xs[5]); } catch(out_of_bounds e) { print(e.message); }
-  auto v = try { throw 5; 0 } catch(i64 x) { x * 2 };
+  try { xs = array{1, 2}; print(xs[5]); } catch(out_of_bounds e) { print(e.message); }
+  v = try { throw 5; 0 } catch(i64 x) { x * 2 };
   print(v);
-  auto p = point{7};
-  p.y = try { guarded() } catch(auto e) { p.x };
+  p = point{7};
+  p.y = try { guarded() } catch(e) { p.x };
   print(p.y);
 }

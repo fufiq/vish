@@ -9,33 +9,33 @@
 // счётчиков ссылок 
 // Копия внутри функции, возврат
 // параметра и сохранение его в другом массиве — самостоятельные значения.
-local_copy(auto a) {
-  auto b = a;
+local_copy(a) {
+  b = a;
   b[0] = 9;
   print(a, b);
 }
 
-same(auto a) => a
+same(a) => a
 
-keep(auto a) {
-  auto box = array{a, a};
+keep(a) {
+  box = array{a, a};
   box
 }
 
-sum(auto a) {
-  auto s = 0;
-  for(auto i : range(a.size)) s += a[i];
+sum(a) {
+  s = 0;
+  for(i : range(a.size)) s += a[i];
   s
 }
 
-first_to(mut auto a, auto v) { a[0] = v; }
+first_to(mut a, v) { a[0] = v; }
 
 main() {
-  auto xs = array{1, 2, 3};
+  xs = array{1, 2, 3};
   local_copy(xs);
-  auto ys = same(xs);
+  ys = same(xs);
   print(ys);
-  auto box = keep(xs);
+  box = keep(xs);
   xs[0] = 7;
   print(box, xs);
   xs[0] = 1;

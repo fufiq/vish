@@ -2,14 +2,14 @@
 // out: 11
 // out: [1, 2, 30]
 // Параметры — алиасы ячеек вызывающего (§6.2).
-inc(mut auto x) { x = x + 1; }
-set_last(mut auto a, auto v) { a[a.size - 1] = v; }
+inc(mut x) { x = x + 1; }
+set_last(mut a, v) { a[a.size - 1] = v; }
 
 main() {
-  auto n = 10;
+  n = 10;
   inc(n);
   print(n);
-  auto arr = array{1, 2, 3};
+  arr = array{1, 2, 3};
   set_last(arr, 30);
   print(arr);
 }

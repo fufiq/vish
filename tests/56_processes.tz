@@ -8,32 +8,32 @@
 // процессами — данные перемещением, без сериализации.
 struct job { i64 id; array xs; }
 
-sum_worker(auto input, auto output) {
-  for(auto j : input) {
-    auto s = 0;
-    for(auto x : j.xs) s += x;
+sum_worker(input, output) {
+  for(j : input) {
+    s = 0;
+    for(x : j.xs) s += x;
     write(output, s);
   }
   close(output);
 }
 
-crash(auto xs) => print(xs[9]);
+crash(xs) => print(xs[9]);
 
 main() {
-  auto input = stream();
-  auto output = stream();
-  auto p = process(sum_worker, input, output);
+  input = stream();
+  output = stream();
+  p = process(sum_worker, input, output);
   write(input, job{1, array{1, 2, 3, 4, 5, 6, 7, 8, 9}});
   write(input, job{2, array{10, 20}});
   write(input, job{3, array{0}});
   close(input);
-  auto first = read(output);
+  first = read(output);
   print("сумма", first);
-  auto q = process(crash, array{1, 2});
+  q = process(crash, array{1, 2});
   if(!wait(q)) print("процесс упал: " + error(q));
   print("главный жив");
-  auto n = 1;
-  for(auto s : output) n += 1;
+  n = 1;
+  for(s : output) n += 1;
   wait(p);
   print("собрано", n);
 }

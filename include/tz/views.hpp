@@ -66,6 +66,10 @@ struct residual_view {
       auto const * init = vm.observed(db.as<n_var>(n).init);
       if(!init || !init->effect) return false;
     }
+    if(vm.declares(n) && !used.contains(db.as<n_ident>(db.as<n_op>(n).args[0]).name)) { // x = e, which declared x
+      auto const * init = vm.observed(db.as<n_op>(n).args[1]);
+      if(!init || !init->effect) return false;
+    }
     if(pure_noop(n)) return false;
     if(db.is<n_if>(n)) { // if(ложь) without more - nothing remains
       auto c = cond_value(n);
@@ -127,7 +131,7 @@ struct residual_view {
   void find_used_names(node_id n) {
     if(!n) return;
     if(db.is<n_fn>(n) && db[n].parent && db.is<n_module>(db[n].parent) && !keep(n)) return;
-    if(is_statement(db, n) && !db.is<n_var>(n) && !db.is<n_fn>(n) && (!keep_ignoring_dead(n) || pure_noop(n))) return;
+    if(is_statement(db, n) && !db.is<n_var>(n) && !vm.declares(n) && !db.is<n_fn>(n) && (!keep_ignoring_dead(n) || pure_noop(n))) return;
     if(fold_value(n)) return;
     if(node_id other = fold_if(n)) {
       find_used_names(other);

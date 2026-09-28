@@ -13,23 +13,23 @@
 //). Поток ёмкости 2: писатель ждёт, пока
 // читатель заберёт. Значение уходит в поток перемещением (own).
 main() {
-  auto s = stream(2);
+  s = stream(2);
   spawn {
-    for(auto i : range(5)) write(s, i * 10);
+    for(i : range(5)) write(s, i * 10);
     close(s);
   }
-  auto t = stream();
+  t = stream();
   spawn {
     write(t, 7);
     yield();
     write(t, 8);
     close(t);
   }
-  auto sum = 0;
-  for(auto x : s) print("got", x);
-  for(auto y : t) print("t", y);
-  auto u = stream();
-  auto v = array{1, 2};
+  sum = 0;
+  for(x : s) print("got", x);
+  for(y : t) print("t", y);
+  u = stream();
+  v = array{1, 2};
   spawn { write(u, v); }
   print(sum + 100);
   print("moved", read(u)[0]);

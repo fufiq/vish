@@ -3,19 +3,19 @@
 // out: load failed
 // Семантический инлайн: return(caller) в теле try выходит из load, а не из try.
 try(expr e) {
-  auto r = e;
+  r = e;
   if(r.is_err()) return(caller) r;
   r.value
 }
 
 load(s) {
-  auto v = try(parse_int(s));
+  v = try(parse_int(s));
   print("after");
   v
 }
 
 main() {
   print("before");
-  auto r = load(args[1]);
+  r = load(args[1]);
   if(r.is_err()) print("load failed");
 }

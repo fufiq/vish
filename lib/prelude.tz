@@ -38,16 +38,16 @@ while(expr c, expr body) {
   }
 }
 
-// for(auto x : xs) тело — по массиву или range. Индекс становится безопасным
+// for(x : xs) тело — по массиву или range. Индекс становится безопасным
 // после проверки is_index: 
 // 
 // Шаг — до тела:
 // continue в теле не пропускает его.
-for(auto xs, expr body) {
-  auto i = 0;
+for(xs, expr body) {
+  i = 0;
   loop {
     if(!is_index(i, xs)) break;
-    auto k = i;
+    k = i;
     i = i + 1;
     body(xs[k]);
   }
@@ -62,7 +62,7 @@ try(expr body) catch(expr... handlers) => intercept(body, handlers);
 // push(xs, x) — рост массива: буфер может переехать, ссылки на элементы
 // недействительны (
 //). Семантика — атрибутом библиотеки.
-[[invalidates(xs)]] push(mut auto xs, auto x) => append(xs, x);
+[[invalidates(xs)]] push(mut xs, x) => append(xs, x);
 
 // checked { … } — контекст: арифметика i64 с проверкой переполнения для всего,
 // что выполняется внутри блока, включая вызванные функции (их экземпляры —
@@ -81,7 +81,7 @@ checked(expr body) {
 spawn(expr body) => fiber_start(body);
 stream() => stream_new(16);
 stream(i64 cap) => stream_new(cap);
-write(stream s, own auto x) => stream_write(s, x);
+write(stream s, own x) => stream_write(s, x);
 read(stream s) => stream_read(s);
 more(stream s) => stream_more(s);
 close(stream s) => stream_close(s);

@@ -22,21 +22,21 @@ send(own msg m) => m.id;
 
 // hide self: после вызова переменная вызывающего скрыта
 consume(mut msg m) {
-  auto id = m.id;
+  id = m.id;
   hide m;
   id
 }
 
 main() {
-  auto n = parse_int(args[1]).value;
-  auto f = file{n};
-  auto r = read(f);
+  n = parse_int(args[1]).value;
+  f = file{n};
+  r = read(f);
   close(f);
-  auto g = file{1};
+  g = file{1};
   if(n > 5) close(g);   // состояние g — по ветке: продолжение расщеплено
   print(r, g.fd, state(f));
-  auto m = msg{7};
-  auto k = send(m);
-  auto q = msg{2};
+  m = msg{7};
+  k = send(m);
+  q = msg{2};
   print(k, consume(q));
 }

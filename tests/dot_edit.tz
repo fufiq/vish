@@ -5,13 +5,13 @@
 // Программа для сценария 32_jit_edit.session.
 dot(a, b) {
   require(a.size == b.size);
-  auto s = zero(typeof(a[0]));
-  for(auto i : range(a.size)) s = s + (a[i] * b[i]);
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
   s
 }
 
 main() {
-  auto xs = read_floats(stdin);
-  auto ys = read_floats(stdin);
+  xs = read_floats(stdin);
+  ys = read_floats(stdin);
   print(dot(xs, ys));
 }

@@ -14,6 +14,6 @@ fact(n) {
 
 main() {
   print(fact(5));
-  auto r = fact(parse_int(args[1]).value);
+  r = fact(parse_int(args[1]).value);
   print(r);
 }

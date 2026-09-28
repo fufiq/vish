@@ -863,6 +863,13 @@ struct jit_codegen {
   void gen_assign(node_id n, n_op const & o, std::string_view op) {
     using namespace x64;
     node_id target = o.args[0];
+    if(db.is<n_ident>(target) && op == "=" && !resolve(db.as<n_ident>(target).name)) { // x = e without name - announcement
+      jt t = gen_value(o.args[1]);
+      if(t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{n, cat("переменная типа ", jt_name(t))};
+      slot s = declare(db.as<n_ident>(target).name, t);
+      store_var(s);
+      return;
+    }
     if(db.is<n_ident>(target)) {
       slot const * sp = resolve(db.as<n_ident>(target).name);
       if(!sp || sp->thunk || is_array(sp->type)) throw jit_unsupported{target, "присваивание"};

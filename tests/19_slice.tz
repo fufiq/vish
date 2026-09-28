@@ -2,19 +2,19 @@
 // out: 14.0
 // out: 3
 // slice: main total
-// slice-has: auto xs = read_floats(stdin);
-// slice-has: for(auto x : xs) total = total + (x * x);
+// slice-has: xs = read_floats(stdin);
+// slice-has: for(x : xs) total = total + (x * x);
 // slice-has: print(total);
 // slice-lacks: count
 // slice-lacks: xs) ;
 // 
 //.
 main() {
-  auto xs = read_floats(stdin);
-  auto total = 0.0;
-  auto count = 0;
-  for(auto x : xs) total = total + (x * x);
-  for(auto x : xs) count = count + 1;
+  xs = read_floats(stdin);
+  total = 0.0;
+  count = 0;
+  for(x : xs) total = total + (x * x);
+  for(x : xs) count = count + 1;
   print(total);
   print(count);
 }

@@ -12,28 +12,28 @@
 // Ошибка VM внутри try — тоже переход в catch.
 // Не пойманное в машинном коде выходит «вторым путём» (как errno), дальше
 // ловит интерпретатор.
-level3(auto x) {
+level3(x) {
   if(x < 0) throw x * 2;
   x * 3
 }
-level2(auto x) => level3(x - 1) + 0
-level1(auto x) => level2(x + 1) * 1
+level2(x) => level3(x - 1) + 0
+level1(x) => level2(x + 1) * 1
 
-outer(auto x) {
+outer(x) {
   try { level1(x) } catch(i64 e) { e }
 }
 
-guard(auto d, auto n) {
+guard(d, n) {
   try { n / d } catch(div_by_zero _) { -3 }
 }
 
-escape(auto x) {
+escape(x) {
   if(x > 5) throw 99;
   x
 }
 
 main() {
-  auto n = parse_int(args[1]).value;
+  n = parse_int(args[1]).value;
   print(outer(n), outer((0 - n) + 6), outer(n - 0) - n);
   print(outer(0 - 1), guard(0, n));
   print(try { escape(n) } catch(i64 e) { e });

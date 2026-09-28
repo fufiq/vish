@@ -5,7 +5,7 @@
 at(xs, i) => xs[i];
 
 main() {
-  auto xs = array{1, 2, 3};
+  xs = array{1, 2, 3};
   print(at(xs, 1));
   print(at(xs, 3));
 }

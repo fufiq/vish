@@ -1,11 +1,11 @@
 // error: outline
 // outline-функция не инлайнится, поэтому return(caller) через неё запрещён.
 outline try(expr e) {
-  auto r = e;
+  r = e;
   if(r.is_err()) return(caller) r;
   r.value
 }
 
 main() {
-  auto x = try(parse_int("1"));
+  x = try(parse_int("1"));
 }

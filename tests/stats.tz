@@ -5,19 +5,19 @@
 sq(x) => x * x;
 
 sum_sq(xs) {
-  auto s = 0.0;
-  for(auto x : xs) s = s + sq(x);
+  s = 0.0;
+  for(x : xs) s = s + sq(x);
   s
 }
 
 mean(xs) {
-  auto s = 0.0;
-  for(auto x : xs) s = s + x;
+  s = 0.0;
+  for(x : xs) s = s + x;
   s / f64(xs.size)
 }
 
 main() {
-  auto xs = read_floats(stdin);
+  xs = read_floats(stdin);
   print(sum_sq(xs));
   print(mean(xs));
 }

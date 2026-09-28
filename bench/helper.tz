@@ -1,9 +1,9 @@
 // Помощник в горячем цикле: встраивание (по умолчанию) против настоящего вызова.
-sq(auto x) => (x * 3) + 1
+sq(x) => (x * 3) + 1
 
-sumsq(auto n) {
-  auto s = 0;
-  for(auto i : range(n)) s += sq(i);
+sumsq(n) {
+  s = 0;
+  for(i : range(n)) s += sq(i);
   s
 }
 

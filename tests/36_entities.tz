@@ -25,9 +25,9 @@ point {
 main() {
   print(attrs(api_call));
   print(attrs(point));
-  auto fs = fields(point);
+  fs = fields(point);
   print(fs[0].name, fs[0].type, fs.size);
-  auto p = point{1, 2};
+  p = point{1, 2};
   print(p, p.sum());
   print(typeof(p) == point);
 }

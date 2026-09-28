@@ -143,7 +143,7 @@ struct printer {
   void print_node(node_id, n_param const & p) {
     static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct "};
     out += modes[uint32_t(p.mode)];
-    if(p.type) {
+    if(p.type && !db.is<n_auto>(p.type)) {
       item(p.type);
       out += p.pack ? "... " : " ";
     } else if(p.pack) {
@@ -155,8 +155,12 @@ struct printer {
 
   void print_node(node_id, n_var const & v) {
     if(v.is_const) out += "const ";
-    item(v.type);
-    out += cat(v.ref ? "& " : " ", str(v.name), " = ");
+    if(v.ref) out += "&";
+    if(v.type && !db.is<n_auto>(v.type)) {
+      item(v.type);
+      out += ' ';
+    }
+    out += cat(str(v.name), " = ");
     item(v.init);
     out += ';';
   }

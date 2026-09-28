@@ -9,16 +9,16 @@
 // 
 // 
 // Вне контекста арифметика — модульная (§5.8).
-sq(auto x) => x * x;
+sq(x) => x * x;
 
-big(auto n) => 9223372036854775807 - (n - n);
+big(n) => 9223372036854775807 - (n - n);
 
 main() {
-  auto n = parse_int(args[1]).value;
-  auto a = checked { (n * 4) + 0 };
-  auto b = checked { sq(n) };
+  n = parse_int(args[1]).value;
+  a = checked { (n * 4) + 0 };
+  b = checked { sq(n) };
   print(a, b);
-  auto r = try { checked { sq(big(n)) } } catch(overflow e) { -1 };
+  r = try { checked { sq(big(n)) } } catch(overflow e) { -1 };
   if(r == -1) print("overflow");
   print(big(n), sq(big(n)));
 }

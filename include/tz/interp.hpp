@@ -933,6 +933,16 @@ struct interpreter {
     value last;
     for(uint32_t i = from; i < b.items.size(); ++i) {
       node_id s = b.items[i];
+      if(checking() && implicit_declaration(s, inner)) { // x = e without name - as an announcement: splitting
+        auto const & o = db.as<n_op>(s);
+        mark_executed(s);
+        TZ_TRY(init, eval(o.args[1], inner, frame));
+        implicit_decls.insert(s.value);
+        if(init.is<split_v>()) return split_continuation(b, i, s, init, inner, frame);
+        emit({report_event::stage, path, std::string(str(db.as<n_ident>(o.args[0]).name)), init.known() ? cat("кт ", show_v(init)) : cat("рт ", types.describe(init)), db[s].where, {}});
+        inner->declare(db.as<n_ident>(o.args[0]).name, std::move(init));
+        continue;
+      }
       if(checking() && db.is<n_var>(s) && !db.as<n_var>(s).ref) {
         auto const & v = db.as<n_var>(s);
         mark_executed(s); // instruction
@@ -949,7 +959,7 @@ struct interpreter {
   }
 
   flow split_continuation(n_block const & b, uint32_t i, node_id s, value const & init, scope * inner, uint32_t frame) {
-    auto const & v = db.as<n_var>(s);
+    n_var v = db.is<n_var>(s) ? db.as<n_var>(s) : n_var{db.as<n_ident>(db.as<n_op>(s).args[0]).name, {}, db.as<n_op>(s).args[1]};
     std::vector<std::string> names;
     for(auto const & a: init.as<split_v>().alts) names.push_back(types.describe(a));
     emit({report_event::split, std::string(str(v.name)), {}, {}, db[s].where, names});
@@ -969,6 +979,13 @@ struct interpreter {
     }
     return result;
   }
+
+  bool implicit_declaration(node_id s, scope * env) const {
+    if(!db.is<n_op>(s) || db.strings.text(db.as<n_op>(s).op) != "=" || !db.is<n_ident>(db.as<n_op>(s).args[0])) return false;
+    return !env->find(db.as<n_ident>(db.as<n_op>(s).args[0]).name);
+  }
+  // The assignment that declares the variable (x = e without a name) is for projection.
+  bool declares(node_id n) const { return implicit_decls.contains(n.value); }
 
   void declare_var(node_id s, n_var const & v, value init, scope * env) {
     if(v.type && db.is<n_ident>(v.type)) check_type(init, db.as<n_ident>(v.type).name, db[v.init].where);
@@ -2608,6 +2625,15 @@ struct interpreter {
     }
     if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
       TZ_TRY(rhs, eval(o.args[1], env, frame));
+      // x = e and no name x is an announcement with type output
+      if(op == "=" && db.is<n_ident>(o.args[0]) && !env->find(db.as<n_ident>(o.args[0]).name)) {
+        symbol name = db.as<n_ident>(o.args[0]).name;
+        if(checking()) implicit_decls.insert(n.value);
+        if(checking())
+          emit({report_event::stage, path, std::string(str(name)), rhs.known() ? cat("кт ", show_v(rhs)) : cat("рт ", types.describe(rhs)), where, {}});
+        env->declare(name, std::move(rhs));
+        return ok();
+      }
       written(o.args[0], env);
       if(db.is<n_ident>(o.args[0]))
         if(value * c = env->find(db.as<n_ident>(o.args[0]).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
@@ -3651,6 +3677,7 @@ struct interpreter {
   std::size_t host_size = 0;
   std::deque<interpreter> level_runs;
   std::vector<std::string> level_details;
+  std::set<uint32_t> implicit_decls; // x = e, declaring x
   std::vector<override_rec> overrides;
   uint32_t override_depth = 0;
   uint64_t array_gen = 0; // generation of array buffers (performance)

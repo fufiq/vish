@@ -11,18 +11,18 @@
 struct point { i64 x; i64 y; }
 
 // функция, порождающая код: n — значение, вставленное в тело
-make_adder(auto name_n) => quote { add_n(auto x) => x + #name_n; };
+make_adder(name_n) => quote { add_n(x) => x + #name_n; };
 
 ct {
-  auto k = 40 + 2;
+  k = 40 + 2;
   emit(quote { answer() => #k; });
   emit(quote { point { i64 w = 7; } });   // расширение сущности кодом
   emit(make_adder(5));
 }
 
 ct {
-  auto big = 100;
-  emit(quote { add_big(auto x) => add_n(x) + #big; });   // видит порождённое раньше
+  big = 100;
+  emit(quote { add_big(x) => add_n(x) + #big; });   // видит порождённое раньше
 }
 
 main() {

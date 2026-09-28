@@ -7,8 +7,8 @@
 // с трейсом; при исполнении — то же
 // исключением invalidated_alias.
 main() {
-  auto v = array{1, 2, 3};
-  auto& e = v[0];
+  v = array{1, 2, 3};
+  &e = v[0];
   v[1] = 5;
   e = 10;
   push(v, 4);

@@ -12,43 +12,43 @@
 // переменная цикла for(i: range(a.size)) — индекс a, проверка границ
 // снимается разбором и видна в отчёте check. Не снимается, если тело меняет
 // индекс, заменяет массив целиком или индексирует другой массив.
-sum(auto xs) {
-  auto s = 0;
-  for(auto i : range(xs.size)) s += xs[i];
+sum(xs) {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
   s
 }
 
 // запись в элемент тоже доказана
-twice(mut auto ys) {
-  for(auto k : range(ys.size)) ys[k] = ys[k] * 2;
+twice(mut ys) {
+  for(k : range(ys.size)) ys[k] = ys[k] * 2;
 }
 
 // другой массив той же длины не доказан
-cross(auto xs, auto ws) {
-  auto s = 0;
-  for(auto i : range(xs.size)) s += ws[i];
+cross(xs, ws) {
+  s = 0;
+  for(i : range(xs.size)) s += ws[i];
   s
 }
 
 // индекс меняется в теле
-second(auto zs) {
-  auto s = 0;
-  for(auto j : range(zs.size)) { j = j + 0; s += zs[j]; }
+second(zs) {
+  s = 0;
+  for(j : range(zs.size)) { j = j + 0; s += zs[j]; }
   s
 }
 
 // массив заменяется целиком
-shrink(auto xs) {
-  auto vs = xs;
-  auto s = 0;
-  for(auto i : range(vs.size)) { s += vs[i]; vs = fill(9, 1); }
+shrink(xs) {
+  vs = xs;
+  s = 0;
+  for(i : range(vs.size)) { s += vs[i]; vs = fill(9, 1); }
   s
 }
 
 main() {
-  auto n = parse_int(args[1]).value;
-  auto xs = fill(n, 2);
-  auto ys = fill(n, 1);
+  n = parse_int(args[1]).value;
+  xs = fill(n, 2);
+  ys = fill(n, 1);
   twice(ys);
   print(sum(xs), cross(xs, xs), second(ys) / 2, shrink(xs) - 1);
   print(sum(ys) + n);

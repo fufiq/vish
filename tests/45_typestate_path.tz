@@ -13,8 +13,8 @@ read(file f) {
 }
 
 main() {
-  auto n = parse_int(args[1]).value;
-  auto g = file{1};
+  n = parse_int(args[1]).value;
+  g = file{1};
   if(n > 5) close(g);
   print(read(g));
 }

@@ -5,12 +5,12 @@
 // Развилка по рт-условию с разными типами веток: продолжение клонируется по
 // типам (foo => [T0 => bar, T1 => bar]), variant не создаётся.
 dot(a, b) {
-  auto s = zero(typeof(a[0]));
-  for(auto i : range(a.size)) s = s + (a[i] * b[i]);
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
   s
 }
 
 main() {
-  auto w = if(args.size > 1) read_floats(stdin) else range(args.size);
+  w = if(args.size > 1) read_floats(stdin) else range(args.size);
   print(dot(w, w));
 }

@@ -5,15 +5,15 @@
 // check: исключённые блоки try_compile
 // try_compile исключает блок только по ошибке инстанцирования (нет перегрузки,
 // имени, поля), а рантайм-ошибки не глушит.
-fast_size(auto x) { x.size }
+fast_size(x) { x.size }
 
-describe(auto x) {
-  try_compile { auto n = fast_size(x); return "fast"; }
+describe(x) {
+  try_compile { n = fast_size(x); return "fast"; }
   "slow"
 }
 
 main() {
   print(describe(array{1, 2}));
   print(describe(42));
-  try_compile { auto a = array{1}; print(a[5]); }
+  try_compile { a = array{1}; print(a[5]); }
 }
