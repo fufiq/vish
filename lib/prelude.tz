@@ -97,3 +97,9 @@ listen(i64 p) => stream_listen(p);
 port(stream l) => stream_port(l);
 accept(stream l) => stream_accept(l);
 connect(str host, i64 p) => stream_connect(host, p);
+
+// Процессы VM (M3c): process(f, аргументы…) — изолированный процесс, между
+// процессами — только данные перемещением. wait — дождаться; false — процесс
+// упал (остальные живут), error — его сообщение.
+wait(process p) => process_wait(p);
+error(process p) => process_error(p);

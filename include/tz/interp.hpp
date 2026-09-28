@@ -148,12 +148,15 @@ struct interpreter {
     std::vector<std::string> stdin_lines;
   };
 
+  // Parent is a process (or sample) within the same VM: a common type registry and scheduler.
   interpreter(ast_db & db, node_id module, std::vector<std::string> args, mode m = mode::run,
-      std::optional<known_inputs> known = std::nullopt, check_cache * cache = nullptr)
-      : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)) {
+      std::optional<known_inputs> known = std::nullopt, check_cache * cache = nullptr, interpreter * parent = nullptr)
+      : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)), types(parent ? parent->types : own_types),
+        root(parent ? parent->root : this) {
     sym_intercept = sym("intercept");
     sym_append = sym("append");
     sym_spawn = sym("fiber_start");
+    sym_process = sym("process");
     sym_yield = sym("yield");
     sym_is_index = sym("is_index");
     globals = new_scope(nullptr);
@@ -418,7 +421,7 @@ struct interpreter {
       return value(std::move(g));
     }
     if(level_runs.empty()) {
-      level_runs.emplace_back(db, mod, std::vector<std::string>{"level"}, mode::check);
+      level_runs.emplace_back(db, mod, std::vector<std::string>{"level"}, mode::check, std::nullopt, nullptr, this);
       interpreter & a = level_runs.back();
       a.level_probe = true;
       a.fuel = 2000000;
@@ -520,6 +523,9 @@ struct interpreter {
     std::optional<diagnostic> error;
     std::optional<diagnostic> pending; // Error that fiber will get when it wakes up (mutual lock)
     bool cancel = false; // end of the program: spin the fiber stack
+    symbol entry; // Process input: function and arguments (M3c)
+    std::vector<value> entry_args;
+    uint32_t proc = 0;
     interpreter * vm = nullptr;
   };
 
@@ -529,12 +535,18 @@ struct interpreter {
     std::deque<value> buf;
     std::size_t cap = 16;
     bool closed = false;
-    std::deque<uint32_t> readers, writers;
+    std::deque<fiber_rec *> readers, writers;
     value shape; // parsing: type of elements
     bool typed = false;
     int fd = -1; // Socket host (M3b): stream of bytes; listener
     bool listener = false;
     bool eof = false;
+  };
+  struct proc_meta_rec {
+    interpreter * vm = nullptr;
+    bool done = false, failed = false;
+    std::string error;
+    std::vector<fiber_rec *> waiters;
   };
 
   bool checking() const { return run_mode == mode::check; }
@@ -1751,7 +1763,7 @@ struct interpreter {
 
   interpreter & prober() {
     if(probes.empty()) {
-      probes.emplace_back(db, mod, std::vector<std::string>{}, mode::check);
+      probes.emplace_back(db, mod, std::vector<std::string>{}, mode::check, std::nullopt, nullptr, this);
       probes.back().fuel = 200000;
     }
     return probes.back();
@@ -2042,7 +2054,8 @@ struct interpreter {
   // blocking operation parks the fiber and gives the kernel to another. Exchange -
   // threads with blocking write/read:
 // parsing spawn mode
-  // It's sorted out on the spot, flows are just types.
+  // It's sorted out on the spot, flows are just types. The scheduler, threads, and
+  // expectation of host are at the root of VM: all processes (M3c) common to fiber.
 
   void swap_exec(exec_state & e) {
     std::swap(frames, e.frames);
@@ -2056,9 +2069,25 @@ struct interpreter {
     std::swap(path, e.path);
   }
 
+  // fiber is now executable (in any VM process); the main root is the host stack.
   fiber_rec & running() {
-    if(fibers.empty()) fibers.emplace_back(); // basic - fiber 0
-    return fibers[current];
+    if(!root->running_fiber) {
+      root->fibers.emplace_back();
+      root->fibers.back().vm = root;
+      root->running_fiber = &root->fibers.back();
+    }
+    return *root->running_fiber;
+  }
+
+  fiber_rec & new_fiber() {
+    running();
+    fiber_rec & f = fibers.emplace_back();
+    f.id = uint32_t(fibers.size() - 1);
+    f.vm = this;
+    f.stack.emplace(std::size_t(64) << 20);
+    f.rsp = f.stack->start(&fiber_main, &f);
+    root->ready.push_back(&f);
+    return f;
   }
 
   // spawn(expr body) is the new fiber; the body is closed (the area lives beyond the call).
@@ -2071,29 +2100,26 @@ struct interpreter {
       (void)r;
       return ok();
     }
-    running();
     capture(t.env);
-    fiber_rec & f = fibers.emplace_back();
-    f.id = uint32_t(fibers.size() - 1);
+    fiber_rec & f = new_fiber();
     f.body = t.expr;
     f.env = t.env;
     f.frame = t.frame;
     f.body_ctx = t.ctx;
-    f.vm = this;
-    f.stack.emplace(std::size_t(64) << 20);
-    f.rsp = f.stack->start(&fiber_main, &f);
-    ready_queue.push_back(f.id);
     return ok();
   }
 
   static void fiber_main(void * arg) {
     auto & f = *static_cast<fiber_rec *>(arg);
     interpreter & vm = *f.vm;
-    fiber_started(&vm.host_bottom, &vm.host_size);
+    fiber_started(&vm.root->host_bottom, &vm.root->host_size);
     try {
-      vm.ctx = f.body_ctx;
-      flow r = vm.eval(f.body, f.env, f.frame);
-      if(r.kind == flow_kind::thr) vm.uncaught(r);
+      if(f.entry) vm.process_main(f); // input
+      else {
+        vm.ctx = f.body_ctx;
+        flow r = vm.eval(f.body, f.env, f.frame);
+        if(r.kind == flow_kind::thr) vm.uncaught(r);
+      }
     } catch(fiber_cancel const &) {
     } catch(diagnostic const & d) {
       f.error = d; // uncaught completes fiber with the track; the rest work
@@ -2101,46 +2127,50 @@ struct interpreter {
       f.error = diagnostic("внутренняя ошибка в файбере", {});
     }
     f.state = fiber_rec::done;
-    for(uint32_t w: std::exchange(vm.joiners, {})) vm.wake(w);
+    if(f.entry) vm.process_done(f);
+    for(fiber_rec * w: std::exchange(vm.root->joiners, {})) vm.wake(w);
     vm.schedule(); // They don't come back
   }
 
-  void wake(uint32_t id) {
-    if(fibers[id].state != fiber_rec::blocked) return;
-    fibers[id].state = fiber_rec::ready;
-    ready_queue.push_back(id);
+  void wake(fiber_rec * f) {
+    if(f->state != fiber_rec::blocked) return;
+    f->state = fiber_rec::ready;
+    root->ready.push_back(f);
   }
 
   // Give the kernel to the next finished fiber. "" There are no ready ones, the current
   // one is locked, no one will wake it up: mutual lock.
   void schedule() {
+    interpreter & r = *root;
     fiber_rec & me = running();
-    while(!ready_queue.empty() && fibers[ready_queue.front()].state != fiber_rec::ready) ready_queue.pop_front();
-    while(ready_queue.empty() && fd_waiters > 0 && me.state != fiber_rec::ready) { // Everyone is waiting for host: sleep on epoll
-      for(uint32_t id: poll.wait()) wake(id);
-      while(!ready_queue.empty() && fibers[ready_queue.front()].state != fiber_rec::ready) ready_queue.pop_front();
+    auto drop_stale = [&] {
+      while(!r.ready.empty() && r.ready.front()->state != fiber_rec::ready) r.ready.pop_front();
+    };
+    drop_stale();
+    while(r.ready.empty() && r.fd_waiters > 0 && me.state != fiber_rec::ready) { // Everyone is waiting for host: sleep on epoll
+      for(uint32_t k: r.poll.wait()) wake(r.fd_wait[k]);
+      drop_stale();
     }
-    if(ready_queue.empty()) {
+    if(r.ready.empty()) {
       if(me.state == fiber_rec::ready) return;
       // No One Wakes Up: The Error Gets the Basic fiber
-      fiber_rec & main_f = fibers[0];
+      fiber_rec & main_f = r.fibers[0];
       main_f.pending = diagnostic("все файберы ждут друг друга (взаимная блокировка)", {}, diag_kind::runtime);
       main_f.state = fiber_rec::ready;
-      if(me.id == 0) {
+      if(&me == &main_f) {
         auto d = *std::exchange(main_f.pending, std::nullopt);
         fail_rt("deadlock", d.what(), stack.empty() ? span{} : stack.back().where);
       }
-      ready_queue.push_back(0);
+      r.ready.push_back(&main_f);
     }
-    uint32_t to = ready_queue.front();
-    ready_queue.pop_front();
-    if(to == me.id) return;
-    fiber_rec & next = fibers[to];
-    swap_exec(me.exec);
-    swap_exec(next.exec);
-    current = to;
-    void const * bottom = next.stack ? next.stack->base : host_bottom;
-    std::size_t size = next.stack ? next.stack->size : host_size;
+    fiber_rec & next = *r.ready.front();
+    r.ready.pop_front();
+    if(&next == &me) return;
+    me.vm->swap_exec(me.exec);
+    next.vm->swap_exec(next.exec);
+    r.running_fiber = &next;
+    void const * bottom = next.stack ? next.stack->base : r.host_bottom;
+    std::size_t size = next.stack ? next.stack->size : r.host_size;
     switch_to(&me.rsp, next.rsp, bottom, size);
     // They come back here when someone switched to me.
   }
@@ -2159,68 +2189,179 @@ struct interpreter {
   }
 
   void yield() {
-    fiber_rec & me = running();
-    ready_queue.push_back(me.id);
+    root->ready.push_back(&running());
     schedule();
+  }
+
+  void each_fiber(auto && f) {
+    for(auto & x: root->fibers) f(x);
+    for(auto & p: root->procs)
+      for(auto & x: p.fibers) f(x);
   }
 
   // fiber, left to wait (the program ended in error), are unwinded: their areas and
   // values are released as in the usual output.
   void cancel_fibers() {
-    if(fibers.size() <= 1 || current != 0) return;
-    for(auto & f: fibers) {
-      if(f.id == 0 || f.state == fiber_rec::done || !f.stack) continue;
+    if(root != this || root->fibers.empty() || root->running_fiber != &root->fibers[0]) return;
+    each_fiber([&](fiber_rec & f) {
+      if(f.state == fiber_rec::done || !f.stack) return;
       f.cancel = true;
       f.state = fiber_rec::ready;
-      ready_queue.push_front(f.id);
+      ready.push_front(&f);
       fibers[0].state = fiber_rec::ready;
-      ready_queue.push_back(0);
+      ready.push_back(&fibers[0]);
       schedule();
-    }
+    });
   }
 
-  // End main: VM awaits the rest of fiber; fiber error is program error.
+  // The end of the main: VM awaits fiber and processes; the program's fiber error is its error
+  // 
+//.
   void join_all() {
-    if(fibers.size() <= 1) return;
+    if(root != this || fibers.size() <= 1) return;
     for(;;) {
       bool alive = false;
-      for(auto const & f: fibers)
-        if(f.id != 0 && f.state != fiber_rec::done) alive = true;
+      each_fiber([&](fiber_rec & f) {
+        if(&f != &fibers[0] && f.state != fiber_rec::done) alive = true;
+      });
       if(!alive) break;
-      joiners.push_back(0);
+      joiners.push_back(&fibers[0]);
       park();
     }
     for(auto & f: fibers)
       if(f.error) throw *f.error;
   }
 
+  // --- VM processes (M3c) ---
+  //
+  // 
+// ; The process is its own.
+  // Interpreter: its globals, domains, and fiber; common - code base, type registry,
+  // and scheduler Between processes, only data is moved (without alias, circuits and
+  // serialization, §9.2).
+
+  bool transferable(value const & v) const {
+    if(v.is<thunk_v>() || v.is<ref_v>() || v.is<split_v>()) return false;
+    if(v.is<fn_v>()) return v.as<fn_v>().name && !v.as<fn_v>().env; // entity - function - yes, closure - no
+    if(v.is<array_v>()) {
+      auto const & a = v.as<array_v>();
+      for(uint32_t i = 0; i < a.size(); ++i)
+        if(!transferable(a.get(i))) return false;
+    }
+    if(v.is<agg_v>())
+      for(auto const & [k, f]: v.as<agg_v>().fields)
+        if(!transferable(f)) return false;
+    return true;
+  }
+
+  flow start_process(node_list const & args, scope * env, uint32_t frame, span where) {
+    if(args.empty() || !db.is<n_ident>(args[0])) fail("process(функция, аргументы…)", where);
+    symbol fname = db.as<n_ident>(args[0]).name;
+    if(!functions.contains(fname)) fail(cat("process: нет функции ", str(fname)), where);
+    node_list rest(args.begin() + 1, args.end());
+    if(checking()) { // parsing: Process input is treated as a call
+      rt_effect();
+      flow r = call_named(fname, rest, env, frame, where);
+      if(r.kind == flow_kind::thr) record_throw(r.v);
+      return ok(value(agg_v{types.named("process"), {{sym("id"), erase(value(int64_t(0)))}}}));
+    }
+    std::vector<value> vals;
+    for(node_id a: rest) {
+      TZ_TRY(v, eval(a, env, frame));
+      if(!transferable(v)) fail(cat("process: аргумент типа ", types.describe(v), " не передаётся между процессами (только данные)"), db[a].where);
+      vals.push_back(std::move(v));
+    }
+    interpreter & child = root->procs.emplace_back(db, mod, std::vector<std::string>{"process"}, mode::run, std::nullopt, nullptr, root);
+    child.jit = jit;
+    child.captured = captured;
+    auto & meta = root->proc_meta.emplace_back();
+    meta.vm = &child;
+    fiber_rec & f = child.new_fiber();
+    f.entry = fname;
+    f.entry_args = std::move(vals);
+    f.proc = uint32_t(root->proc_meta.size() - 1);
+    return ok(value(agg_v{types.named("process"), {{sym("id"), value(int64_t(f.proc))}}}));
+  }
+
+  void process_main(fiber_rec & f) {
+    elaborate();
+    auto it = functions.find(f.entry);
+    call_site site{{}, std::string(str(f.entry)), 0, 0};
+    flow r = dispatch_split(it->second, f.entry_args, 0, {}, globals, 0, site);
+    if(r.kind == flow_kind::thr) uncaught(r);
+  }
+
+  void process_done(fiber_rec & f) {
+    auto & m = root->proc_meta[f.proc];
+    m.done = true;
+    if(f.error) {
+      m.failed = true;
+      m.error = f.error->what();
+      f.error.reset(); // Process outcome, not program error
+    }
+    for(fiber_rec * w: std::exchange(m.waiters, {})) wake(w);
+  }
+
+  proc_meta_rec & proc_of(value const & p, span where) {
+    value const * v = shape_of(p);
+    if(!v || !v->is<agg_v>() || types.name(v->as<agg_v>().type) != "process") fail("ожидался процесс", where);
+    value const & id = v->as<agg_v>().fields[0].second;
+    if(!id.is<int64_t>() || uint64_t(id.as<int64_t>()) >= root->proc_meta.size()) fail("неизвестный процесс", where);
+    return root->proc_meta[std::size_t(id.as<int64_t>())];
+  }
+
+  value process_op(std::string_view n, std::vector<value> & a, span where) {
+    if(checking()) {
+      rt_effect();
+      return n == "process_wait" ? erase(value(true)) : erase(value(std::string("x")));
+    }
+    auto & m = proc_of(a[0], where);
+    while(!m.done) {
+      m.waiters.push_back(&running());
+      park();
+    }
+    if(n == "process_wait") return value(!m.failed);
+    return value(m.error);
+  }
+
   uint32_t stream_id(value const & s, span where) {
     value const * v = shape_of(s);
     if(!v || !v->is<agg_v>() || types.name(v->as<agg_v>().type) != "stream" || v->as<agg_v>().fields.empty()) fail("ожидался поток", where);
     value const & id = v->as<agg_v>().fields[0].second;
-    if(!id.is<int64_t>() || id.as<int64_t>() < 0 || uint64_t(id.as<int64_t>()) >= streams.size()) fail("неизвестный поток", where);
+    if(!id.is<int64_t>() || id.as<int64_t>() < 0 || uint64_t(id.as<int64_t>()) >= root->streams.size()) fail("неизвестный поток", where);
     return uint32_t(id.as<int64_t>());
   }
 
   void wait_fd(int fd, bool write) {
-    poll.wait_for(fd, write, running().id);
-    ++fd_waiters;
+    interpreter & r = *root;
+    uint32_t k = uint32_t(r.fd_wait.size());
+    for(uint32_t i = 0; i < r.fd_wait.size(); ++i)
+      if(!r.fd_wait[i]) k = i;
+    if(k == r.fd_wait.size()) r.fd_wait.push_back(nullptr);
+    r.fd_wait[k] = &running();
+    r.poll.wait_for(fd, write, k);
+    ++r.fd_waiters;
     struct dec {
-      uint32_t & n;
-      ~dec() { --n; }
-    } d{fd_waiters};
+      interpreter & r;
+      uint32_t k;
+      ~dec() {
+        --r.fd_waiters;
+        r.fd_wait[k] = nullptr;
+      }
+    } d{r, k};
     park();
   }
 
   value new_stream(int fd, bool listener) {
-    streams.emplace_back();
-    streams.back().fd = fd;
-    streams.back().listener = listener;
+    auto & ss = root->streams;
+    ss.emplace_back();
+    ss.back().fd = fd;
+    ss.back().listener = listener;
     if(checking()) {
-      streams.back().shape = erase(value(std::string("x")));
-      streams.back().typed = true;
+      ss.back().shape = erase(value(std::string("x")));
+      ss.back().typed = true;
     }
-    return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(streams.size() - 1))}}});
+    return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(ss.size() - 1))}}});
   }
 
   // Socket: more is data (or wait); zero bytes is the end.
@@ -2267,7 +2408,7 @@ struct interpreter {
     }
     if(n == "stream_close") {
       if(s.fd >= 0) {
-        poll.forget(s.fd);
+        root->poll.forget(s.fd);
         ::close(s.fd);
         s.fd = -1;
       }
@@ -2301,11 +2442,12 @@ struct interpreter {
       return new_stream(fd, false);
     }
     if(n == "stream_new") {
-      streams.emplace_back();
-      if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) streams.back().cap = std::size_t(a[0].as<int64_t>());
-      return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(streams.size() - 1))}}});
+      auto & ss = root->streams;
+      ss.emplace_back();
+      if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) ss.back().cap = std::size_t(a[0].as<int64_t>());
+      return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(ss.size() - 1))}}});
     }
-    stream_rec & s = streams[stream_id(a[0], where)];
+    stream_rec & s = root->streams[stream_id(a[0], where)];
     if(checking() && (n == "stream_accept" || n == "stream_port")) {
       rt_effect();
       return n == "stream_accept" ? new_stream(-1, false) : erase(value(int64_t(1)));
@@ -2327,8 +2469,9 @@ struct interpreter {
       if(n == "stream_more") return erase(value(true));
       return value();
     }
-    uint32_t me = running().id;
+    fiber_rec * me = &running();
     if(n == "stream_write") {
+      if(!transferable(a[1])) fail(cat("в поток — только данные: ", types.describe(a[1])), where);
       while(s.buf.size() >= s.cap && !s.closed) {
         s.writers.push_back(me);
         park();
@@ -2358,8 +2501,8 @@ struct interpreter {
     }
     if(n == "stream_close") {
       s.closed = true;
-      for(uint32_t r: std::exchange(s.readers, {})) wake(r);
-      for(uint32_t w: std::exchange(s.writers, {})) wake(w);
+      for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
+      for(fiber_rec * w: std::exchange(s.writers, {})) wake(w);
       return value();
     }
     fail(cat("неизвестная операция потока ", n), where);
@@ -2678,6 +2821,7 @@ struct interpreter {
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
       if(name == sym_spawn && !functions.contains(name)) return spawn(c.args, env, frame, where);
+      if(name == sym_process && !functions.contains(name)) return start_process(c.args, env, frame, where);
       if(name == sym_yield && !functions.contains(name) && c.args.empty()) {
         if(!checking()) yield();
         return ok();
@@ -2714,7 +2858,7 @@ struct interpreter {
         inner->declare(p.name, value(thunk_v{args[i], env, frame, ctx}));
         continue;
       }
-      if(value * cell = place_or_null(args[i], env)) {
+      if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr) {
         inner->alias(p.name, cell);
         continue;
       }
@@ -2840,7 +2984,7 @@ struct interpreter {
     std::vector<std::string> rejected;
     for(node_id f: fns) {
       auto const & fn = db.as<n_fn>(f);
-      if(fn.params.size() != args.size()) {
+      if(fn.params.size() != vals.size()) {
         rejected.push_back(cat(describe_fn(f), ": ожидает ", fn.params.size(), " аргументов"));
         continue;
       }
@@ -3102,7 +3246,7 @@ struct interpreter {
           continue;
         }
       if(p.mode != param_mode::expr && p.mode != param_mode::own && !vals[i].is<split_v>()) {
-        if(value * cell = place_or_null(args[i], env); cell && !cell->is<split_v>()) {
+        if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr; cell && !cell->is<split_v>()) {
           inner->alias(p.name, cell);
           continue;
         }
@@ -3326,10 +3470,12 @@ struct interpreter {
       return erase(value(true));
     }
     if(n.starts_with("stream_")) return stream_op(n, a, where);
+    if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
     if(n == "text" && a.size() == 1) // text of value (bytes): number - decimal record
       return a[0].known() ? value(a[0].is<std::string>() ? a[0].as<std::string>() : show_v(a[0])) : erase(value(std::string("x")));
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
+      if(unknown(a[0]) || unknown(a[1])) return value(rt_v{}); // type
       if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
       if(a[0].is<int64_t>() && a[1].is<array_v>()) {
         int64_t k = a[0].as<int64_t>();
@@ -3427,7 +3573,8 @@ struct interpreter {
   std::vector<scope *> free_scopes;
   scope * globals = nullptr;
   std::map<symbol, std::vector<node_id>> functions;
-  type_registry types;
+  type_registry own_types;
+  type_registry & types;
   std::vector<call_site> stack;
   std::vector<frame_rec> frames;
   uint32_t frame_counter = 0;
@@ -3483,18 +3630,23 @@ struct interpreter {
   std::vector<fact> facts;
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
-  symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield; // kernel forms analyzed prior to the calculation of arguments
+  symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
   std::vector<std::string> instance_keys; // instance in the parsing chain
   std::map<std::string, std::map<std::string, std::pair<span, std::string>>> rt_checks; // instance → run-time - checks
   bool level_probe = false; // This is parsing for static_level.
 
-  std::deque<fiber_rec> fibers; // 0 - basic
-  uint32_t current = 0;
-  std::deque<uint32_t> ready_queue;
-  std::vector<uint32_t> joiners;
+  std::deque<fiber_rec> fibers; // root 0 is the main
+  // at the root of VM (common to processes): scheduler, threads, expectation host
+  interpreter * root = this;
+  fiber_rec * running_fiber = nullptr;
+  std::deque<fiber_rec *> ready;
+  std::vector<fiber_rec *> joiners;
   std::deque<stream_rec> streams;
   os::poller poll; // expectation of host descriptors
   uint32_t fd_waiters = 0;
+  std::vector<fiber_rec *> fd_wait; // epoll key: fiber
+  std::deque<interpreter> procs;
+  std::deque<proc_meta_rec> proc_meta;
   void const * host_bottom = nullptr;
   std::size_t host_size = 0;
   std::deque<interpreter> level_runs;
