@@ -1,0 +1,34 @@
+// args: 4
+// out: 1020
+// out: 12
+// out: 12 7.5
+// jit-compiled: mixed
+// jit-compiled: consts
+// jit-compiled: nested_mix
+// Копия функции под каждый контекст вызова 
+// Один
+// помощник встраивается с i64 и с f64, с разными кт-значениями: у каждого
+// места вызова свои типы и константы, а не их смесь.
+twice(auto x) => x + x
+
+scaled(auto x, auto k) => x * k + k
+
+mixed(auto n, auto y) {
+  auto a = twice(n) + twice(n + 1) + 2;
+  auto b = twice(y) + twice(y * 0.5) * 0.0;
+  a + i64(b) * 100
+}
+
+// вложенный вызов: узел twice(x) внутри h один, а типы у мест h — разные
+h(auto x) => twice(x) + x
+
+nested_mix(auto n, auto y) => h(n) * 1000 + i64(h(y) * 2.0)
+
+consts(auto n) => scaled(n, 2) + scaled(n, 0) - 2 + 4 * 0
+
+main() {
+  auto n = parse_int(args[1]).value;
+  print(mixed(n, f64(n) + 1.0));
+  print(consts(n) + 4);
+  print(nested_mix(n, 2.5) / 1000, f64(nested_mix(n, 2.5) % 1000) / 2.0);
+}

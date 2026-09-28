@@ -226,6 +226,7 @@ private:
     // The context of the embedding point: what was seen by the caller.
     struct context {
         u32 scopes, fn_base, frames;
+        u64 ctx; // Context of caller embedding (parsing observations)
     };
 
     // The frame of the function in the embedding chain: where does its return lead?
@@ -280,8 +281,10 @@ private:
         scopes_.resize(c.scopes);
         frames_.resize(c.frames);
         u32 base = std::exchange(fn_base_, c.fn_base);
+        u64 cx   = std::exchange(ctx_, c.ctx);
         auto r   = f();
         fn_base_ = base;
+        ctx_     = cx;
         for (auto& sc : scopes) scopes_.push_back(std::move(sc));
         frames_.insert(frames_.end(), frames.begin(), frames.end());
         return r;
@@ -346,7 +349,9 @@ private:
         if (t == jt::f64_) as_.movq(xmm0, rax);
     }
 
-    const interpreter::observation* obs(node_id n) const { return an_.observed(n); }
+    // Observation of node in the current embedding context: Each call site has its own
+    // copy of the body with its own types and compile-time.
+    const interpreter::observation* obs(node_id n) const { return an_.observed(n, ctx_); }
 
     jt type_of(node_id n) const {
         const auto* o = obs(n);
@@ -695,7 +700,7 @@ private:
     jt inline_call(node_id n, const n_call& c, node_id target) {
         using namespace x64;
         const auto& g = db_.as<n_fn>(target);
-        context     at{u32(scopes_.size()), fn_base_, u32(frames_.size())};
+        context     at{u32(scopes_.size()), fn_base_, u32(frames_.size()), ctx_};
         u32         ctx = u32(contexts_.size());
         contexts_.push_back(at);
         // arguments: place - alias slot, expr - expression with context, other - calculated in your slot
@@ -734,12 +739,14 @@ private:
         auto exit = std::make_unique<label>();
         scopes_.emplace_back(std::move(params));
         u32 base = std::exchange(fn_base_, u32(scopes_.size() - 1));
+        u64 cx   = std::exchange(ctx_, interpreter::inline_context(ctx_, n.value()));
         frames_.push_back({target, exit.get(), result, depth_, false});
         jt body = gen_value(g.body);
         if (body != result && body != jt::unit) throw jit_unsupported{n, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(result))};
         as_.bind(*exit);
         frames_.pop_back();
         fn_base_ = base;
+        ctx_     = cx;
         scopes_.resize(at.scopes);
         inline_exits_.push_back(std::move(exit));
         return result;
@@ -904,6 +911,7 @@ private:
     u32                                           depth_ = 0;
     u32                                           frame_patch_ = 0;
     u32                                           fn_base_ = 0; // first area of the current (built-in) function
+    u64                                           ctx_ = 0;     // Embedded context (as in parsing)
     std::vector<frame>                            frames_;
     std::vector<context>                          contexts_;
     std::vector<std::unique_ptr<x64::label>>      inline_exits_;

@@ -100,6 +100,7 @@ struct thunk_v {
     node_id                expr;
     std::shared_ptr<scope> env;
     u32                    frame; // function from which `return` within the expression
+    u64                    ctx = 0; // context in which the expression is written
 };
 
 // Verification mode (value approach):

@@ -134,6 +134,17 @@ public:
         bool  present  = false; // knot
     };
 
+    // Observing node in One Embedding Context
+//.
+    const observation* observed(node_id n, u64 ctx) const {
+        build_observed();
+        auto it = observed_ctx_.find({n.value(), ctx});
+        return it == observed_ctx_.end() ? nullptr : &it->second;
+    }
+
+    // The body context of a function called from a node call in a ctx context.
+    static u64 inline_context(u64 ctx, u32 call) { return (ctx ^ (u64(call) + 0x9e3779b97f4a7c15ull)) * 0x100000001b3ull; }
+
     const observation* observed(node_id n) const {
         build_observed();
         auto it = observed_.find(n.value());
@@ -247,6 +258,7 @@ private:
     struct call_site {
         span        where;
         std::string what;
+        u32         node = 0; // call node: from the chain of such node is formed the context of embedding
     };
 
     bool checking() const { return mode_ == mode::check; }
@@ -310,24 +322,25 @@ private:
         u32   node;
         value v;
         bool  seen, diverted, effect;
+        u64   ctx = 0; // Embedded context (node chain)
     };
 
     void observe(node_id n, const flow& f, bool effect) {
-        if (!f.normal()) journal_.push_back({n.value(), {}, false, true, effect});
-        else journal_.push_back({n.value(), f.v, true, false, effect});
+        if (!f.normal()) journal_.push_back({n.value(), {}, false, true, effect, ctx_});
+        else journal_.push_back({n.value(), f.v, true, false, effect, ctx_});
         observed_dirty_ = true;
     }
 
     void mark_executed(node_id n) {
-        journal_.push_back({n.value(), {}, false, false, false});
+        journal_.push_back({n.value(), {}, false, false, false, ctx_});
         observed_dirty_ = true;
     }
 
     void build_observed() const {
         if (!observed_dirty_) return;
         observed_.clear();
-        for (const auto& e : journal_) {
-            auto& o = observed_[e.node];
+        observed_ctx_.clear();
+        auto add = [&](observation& o, const obs_entry& e) {
             o.effect |= e.effect;
             o.diverted |= e.diverted;
             o.present = true;
@@ -335,6 +348,10 @@ private:
                 o.v    = o.seen ? const_cast<interpreter*>(this)->merge(o.v, e.v) : e.v;
                 o.seen = true;
             }
+        };
+        for (const auto& e : journal_) {
+            add(observed_[e.node], e);
+            add(observed_ctx_[{e.node, e.ctx}], e);
         }
         observed_dirty_ = false;
     }
@@ -342,8 +359,17 @@ private:
     // The value of the variable; thunk (expr parameter) is calculated when mentioned.
     flow read(value* cell) {
         if (cell->is<thunk_v>()) {
-            thunk_v t = cell->as<thunk_v>();
-            return eval(t.expr, t.env, t.frame);
+            thunk_v t     = cell->as<thunk_v>();
+            u64     saved = std::exchange(ctx_, t.ctx); // expression of the caller in its context
+            flow    r;
+            try {
+                r = eval(t.expr, t.env, t.frame);
+            } catch (...) {
+                ctx_ = saved;
+                throw;
+            }
+            ctx_ = saved;
+            return r;
         }
         return ok(*cell);
     }
@@ -938,7 +964,7 @@ private:
     flow eval_node(node_id n, const n_op& o, const scope_ptr& env, u32 frame) {
         auto op    = str(o.op);
         span where = db_[n].where;
-        if (op == "?") return call_named(sym("try"), o.args, env, frame, where);
+        if (op == "?") return call_named(sym("try"), o.args, env, frame, where, n.value());
         if (o.args.size() == 1) {
             TZ_TRY(x, eval(o.args[0], env, frame));
             return ok(lift(x, [&](const value& a) { return unary(op, a, where); }));
@@ -1082,24 +1108,24 @@ private:
             const auto& m = db_.as<n_member>(c.callee);
             node_list   args{m.object};
             args.insert(args.end(), c.args.begin(), c.args.end());
-            return call_named(m.name, args, env, frame, where);
+            return call_named(m.name, args, env, frame, where, n.value());
         }
         if (db_.is<n_ident>(c.callee)) {
             symbol name = db_.as<n_ident>(c.callee).name;
             if (value* cell = env->find(name)) {
                 TZ_TRY(fv, read(cell));
-                return call_value(fv, c.args, env, frame, where);
+                return call_value(fv, c.args, env, frame, where, n.value());
             }
-            return call_named(name, c.args, env, frame, where);
+            return call_named(name, c.args, env, frame, where, n.value());
         }
         TZ_TRY(fv, eval(c.callee, env, frame));
-        return call_value(fv, c.args, env, frame, where);
+        return call_value(fv, c.args, env, frame, where, n.value());
     }
 
-    flow call_value(const value& fv, const node_list& args, const scope_ptr& env, u32 frame, span where) {
+    flow call_value(const value& fv, const node_list& args, const scope_ptr& env, u32 frame, span where, u32 node = 0) {
         if (!fv.is<fn_v>()) fail(std::format("значение типа {} нельзя вызвать", types_.describe(fv)), where);
         const fn_v& f = fv.as<fn_v>();
-        if (f.name) return call_named(f.name, args, env, frame, where);
+        if (f.name) return call_named(f.name, args, env, frame, where, node);
         const node_list& params = db_.is<n_lambda>(f.lambda) ? db_.as<n_lambda>(f.lambda).params : db_.as<n_fn>(f.lambda).params;
         node_id          body   = db_.is<n_lambda>(f.lambda) ? db_.as<n_lambda>(f.lambda).body : db_.as<n_fn>(f.lambda).body;
         if (params.size() != args.size()) fail(std::format("ожидалось {} аргументов, передано {}", params.size(), args.size()), where);
@@ -1107,7 +1133,7 @@ private:
         inner->parent = f.env;
         for (u32 i = 0; i < params.size(); ++i) {
             const auto& p = db_.as<n_param>(params[i]);
-            if (p.mode == param_mode::expr) { inner->declare(p.name, value(thunk_v{args[i], env, frame})); continue; }
+            if (p.mode == param_mode::expr) { inner->declare(p.name, value(thunk_v{args[i], env, frame, ctx_})); continue; }
             if (value* cell = place_or_null(args[i], env)) { inner->alias(p.name, cell); continue; }
             TZ_TRY(v, eval(args[i], env, frame));
             inner->declare(p.name, std::move(v));
@@ -1137,9 +1163,9 @@ private:
         return r;
     }
 
-    flow call_named(symbol name, const node_list& args, const scope_ptr& env, u32 frame, span where) {
+    flow call_named(symbol name, const node_list& args, const scope_ptr& env, u32 frame, span where, u32 node = 0) {
         if (auto it = functions_.find(name); it != functions_.end())
-            return call_overloaded(it->second, args, env, frame, {where, std::string(str(name))});
+            return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node});
         std::vector<value> vals;
         for (node_id a : args) {
             TZ_TRY(v, eval(a, env, frame));
@@ -1176,7 +1202,7 @@ private:
                 const auto& ps = db_.as<n_fn>(f).params;
                 if (i >= ps.size() || db_.as<n_param>(ps[i]).mode != param_mode::expr) expr_everywhere = false;
             }
-            if (expr_everywhere) vals[i] = value(thunk_v{args[i], env, frame});
+            if (expr_everywhere) vals[i] = value(thunk_v{args[i], env, frame, ctx_});
             else if (value* cell = checking() ? nullptr : place_or_null(args[i], env); cell && cell->is<array_v>())
                 vals[i] = value(array_v::borrow(cell->as<array_v>())); // place-link, not copy
             else {
@@ -1324,7 +1350,7 @@ private:
             if (auto it = cache_->entries.find(memo_key); it != cache_->entries.end() && valid(it->second)) {
                 ++cache_->hits;
                 for (const auto& ev : it->second.events) emit(ev);
-                for (const auto& [node, v, seen, div, eff] : it->second.journal) journal_.push_back({node, v, seen, div, eff});
+                for (const auto& [node, v, seen, div, eff] : it->second.journal) journal_.push_back({node, v, seen, div, eff, ctx_});
                 observed_dirty_ = true;
                 if (it->second.effect) { ++effects_; if (!frames_.empty()) frames_.back().rt_effect = true; }
                 last_rt_effect_ = it->second.effect;
@@ -1341,6 +1367,7 @@ private:
         }
 
         stack_.push_back(site);
+        u64 ctx_saved = std::exchange(ctx_, inline_context(ctx_, site.node)); // body in its context of embedding
         std::size_t journal_mark  = journal_.size();
         frame_floors_.push_back({frame_counter_, false});
         flow r;
@@ -1353,6 +1380,7 @@ private:
                 r = run_frame(fn.body, inner, fn.name, fn.outline);
             } catch (...) {
                 stack_.pop_back();
+                ctx_ = ctx_saved;
                 frame_floors_.pop_back();
                 if (memoize) { recording_.pop_back(); deps_.pop_back(); }
                 if (checking()) { active_.erase(active_key); approx_.erase(active_key); recursed_.erase(active_key); }
@@ -1367,6 +1395,7 @@ private:
             approx_[active_key] = next;
         }
         stack_.pop_back();
+        ctx_ = ctx_saved;
         if (checking()) { approx_.erase(active_key); recursed_.erase(active_key); }
 
         // curled up in compile-time: all arguments and result known, runtime no effects
@@ -1609,6 +1638,8 @@ private:
     std::optional<known_inputs>             known_inputs_;
     std::vector<obs_entry>                  journal_;
     mutable std::unordered_map<u32, observation> observed_;
+    mutable std::map<std::pair<u32, u64>, observation> observed_ctx_; // insertion
+    u64                                     ctx_ = 0;          // current context
     mutable bool                            observed_dirty_ = false;
     std::set<u32>                           live_fns_;
     std::set<u32>                           param_writes_checked_;
