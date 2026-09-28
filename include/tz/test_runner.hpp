@@ -24,6 +24,7 @@
 #include "views.hpp"
 #include "store.hpp"
 #include "session.hpp"
+#include "server.hpp"
 #include "jit/jit.hpp"
 
 #include <filesystem>
@@ -34,7 +35,7 @@ struct test_runner {
   int run(std::string const & dir) {
     std::vector<std::filesystem::path> files;
     for(auto & e: std::filesystem::directory_iterator(dir))
-      if(e.path().extension() == ".tz" || e.path().extension() == ".session") files.push_back(e.path());
+      if(e.path().extension() == ".tz" || e.path().extension() == ".session" || e.path().extension() == ".wire") files.push_back(e.path());
     std::ranges::sort(files);
     uint32_t passed = 0;
     for(auto & f: files) {
@@ -89,7 +90,9 @@ struct test_runner {
 
   // Scenario of the VM session: commands and after each waiting for its conclusion.
   // // program: file.tz program (relative to script directory)
-  // // expect: substring // expect-not: substring
+  // // expect: substring // expect-not: substring Script .wire - the same through the
+  // editor's protocol: the line is the client's message in text form, the output is the
+  // VM answers that passed through the real socket.
   std::string run_session(std::filesystem::path const & path) {
     os::mapped_file text(path.string());
     std::vector<std::string> lines;
@@ -97,6 +100,9 @@ struct test_runner {
     ast_db db;
     node_id root;
     std::optional<vm_session> session;
+    std::optional<editor_server> server;
+    wire_client client;
+    bool wire = path.extension() == ".wire";
     std::string last, why;
     for(std::size_t i = 0; i < lines.size(); ++i) {
       auto const & l = lines[i];
@@ -106,6 +112,14 @@ struct test_runner {
         parser p(db, f.text());
         root = p.parse_module();
         session.emplace(db, root, file.filename().string());
+        if(wire) {
+          int fds[2];
+          if(!os::socket_pair(fds)) return "socketpair не удался";
+          server.emplace(*session);
+          client.peer = &server->add_peer(fds[0]);
+          client.fd = fds[1];
+          client.db = &db;
+        }
         continue;
       }
       if(l.starts_with("// expect:")) {
@@ -121,16 +135,115 @@ struct test_runner {
         continue;
       }
       if(l.empty() || l.starts_with("//") || !session) continue;
+      if(wire) {
+        last = client.exchange(*server, l);
+        if(!client.mismatch.empty()) why += cat("    строка ", i + 1, ": текст представления расходится с проекцией:\n", client.mismatch);
+        client.mismatch.clear();
+        continue;
+      }
       std::string body;
       if(l.starts_with("edit "))
         while(++i < lines.size() && lines[i] != ".") body += lines[i] + "\n";
       last = session->exec(l, body);
     }
+    if(wire && client.fd >= 0) os::close_fd(client.fd);
     return why;
   }
 
+  // The protocol client is in the same process: writes a frame at its end of a pair of
+  // sockets, spins the server until it responds, and describes the answers in text. For
+  // presentation, adds the text collected by the client, for the cursor - a line with .
+  struct wire_client {
+    int fd = -1;
+    editor_server::peer * peer = nullptr;
+    uint32_t sent = 0;
+    std::string in;
+    std::vector<proto::s_node> nodes;
+    node_id root;
+    ast_db const * db = nullptr;
+    std::string mismatch; // pieced text ) projection (tz fmt)
+
+    // @substring is the number of the first node in whose own text it is: scripts do
+    // not depend on node numbers (they shift from prelude).
+    std::string resolve(std::string const & line) const {
+      std::string out;
+      for(auto w: words_of(line)) {
+        if(!out.empty()) out += ' ';
+        if(!w.starts_with('@')) {
+          out += w;
+          continue;
+        }
+        auto want = w.substr(1);
+        std::string found = "#?";
+        for(auto const & x: nodes)
+          for(auto const & pc: x.pieces)
+            if(auto const * t = std::get_if<std::string>(&pc); t && found == "#?" && t->contains(want)) found = cat("#", x.id.value);
+        out += found;
+      }
+      return out;
+    }
+
+    std::string exchange(editor_server & server, std::string const & line) {
+      os::write_all(fd, proto::frame(proto::parse_client(resolve(line))));
+      ++sent;
+      while(peer->handled < sent || !server.settled(*peer)) server.step();
+      in += os::read_ready(fd);
+      std::string out;
+      proto::take_frames(in, [&](std::string_view body) {
+        proto::server_msg m;
+        proto::decode(body, m);
+        out += proto::describe(m);
+        if(auto * v = std::get_if<proto::s_view>(&m)) {
+          nodes = v->nodes;
+          root = v->root;
+          std::string t = text(root);
+          if(std::string want = printer(*db).print(root); t != want) mismatch = cat("собрано:\n", t, "\nпроекция:\n", want);
+          out += cat("текст:\n", t, "\n");
+        }
+        if(auto * c = std::get_if<proto::s_cursor>(&m)) out += cat("курсор: ", cursor_line(*c), "\n");
+      });
+      return out;
+    }
+
+    proto::s_node const * node(node_id n) const {
+      for(auto const & x: nodes)
+        if(x.id == n) return &x;
+      return nullptr;
+    }
+
+    // Text projection, collected from pieces - as it will collect the editor; with
+    // a given cursor in its place put ном.
+    std::string text(node_id n, proto::s_cursor const * c = nullptr) const {
+      std::string out;
+      auto const * x = node(n);
+      if(!x) return out;
+      for(uint32_t i = 0; i < x->pieces.size(); ++i) {
+        if(auto const * t = std::get_if<std::string>(&x->pieces[i])) {
+          if(c && c->node == n && c->piece == i) {
+            uint32_t cp = 0;
+            for(char ch: *t) {
+              if((static_cast<unsigned char>(ch) & 0xC0) != 0x80 && cp++ == c->offset) out += "‸";
+              out += ch;
+            }
+            if(cp == c->offset) out += "‸";
+          } else out += *t;
+        } else out += text(std::get<node_id>(x->pieces[i]), c);
+      }
+      return out;
+    }
+
+    std::string cursor_line(proto::s_cursor const & c) const {
+      std::string all = text(root, &c);
+      auto bar = all.find("‸");
+      if(bar == std::string::npos) return "?";
+      auto b = all.rfind('\n', bar), e = all.find('\n', bar);
+      b = b == std::string::npos ? 0 : b + 1;
+      return all.substr(b, e == std::string::npos ? std::string::npos : e - b);
+    }
+  };
+
   std::string run_one(std::filesystem::path const & path) {
-    if(path.extension() == ".session") return run_session(path);
+    if(path.extension() == ".session" || path.extension() == ".wire") return run_session(path);
     os::mapped_file file(path.string());
     std::string src(file.text());
     expect e = read_header(src);

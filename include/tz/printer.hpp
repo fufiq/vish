@@ -12,6 +12,13 @@
 
 namespace tz {
 
+// projection node: Your text or child's place.
+using piece = std::variant<std::string, node_id>;
+struct node_layout {
+  node_id node;
+  std::vector<piece> pieces;
+};
+
 struct printer {
   // keep(n) == False - node drops out of projection (slice).
   using filter = std::function<bool(node_id)>;
@@ -42,6 +49,34 @@ struct printer {
 
   void item(node_id n) {
     if(!n || !kept(n)) return;
+    if(!layouts) return item_body(n);
+    enter(n);
+    item_body(n);
+    leave();
+  }
+
+  // projection layout by node (editor, M5): Each node has chunks of its own text and
+  // children's place. The syntax is described once - here in projection; the editor
+  // gets the finished chunks, not his copy of the grammar.
+  void enter(node_id n) {
+    if(!open.empty()) {
+      flush();
+      (*layouts)[open.back()].pieces.push_back(n);
+    }
+    open.push_back(uint32_t(layouts->size()));
+    layouts->push_back({n, {}});
+    mark = out.size();
+  }
+  void leave() {
+    flush();
+    open.pop_back();
+  }
+  void flush() {
+    if(out.size() > mark) (*layouts)[open.back()].pieces.push_back(out.substr(mark));
+    mark = out.size();
+  }
+
+  void item_body(node_id n) {
     if(subst.node) {
       if(node_id other = subst.node(n); other && other != n) {
         item(other);
@@ -439,35 +474,41 @@ struct printer {
   // (Arguments and parameters of the block) body
   void clause(node_id body, node_list const & args, bool bare_ok = true) {
     n_lambda const * lam = db.is<n_lambda>(body) && db.as<n_lambda>(body).block ? &db.as<n_lambda>(body) : nullptr;
-    std::vector<std::string> parts;
-    for(uint32_t k = 0; k < args.size(); ++k) {
-      std::string s;
-      if(lam)
-        for(node_id pn: lam->params)
-          if(db.as<n_param>(pn).source == int64_t(k)) s = cat(print_sub(pn), " : ");
-      parts.push_back(s + print_sub(args[k]));
-    }
+    // Print immediately in order, without intermediate lines: the layout of
+    // projection by node (editor) requires the text to go out linearly
+    uint32_t count = uint32_t(args.size());
     if(lam)
       for(node_id pn: lam->params)
-        if(db.as<n_param>(pn).source < 0) parts.push_back(print_sub(pn));
-    if(!parts.empty() || !bare_ok) {
+        if(db.as<n_param>(pn).source < 0) ++count;
+    if(count || !bare_ok) {
       out += '(';
-      for(uint32_t k = 0; k < parts.size(); ++k) {
-        if(k) out += ", ";
-        out += parts[k];
+      bool first = true;
+      auto sep = [&] {
+        if(!first) out += ", ";
+        first = false;
+      };
+      for(uint32_t k = 0; k < args.size(); ++k) {
+        sep();
+        if(lam)
+          for(node_id pn: lam->params)
+            if(db.as<n_param>(pn).source == int64_t(k)) {
+              item(pn);
+              out += " : ";
+            }
+        item(args[k]);
       }
+      if(lam)
+        for(node_id pn: lam->params)
+          if(db.as<n_param>(pn).source < 0) {
+            sep();
+            item(pn);
+          }
       out += ')';
     }
     node_id b = lam ? lam->body : body;
     out += ' ';
     item(b);
     if(!db.is<n_block>(b)) terminate(b);
-  }
-
-  std::string print_sub(node_id n) {
-    std::string saved = std::exchange(out, std::string());
-    item(n);
-    return std::exchange(out, std::move(saved));
   }
 
   void print_node(node_id, n_member const & m) {
@@ -518,6 +559,9 @@ struct printer {
   substitution subst;
   std::string out;
   uint32_t indent = 0;
+  std::vector<node_layout> * layouts = nullptr; // It's not empty.
+  std::vector<uint32_t> open; // node, which is printed (numbers in layouts)
+  std::size_t mark = 0; // beginning of text not yet referred to as node
 };
 
 } // namespace tz

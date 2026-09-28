@@ -15,6 +15,7 @@
 #include "tz/views.hpp"
 #include "tz/store.hpp"
 #include "tz/session.hpp"
+#include "tz/server.hpp"
 #include "tz/jit/jit.hpp"
 
 namespace {
@@ -23,7 +24,7 @@ using tz::cat;
 using tz::put;
 
 int usage() {
-  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz test <каталог>          прогнать эталонные тесты\n"));
+  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz test <каталог>          прогнать эталонные тесты\n"));
   return 2;
 }
 
@@ -123,6 +124,14 @@ int main(int argc, char ** argv) {
       return 0;
     }
 
+    if(cmd == "serve") {
+      if(at >= argc) return usage();
+      tz::vm_session session(p.db, p.root, p.path);
+      tz::editor_server server(session);
+      server.listen(argv[at]);
+      put(stderr, cat("tz serve: ", p.path, " на ", argv[at], "\n"));
+      for(;;) server.step();
+    }
     if(cmd == "run") {
       std::vector<std::string> args{p.path};
       args.insert(args.end(), argv + at, argv + argc);

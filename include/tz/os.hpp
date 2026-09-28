@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace tz::os {
@@ -144,6 +145,51 @@ bool ipv4(std::string const & host, int port, sockaddr_in & a) {
   a.sin_port = htons(uint16_t(port));
   return ::inet_pton(AF_INET, host.c_str(), &a.sin_addr) == 1;
 }
+
+// Listening to a Unix socket (protocol editorйVM, M5); the old socket file is removed.
+int listen_unix(std::string const & path) {
+  sockaddr_un a{};
+  if(path.size() >= sizeof a.sun_path) {
+    errno = ENAMETOOLONG; // Socket path - no longer than 107 bytes
+    return -1;
+  }
+  a.sun_family = AF_UNIX;
+  std::memcpy(a.sun_path, path.data(), path.size());
+  int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if(fd < 0) return -1;
+  ::unlink(path.c_str());
+  if(::bind(fd, reinterpret_cast<sockaddr *>(&a), sizeof a) != 0 || ::listen(fd, 16) != 0) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+// A pair of linked sockets is a client in the same process (protocol tests).
+bool socket_pair(int (&fds)[2]) { return ::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) == 0; }
+
+void write_all(int fd, std::string_view s) {
+  while(!s.empty()) {
+    auto n = ::write(fd, s.data(), s.size());
+    if(n < 0 && errno == EINTR) continue;
+    if(n <= 0) throw diagnostic(cat("запись: ", std::strerror(errno)), {});
+    s.remove_prefix(std::size_t(n));
+  }
+}
+
+// Everything that has already come, without waiting.
+std::string read_ready(int fd) {
+  std::string out;
+  char buf[16384];
+  for(;;) {
+    auto n = ::recv(fd, buf, sizeof buf, MSG_DONTWAIT);
+    if(n <= 0) break;
+    out.append(buf, std::size_t(n));
+  }
+  return out;
+}
+
+void close_fd(int fd) { ::close(fd); }
 
 // The io_uring ring and the common ring of reception buffers (Group 0).
 struct uring {

@@ -1,0 +1,42 @@
+// Протокол редактора (M5, §13.1): VM — единственное состояние, клиент шлёт
+// управляющие сигналы и рисует то, что пришло. 
+// Сообщения идут через настоящий сокет и
+// io_uring; текст представления сверяется с проекцией (tz fmt) автоматически.
+// program: editor_text.tz
+hello 1
+// expect: hello version=1 program="editor_text.tz"
+hello 7
+// expect: error text="версия протокола 7 не поддерживается (VM: 1)"
+open_view grid
+// expect: неизвестный вид представления: grid
+open_view module
+// expect: view view=1
+// expect: kind="n_str" pieces=["\"привет, мир\""]
+// expect: kind="n_block" pieces=["{\n  " #
+// expect: курсор: ‸main() {
+// указатель внутрь строки — курсор в координатах узла, смещение в кодовых точках
+pointer 1 @привет 0 7
+// expect: offset=7
+// expect: курсор:   s = "привет‸, мир";
+key 1 ArrowLeft
+// expect: курсор:   s = "приве‸т, мир";
+key 1 End
+// expect: курсор:   s = "привет, мир";‸
+key 1 ArrowRight
+// expect: курсор: ‸  print(s);
+key 1 End
+key 1 Home
+// expect: курсор: ‸  print(s);
+// конец куска — место перед следующим куском
+pointer 1 @print 0 5
+// expect: курсор:   print‸(s);
+key 1 ArrowRight
+key 1 ArrowRight
+// expect: курсор:   print(s‸);
+key 1 Tab
+// expect: клавиша не обработана: Tab
+key 2 ArrowRight
+// expect: нет представления 2
+close_view 1
+key 1 ArrowRight
+// expect: нет представления 1
