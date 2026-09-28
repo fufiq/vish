@@ -10,11 +10,11 @@
 
 namespace tz::x64 {
 
-enum reg : u8 { rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15 };
-enum xmm : u8 { xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7 };
+enum reg : uint8_t { rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15 };
+enum xmm : uint8_t { xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7 };
 
 // Transition conditions/setcc.
-enum cond : u8 { o = 0, no, b, ae, e, ne, be, a, s, ns, p, np, l, ge, le, g };
+enum cond : uint8_t { o = 0, no, b, ae, e, ne, be, a, s, ns, p, np, l, ge, le, g };
 
 class label {
 public:
@@ -22,8 +22,8 @@ public:
 
 private:
     friend class assembler;
-    i64              pos_ = -1;
-    std::vector<u32> fixups_; // rel32 locations waiting for addresses
+    int64_t              pos_ = -1;
+    std::vector<uint32_t> fixups_; // rel32 locations waiting for addresses
 };
 
 // Executable Code: Owns pages, releases them.
@@ -54,23 +54,23 @@ public:
     // --- whole ---
 
     void mov(reg dst, reg src) { op_rr(0x89, src, dst); }
-    void mov(reg dst, u64 imm) {
+    void mov(reg dst, uint64_t imm) {
         rex(true, 0, 0, dst);
         byte(0xB8 + (dst & 7));
         u64le(imm);
     }
-    void load(reg dst, reg base, i32 disp) { op_rm(0x8B, dst, base, disp); }
-    void store(reg base, i32 disp, reg src) { op_rm(0x89, src, base, disp); }
+    void load(reg dst, reg base, int32_t disp) { op_rm(0x8B, dst, base, disp); }
+    void store(reg base, int32_t disp, reg src) { op_rm(0x89, src, base, disp); }
     void load_idx(reg dst, reg base, reg index) { op_sib(0x8B, dst, base, index); }
     void store_idx(reg base, reg index, reg src) { op_sib(0x89, src, base, index); }
-    void lea(reg dst, reg base, i32 disp) { op_rm(0x8D, dst, base, disp); }
-    void store_imm32(reg base, i32 disp, i32 imm) { // mov qword [base+disp], imm32 (signal expands)
+    void lea(reg dst, reg base, int32_t disp) { op_rm(0x8D, dst, base, disp); }
+    void store_imm32(reg base, int32_t disp, int32_t imm) { // mov qword [base+disp], imm32 (signal expands)
         op_rm(0xC7, reg(0), base, disp);
         i32le(imm);
     }
-    void cmp_mem_imm8(reg base, i32 disp, i8 imm) {
+    void cmp_mem_imm8(reg base, int32_t disp, int8_t imm) {
         op_rm(0x83, reg(7), base, disp);
-        byte(u8(imm));
+        byte(uint8_t(imm));
     }
 
     void add(reg dst, reg src) { op_rr(0x01, src, dst); }
@@ -89,17 +89,17 @@ public:
     void cqo() { byte(0x48); byte(0x99); }
     void idiv(reg src) { unary_f7(7, src); }
     void neg(reg r) { unary_f7(3, r); }
-    void xor_imm8(reg r, i8 imm) {
+    void xor_imm8(reg r, int8_t imm) {
         rex(true, 0, 0, r);
         byte(0x83);
         modrm(3, 6, r);
-        byte(u8(imm));
+        byte(uint8_t(imm));
     }
-    void cmp_imm8(reg r, i8 imm) {
+    void cmp_imm8(reg r, int8_t imm) {
         rex(true, 0, 0, r);
         byte(0x83);
         modrm(3, 7, r);
-        byte(u8(imm));
+        byte(uint8_t(imm));
     }
     void setcc(cond c, reg r8) { // only al/cl/dl/bl
         byte(0x0F);
@@ -118,20 +118,20 @@ public:
         if (r >= 8) byte(0x41);
         byte(0x58 + (r & 7));
     }
-    void sub_rsp(i32 n) { byte(0x48); byte(0x81); byte(0xEC); i32le(n); }
-    void add_rsp(i32 n) { byte(0x48); byte(0x81); byte(0xC4); i32le(n); }
+    void sub_rsp(int32_t n) { byte(0x48); byte(0x81); byte(0xEC); i32le(n); }
+    void add_rsp(int32_t n) { byte(0x48); byte(0x81); byte(0xC4); i32le(n); }
     void call(reg r) {
         if (r >= 8) byte(0x41);
         byte(0xFF);
         modrm(3, 2, r);
     }
-    void call_mem(reg base, i32 disp) { op_rm_nw(0xFF, reg(2), base, disp); } // call qword [base+disp]
+    void call_mem(reg base, int32_t disp) { op_rm_nw(0xFF, reg(2), base, disp); } // call qword [base+disp]
     void ret() { byte(0xC3); }
 
     // --- SSE2 (f64) ---------------------------------------------------------------------
 
-    void movsd_load(xmm dst, reg base, i32 disp) { sse_rm(0xF2, 0x10, dst, base, disp); }
-    void movsd_store(reg base, i32 disp, xmm src) { sse_rm(0xF2, 0x11, src, base, disp); }
+    void movsd_load(xmm dst, reg base, int32_t disp) { sse_rm(0xF2, 0x10, dst, base, disp); }
+    void movsd_store(reg base, int32_t disp, xmm src) { sse_rm(0xF2, 0x11, src, base, disp); }
     void movsd_load_idx(xmm dst, reg base, reg index) { sse_sib(0xF2, 0x10, dst, base, index); }
     void movsd_store_idx(reg base, reg index, xmm src) { sse_sib(0xF2, 0x11, src, base, index); }
     void movsd(xmm dst, xmm src) { sse_rr(0xF2, 0x10, dst, src); }
@@ -182,14 +182,14 @@ public:
         rel32(l);
     }
     void bind(label& l) {
-        l.pos_ = i64(buf_.size());
-        for (u32 at : l.fixups_) patch32(at, i32(l.pos_ - i64(at + 4)));
+        l.pos_ = int64_t(buf_.size());
+        for (uint32_t at : l.fixups_) patch32(at, int32_t(l.pos_ - int64_t(at + 4)));
         l.fixups_.clear();
     }
 
-    u32  here() const { return u32(buf_.size()); }
-    void patch32(u32 at, i32 v) { std::memcpy(buf_.data() + at, &v, 4); }
-    void i32le(i32 v) { for (int k = 0; k < 4; ++k) byte(u8(u32(v) >> (8 * k))); }
+    uint32_t  here() const { return uint32_t(buf_.size()); }
+    void patch32(uint32_t at, int32_t v) { std::memcpy(buf_.data() + at, &v, 4); }
+    void i32le(int32_t v) { for (int k = 0; k < 4; ++k) byte(uint8_t(uint32_t(v) >> (8 * k))); }
 
     // The finished executable block (W^X).
     code_block finalize() {
@@ -207,80 +207,80 @@ public:
     std::size_t size() const { return buf_.size(); }
 
 private:
-    void byte(u8 b) { buf_.push_back(b); }
-    void u64le(u64 v) { for (int k = 0; k < 8; ++k) byte(u8(v >> (8 * k))); }
+    void byte(uint8_t b) { buf_.push_back(b); }
+    void u64le(uint64_t v) { for (int k = 0; k < 8; ++k) byte(uint8_t(v >> (8 * k))); }
 
-    void rex(bool w, u8 r, u8 x, u8 b_) {
-        u8 v = 0x40 | (w ? 8 : 0) | ((r >> 3) << 2) | ((x >> 3) << 1) | (b_ >> 3);
+    void rex(bool w, uint8_t r, uint8_t x, uint8_t b_) {
+        uint8_t v = 0x40 | (w ? 8 : 0) | ((r >> 3) << 2) | ((x >> 3) << 1) | (b_ >> 3);
         if (v != 0x40) byte(v);
     }
-    void modrm(u8 mod, u8 r, u8 rm) { byte(u8((mod << 6) | ((r & 7) << 3) | (rm & 7))); }
+    void modrm(uint8_t mod, uint8_t r, uint8_t rm) { byte(uint8_t((mod << 6) | ((r & 7) << 3) | (rm & 7))); }
 
     // [base + disp32]; rsp/r12 requires SIB
-    void mem(u8 r, reg base, i32 disp) {
+    void mem(uint8_t r, reg base, int32_t disp) {
         modrm(2, r, base);
         if ((base & 7) == 4) byte(0x24);
         i32le(disp);
     }
-    void op_rr(u8 op, reg r, reg rm) {
+    void op_rr(uint8_t op, reg r, reg rm) {
         rex(true, r, 0, rm);
         byte(op);
         modrm(3, r, rm);
     }
-    void op_rm(u8 op, reg r, reg base, i32 disp) {
+    void op_rm(uint8_t op, reg r, reg base, int32_t disp) {
         rex(true, r, 0, base);
         byte(op);
         mem(r, base, disp);
     }
-    void op_rm_nw(u8 op, reg r, reg base, i32 disp) {
+    void op_rm_nw(uint8_t op, reg r, reg base, int32_t disp) {
         rex(false, r, 0, base);
         byte(op);
         mem(r, base, disp);
     }
     // [base + index*8]
-    void op_sib(u8 op, reg r, reg base, reg index) {
+    void op_sib(uint8_t op, reg r, reg base, reg index) {
         rex(true, r, index, base);
         byte(op);
         modrm(0, r, 4);
-        byte(u8((3 << 6) | ((index & 7) << 3) | (base & 7)));
+        byte(uint8_t((3 << 6) | ((index & 7) << 3) | (base & 7)));
         if ((base & 7) == 5) throw diagnostic("JIT: rbp/r13 как база SIB без смещения не поддержан", {});
     }
-    void unary_f7(u8 ext, reg r) {
+    void unary_f7(uint8_t ext, reg r) {
         rex(true, 0, 0, r);
         byte(0xF7);
         modrm(3, ext, r);
     }
-    void sse_rr(u8 prefix, u8 op, u8 r, u8 rm) {
+    void sse_rr(uint8_t prefix, uint8_t op, uint8_t r, uint8_t rm) {
         byte(prefix);
         rex(false, r, 0, rm);
         byte(0x0F);
         byte(op);
         modrm(3, r, rm);
     }
-    void sse_rm(u8 prefix, u8 op, u8 r, reg base, i32 disp) {
+    void sse_rm(uint8_t prefix, uint8_t op, uint8_t r, reg base, int32_t disp) {
         byte(prefix);
         rex(false, r, 0, base);
         byte(0x0F);
         byte(op);
         mem(r, base, disp);
     }
-    void sse_sib(u8 prefix, u8 op, u8 r, reg base, reg index) {
+    void sse_sib(uint8_t prefix, uint8_t op, uint8_t r, reg base, reg index) {
         byte(prefix);
         rex(false, r, index, base);
         byte(0x0F);
         byte(op);
         modrm(0, r, 4);
-        byte(u8((3 << 6) | ((index & 7) << 3) | (base & 7)));
+        byte(uint8_t((3 << 6) | ((index & 7) << 3) | (base & 7)));
         if ((base & 7) == 5) throw diagnostic("JIT: rbp/r13 как база SIB без смещения не поддержан", {});
     }
     void rel32(label& l) {
-        u32 at = here();
+        uint32_t at = here();
         i32le(0);
-        if (l.bound()) patch32(at, i32(l.pos_ - i64(at + 4)));
+        if (l.bound()) patch32(at, int32_t(l.pos_ - int64_t(at + 4)));
         else l.fixups_.push_back(at);
     }
 
-    std::vector<u8> buf_;
+    std::vector<uint8_t> buf_;
 };
 
 } // namespace tz::x64

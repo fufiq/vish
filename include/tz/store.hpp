@@ -33,7 +33,7 @@ inline std::vector<journal_entry> read_journal(const std::string& path, node_id&
     reader      r(bytes);
     for (char c : tzdb_magic)
         if (r.get<char>() != c) throw diagnostic(std::format("{}: не файл базы tz", path), {});
-    root = node_id(r.get<u32>());
+    root = node_id(r.get<uint32_t>());
     std::vector<journal_entry> entries;
     while (!r.at_end()) entries.push_back(r.get<journal_entry>());
     return entries;

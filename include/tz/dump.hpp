@@ -17,7 +17,7 @@ public:
     }
 
 private:
-    void visit(node_id n, u32 depth) {
+    void visit(node_id n, uint32_t depth) {
         out_.append(depth * 2, ' ');
         if (!n) { out_ += "·\n"; return; }
         out_ += kind_name(db_[n]);
@@ -35,18 +35,18 @@ private:
                 out_ += std::format(" {}={}", name, db_.strings.text(k.[:m:]));
             } else if constexpr (std::is_same_v<field_t, bool>) {
                 if (k.[:m:]) out_ += std::format(" {}", name);
-            } else if constexpr (std::is_same_v<field_t, i64> || std::is_same_v<field_t, f64>) {
+            } else if constexpr (std::is_same_v<field_t, int64_t> || std::is_same_v<field_t, double>) {
                 out_ += std::format(" {}={}", name, k.[:m:]);
             } else if constexpr (std::is_same_v<field_t, std::string>) {
                 out_ += std::format(" {}={:?}", name, k.[:m:]);
             } else if constexpr (std::is_enum_v<field_t>) {
-                out_ += std::format(" {}={}", name, u32(k.[:m:]));
+                out_ += std::format(" {}={}", name, uint32_t(k.[:m:]));
             }
         }
     }
 
     template <class kind>
-    void children(const kind& k, u32 depth) {
+    void children(const kind& k, uint32_t depth) {
         template for (constexpr auto m : fields_of<kind>()) {
             using field_t = [:std::meta::type_of(m):];
             if constexpr (std::is_same_v<field_t, node_id>) {

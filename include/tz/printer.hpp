@@ -86,7 +86,7 @@ private:
 
     void params(const node_list& ps) {
         out_ += '(';
-        for (u32 i = 0; i < ps.size(); ++i) {
+        for (uint32_t i = 0; i < ps.size(); ++i) {
             if (i) out_ += ", ";
             item(ps[i]);
         }
@@ -95,7 +95,7 @@ private:
 
     void print_node(node_id, const n_param& p) {
         static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct "};
-        out_ += modes[u32(p.mode)];
+        out_ += modes[uint32_t(p.mode)];
         if (p.type) { item(p.type); out_ += p.pack ? "... " : " "; }
         out_ += str(p.name);
     }
@@ -114,7 +114,7 @@ private:
         if (items.empty()) { out_ += "{}"; return; }
         out_ += '{';
         ++indent_;
-        for (u32 i = 0; i < items.size(); ++i) {
+        for (uint32_t i = 0; i < items.size(); ++i) {
             line();
             item(items[i]);
             bool value = b.has_value && items[i] == b.items.back();
@@ -252,9 +252,9 @@ private:
     void print_node(node_id, const n_call& c) {
         item(c.callee);
         out_ += '(';
-        u32 n = u32(c.args.size());
+        uint32_t n = uint32_t(c.args.size());
         bool trailing = n > 0 && db_.is<n_block>(c.args.back());
-        for (u32 i = 0; i < n - (trailing ? 1 : 0); ++i) {
+        for (uint32_t i = 0; i < n - (trailing ? 1 : 0); ++i) {
             if (i) out_ += ", ";
             item(c.args[i]);
         }
@@ -289,7 +289,7 @@ private:
     void print_node(node_id, const n_construct& c) {
         item(c.type);
         out_ += '{';
-        for (u32 i = 0; i < c.items.size(); ++i) {
+        for (uint32_t i = 0; i < c.items.size(); ++i) {
             if (i) out_ += ", ";
             item(c.items[i]);
         }
@@ -302,7 +302,7 @@ private:
     filter        keep_;
     substitution  subst_;
     std::string   out_;
-    u32           indent_ = 0;
+    uint32_t           indent_ = 0;
 };
 
 } // namespace tz

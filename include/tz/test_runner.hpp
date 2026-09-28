@@ -38,7 +38,7 @@ public:
         for (auto& e : std::filesystem::directory_iterator(dir))
             if (e.path().extension() == ".tz" || e.path().extension() == ".session") files.push_back(e.path());
         std::ranges::sort(files);
-        u32 passed = 0;
+        uint32_t passed = 0;
         for (auto& f : files) {
             std::string why = run_one(f);
             if (why.empty()) {
@@ -282,7 +282,7 @@ private:
         }
         std::istringstream out_lines(out);
         std::string        line;
-        u32                i = 0;
+        uint32_t                i = 0;
         while (std::getline(out_lines, line)) {
             if (i >= e.out.size()) { why += std::format("    лишний вывод: {}\n", line); continue; }
             if (line != e.out[i]) why += std::format("    строка {}: ожидалось {:?}, получено {:?}\n", i + 1, e.out[i], line);

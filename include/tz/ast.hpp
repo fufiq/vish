@@ -18,7 +18,7 @@ using node_id = id<node_tag>;
 using node_list = std::vector<node_id>;
 
 // Parameter mode (§6.2 steak).
-enum class param_mode : u8 { let, mut, own, out, expr, ct };
+enum class param_mode : uint8_t { let, mut, own, out, expr, ct };
 
 // --- node ---
 
@@ -28,8 +28,8 @@ struct n_param    { symbol name; node_id type; param_mode mode = param_mode::let
 struct n_var      { symbol name; node_id type; node_id init; bool is_const = false; };
 struct n_block    { node_list items; bool has_value = false; }; // has_value: Last expression without `;`
 struct n_ident    { symbol name; };
-struct n_int      { i64 value = 0; };
-struct n_float    { f64 value = 0; };
+struct n_int      { int64_t value = 0; };
+struct n_float    { double value = 0; };
 struct n_str      { std::string value; };
 struct n_call     { node_id callee; node_list args; };
 struct n_op       { symbol op; node_list args; };        // operator = operator entity call (§4.4)
@@ -61,15 +61,15 @@ struct node {
 // 
 // The base state is the reproduction of journal;
 // journal is the history of change.
-struct j_intern  { u32 id; std::string text; };
-struct j_add     { u32 id; node_kind kind; span where; };
-struct j_replace { u32 id; node_kind kind; };
-struct j_link    { u32 root; }; // Put the parent in the subtree (deterministically)
+struct j_intern  { uint32_t id; std::string text; };
+struct j_add     { uint32_t id; node_kind kind; span where; };
+struct j_replace { uint32_t id; node_kind kind; };
+struct j_link    { uint32_t root; }; // Put the parent in the subtree (deterministically)
 struct j_import  { std::string text; std::string label; }; // projection: span node - position in it
 using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import>;
 
 struct journal_entry {
-    u64        revision;
+    uint64_t        revision;
     journal_op op;
 };
 
@@ -77,7 +77,7 @@ class ast_db {
 public:
     node_id add(node_kind k, span where) {
         ++revision_;
-        where.source = u32(sources_.empty() ? 0 : sources_.size() - 1);
+        where.source = uint32_t(sources_.empty() ? 0 : sources_.size() - 1);
         node_id id   = nodes_.add(node{std::move(k), where, {}});
         node_rev_.push_back(revision_);
         log({j_add{id.value(), nodes_[id].kind, where}});
@@ -85,7 +85,7 @@ public:
     }
 
     // node revision - when it was last changed (for reactive disability).
-    u64 node_revision(node_id n) const { return node_rev_[n.value()]; }
+    uint64_t node_revision(node_id n) const { return node_rev_[n.value()]; }
 
     template <class kind>
     node_id add(kind k, span where) {
@@ -115,20 +115,20 @@ public:
 
     // Text input - operation on the base (§3.1): the text is stored in journal, the
     // positions node (span) indicate it.
-    u32 record_import(std::string text, std::string label = {}) {
+    uint32_t record_import(std::string text, std::string label = {}) {
         sources_.push_back(text);
         labels_.push_back(label);
         log({j_import{std::move(text), std::move(label)}});
-        return u32(sources_.size() - 1);
+        return uint32_t(sources_.size() - 1);
     }
 
     // Import tag for diagnostics (empty - main file).
-    const std::string& source_label(u32 i) const {
+    const std::string& source_label(uint32_t i) const {
         static const std::string empty;
         return i < labels_.size() ? labels_[i] : empty;
     }
 
-    const std::string& source(u32 i = 0) const {
+    const std::string& source(uint32_t i = 0) const {
         static const std::string empty;
         return i < sources_.size() ? sources_[i] : empty;
     }
@@ -136,7 +136,7 @@ public:
     // journal with new strings before each operation.
     std::vector<journal_entry> journal() const {
         std::vector<journal_entry> out;
-        u32                        emitted = 0;
+        uint32_t                        emitted = 0;
         for (const auto& [strings_count, e] : log_) {
             for (; emitted < strings_count; ++emitted)
                 out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
@@ -173,8 +173,8 @@ public:
         std::visit([&](const auto& k) { for_each_child_of(k, f); }, nodes_[n].kind);
     }
 
-    u64 revision() const { return revision_; }
-    u32 size() const { return nodes_.size(); }
+    uint64_t revision() const { return revision_; }
+    uint32_t size() const { return nodes_.size(); }
 
     interner strings;
 
@@ -201,11 +201,11 @@ private:
     }
 
     arena<node, node_tag>                            nodes_;
-    u64                                              revision_ = 0;
-    std::vector<std::pair<u32, journal_entry>>       log_; // (line interned at time, operation)
+    uint64_t                                              revision_ = 0;
+    std::vector<std::pair<uint32_t, journal_entry>>       log_; // (line interned at time, operation)
     std::deque<std::string>                          sources_; // Deque: Text references are stable
     std::vector<std::string>                         labels_;
-    std::vector<u64>                                 node_rev_;
+    std::vector<uint64_t>                                 node_rev_;
 };
 
 // Diagnostics on the basis: the text is taken from the import to which the node belongs.

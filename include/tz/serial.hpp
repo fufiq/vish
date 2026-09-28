@@ -27,13 +27,13 @@ public:
         } else if constexpr (is_id<T>::value) {
             put(x.value());
         } else if constexpr (std::is_same_v<T, std::string>) {
-            put(u32(x.size()));
+            put(uint32_t(x.size()));
             raw(x.data(), x.size());
         } else if constexpr (is_vector<T>::value) {
-            put(u32(x.size()));
+            put(uint32_t(x.size()));
             for (const auto& e : x) put(e);
         } else if constexpr (is_variant<T>::value) {
-            put(u32(x.index()));
+            put(uint32_t(x.index()));
             std::visit([&](const auto& alt) { put(alt); }, x);
         } else {
             static_assert(std::is_aggregate_v<T>, "сериализуются агрегаты");
@@ -60,21 +60,21 @@ public:
             raw(&x, sizeof x);
             return x;
         } else if constexpr (is_id<T>::value) {
-            return T(get<u32>());
+            return T(get<uint32_t>());
         } else if constexpr (std::is_same_v<T, std::string>) {
-            u32 n = get<u32>();
+            uint32_t n = get<uint32_t>();
             need(n);
             std::string s(in_.substr(pos_, n));
             pos_ += n;
             return s;
         } else if constexpr (is_vector<T>::value) {
-            u32 n = get<u32>();
+            uint32_t n = get<uint32_t>();
             T   v;
             v.reserve(n);
-            for (u32 i = 0; i < n; ++i) v.push_back(get<typename T::value_type>());
+            for (uint32_t i = 0; i < n; ++i) v.push_back(get<typename T::value_type>());
             return v;
         } else if constexpr (is_variant<T>::value) {
-            return get_variant<T>(get<u32>(), std::make_index_sequence<std::variant_size_v<T>>{});
+            return get_variant<T>(get<uint32_t>(), std::make_index_sequence<std::variant_size_v<T>>{});
         } else {
             static_assert(std::is_aggregate_v<T>, "сериализуются агрегаты");
             T x{};
@@ -87,7 +87,7 @@ public:
 
 private:
     template <class V, std::size_t... I>
-    V get_variant(u32 index, std::index_sequence<I...>) {
+    V get_variant(uint32_t index, std::index_sequence<I...>) {
         std::optional<V> out;
         ((index == I ? (out.emplace(std::in_place_index<I>, get<std::variant_alternative_t<I, V>>()), 0) : 0), ...);
         if (!out) throw diagnostic(std::format("журнал повреждён: вид {} неизвестен", index), {});

@@ -30,7 +30,7 @@ struct type_v { type_id type; };
 //
 class array_v {
 public:
-    enum class layout : u8 { generic, ints, floats };
+    enum class layout : uint8_t { generic, ints, floats };
 
     array_v() = default;
     array_v(const array_v& o) { *this = o; }
@@ -54,18 +54,18 @@ public:
         return a;
     }
 
-    u32    size() const;
+    uint32_t    size() const;
     bool   empty() const { return size() == 0; }
-    value  get(u32 i) const;
-    void   set(u32 i, value v);
+    value  get(uint32_t i) const;
+    void   set(uint32_t i, value v);
     void   push(value v);
     layout kind() const { return r().layout_; }
 
-    const i64* ints() const { return r().ints_.data(); }
-    const f64* floats() const { return r().floats_.data(); }
-    i64*       ints_mut() { own(); return ints_.data(); }
-    f64*       floats_mut() { own(); return floats_.data(); }
-    value*     generic_cell(u32 i) {
+    const int64_t* ints() const { return r().ints_.data(); }
+    const double* floats() const { return r().floats_.data(); }
+    int64_t*       ints_mut() { own(); return ints_.data(); }
+    double*       floats_mut() { own(); return floats_.data(); }
+    value*     generic_cell(uint32_t i) {
         if (kind() != layout::generic) return nullptr;
         own();
         return &items_[i];
@@ -80,8 +80,8 @@ private:
 
     layout             layout_ = layout::generic;
     std::vector<value> items_;
-    std::vector<i64>   ints_;
-    std::vector<f64>   floats_;
+    std::vector<int64_t>   ints_;
+    std::vector<double>   floats_;
     const array_v*     borrowed_ = nullptr;
 };
 
@@ -99,8 +99,8 @@ struct fn_v {
 struct thunk_v {
     node_id                expr;
     std::shared_ptr<scope> env;
-    u32                    frame; // function from which `return` within the expression
-    u64                    ctx = 0; // context in which the expression is written
+    uint32_t                    frame; // function from which `return` within the expression
+    uint64_t                    ctx = 0; // context in which the expression is written
 };
 
 // Verification mode (value approach):
@@ -116,7 +116,7 @@ struct rt_v { std::shared_ptr<value> shape; };
 struct split_v { std::vector<value> alts; };
 
 struct value {
-    std::variant<unit_v, bool, i64, f64, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v> v;
+    std::variant<unit_v, bool, int64_t, double, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v> v;
 
     value() : v(unit_v{}) {}
     template <class T> value(T x) : v(std::move(x)) {}
@@ -136,16 +136,16 @@ inline array_v array_v::of(std::vector<value> items) {
     return a;
 }
 
-inline u32 array_v::size() const {
+inline uint32_t array_v::size() const {
     const array_v& a = r();
     switch (a.layout_) {
-    case layout::ints: return u32(a.ints_.size());
-    case layout::floats: return u32(a.floats_.size());
-    default: return u32(a.items_.size());
+    case layout::ints: return uint32_t(a.ints_.size());
+    case layout::floats: return uint32_t(a.floats_.size());
+    default: return uint32_t(a.items_.size());
     }
 }
 
-inline value array_v::get(u32 i) const {
+inline value array_v::get(uint32_t i) const {
     const array_v& a = r();
     switch (a.layout_) {
     case layout::ints: return value(a.ints_[i]);
@@ -158,7 +158,7 @@ inline void array_v::to_generic() {
     own();
     if (layout_ == layout::generic) return;
     std::vector<value> items;
-    for (u32 i = 0; i < size(); ++i) items.push_back(get(i));
+    for (uint32_t i = 0; i < size(); ++i) items.push_back(get(i));
     ints_.clear();
     floats_.clear();
     items_  = std::move(items);
@@ -168,19 +168,19 @@ inline void array_v::to_generic() {
 inline void array_v::push(value v) {
     own();
     if (size() == 0 && layout_ == layout::generic) { // first element selects the layout
-        if (v.is<i64>()) layout_ = layout::ints;
-        else if (v.is<f64>()) layout_ = layout::floats;
+        if (v.is<int64_t>()) layout_ = layout::ints;
+        else if (v.is<double>()) layout_ = layout::floats;
     }
-    if (layout_ == layout::ints && v.is<i64>()) { ints_.push_back(v.as<i64>()); return; }
-    if (layout_ == layout::floats && v.is<f64>()) { floats_.push_back(v.as<f64>()); return; }
+    if (layout_ == layout::ints && v.is<int64_t>()) { ints_.push_back(v.as<int64_t>()); return; }
+    if (layout_ == layout::floats && v.is<double>()) { floats_.push_back(v.as<double>()); return; }
     to_generic();
     items_.push_back(std::move(v));
 }
 
-inline void array_v::set(u32 i, value v) {
+inline void array_v::set(uint32_t i, value v) {
     own();
-    if (layout_ == layout::ints && v.is<i64>()) { ints_[i] = v.as<i64>(); return; }
-    if (layout_ == layout::floats && v.is<f64>()) { floats_[i] = v.as<f64>(); return; }
+    if (layout_ == layout::ints && v.is<int64_t>()) { ints_[i] = v.as<int64_t>(); return; }
+    if (layout_ == layout::floats && v.is<double>()) { floats_[i] = v.as<double>(); return; }
     to_generic();
     items_[i] = std::move(v);
 }
@@ -192,7 +192,7 @@ inline bool same_shape(const value& a, const value& b);
 // tuple with one type - it is an array.
 inline bool is_tuple(const array_v& a) {
     if (a.kind() != array_v::layout::generic) return false;
-    for (u32 i = 1; i < a.size(); ++i)
+    for (uint32_t i = 1; i < a.size(); ++i)
         if (!same_shape(a.get(0), a.get(i))) return true;
     return false;
 }
@@ -204,14 +204,14 @@ inline value erase(const value& x);
 inline value erase(const value& x) {
     if (x.is<rt_v>() || x.is<split_v>()) return x;
     value shape;
-    if (x.is<i64>()) shape = value(i64(1));
-    else if (x.is<f64>()) shape = value(f64(1));
+    if (x.is<int64_t>()) shape = value(int64_t(1));
+    else if (x.is<double>()) shape = value(double(1));
     else if (x.is<bool>()) shape = value(true);
     else if (x.is<std::string>()) shape = value(std::string("x"));
     else if (x.is<array_v>()) { // Array - a sample of one element; tuple - samples of all
         const auto& src = x.as<array_v>();
         array_v     a;
-        if (is_tuple(src)) for (u32 i = 0; i < src.size(); ++i) a.push(erase(src.get(i)));
+        if (is_tuple(src)) for (uint32_t i = 0; i < src.size(); ++i) a.push(erase(src.get(i)));
         else if (!src.empty()) a.push(erase(src.get(0)));
         shape = value(std::move(a));
     } else if (x.is<agg_v>()) {
@@ -242,7 +242,7 @@ inline bool same_shape(const value& a, const value& b) {
         if (tp != tq) return false;
         if (tp) {
             if (p.size() != q.size()) return false;
-            for (u32 i = 0; i < p.size(); ++i)
+            for (uint32_t i = 0; i < p.size(); ++i)
                 if (!same_shape(p.get(i), q.get(i))) return false;
             return true;
         }
@@ -253,7 +253,7 @@ inline bool same_shape(const value& a, const value& b) {
         const auto& p = x->as<agg_v>();
         const auto& q = y->as<agg_v>();
         if (p.type != q.type || p.fields.size() != q.fields.size()) return false;
-        for (u32 i = 0; i < p.fields.size(); ++i)
+        for (uint32_t i = 0; i < p.fields.size(); ++i)
             if (!same_shape(p.fields[i].second, q.fields[i].second)) return false;
         return true;
     }
@@ -268,7 +268,7 @@ public:
     }
 
     type_id builtin(std::string_view name) const {
-        for (u32 i = 0; i < names_.size(); ++i)
+        for (uint32_t i = 0; i < names_.size(); ++i)
             if (names_[i] == name) return type_id(i);
         return {};
     }
@@ -286,8 +286,8 @@ public:
             using T = std::remove_cvref_t<decltype(a)>;
             if constexpr (std::is_same_v<T, unit_v>) return type_id(0);
             else if constexpr (std::is_same_v<T, bool>) return type_id(1);
-            else if constexpr (std::is_same_v<T, i64>) return type_id(2);
-            else if constexpr (std::is_same_v<T, f64>) return type_id(3);
+            else if constexpr (std::is_same_v<T, int64_t>) return type_id(2);
+            else if constexpr (std::is_same_v<T, double>) return type_id(3);
             else if constexpr (std::is_same_v<T, std::string>) return type_id(4);
             else if constexpr (std::is_same_v<T, type_v>) return type_id(5);
             else if constexpr (std::is_same_v<T, array_v>) return type_id(is_tuple(a) ? 9 : 6);
@@ -310,7 +310,7 @@ public:
             const auto& a = x.as<array_v>();
             if (is_tuple(a)) {
                 std::string s;
-                for (u32 i = 0; i < a.size(); ++i) s += (i ? ", " : "") + describe(a.get(i));
+                for (uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + describe(a.get(i));
                 return std::format("tuple<{}>", s);
             }
             return std::format("array<{}>", a.empty() ? std::string("?") : describe(a.get(0)));
@@ -321,7 +321,7 @@ public:
 private:
     type_id intern_builtin(std::string_view n) {
         names_.emplace_back(n);
-        return type_id(u32(names_.size() - 1));
+        return type_id(uint32_t(names_.size() - 1));
     }
 
     std::vector<std::string> names_;
@@ -332,8 +332,8 @@ inline std::string show(const value& x, const type_registry& types, const intern
         using T = std::remove_cvref_t<decltype(a)>;
         if constexpr (std::is_same_v<T, unit_v>) return "()";
         else if constexpr (std::is_same_v<T, bool>) return a ? "true" : "false";
-        else if constexpr (std::is_same_v<T, i64>) return std::to_string(a);
-        else if constexpr (std::is_same_v<T, f64>) {
+        else if constexpr (std::is_same_v<T, int64_t>) return std::to_string(a);
+        else if constexpr (std::is_same_v<T, double>) {
             auto s = std::format("{}", a);
             if (!s.contains('.') && !s.contains('e') && !s.contains('n')) s += ".0";
             return s;
@@ -341,14 +341,14 @@ inline std::string show(const value& x, const type_registry& types, const intern
         else if constexpr (std::is_same_v<T, type_v>) return std::string(types.name(a.type));
         else if constexpr (std::is_same_v<T, array_v>) {
             std::string s = "[";
-            for (u32 i = 0; i < a.size(); ++i) {
+            for (uint32_t i = 0; i < a.size(); ++i) {
                 if (i) s += ", ";
                 s += show(a.get(i), types, strings);
             }
             return s + "]";
         } else if constexpr (std::is_same_v<T, agg_v>) {
             std::string s = std::format("{}{{", types.name(a.type));
-            for (u32 i = 0; i < a.fields.size(); ++i) {
+            for (uint32_t i = 0; i < a.fields.size(); ++i) {
                 if (i) s += ", ";
                 s += std::format("{}: {}", strings.text(a.fields[i].first), show(a.fields[i].second, types, strings));
             }

@@ -35,7 +35,7 @@ public:
     }
 
     node_id parse_module() {
-        u32       start = here().where.begin;
+        uint32_t       start = here().where.begin;
         n_module  m;
         if (is_word("module")) {
             advance();
@@ -59,14 +59,14 @@ private:
     // --- Phase 1: paired brackets ---
 
     void match_brackets() {
-        match_.assign(toks_.size(), ~u32{0});
-        std::vector<u32> stack;
-        for (u32 i = 0; i < toks_.size(); ++i) {
+        match_.assign(toks_.size(), ~uint32_t{0});
+        std::vector<uint32_t> stack;
+        for (uint32_t i = 0; i < toks_.size(); ++i) {
             if (toks_[i].kind == tok::open) stack.push_back(i);
             else if (toks_[i].kind == tok::close) {
                 // Unpaired Closing: Remove unclosed openers until suitable so that one lost `(`
                 // does not break the enveloping `{ }`.
-                auto fits = [&](u32 o) { return pairs(toks_[o].ch(), toks_[i].ch()); };
+                auto fits = [&](uint32_t o) { return pairs(toks_[o].ch(), toks_[i].ch()); };
                 if (std::ranges::none_of(stack, fits)) {
                     errors_.push_back(diagnostic("непарная скобка", toks_[i].where));
                     continue;
@@ -80,7 +80,7 @@ private:
                 stack.pop_back();
             }
         }
-        for (u32 i : stack) errors_.push_back(diagnostic("незакрытая скобка", toks_[i].where));
+        for (uint32_t i : stack) errors_.push_back(diagnostic("незакрытая скобка", toks_[i].where));
     }
 
     static bool pairs(char o, char c) { return (o == '(' && c == ')') || (o == '[' && c == ']') || (o == '{' && c == '}'); }
@@ -88,25 +88,25 @@ private:
     // --- navigation ---
 
     const token& here() const { return toks_[pos_]; }
-    const token& ahead(u32 k) const { return toks_[std::min<u32>(pos_ + k, toks_.size() - 1)]; }
+    const token& ahead(uint32_t k) const { return toks_[std::min<uint32_t>(pos_ + k, toks_.size() - 1)]; }
     bool         at_end() const { return here().kind == tok::end; }
     void         advance() { if (!at_end()) ++pos_; }
 
-    bool is_word(std::string_view w, u32 k = 0) const { return ahead(k).kind == tok::ident && ahead(k).text == w; }
-    bool is_open(char c, u32 k = 0) const { return ahead(k).kind == tok::open && ahead(k).ch() == c; }
+    bool is_word(std::string_view w, uint32_t k = 0) const { return ahead(k).kind == tok::ident && ahead(k).text == w; }
+    bool is_open(char c, uint32_t k = 0) const { return ahead(k).kind == tok::open && ahead(k).ch() == c; }
     bool is_close(char c) const { return here().kind == tok::close && here().ch() == c; }
 
     // The operator in position k is the longest matching of glued symbols (`==` is
     // not read as `=` `=`, `=>` is not read as `=` `>`).
-    bool is_op(std::string_view op, u32 k = 0) const { return longest_op(k) == op; }
+    bool is_op(std::string_view op, uint32_t k = 0) const { return longest_op(k) == op; }
 
-    std::string_view longest_op(u32 k) const {
+    std::string_view longest_op(uint32_t k) const {
         static constexpr std::array ops{"...", "==", "!=", "<=", ">=", "&&", "||", "=>", "+=", "-=", "*=", "/=",
                                         "..", "=", "<", ">", "+", "-", "*", "/", "%", "!", "~", "?", ":",
                                         ".", ",", ";", "&", "|", "^", "@", "#", "$", "\\"};
         for (std::string_view o : ops) {
             bool ok = true;
-            for (u32 i = 0; i < o.size() && ok; ++i) {
+            for (uint32_t i = 0; i < o.size() && ok; ++i) {
                 const token& t = ahead(k + i);
                 ok = t.kind == tok::op && t.ch() == o[i] && (i == 0 || t.glued);
             }
@@ -115,7 +115,7 @@ private:
         return {};
     }
 
-    void eat_op(std::string_view op) { for (u32 i = 0; i < op.size(); ++i) advance(); }
+    void eat_op(std::string_view op) { for (uint32_t i = 0; i < op.size(); ++i) advance(); }
 
     void expect_op(std::string_view op) {
         if (!is_op(op)) throw diagnostic(std::format("ожидалось '{}'", op), here().where);
@@ -157,15 +157,15 @@ private:
     // (up to `;` at this level of brackets or to the end of the nearest group).
     template <class fn>
     node_id recover_statement(fn&& f) {
-        u32 start_tok = pos_;
+        uint32_t start_tok = pos_;
         try {
             return f();
         } catch (const diagnostic& d) {
             errors_.push_back(d);
-            u32 start = toks_[start_tok].where.begin;
+            uint32_t start = toks_[start_tok].where.begin;
             pos_      = start_tok;
             skip_to_statement_end();
-            u32 end = toks_[pos_ > 0 ? pos_ - 1 : 0].where.end;
+            uint32_t end = toks_[pos_ > 0 ? pos_ - 1 : 0].where.end;
             return db_.add(n_hole{std::string(src_.substr(start, end - start)), d.what()}, {start, end});
         }
     }
@@ -174,8 +174,8 @@ private:
         while (!at_end()) {
             if (here().kind == tok::close) return;             // terminus
             if (here().kind == tok::open) {                    // skip the whole group
-                u32 m = match_[pos_];
-                if (m == ~u32{0}) { advance(); continue; }
+                uint32_t m = match_[pos_];
+                if (m == ~uint32_t{0}) { advance(); continue; }
                 pos_ = m + 1;
                 if (toks_[m].ch() == '}') return;              // block completes the design
                 continue;
@@ -197,21 +197,21 @@ private:
     // upper level, a form without the type on the left is allowed; in the block, only
     // with the sign of the declaration (§4.2).
     std::optional<node_id> try_fn_decl(bool in_block) {
-        u32  k       = 0;
+        uint32_t  k       = 0;
         bool outline = false;
         if (is_word("outline")) { outline = true; ++k; }
         // [type] name
-        u32 name_at;
+        uint32_t name_at;
         if (ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
         else if (!in_block && ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
         else return std::nullopt;
         // after ) shall be => or {
-        u32 close = match_[pos_ + name_at + 1];
-        if (close == ~u32{0}) return std::nullopt;
-        u32 after = close + 1 - pos_;
+        uint32_t close = match_[pos_ + name_at + 1];
+        if (close == ~uint32_t{0}) return std::nullopt;
+        uint32_t after = close + 1 - pos_;
         if (!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
 
-        u32  start = here().where.begin;
+        uint32_t  start = here().where.begin;
         n_fn f;
         f.outline = outline;
         if (outline) advance();
@@ -247,7 +247,7 @@ private:
     }
 
     node_id param() {
-        u32     start = here().where.begin;
+        uint32_t     start = here().where.begin;
         n_param p;
         if (is_word("mut")) { p.mode = param_mode::mut; advance(); }
         else if (is_word("own")) { p.mode = param_mode::own; advance(); }
@@ -264,7 +264,7 @@ private:
     }
 
     node_id type_expr() {
-        u32 start = here().where.begin;
+        uint32_t start = here().where.begin;
         if (is_word("auto")) {
             advance();
             return db_.add(n_auto{}, {start, toks_[pos_ - 1].where.end});
@@ -273,7 +273,7 @@ private:
     }
 
     node_id block() {
-        u32 start = here().where.begin;
+        uint32_t start = here().where.begin;
         expect_open('{');
         n_block b;
         while (!is_close('}') && !at_end()) {
@@ -288,7 +288,7 @@ private:
     // Instructions. last_was_value_ is an expression without `;`.
     node_id statement() {
         last_was_value_ = false;
-        u32 start       = here().where.begin;
+        uint32_t start       = here().where.begin;
 
         if (auto f = try_fn_decl(true)) return *f;
 
@@ -298,7 +298,7 @@ private:
             node_id target;
             if (is_open('(') && here().glued) {
                 advance();
-                u32 t0 = here().where.begin;
+                uint32_t t0 = here().where.begin;
                 target = db_.add(n_ident{ident()}, {t0, toks_[pos_ - 1].where.end});
                 expect_close(')');
             }
@@ -355,12 +355,12 @@ private:
 
     // [const] (auto | type) name = expression;
     std::optional<node_id> try_var_decl() {
-        u32  k        = 0;
+        uint32_t  k        = 0;
         bool is_const = false;
         if (is_word("const")) { is_const = true; ++k; }
         bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
         if (!typed) return std::nullopt;
-        u32 start = here().where.begin;
+        uint32_t start = here().where.begin;
         if (is_const) advance();
         n_var v;
         v.is_const = is_const;
@@ -373,7 +373,7 @@ private:
     }
 
     node_id for_statement() {
-        u32 start = here().where.begin;
+        uint32_t start = here().where.begin;
         advance();
         expect_open('(');
         if (is_word("auto")) advance();
@@ -413,7 +413,7 @@ private:
         node_id lhs = unary();
         while (auto b = peek_binop()) {
             if (b->prec < min_prec) break;
-            u32 start = db_[lhs].where.begin;
+            uint32_t start = db_[lhs].where.begin;
             eat_op(b->op);
             node_id rhs = expression(b->right ? b->prec : b->prec + 1);
             lhs = db_.add(n_op{db_.strings.intern(b->op), {lhs, rhs}}, {start, db_[rhs].where.end});
@@ -422,7 +422,7 @@ private:
     }
 
     node_id unary() {
-        u32 start = here().where.begin;
+        uint32_t start = here().where.begin;
         for (std::string_view op : {"-", "!", "~"}) {
             if (is_op(op) && !is_op("=>")) {
                 eat_op(op);
@@ -435,7 +435,7 @@ private:
 
     node_id postfix(node_id e) {
         for (;;) {
-            u32 start = db_[e].where.begin;
+            uint32_t start = db_[e].where.begin;
             if (is_open('(') && here().glued) {
                 node_list args = call_args();
                 // tail unit: f(x) { ... } - last expr argument (§4.4)
@@ -487,7 +487,7 @@ private:
 
     node_id primary() {
         const token& t     = here();
-        u32          start = t.where.begin;
+        uint32_t          start = t.where.begin;
         switch (t.kind) {
         case tok::int_lit: {
             advance();
@@ -515,8 +515,8 @@ private:
             if (t.ch() == '{') return block();
             if (t.ch() == '(') {
                 // lambda: (parameters) => body
-                u32 close = match_[pos_];
-                if (close != ~u32{0} && is_op("=>", close + 1 - pos_)) {
+                uint32_t close = match_[pos_];
+                if (close != ~uint32_t{0} && is_op("=>", close + 1 - pos_)) {
                     n_lambda l;
                     l.params = param_list();
                     eat_op("=>");
@@ -536,7 +536,7 @@ private:
     }
 
     node_id if_expression() {
-        u32 start = here().where.begin;
+        uint32_t start = here().where.begin;
         advance();
         expect_open('(');
         node_id c = expression();
@@ -560,13 +560,13 @@ private:
 
     // --- literary ---
 
-    static i64 parse_int(std::string_view s) {
-        i64 v = 0;
+    static int64_t parse_int(std::string_view s) {
+        int64_t v = 0;
         for (char c : s) if (c != '_') v = v * 10 + (c - '0');
         return v;
     }
 
-    static f64 parse_float(std::string_view s) {
+    static double parse_float(std::string_view s) {
         std::string clean;
         for (char c : s) if (c != '_') clean += c;
         return std::stod(clean);
@@ -574,7 +574,7 @@ private:
 
     static std::string unescape(std::string_view s) {
         std::string out;
-        for (u32 i = 1; i + 1 < s.size(); ++i) {
+        for (uint32_t i = 1; i + 1 < s.size(); ++i) {
             if (s[i] == '\\' && i + 2 < s.size()) {
                 char n = s[++i];
                 out += n == 'n' ? '\n' : n == 't' ? '\t' : n;
@@ -594,11 +594,11 @@ private:
     }
 
     ast_db&                 db_;
-    u32                     source_ = 0;
+    uint32_t                     source_ = 0;
     std::string_view        src_;
     std::vector<token>      toks_;
-    std::vector<u32>        match_;
-    u32                     pos_ = 0;
+    std::vector<uint32_t>        match_;
+    uint32_t                     pos_ = 0;
     bool                    last_was_value_ = false;
     std::vector<diagnostic> errors_;
 };

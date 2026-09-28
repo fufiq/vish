@@ -20,30 +20,22 @@
 
 namespace tz {
 
-using u8  = std::uint8_t;
-using u32 = std::uint32_t;
-using u64 = std::uint64_t;
-using i8  = std::int8_t;
-using i32 = std::int32_t;
-using i64 = std::int64_t;
-using f64 = double;
-
 // Typed index: id< node_tag> and id< symbol_tag> are not mixed.
 template <class tag>
 class id {
 public:
-    static constexpr u32 none_value = ~u32{0};
+    static constexpr uint32_t none_value = ~uint32_t{0};
 
     constexpr id() = default;
-    constexpr explicit id(u32 v) : value_(v) {}
+    constexpr explicit id(uint32_t v) : value_(v) {}
 
-    constexpr u32  value() const { return value_; }
+    constexpr uint32_t  value() const { return value_; }
     constexpr bool valid() const { return value_ != none_value; }
     constexpr explicit operator bool() const { return valid(); }
     constexpr auto operator<=>(const id&) const = default;
 
 private:
-    u32 value_ = none_value;
+    uint32_t value_ = none_value;
 };
 
 // Arena: a dense array of objects of the same kind addressed by the index.
@@ -54,13 +46,13 @@ public:
 
     handle add(T value) {
         items_.push_back(std::move(value));
-        return handle(u32(items_.size() - 1));
+        return handle(uint32_t(items_.size() - 1));
     }
 
     T&       operator[](handle h)       pre(h.value() < items_.size()) { return items_[h.value()]; }
     const T& operator[](handle h) const pre(h.value() < items_.size()) { return items_[h.value()]; }
 
-    u32  size() const { return u32(items_.size()); }
+    uint32_t  size() const { return uint32_t(items_.size()); }
     auto begin() const { return items_.begin(); }
     auto end() const { return items_.end(); }
     void clear() { items_.clear(); }
@@ -77,13 +69,13 @@ class interner {
 public:
     symbol intern(std::string_view s) {
         if (auto it = index_.find(std::string(s)); it != index_.end()) return it->second;
-        symbol sym(u32(strings_.size()));
+        symbol sym(uint32_t(strings_.size()));
         strings_.emplace_back(s);
         index_.emplace(strings_.back(), sym);
         return sym;
     }
 
-    u32 size() const { return u32(strings_.size()); }
+    uint32_t size() const { return uint32_t(strings_.size()); }
 
     std::string_view text(symbol s) const {
         return s.valid() ? std::string_view(strings_[s.value()]) : std::string_view("<none>");
@@ -96,16 +88,16 @@ private:
 
 // Position in the text projection (for diagnostics and feedback with the editor).
 struct span {
-    u32 begin  = 0;
-    u32 end    = 0;
-    u32 source = 0; // text import number in the database (adjustments - new imports)
+    uint32_t begin  = 0;
+    uint32_t end    = 0;
+    uint32_t source = 0; // text import number in the database (adjustments - new imports)
 };
 
 // Type of error: instantiation (name, overload, type - "not compiled") or runtime
 // (boundary, division by zero). SFINAE-block try_compile discards only the first:
 //
 //
-enum class diag_kind : u8 { instantiation, runtime };
+enum class diag_kind : uint8_t { instantiation, runtime };
 
 // Diagnosis is a track, not a single line.
 class diagnostic : public std::runtime_error {
@@ -136,13 +128,13 @@ private:
 
 // The line / column for span - only when output to a person.
 struct line_col {
-    u32 line = 1;
-    u32 col  = 1;
+    uint32_t line = 1;
+    uint32_t col  = 1;
 };
 
-inline line_col locate(std::string_view text, u32 offset) {
+inline line_col locate(std::string_view text, uint32_t offset) {
     line_col lc;
-    for (u32 i = 0; i < offset && i < text.size(); ++i) {
+    for (uint32_t i = 0; i < offset && i < text.size(); ++i) {
         if (text[i] == '\n') { ++lc.line; lc.col = 1; }
         else ++lc.col;
     }

@@ -64,7 +64,7 @@ struct scope {
 
 using scope_ptr = std::shared_ptr<scope>;
 
-enum class mode : u8 { run, check };
+enum class mode : uint8_t { run, check };
 
 // --- reactive cache of static parsing (§10.1) ---
 //
@@ -75,23 +75,23 @@ enum class mode : u8 { run, check };
 // lives in a long-lived VM session (tz vm).
 //
 struct report_event {
-    enum kind_t : u8 { instance, folded, stage, split, excluded, live, proven } kind;
+    enum kind_t : uint8_t { instance, folded, stage, split, excluded, live, proven } kind;
     std::string              a, b, c; // meaning depends on the species
     span                     where;
     std::vector<std::string> alts;
-    u32                      fn = 0;
+    uint32_t                      fn = 0;
 };
 
 struct check_cache {
     struct entry {
         value                     result;
-        std::map<u32, u64>        deps; // Node of function → revision at parsing
+        std::map<uint32_t, uint64_t>        deps; // Node of function → revision at parsing
         std::vector<report_event> events;
-        std::vector<std::tuple<u32, value, bool, bool, bool>> journal; // observation
+        std::vector<std::tuple<uint32_t, value, bool, bool, bool>> journal; // observation
         bool                      effect = false;
     };
     std::map<std::string, entry> entries;
-    u32                          hits = 0, recomputed = 0;
+    uint32_t                          hits = 0, recomputed = 0;
     std::vector<std::string>     recomputed_names;
 };
 
@@ -122,7 +122,7 @@ public:
         if (it == functions_.end()) throw diagnostic("нет функции main", {});
         call_site site{db_[it->second.front()].where, "main"};
         flow r = call_overloaded(it->second, {}, globals_, 0, site);
-        return r.v.is<i64>() ? int(r.v.as<i64>()) : 0;
+        return r.v.is<int64_t>() ? int(r.v.as<int64_t>()) : 0;
     }
 
     // Observations of node mode (for residual program).
@@ -136,14 +136,14 @@ public:
 
     // Observing node in One Embedding Context
 //.
-    const observation* observed(node_id n, u64 ctx) const {
+    const observation* observed(node_id n, uint64_t ctx) const {
         build_observed();
         auto it = observed_ctx_.find({n.value(), ctx});
         return it == observed_ctx_.end() ? nullptr : &it->second;
     }
 
     // The body context of a function called from a node call in a ctx context.
-    static u64 inline_context(u64 ctx, u32 call) { return (ctx ^ (u64(call) + 0x9e3779b97f4a7c15ull)) * 0x100000001b3ull; }
+    static uint64_t inline_context(uint64_t ctx, uint32_t call) { return (ctx ^ (uint64_t(call) + 0x9e3779b97f4a7c15ull)) * 0x100000001b3ull; }
 
     const observation* observed(node_id n) const {
         build_observed();
@@ -156,11 +156,11 @@ public:
     // Show the meaning as literal, if possible.
     std::optional<std::string> literal(const value& v) const {
         if (!v.known()) return std::nullopt;
-        if (v.is<i64>() || v.is<f64>() || v.is<bool>()) return show_v(v);
+        if (v.is<int64_t>() || v.is<double>() || v.is<bool>()) return show_v(v);
         if (v.is<std::string>()) return std::format("{:?}", v.as<std::string>());
         if (v.is<array_v>()) {
             std::string s = "array{";
-            for (u32 i = 0; i < v.as<array_v>().size(); ++i) {
+            for (uint32_t i = 0; i < v.as<array_v>().size(); ++i) {
                 auto item = literal(v.as<array_v>().get(i));
                 if (!item) return std::nullopt;
                 s += (i ? ", " : "") + *item;
@@ -176,14 +176,14 @@ public:
         const auto& fn    = db_.as<n_fn>(f);
         auto        inner = std::make_shared<scope>();
         inner->parent     = globals_;
-        for (u32 i = 0; i < fn.params.size() && i < args.size(); ++i) inner->declare(db_.as<n_param>(fn.params[i]).name, args[i]);
+        for (uint32_t i = 0; i < fn.params.size() && i < args.size(); ++i) inner->declare(db_.as<n_param>(fn.params[i]).name, args[i]);
         flow r = run_frame(fn.body, inner, fn.name, fn.outline);
         return r.v;
     }
 
     // Static parsing step budget (for JIT: compiling calculations should not be
     // unlimited).
-    void set_fuel(u64 steps) { fuel_ = steps; }
+    void set_fuel(uint64_t steps) { fuel_ = steps; }
 
     // Connect JIT (run mode): instance is executed by machine code, if JIT supports
     // them, otherwise by the interpreter.
@@ -238,17 +238,17 @@ public:
     // language knows the check is off and shows it in the report).
     bool bounds_proven(node_id n) const { return proven_.contains(n.value()); }
     // Does the function change its k parameter (inference, see writes_param).
-    bool param_written(node_id f, u32 k) const { return writes_param(f, k); }
+    bool param_written(node_id f, uint32_t k) const { return writes_param(f, k); }
 
 private:
     // --- flow ---
 
-    enum class flow_kind : u8 { normal, ret, brk, cont };
+    enum class flow_kind : uint8_t { normal, ret, brk, cont };
 
     struct flow {
         flow_kind kind = flow_kind::normal;
         value     v;
-        u32       target = 0; // a frame from which comes the return
+        uint32_t       target = 0; // a frame from which comes the return
 
         bool normal() const { return kind == flow_kind::normal; }
     };
@@ -258,7 +258,7 @@ private:
     struct call_site {
         span        where;
         std::string what;
-        u32         node = 0; // call node: from the chain of such node is formed the context of embedding
+        uint32_t         node = 0; // call node: from the chain of such node is formed the context of embedding
     };
 
     bool checking() const { return mode_ == mode::check; }
@@ -287,12 +287,12 @@ private:
     if (!var##_f.normal()) return var##_f;   \
     value var = std::move(var##_f.v)
 
-    flow eval(node_id n, const scope_ptr& env, u32 frame) {
+    flow eval(node_id n, const scope_ptr& env, uint32_t frame) {
         if (!checking()) return std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
         if (fuel_ && --*fuel_ == 0) fail("бюджет статического разбора исчерпан", db_[n].where);
         // Check mode: observation - what value the node received and whether there was a
         // runtime effect (necessary for residual program, §13.2)
-        u64  effects_before = effects_;
+        uint64_t  effects_before = effects_;
         flow f = std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db_[n].kind);
         observe(n, f, effects_ != effects_before);
         return f;
@@ -319,10 +319,10 @@ private:
     // rolls back its part - it will not be in runtime, and its values should not interfere
     // with the convolution of living code.
     struct obs_entry {
-        u32   node;
+        uint32_t   node;
         value v;
         bool  seen, diverted, effect;
-        u64   ctx = 0; // Embedded context (node chain)
+        uint64_t   ctx = 0; // Embedded context (node chain)
     };
 
     void observe(node_id n, const flow& f, bool effect) {
@@ -360,7 +360,7 @@ private:
     flow read(value* cell) {
         if (cell->is<thunk_v>()) {
             thunk_v t     = cell->as<thunk_v>();
-            u64     saved = std::exchange(ctx_, t.ctx); // expression of the caller in its context
+            uint64_t     saved = std::exchange(ctx_, t.ctx); // expression of the caller in its context
             flow    r;
             try {
                 r = eval(t.expr, t.env, t.frame);
@@ -467,11 +467,11 @@ private:
 
     // --- node: Literaries and names ---
 
-    flow eval_node(node_id, const n_int& x, const scope_ptr&, u32) { return ok(value(x.value)); }
-    flow eval_node(node_id, const n_float& x, const scope_ptr&, u32) { return ok(value(x.value)); }
-    flow eval_node(node_id, const n_str& x, const scope_ptr&, u32) { return ok(value(x.value)); }
+    flow eval_node(node_id, const n_int& x, const scope_ptr&, uint32_t) { return ok(value(x.value)); }
+    flow eval_node(node_id, const n_float& x, const scope_ptr&, uint32_t) { return ok(value(x.value)); }
+    flow eval_node(node_id, const n_str& x, const scope_ptr&, uint32_t) { return ok(value(x.value)); }
 
-    flow eval_node(node_id n, const n_ident& x, const scope_ptr& env, u32) {
+    flow eval_node(node_id n, const n_ident& x, const scope_ptr& env, uint32_t) {
         if (value* cell = env->find(x.name)) return read(cell);
         if (str(x.name) == "true") return ok(value(true));
         if (str(x.name) == "false") return ok(value(false));
@@ -490,7 +490,7 @@ private:
 
     // --- blockages ---
 
-    flow eval_node(node_id n, const n_block& b, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_block& b, const scope_ptr& env, uint32_t frame) {
         auto inner    = std::make_shared<scope>();
         inner->parent = env;
         return run_block(b, 0, inner, frame);
@@ -498,9 +498,9 @@ private:
 
     // Execute the block instructions starting with from. In verification mode,
     // declaring a split-value variable clones a continuation.
-    flow run_block(const n_block& b, u32 from, const scope_ptr& inner, u32 frame) {
+    flow run_block(const n_block& b, uint32_t from, const scope_ptr& inner, uint32_t frame) {
         value last;
-        for (u32 i = from; i < b.items.size(); ++i) {
+        for (uint32_t i = from; i < b.items.size(); ++i) {
             node_id s = b.items[i];
             if (checking() && db_.is<n_var>(s)) {
                 const auto& v = db_.as<n_var>(s);
@@ -517,7 +517,7 @@ private:
         return ok(b.has_value ? std::move(last) : value());
     }
 
-    flow split_continuation(const n_block& b, u32 i, node_id s, const value& init, const scope_ptr& inner, u32 frame) {
+    flow split_continuation(const n_block& b, uint32_t i, node_id s, const value& init, const scope_ptr& inner, uint32_t frame) {
         const auto&              v = db_.as<n_var>(s);
         std::vector<std::string> names;
         for (const auto& a : init.as<split_v>().alts) names.push_back(types_.describe(a));
@@ -546,37 +546,37 @@ private:
         env->declare(v.name, std::move(init));
     }
 
-    flow eval_node(node_id n, const n_var& v, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_var& v, const scope_ptr& env, uint32_t frame) {
         TZ_TRY(init, eval(v.init, env, frame));
         declare_var(n, v, std::move(init), env);
         return ok();
     }
 
-    flow eval_node(node_id n, const n_fn& f, const scope_ptr& env, u32) {
+    flow eval_node(node_id n, const n_fn& f, const scope_ptr& env, uint32_t) {
         env->declare(f.name, value(fn_v{{}, n, env})); // local function = lambda with a name
         return ok();
     }
 
-    flow eval_node(node_id n, const n_return& r, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_return& r, const scope_ptr& env, uint32_t frame) {
         value v;
         if (r.value) {
             TZ_TRY(x, eval(r.value, env, frame));
             v = std::move(x);
         }
-        u32 target = r.target ? return_target(db_.as<n_ident>(r.target).name, frame, db_[n].where) : frame;
+        uint32_t target = r.target ? return_target(db_.as<n_ident>(r.target).name, frame, db_[n].where) : frame;
         return flow{flow_kind::ret, std::move(v), target};
     }
 
     // return(f) is the output from the external function f in the call chain;
     // return(caller) is the output from the calling function.
 // The outline boundary is not allowed: there is no inline.
-    u32 return_target(symbol name, u32 frame, span where) {
-        i64 here = -1;
-        for (i64 i = i64(frames_.size()) - 1; i >= 0; --i)
+    uint32_t return_target(symbol name, uint32_t frame, span where) {
+        int64_t here = -1;
+        for (int64_t i = int64_t(frames_.size()) - 1; i >= 0; --i)
             if (frames_[i].id == frame) { here = i; break; }
         if (here < 0) fail("return вне функции", where);
         bool to_caller = str(name) == "caller";
-        for (i64 i = here - 1; i >= 0; --i) {
+        for (int64_t i = here - 1; i >= 0; --i) {
             if (frames_[i + 1].outline)
                 fail(std::format("return({}) через outline-функцию {}: у неё нет семантики инлайна", str(name),
                                  str(frames_[i + 1].name)),
@@ -586,7 +586,7 @@ private:
         fail(std::format("return({}): нет такой внешней функции в цепочке вызовов", str(name)), where);
     }
 
-    flow eval_node(node_id n, const n_require& r, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_require& r, const scope_ptr& env, uint32_t frame) {
         TZ_TRY(c, eval(r.cond, env, frame));
         auto b = known_bool(c, db_[r.cond].where);
         if (b && !*b) fail("нарушено требование require", db_[n].where, diag_kind::runtime);
@@ -595,7 +595,7 @@ private:
 
     // --- branching ---
 
-    flow eval_node(node_id n, const n_if& i, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_if& i, const scope_ptr& env, uint32_t frame) {
         TZ_TRY(c, eval(i.cond, env, frame));
         auto b = known_bool(c, db_[i.cond].where);
         if (b) {
@@ -608,8 +608,8 @@ private:
         return join_branches(std::move(t), std::move(e));
     }
 
-    flow eval_node(node_id n, const n_while& w, const scope_ptr& env, u32 frame) {
-        for (u32 guard = 0;; ++guard) {
+    flow eval_node(node_id n, const n_while& w, const scope_ptr& env, uint32_t frame) {
+        for (uint32_t guard = 0;; ++guard) {
             TZ_TRY(c, eval(w.cond, env, frame));
             auto b = known_bool(c, db_[w.cond].where);
             if (b && !*b) return ok();
@@ -621,7 +621,7 @@ private:
         }
     }
 
-    flow eval_node(node_id n, const n_for& f, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_for& f, const scope_ptr& env, uint32_t frame) {
         TZ_TRY(r, eval(f.range, env, frame));
         if (r.is<rt_v>()) {
             const value* shape = shape_of(r);
@@ -633,7 +633,7 @@ private:
         }
         if (!r.is<array_v>()) fail(std::format("for ожидает массив, получено {}", types_.describe(r)), db_[f.range].where);
         const auto& arr = r.as<array_v>();
-        for (u32 k = 0; k < arr.size(); ++k) {
+        for (uint32_t k = 0; k < arr.size(); ++k) {
             auto inner    = std::make_shared<scope>();
             inner->parent = env;
             inner->declare(f.var, arr.get(k));
@@ -647,13 +647,13 @@ private:
     // A cycle whose number of iterations is known only in runtime: the variables that
     // the body assigns are erased to type; the body is disassembled to a fixed point
     // of types (usually 1-2 passes).
-    flow abstract_loop(node_id body, const scope_ptr& env, u32 frame, symbol var, const value& elem,
+    flow abstract_loop(node_id body, const scope_ptr& env, uint32_t frame, symbol var, const value& elem,
                        const value* indexes = nullptr, symbol indexes_name = {}) {
         std::set<symbol> assigned;
         collect_assigned(body, assigned);
         for (symbol s : assigned)
             if (value* c = env->find(s)) *c = erase(*c);
-        for (u32 pass = 0; pass < 4; ++pass) {
+        for (uint32_t pass = 0; pass < 4; ++pass) {
             std::vector<std::string> before;
             for (symbol s : assigned) if (value* c = env->find(s)) before.push_back(types_.describe(*c));
             auto inner    = std::make_shared<scope>();
@@ -714,7 +714,7 @@ private:
         }
         if (db_.is<n_call>(n)) { // a as an argument for a changing parameter
             const auto& c = db_.as<n_call>(n);
-            for (u32 k = 0; k < c.args.size(); ++k) {
+            for (uint32_t k = 0; k < c.args.size(); ++k) {
                 if (!db_.is<n_ident>(c.args[k])) continue;
                 symbol a = db_.as<n_ident>(c.args[k]).name;
                 if (a != arr && a != var) continue;
@@ -734,13 +734,13 @@ private:
     // and does not require marking - it is displayed.
 //  и
     // Seen in the check report. Mut is an optional explicit mark.
-    bool writes_param(node_id f, u32 k) const {
+    bool writes_param(node_id f, uint32_t k) const {
         const auto& fn = db_.as<n_fn>(f);
         if (k >= fn.params.size()) return false;
         auto m = db_.as<n_param>(fn.params[k]).mode;
         if (m == param_mode::mut || m == param_mode::out || m == param_mode::own || m == param_mode::expr) return true;
         if (m == param_mode::ct) return false;
-        u64 key = (u64(f.value()) << 32) | k;
+        uint64_t key = (uint64_t(f.value()) << 32) | k;
         if (auto it = writes_.find(key); it != writes_.end()) {
             if (writes_open_.contains(key)) writes_guess_used_ = true;
             return it->second;
@@ -794,7 +794,7 @@ private:
         if (db_.is<n_call>(n) && db_.is<n_ident>(db_.as<n_call>(n).callee)) {
             const auto& c = db_.as<n_call>(n);
             if (auto it = functions_.find(db_.as<n_ident>(c.callee).name); it != functions_.end())
-                for (u32 k = 0; k < c.args.size(); ++k) {
+                for (uint32_t k = 0; k < c.args.size(); ++k) {
                     node_id a = c.args[k];
                     while (db_.is<n_index>(a) || db_.is<n_member>(a))
                         a = db_.is<n_index>(a) ? db_.as<n_index>(a).object : db_.as<n_member>(a).object;
@@ -813,7 +813,7 @@ private:
         if (db_.is<n_call>(n) && db_.is<n_ident>(db_.as<n_call>(n).callee)) { // change-place
             const auto& c = db_.as<n_call>(n);
             if (auto it = functions_.find(db_.as<n_ident>(c.callee).name); it != functions_.end())
-                for (u32 k = 0; k < c.args.size(); ++k) {
+                for (uint32_t k = 0; k < c.args.size(); ++k) {
                     node_id a = c.args[k];
                     while (db_.is<n_index>(a)) a = db_.as<n_index>(a).object;
                     if (!db_.is<n_ident>(a)) continue;
@@ -833,7 +833,7 @@ private:
         db_.for_each_child(n, [&](node_id c) { collect_assigned(c, out); });
     }
 
-    flow eval_node(node_id n, const n_ct& c, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_ct& c, const scope_ptr& env, uint32_t frame) {
         TZ_TRY(v, eval(c.body, env, frame));
         if (checking() && !v.known()) fail(std::format("ct: значение не вычислимо при компиляции (рт {})", types_.describe(v)), db_[n].where);
         return ok(std::move(v));
@@ -841,7 +841,7 @@ private:
 
     // SFINAE block (§5.4):
 // runtime - errors don't get jammed.
-    flow eval_node(node_id n, const n_try_compile& t, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_try_compile& t, const scope_ptr& env, uint32_t frame) {
         auto saved_may = may_return_;
         try {
             return eval(t.body, env, frame);
@@ -853,9 +853,9 @@ private:
         }
     }
 
-    flow eval_node(node_id n, const n_lambda& l, const scope_ptr& env, u32) { return ok(value(fn_v{{}, n, env})); }
+    flow eval_node(node_id n, const n_lambda& l, const scope_ptr& env, uint32_t) { return ok(value(fn_v{{}, n, env})); }
 
-    flow eval_node(node_id n, const n_construct& c, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_construct& c, const scope_ptr& env, uint32_t frame) {
         std::vector<value> items;
         for (node_id item : c.items) {
             TZ_TRY(x, eval(item, env, frame));
@@ -870,7 +870,7 @@ private:
 
     // --- field access ---
 
-    flow eval_node(node_id n, const n_member& m, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_member& m, const scope_ptr& env, uint32_t frame) {
         if (const value* o = peek(m.object, env); o && o->is<array_v>()) return ok(member(*o, m.name, db_[n].where));
         TZ_TRY(obj, eval(m.object, env, frame));
         return ok(lift(obj, [&](const value& o) { return member(o, m.name, db_[n].where); }));
@@ -883,8 +883,8 @@ private:
             return erase(member(*shape, name, where));
         }
         if (str(name) == "size") {
-            if (obj.is<array_v>()) return value(i64(obj.as<array_v>().size()));
-            if (obj.is<std::string>()) return value(i64(obj.as<std::string>().size()));
+            if (obj.is<array_v>()) return value(int64_t(obj.as<array_v>().size()));
+            if (obj.is<std::string>()) return value(int64_t(obj.as<std::string>().size()));
         }
         if (obj.is<agg_v>())
             for (auto& [k, v] : obj.as<agg_v>().fields)
@@ -900,7 +900,7 @@ private:
         return c && !c->is<thunk_v>() ? c : nullptr;
     }
 
-    flow eval_node(node_id n, const n_index& i, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_index& i, const scope_ptr& env, uint32_t frame) {
         span where = db_[n].where;
         note_index_proof(n, env);
         if (const value* arr = peek(i.object, env); arr && arr->is<array_v>()) {
@@ -930,32 +930,32 @@ private:
         if (a.empty()) return value(rt_v{});
         value t = erase(a.get(0));
         if (is_tuple(a))
-            for (u32 i = 1; i < a.size(); ++i) t = merge(t, erase(a.get(i)));
+            for (uint32_t i = 1; i < a.size(); ++i) t = merge(t, erase(a.get(i)));
         return t;
     }
 
     // Proven index of the array element: OutOfBounds (§12.1) - runtime - error.
-    u32 checked_index(const value& arr, const value& idx, span where) {
+    uint32_t checked_index(const value& arr, const value& idx, span where) {
         if (!arr.is<array_v>()) fail(std::format("индексация значения типа {}", types_.describe(arr)), where);
-        if (!idx.is<i64>()) fail("индекс должен быть i64", where);
-        i64 k = idx.as<i64>();
-        u32 n = arr.as<array_v>().size();
-        if (k < 0 || u64(k) >= n) fail(std::format("индекс {} вне границ массива размера {}", k, n), where, diag_kind::runtime);
-        return u32(k);
+        if (!idx.is<int64_t>()) fail("индекс должен быть i64", where);
+        int64_t k = idx.as<int64_t>();
+        uint32_t n = arr.as<array_v>().size();
+        if (k < 0 || uint64_t(k) >= n) fail(std::format("индекс {} вне границ массива размера {}", k, n), where, diag_kind::runtime);
+        return uint32_t(k);
     }
 
-    flow eval_node(node_id n, const n_hole& h, const scope_ptr&, u32) {
+    flow eval_node(node_id n, const n_hole& h, const scope_ptr&, uint32_t) {
         fail(std::format("исполнение неразобранного фрагмента: {}", h.reason), db_[n].where);
     }
 
     template <class other>
-    flow eval_node(node_id n, const other&, const scope_ptr&, u32) {
+    flow eval_node(node_id n, const other&, const scope_ptr&, uint32_t) {
         fail(std::format("узел {} нельзя исполнить", kind_name(db_[n])), db_[n].where);
     }
 
     // --- seats (lvalue) ---
 
-    value* place(node_id n, const scope_ptr& env, u32 frame) {
+    value* place(node_id n, const scope_ptr& env, uint32_t frame) {
         if (db_.is<n_ident>(n)) {
             if (value* c = env->find(db_.as<n_ident>(n).name)) return c;
             fail(std::format("неизвестная переменная {}", str(db_.as<n_ident>(n).name)), db_[n].where);
@@ -972,7 +972,7 @@ private:
 
     // --- operator ---
 
-    flow eval_node(node_id n, const n_op& o, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_op& o, const scope_ptr& env, uint32_t frame) {
         auto op    = str(o.op);
         span where = db_[n].where;
         if (op == "?") return call_named(sym("try"), o.args, env, frame, where, n.value());
@@ -997,7 +997,7 @@ private:
                 value*      arr = place(ix.object, env, frame);
                 if (!arr) fail("присваивание не в переменную", db_[o.args[0]].where);
                 TZ_TRY(idx, eval(ix.index, env, frame));
-                u32   k   = checked_index(*arr, idx, db_[o.args[0]].where);
+                uint32_t   k   = checked_index(*arr, idx, db_[o.args[0]].where);
                 value cur = arr->as<array_v>().get(k);
                 arr->as<array_v>().set(k, op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
                 return ok();
@@ -1029,8 +1029,8 @@ private:
         if (!x.known()) return erase(unary(op, *shape_or_fail(x, where), where));
         if (op == "!") return value(!truthy(x, where));
         if (op == "-") {
-            if (x.is<i64>()) return value(i64(0 - u64(x.as<i64>())));
-            if (x.is<f64>()) return value(-x.as<f64>());
+            if (x.is<int64_t>()) return value(int64_t(0 - uint64_t(x.as<int64_t>())));
+            if (x.is<double>()) return value(-x.as<double>());
         }
         fail(std::format("оператор {} не определён для {}", op, types_.describe(x)), where);
     }
@@ -1055,8 +1055,8 @@ private:
 
     value arith(std::string_view op, const value& a, const value& b, span where) {
         // Strictly: without implicit i64 <-> f64 (§5.8)
-        if (a.is<i64>() && b.is<i64>()) return int_op(op, a.as<i64>(), b.as<i64>(), where);
-        if (a.is<f64>() && b.is<f64>()) return float_op(op, a.as<f64>(), b.as<f64>(), where);
+        if (a.is<int64_t>() && b.is<int64_t>()) return int_op(op, a.as<int64_t>(), b.as<int64_t>(), where);
+        if (a.is<double>() && b.is<double>()) return float_op(op, a.as<double>(), b.as<double>(), where);
         if (a.is<std::string>() && b.is<std::string>()) {
             if (op == "+") return value(a.as<std::string>() + b.as<std::string>());
             if (op == "==") return value(a.as<std::string>() == b.as<std::string>());
@@ -1069,11 +1069,11 @@ private:
         fail(std::format("оператор {} не определён для {} и {}", op, types_.describe(a), types_.describe(b)), where);
     }
 
-    value int_op(std::string_view op, i64 x, i64 y, span where) {
-        auto w = [](u64 r) { return value(i64(r)); }; // Modular arithmetic (§5.8)
-        if (op == "+") return w(u64(x) + u64(y));
-        if (op == "-") return w(u64(x) - u64(y));
-        if (op == "*") return w(u64(x) * u64(y));
+    value int_op(std::string_view op, int64_t x, int64_t y, span where) {
+        auto w = [](uint64_t r) { return value(int64_t(r)); }; // Modular arithmetic (§5.8)
+        if (op == "+") return w(uint64_t(x) + uint64_t(y));
+        if (op == "-") return w(uint64_t(x) - uint64_t(y));
+        if (op == "*") return w(uint64_t(x) * uint64_t(y));
         if (op == "/" || op == "%") {
             if (y == 0) fail("деление на ноль", where, diag_kind::runtime); // certain exception, not UB
             return value(op == "/" ? x / y : x % y);
@@ -1081,7 +1081,7 @@ private:
         return compare(op, x, y, where);
     }
 
-    value float_op(std::string_view op, f64 x, f64 y, span where) {
+    value float_op(std::string_view op, double x, double y, span where) {
         if (op == "+") return value(x + y);
         if (op == "-") return value(x - y);
         if (op == "*") return value(x * y);
@@ -1113,7 +1113,7 @@ private:
 
     // --- challenge ---
 
-    flow eval_node(node_id n, const n_call& c, const scope_ptr& env, u32 frame) {
+    flow eval_node(node_id n, const n_call& c, const scope_ptr& env, uint32_t frame) {
         span where = db_[n].where;
         if (db_.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
             const auto& m = db_.as<n_member>(c.callee);
@@ -1133,7 +1133,7 @@ private:
         return call_value(fv, c.args, env, frame, where, n.value());
     }
 
-    flow call_value(const value& fv, const node_list& args, const scope_ptr& env, u32 frame, span where, u32 node = 0) {
+    flow call_value(const value& fv, const node_list& args, const scope_ptr& env, uint32_t frame, span where, uint32_t node = 0) {
         if (!fv.is<fn_v>()) fail(std::format("значение типа {} нельзя вызвать", types_.describe(fv)), where);
         const fn_v& f = fv.as<fn_v>();
         if (f.name) return call_named(f.name, args, env, frame, where, node);
@@ -1142,7 +1142,7 @@ private:
         if (params.size() != args.size()) fail(std::format("ожидалось {} аргументов, передано {}", params.size(), args.size()), where);
         auto inner    = std::make_shared<scope>();
         inner->parent = f.env;
-        for (u32 i = 0; i < params.size(); ++i) {
+        for (uint32_t i = 0; i < params.size(); ++i) {
             const auto& p = db_.as<n_param>(params[i]);
             if (p.mode == param_mode::expr) { inner->declare(p.name, value(thunk_v{args[i], env, frame, ctx_})); continue; }
             if (value* cell = place_or_null(args[i], env)) { inner->alias(p.name, cell); continue; }
@@ -1155,7 +1155,7 @@ private:
     // Execute body function in a new frame. The result of the verification mode is a
     // merger of the usual result and all possible returns over run-time branches.
     flow run_frame(node_id body, const scope_ptr& inner, symbol name, bool outline) {
-        u32 me = ++frame_counter_;
+        uint32_t me = ++frame_counter_;
         frames_.push_back({me, name, outline, false});
         flow r = eval(body, inner, me);
         bool effect = frames_.back().rt_effect;
@@ -1174,7 +1174,7 @@ private:
         return r;
     }
 
-    flow call_named(symbol name, const node_list& args, const scope_ptr& env, u32 frame, span where, u32 node = 0) {
+    flow call_named(symbol name, const node_list& args, const scope_ptr& env, uint32_t frame, span where, uint32_t node = 0) {
         if (auto it = functions_.find(name); it != functions_.end())
             return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node});
         std::vector<value> vals;
@@ -1186,8 +1186,8 @@ private:
     }
 
     // Fragmented Built-in Argument: A Challenge to Each Alternative
-    value builtin_lifted(symbol name, std::vector<value>& vals, u32 from, span where) {
-        for (u32 i = from; i < vals.size(); ++i) {
+    value builtin_lifted(symbol name, std::vector<value>& vals, uint32_t from, span where) {
+        for (uint32_t i = from; i < vals.size(); ++i) {
             if (!vals[i].is<split_v>()) continue;
             value orig = vals[i], out;
             bool  first = true;
@@ -1205,9 +1205,9 @@ private:
 
     // overload: Candidates by arity and types; require at the beginning of the body -
     // candidate restriction (§5.4); choose the most specific.
-    flow call_overloaded(const std::vector<node_id>& fns, const node_list& args, const scope_ptr& env, u32 frame, call_site site) {
+    flow call_overloaded(const std::vector<node_id>& fns, const node_list& args, const scope_ptr& env, uint32_t frame, call_site site) {
         std::vector<value> vals(args.size());
-        for (u32 i = 0; i < args.size(); ++i) {
+        for (uint32_t i = 0; i < args.size(); ++i) {
             bool expr_everywhere = true;
             for (node_id f : fns) {
                 const auto& ps = db_.as<n_fn>(f).params;
@@ -1225,9 +1225,9 @@ private:
     }
 
     // The split argument: Continuation-challenge is cloned by alternatives.
-    flow dispatch_split(const std::vector<node_id>& fns, std::vector<value>& vals, u32 from, const node_list& args,
-                        const scope_ptr& env, u32 frame, const call_site& site) {
-        for (u32 i = from; i < vals.size(); ++i) {
+    flow dispatch_split(const std::vector<node_id>& fns, std::vector<value>& vals, uint32_t from, const node_list& args,
+                        const scope_ptr& env, uint32_t frame, const call_site& site) {
+        for (uint32_t i = from; i < vals.size(); ++i) {
             if (!vals[i].is<split_v>()) continue;
             value orig = vals[i];
             flow  out;
@@ -1246,7 +1246,7 @@ private:
     }
 
     flow select_and_invoke(const std::vector<node_id>& fns, std::vector<value>& vals, const node_list& args,
-                           const scope_ptr& env, u32 frame, const call_site& site) {
+                           const scope_ptr& env, uint32_t frame, const call_site& site) {
         struct candidate {
             node_id fn;
             int     score;
@@ -1261,7 +1261,7 @@ private:
             }
             int         score = 0;
             std::string why;
-            for (u32 i = 0; i < fn.params.size() && why.empty(); ++i) {
+            for (uint32_t i = 0; i < fn.params.size() && why.empty(); ++i) {
                 const auto& p = db_.as<n_param>(fn.params[i]);
                 if (p.type && db_.is<n_ident>(p.type)) {
                     auto want = str(db_.as<n_ident>(p.type).name);
@@ -1320,14 +1320,14 @@ private:
         if (fn.outline && inline_required(f))
             fail(std::format("{} помечена outline, но использует семантику инлайна", site.what), db_[f].where);
         if (checking() && param_writes_checked_.insert(f.value()).second)
-            for (u32 k = 0; k < fn.params.size(); ++k)
+            for (uint32_t k = 0; k < fn.params.size(); ++k)
                 if (db_.as<n_param>(fn.params[k]).mode != param_mode::expr && writes_param(f, k))
                     param_writes_.push_back(std::format("{}: меняет {}", describe_fn(f), str(db_.as<n_param>(fn.params[k]).name)));
 
         // instance key : only runtime is part of the argument
         bool        all_known = true;
         std::string key       = std::format("{}(", str(fn.name));
-        for (u32 i = 0; i < vals.size(); ++i) {
+        for (uint32_t i = 0; i < vals.size(); ++i) {
             if (i) key += ", ";
             if (vals[i].is<thunk_v>()) key += "expr";
             else if (!checking()) key += types_.describe(vals[i]);
@@ -1378,11 +1378,11 @@ private:
         }
 
         stack_.push_back(site);
-        u64 ctx_saved = std::exchange(ctx_, inline_context(ctx_, site.node)); // body in its context of embedding
+        uint64_t ctx_saved = std::exchange(ctx_, inline_context(ctx_, site.node)); // body in its context of embedding
         std::size_t journal_mark  = journal_.size();
         frame_floors_.push_back({frame_counter_, false});
         flow r;
-        for (u32 pass = 0;; ++pass) {
+        for (uint32_t pass = 0;; ++pass) {
             auto inner    = std::make_shared<scope>();
             inner->parent = globals_;
             bind_values(fn.params, vals, args, env, inner);
@@ -1450,7 +1450,7 @@ private:
 
     // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell.
     void bind_values(const node_list& params, std::vector<value>& vals, const node_list& args, const scope_ptr& env, const scope_ptr& inner) {
-        for (u32 i = 0; i < params.size(); ++i) {
+        for (uint32_t i = 0; i < params.size(); ++i) {
             const auto& p = db_.as<n_param>(params[i]);
             if (p.mode != param_mode::expr && p.mode != param_mode::own && !vals[i].is<split_v>()) {
                 if (value* cell = place_or_null(args[i], env); cell && !cell->is<split_v>()) {
@@ -1487,7 +1487,7 @@ private:
     std::string describe_fn(node_id f) const {
         const auto& fn = db_.as<n_fn>(f);
         std::string s  = std::format("{}(", str(fn.name));
-        for (u32 i = 0; i < fn.params.size(); ++i) {
+        for (uint32_t i = 0; i < fn.params.size(); ++i) {
             if (i) s += ", ";
             const auto& p = db_.as<n_param>(fn.params[i]);
             if (p.type && db_.is<n_ident>(p.type)) s += std::format("{} ", str(db_.as<n_ident>(p.type).name));
@@ -1509,7 +1509,7 @@ private:
             rt_effect();
             if (checking()) return {};
             std::string line;
-            for (u32 i = 0; i < a.size(); ++i) line += (i ? " " : "") + show_v(a[i]);
+            for (uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + show_v(a[i]);
             if (captured_) *captured_ += line + "\n";
             else std::println("{}", line);
             return {};
@@ -1520,34 +1520,34 @@ private:
         }
         if (n == "zero" && a.size() == 1 && a[0].is<type_v>()) {
             auto t = types_.name(a[0].as<type_v>().type);
-            if (t == "i64") return value(i64(0));
-            if (t == "f64") return value(f64(0));
+            if (t == "i64") return value(int64_t(0));
+            if (t == "f64") return value(double(0));
             fail(std::format("zero не определён для {}", t), where);
         }
         if (n == "range" && a.size() == 1) {
-            if (!a[0].known() && types_.describe(a[0]) == "i64") return erase(value(array_v::of({value(i64(0))})));
-            if (a[0].is<i64>()) {
+            if (!a[0].known() && types_.describe(a[0]) == "i64") return erase(value(array_v::of({value(int64_t(0))})));
+            if (a[0].is<int64_t>()) {
                 array_v r;
-                for (i64 i = 0; i < a[0].as<i64>(); ++i) r.push(value(i));
+                for (int64_t i = 0; i < a[0].as<int64_t>(); ++i) r.push(value(i));
                 return value(std::move(r));
             }
         }
         if (n == "fill" && a.size() == 2 && types_.describe(a[0]) == "i64") { // massif
             if (!a[0].known() || !a[1].known()) return erase(value(array_v::of({a[1].known() ? a[1] : *shape_of(a[1])})));
             array_v r;
-            for (i64 i = 0; i < a[0].as<i64>(); ++i) r.push(a[1]);
+            for (int64_t i = 0; i < a[0].as<int64_t>(); ++i) r.push(a[1]);
             return value(std::move(r));
         }
         if (n == "f64" && a.size() == 1 && types_.describe(a[0]) == "i64")
-            return a[0].known() ? value(f64(a[0].as<i64>())) : erase(value(f64(1)));
+            return a[0].known() ? value(double(a[0].as<int64_t>())) : erase(value(double(1)));
         if (n == "i64" && a.size() == 1 && types_.describe(a[0]) == "f64")
-            return a[0].known() ? value(i64(a[0].as<f64>())) : erase(value(i64(1)));
+            return a[0].known() ? value(int64_t(a[0].as<double>())) : erase(value(int64_t(1)));
         if (n == "read_floats") {
             rt_effect();
             std::string line;
             bool        have = false;
             if (checking() && (!known_inputs_ || known_inputs_->stdin_lines.empty()))
-                return erase(value(array_v::of({value(f64(1))})));
+                return erase(value(array_v::of({value(double(1))})));
             if (known_inputs_) { // Entry is set (statically known or submitted by session)
                 if (!known_inputs_->stdin_lines.empty()) {
                     line = known_inputs_->stdin_lines.front();
@@ -1558,13 +1558,13 @@ private:
             array_v r;
             if (have || std::getline(std::cin, line)) {
                 std::stringstream ss(line);
-                f64               x;
+                double               x;
                 while (ss >> x) r.push(value(x));
             }
             return value(std::move(r));
         }
         if (n == "parse_int" && a.size() == 1 && types_.describe(a[0]) == "str") {
-            auto make = [&](bool good, i64 v, std::string err) {
+            auto make = [&](bool good, int64_t v, std::string err) {
                 agg_v r{types_.named("result"), {}};
                 r.fields.push_back({sym("ok"), value(good)});
                 r.fields.push_back({sym("value"), value(v)});
@@ -1573,7 +1573,7 @@ private:
             };
             if (!a[0].known()) return erase(make(true, 0, ""));
             const auto& s    = a[0].as<std::string>();
-            i64         v    = 0;
+            int64_t         v    = 0;
             bool        good = !s.empty();
             for (char ch : s) {
                 if (ch < '0' || ch > '9') { good = false; break; }
@@ -1587,7 +1587,7 @@ private:
         }
         fail(std::format("неизвестная функция {}({})", n, [&] {
             std::string s;
-            for (u32 i = 0; i < a.size(); ++i) s += (i ? ", " : "") + types_.describe(a[i]);
+            for (uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + types_.describe(a[i]);
             return s;
         }()), where);
     }
@@ -1597,7 +1597,7 @@ private:
     // --- condition ---
 
     struct frame_rec {
-        u32    id;
+        uint32_t    id;
         symbol name;
         bool   outline;
         bool   rt_effect; // in the frame was runtime - effect (I/O) - the call does not fold
@@ -1622,11 +1622,11 @@ private:
     type_registry                           types_;
     std::vector<call_site>                  stack_;
     std::vector<frame_rec>                  frames_;
-    u32                                     frame_counter_ = 0;
+    uint32_t                                     frame_counter_ = 0;
     bool                                    last_rt_effect_ = false;
-    std::map<u32, std::vector<value>>       may_return_;
-    std::map<std::string, u32>              instances_;
-    std::map<std::string, u32>              folded_;
+    std::map<uint32_t, std::vector<value>>       may_return_;
+    std::map<std::string, uint32_t>              instances_;
+    std::map<std::string, uint32_t>              folded_;
     std::set<std::string>                   active_;
     std::set<std::string>                   recursed_;
     std::map<std::string, value>            approx_;
@@ -1642,26 +1642,26 @@ private:
     std::string*                            captured_ = nullptr;
     check_cache*                            cache_ = nullptr;
     class jit_engine*                       jit_   = nullptr;
-    std::optional<u64>                      fuel_;
-    std::vector<std::pair<u32, bool>>       frame_floors_; // (The first frame of the call was a return to the outside)
+    std::optional<uint64_t>                      fuel_;
+    std::vector<std::pair<uint32_t, bool>>       frame_floors_; // (The first frame of the call was a return to the outside)
     std::vector<std::vector<report_event>*> recording_;
-    std::vector<std::map<u32, u64>>         deps_;
+    std::vector<std::map<uint32_t, uint64_t>>         deps_;
     std::optional<known_inputs>             known_inputs_;
     std::vector<obs_entry>                  journal_;
-    mutable std::unordered_map<u32, observation> observed_;
-    mutable std::map<std::pair<u32, u64>, observation> observed_ctx_; // insertion
-    u64                                     ctx_ = 0;          // current context
+    mutable std::unordered_map<uint32_t, observation> observed_;
+    mutable std::map<std::pair<uint32_t, uint64_t>, observation> observed_ctx_; // insertion
+    uint64_t                                     ctx_ = 0;          // current context
     mutable bool                            observed_dirty_ = false;
-    std::set<u32>                           live_fns_;
-    std::set<u32>                           param_writes_checked_;
+    std::set<uint32_t>                           live_fns_;
+    std::set<uint32_t>                           param_writes_checked_;
     std::vector<std::string>                param_writes_; // What functions change the parameters
-    mutable std::map<u64, bool>             writes_;
-    mutable std::set<u64>                   writes_open_;
+    mutable std::map<uint64_t, bool>             writes_;
+    mutable std::set<uint64_t>                   writes_open_;
     mutable bool                            writes_guess_used_ = false;
-    std::set<u32>                           proven_;      // node Indexations Proven within Boundaries
+    std::set<uint32_t>                           proven_;      // node Indexations Proven within Boundaries
     std::vector<std::pair<span, std::string>> proven_list_;
     std::vector<std::tuple<const value*, const value*, symbol>> index_proofs_; // (cell variable cycle, cell and array name)
-    u64                                     effects_ = 0;
+    uint64_t                                     effects_ = 0;
 };
 
 } // namespace tz

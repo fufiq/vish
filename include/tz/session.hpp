@@ -137,7 +137,7 @@ private:
     std::string name_;
     check_cache              cache_;
     std::vector<std::string> stdin_;
-    u32                      edits_ = 0;
+    uint32_t                      edits_ = 0;
     std::string last_report_;
 };
 

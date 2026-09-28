@@ -9,7 +9,7 @@
 
 namespace tz {
 
-enum class tok : u8 {
+enum class tok : uint8_t {
     ident,
     int_lit,
     float_lit,
@@ -42,7 +42,7 @@ public:
             if (c == '/' && peek(1) == '/') { skip_line(); glued = false; continue; }
             if (c == '/' && peek(1) == '*') { skip_block_comment(); glued = false; continue; }
 
-            u32   start = pos_;
+            uint32_t   start = pos_;
             token t;
             if (is_ident_start(c)) {
                 while (pos_ < src_.size() && is_ident(src_[pos_])) ++pos_;
@@ -84,14 +84,14 @@ private:
     static bool is_ident(char c) { return is_ident_start(c) || is_digit(c); }
     static bool is_op(char c) { return std::string_view("+-*/%<>=!&|^~?:.,;@#$\\").contains(c); }
 
-    char peek(u32 k) const { return pos_ + k < src_.size() ? src_[pos_ + k] : '\0'; }
+    char peek(uint32_t k) const { return pos_ + k < src_.size() ? src_[pos_ + k] : '\0'; }
 
     void skip_line() {
         while (pos_ < src_.size() && src_[pos_] != '\n') ++pos_;
     }
 
     void skip_block_comment() {
-        u32 start = pos_;
+        uint32_t start = pos_;
         pos_ += 2;
         while (pos_ + 1 < src_.size() && !(src_[pos_] == '*' && src_[pos_ + 1] == '/')) ++pos_;
         if (pos_ + 1 >= src_.size()) throw diagnostic("незакрытый комментарий", {start, start + 2});
@@ -110,7 +110,7 @@ private:
     }
 
     void lex_string() {
-        u32 start = pos_++;
+        uint32_t start = pos_++;
         while (pos_ < src_.size() && src_[pos_] != '"') {
             if (src_[pos_] == '\\') ++pos_;
             ++pos_;
@@ -120,7 +120,7 @@ private:
     }
 
     std::string_view src_;
-    u32              pos_ = 0;
+    uint32_t              pos_ = 0;
 };
 
 } // namespace tz
