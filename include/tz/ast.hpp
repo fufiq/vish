@@ -50,6 +50,7 @@ struct n_var {
   node_id type;
   node_id init;
   bool is_const = false;
+  bool ct = false; // Compilation field state: struct file { ct bool open = true; }
 };
 struct n_block {
   node_list items;
@@ -103,6 +104,11 @@ struct n_loop {
   node_id body;
 };
 struct n_break {};
+// Hide x - the name disappears from the area:
+//
+struct n_hide {
+  symbol name;
+};
 struct n_continue {};
 struct n_return {
   node_id value;
@@ -166,7 +172,7 @@ struct n_hole {
 }; // undisassembled fragment (§4.1)
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
-    n_call, n_op, n_member, n_index, n_if, n_loop, n_break, n_continue, n_return,
+    n_call, n_op, n_member, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
     n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice>;
 
 struct node {

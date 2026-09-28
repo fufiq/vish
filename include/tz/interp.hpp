@@ -31,19 +31,28 @@
 
 namespace tz {
 
-// Lexical scope. Variables are cells; alias indicates the caller cell rather than
-// copying it. Areas live in the interpreter arena (no pile on each and no reference
-// counters): block/call/iteration take the area and return it at the output; the area
-// captured by the lambda lives until the end of the run. Cell Book (Verification Mode):
-// When the cell was born and when its value was last replaced entirely. On this stand
-// the facts about values (the index is valid until the array is replaced) and parsing
-// cycle (which cells born before iteration, it changes - including through blocks of
-// structures).
+// Lexical scope. Variables are cells; alias indicates the caller cell rather than copying
+// it. Areas live in the interpreter arena (no pile on each and no reference counters):
+// block/call/iteration take the area and return it at the output; the area captured by the
+// lambda lives until the end of the run. Cell Book (Verification Mode): When the cell was
+// born and when its value was last replaced entirely. On this stand the facts about values
+// (the index is valid until the array is replaced) and parsing cycle (which cells born
+// before iteration, it changes - including through blocks of structures). journal entries
+// of the parsing section (cycle iteration, if branch): cells born before and changed in
+// it; for the branch, and their former values.
 //
+//
+struct write_log {
+  uint64_t start = 0;
+  std::set<value *> cells;
+  std::map<value *, value> old;
+  bool keep_old = false;
+};
+
 struct cell_book {
   uint64_t clock = 0;
   std::unordered_map<value const *, std::pair<uint64_t, uint64_t>> cells; // (birth, version)
-  std::vector<std::pair<uint64_t, std::set<value *>> *> logs; // (beginning of iteration, recorded cells)
+  std::vector<write_log *> logs;
 
   void born(value const * c) {
     ++clock;
@@ -57,7 +66,7 @@ struct cell_book {
     auto & e = cells[c];
     if(whole) e.second = ++clock;
     for(auto * l: logs)
-      if(e.first <= l->first) l->second.insert(c);
+      if(e.first <= l->start && l->cells.insert(c).second && l->keep_old) l->old.emplace(c, *c);
   }
 };
 
@@ -467,7 +476,7 @@ struct interpreter {
   // Iteration of the cycle writes in journal cells (removed and when excluded).
   struct log_hold {
     interpreter & vm;
-    std::pair<uint64_t, std::set<value *>> * log;
+    write_log * log;
     ~log_hold() { std::erase(vm.book.logs, log); }
   };
   struct loop_hold {
@@ -638,6 +647,7 @@ struct interpreter {
     }
     for(auto & y: alts) {
       if(types.describe(y) != types.describe(x)) continue;
+      if(state_of(y) != state_of(x)) continue; // Another state (ct field, hide) - another alternative
       if(y.known() && x.known() && show_v(y) == show_v(x)) return; // calculus
       y = erase(y); // same type, run-time
       return;
@@ -733,7 +743,10 @@ struct interpreter {
   flow eval_node(node_id, n_str const & x, scope *, uint32_t) { return ok(value(x.value)); }
 
   flow eval_node(node_id n, n_ident const & x, scope * env, uint32_t) {
-    if(value * cell = env->find(x.name)) return read(cell);
+    if(value * cell = env->find(x.name)) {
+      not_hidden(*cell, x.name, db[n].where);
+      return read(cell);
+    }
     if(str(x.name) == "true") return ok(value(true));
     if(str(x.name) == "false") return ok(value(false));
     if(auto t = types.builtin(str(x.name))) return ok(value(type_v{t}));
@@ -886,10 +899,38 @@ struct interpreter {
       }
       return after(i.else_ ? eval(i.else_, env, frame) : ok(), true);
     }
-    // run-time - Condition (only in check mode): both branches are disassembled
-    flow t = then_();
+    // run-time -condition (only in check mode): both branches are disassembled from
+    // the same state, after - the merger of the recorded cells (different types /
+    // states - splitting continuation, the same type - run-time )
+    write_log lt{book.clock, {}, {}, true};
+    flow t;
+    {
+      book.logs.push_back(&lt);
+      log_hold h{*this, &lt};
+      t = then_();
+    }
     bool left = !t.normal();
-    flow e = i.else_ ? eval(i.else_, env, frame) : ok();
+    std::map<value *, value> then_state;
+    for(value * c: lt.cells) {
+      then_state[c] = *c;
+      *c = lt.old.at(c);
+    }
+    write_log le{book.clock, {}, {}, true};
+    flow e;
+    {
+      book.logs.push_back(&le);
+      log_hold h{*this, &le};
+      e = i.else_ ? eval(i.else_, env, frame) : ok();
+    }
+    std::set<value *> touched = lt.cells;
+    touched.insert(le.cells.begin(), le.cells.end());
+    for(value * c: touched) {
+      value tv = then_state.contains(c) ? then_state[c] : le.old.contains(c) ? le.old.at(c)
+                                                                             : *c;
+      if(!t.normal() && e.normal()) continue; // Then left (return/throw/break): state of
+      if(t.normal() && !e.normal()) *c = std::move(tv);
+      else *c = merge(tv, *c);
+    }
     return after(join_branches(std::move(t), std::move(e)), left);
   }
 
@@ -936,7 +977,7 @@ struct interpreter {
     loop_hold lh{*this};
     for(uint32_t guard = 0;; ++guard) {
       loops.back().may_break = false;
-      std::pair<uint64_t, std::set<value *>> log{book.clock, {}};
+      write_log log{book.clock};
       flow f;
       {
         book.logs.push_back(&log);
@@ -951,7 +992,7 @@ struct interpreter {
       }
       if(f.kind == flow_kind::ret) record_return(f);
       if(f.kind == flow_kind::thr) record_throw(f.v);
-      return abstract_loop(l.body, env, frame, std::move(log.second), n);
+      return abstract_loop(l.body, env, frame, std::move(log.cells), n);
     }
   }
 
@@ -962,7 +1003,7 @@ struct interpreter {
         *c = erase(*c);
         before.push_back(types.describe(*c));
       }
-      std::pair<uint64_t, std::set<value *>> log{book.clock, {}};
+      write_log log{book.clock};
       flow f;
       {
         book.logs.push_back(&log);
@@ -972,7 +1013,7 @@ struct interpreter {
       if(f.kind == flow_kind::ret) record_return(f);
       if(f.kind == flow_kind::thr) record_throw(f.v);
       std::size_t had = cells.size();
-      cells.insert(log.second.begin(), log.second.end());
+      cells.insert(log.cells.begin(), log.cells.end());
       std::vector<std::string> after;
       for(value * c: cells) after.push_back(types.describe(erase(*c)));
       if(cells.size() == had && before == after) {
@@ -1029,6 +1070,7 @@ struct interpreter {
   // or transferring to a parameter that changes the function being called? Shadow, stop.
   bool writes_name(node_id n, symbol name) const {
     if(!n || db.is<n_fn>(n)) return false;
+    if(db.is<n_hide>(n)) return db.as<n_hide>(n).name == name; // Hide Self - Changing the location of the caller
     if(db.is<n_lambda>(n)) { // construction block - part of the code; closure - no
       if(!db.as<n_lambda>(n).block) return false;
       for(node_id pn: db.as<n_lambda>(n).params)
@@ -1327,6 +1369,7 @@ struct interpreter {
           TZ_TRY(d, eval(f.init, globals, frame));
           g.fields.push_back({f.name, std::move(d)});
         } else fail(cat(tname, ": не задано поле ", str(f.name)), db[n].where);
+        if(f.ct) pin(g.fields.back().second, f.name, db[n].where);
       }
       return ok(value(std::move(g)));
     }
@@ -1373,6 +1416,7 @@ struct interpreter {
   value const * peek(node_id n, scope * env) {
     if(!db.is<n_ident>(n)) return nullptr;
     value const * c = env->find(db.as<n_ident>(n).name);
+    if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
 
@@ -1697,6 +1741,7 @@ struct interpreter {
     if(db.is<n_member>(n)) { // field
       auto const & m = db.as<n_member>(n);
       value * obj = place(m.object, env, frame);
+      if(obj && obj->is<rt_v>() && shape_of(*obj) && shape_of(*obj)->is<agg_v>()) *obj = *shape_of(*obj); // erased aggregate - sample fields
       if(!obj || !obj->is<agg_v>()) return nullptr;
       for(auto & [k, v]: obj->as<agg_v>().fields)
         if(k == m.name) return &v;
@@ -1778,8 +1823,11 @@ struct interpreter {
         }
         fail("присваивание не в переменную", db[o.args[0]].where);
       }
+      bool pinned = target->pinned;
+      if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
       if(op == "=") *target = std::move(rhs);
       else *target = binary(std::string_view(op).substr(0, 1), *target, rhs, where);
+      if(pinned) pin(*target, {}, where); // The ct field remains a state during compilation
       return ok();
     }
     TZ_TRY(a, eval(o.args[0], env, frame));
@@ -1805,6 +1853,55 @@ struct interpreter {
   }
 
   static bool unknown(value const & x) { return x.is<rt_v>() && !x.as<rt_v>(); }
+
+  // ct-поле: значение известно при компиляции и остаётся известным.
+  void pin(value & v, symbol field, span where) {
+    if(!v.known())
+      fail(cat("ct-поле", field ? cat(" ", str(field)) : std::string(), " — состояние при компиляции: значение должно быть известно, получено рт ", types.describe(v)), where);
+    v.pinned = true;
+  }
+
+  // Hidden name (hide / own) can not be mentioned:
+// A split path is a mistake on that path.
+  void not_hidden(value const & v, symbol name, span where) {
+    uint32_t h = v.hidden;
+    if(!h && v.is<split_v>())
+      for(auto const & a: v.as<split_v>().alts)
+        if(a.hidden) h = a.hidden;
+    if(!h) return;
+    diagnostic d(cat(name ? cat("имя ", str(name)) : std::string("значение"), v.hidden ? " скрыто" : " скрыто в одном из путей", " (hide/own)"), where);
+    d.note("скрыто здесь", db[node_id(h - 1)].where);
+    if(!path.empty()) d.note(cat("в продолжении ", path), where);
+    for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+    throw d;
+  }
+
+  void hide_cell(value * cell, node_id at) {
+    book.written(cell, true); // Branches and cycles see concealment as a record
+    cell->hidden = at.value + 1;
+  }
+
+  flow eval_node(node_id n, n_hide const & h, scope * env, uint32_t) {
+    value * cell = env->find(h.name);
+    if(!cell || cell->is<thunk_v>()) fail(cat("hide: нет переменной ", str(h.name)), db[n].where);
+    not_hidden(*cell, h.name, db[n].where);
+    hide_cell(cell, n);
+    return ok();
+  }
+
+  // Compilation state within the value: ct-fields and hidden names (§5.6).
+  std::string state_of(value const & x) const {
+    std::string s;
+    if(x.hidden) s += "H";
+    if(x.pinned) s += "P" + show_v(x);
+    value const * v = shape_of(x);
+    if(v && v->is<agg_v>())
+      for(auto const & [k, f]: v->as<agg_v>().fields) {
+        auto t = state_of(f);
+        if(!t.empty()) s += cat(k.value, "=", t, ";");
+      }
+    return s;
+  }
 
   // Binary operation; with run-time-operand, the result type is calculated on the samples.
   value binary(std::string_view op, value const & a, value const & b, span where) {
@@ -2027,7 +2124,15 @@ struct interpreter {
       for(auto const & alt: orig.as<split_v>().alts) {
         vals[i] = alt;
         auto copy = vals;
-        flow r = dispatch_split(fns, copy, i + 1, args, env, frame, site);
+        flow r;
+        try {
+          r = dispatch_split(fns, copy, i + 1, args, env, frame, site);
+        } catch(diagnostic & d) { // Trace - the way: what is the argument in what state
+          d.note(cat("в пути [", i < args.size() && db.is<n_ident>(args[i]) ? cat(str(db.as<n_ident>(args[i]).name), ": ") : std::string(),
+                     alt.known() ? show_v(alt) : types.describe(alt), "]"),
+              site.where);
+          throw;
+        }
         out = first ? r : join_branches(out, r);
         first = false;
       }
@@ -2110,6 +2215,10 @@ struct interpreter {
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
     auto const & fn = db.as<n_fn>(f);
     check_inside(f, site);
+    // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
+    for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
+      if(db.as<n_param>(fn.params[k]).mode == param_mode::own && db.is<n_ident>(args[k]))
+        if(value * cell = env->find(db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>()) hide_cell(cell, node_id(site.node));
     if(fn.outline && inline_required(f))
       fail(cat(site.what, " помечена outline, но использует семантику инлайна"), db[f].where);
     if(checking() && param_writes_checked.insert(f.value).second)
@@ -2296,6 +2405,7 @@ struct interpreter {
   value * place_or_null(node_id n, scope * env) {
     if(!db.is<n_ident>(n)) return nullptr;
     value * c = env->find(db.as<n_ident>(n).name);
+    if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
 

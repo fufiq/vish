@@ -315,6 +315,10 @@ struct parser {
     while(!is_close('}')) {
       uint32_t f0 = here().where.begin;
       n_var f;
+      if(is_word("ct") && ahead(1).kind == tok::ident && ahead(2).kind == tok::ident) { // ct field: compile state
+        f.ct = true;
+        advance();
+      }
       f.type = db.add(n_ident{ident()}, {f0, toks[pos - 1].where.end});
       f.name = ident();
       if(is_op("=")) {
@@ -486,6 +490,12 @@ struct parser {
     if(is_word("try_compile") && is_open('{', 1)) {
       advance();
       return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
+    }
+    if(is_word("hide") && ahead(1).kind == tok::ident) {
+      advance();
+      symbol name = ident();
+      end_statement();
+      return db.add(n_hide{name}, {start, toks[pos - 1].where.end});
     }
     if(is_word("break") || is_word("continue")) {
       bool brk = is_word("break");

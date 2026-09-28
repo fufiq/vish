@@ -140,6 +140,11 @@ struct value {
 // , "r - range(xs.size)." A copy of the meaning carries a fact.
   // The new value (i + 1) is not.
   uint32_t proof = 0;
+  // Compilation state (typestate, §5.6): the ct field of the aggregate is "mutable
+  // constexpr". Erasure to the type does not affect it; different states - different
+  // patterns (splitting continuation).
+  bool pinned = false;
+  uint32_t hidden = 0; // Name hidden (hide / own): seat node +1
 
   value() : v(unit_v{}) {}
   value(auto x) : v(std::move(x)) {}
@@ -170,6 +175,14 @@ struct shape_table {
 
   // Canonical text of the sample: only types and structure, without meaning.
   static void key_of(value const & x, std::string & out) {
+    if(x.hidden) out += "H" + std::to_string(x.hidden);
+    if(x.pinned) { // condition
+      out += 'P';
+      if(x.is<bool>()) out += x.as<bool>() ? '1' : '0';
+      else if(x.is<int64_t>()) out += std::to_string(x.as<int64_t>());
+      else if(x.is<double>()) out += cat(x.as<double>());
+      else if(x.is<std::string>()) out += x.as<std::string>();
+    }
     std::visit([&](auto const & a) {
       using T = std::remove_cvref_t<decltype(a)>;
       if constexpr(std::is_same_v<T, unit_v>) out += 'u';
@@ -310,7 +323,7 @@ value erase(value const & x);
 // Erase the value to type (run-time). Samples of numbers - 1, so that the calculation of the
 // type of the result of the operation on the samples does not rest on the division by zero.
 value erase(value const & x) {
-  if(x.is<rt_v>() || x.is<split_v>()) return x;
+  if(x.is<rt_v>() || x.is<split_v>() || x.pinned || x.hidden) return x; // condition during compilation is not erased
   value shape;
   if(x.is<int64_t>()) shape = value(int64_t(1));
   else if(x.is<double>()) shape = value(double(1));

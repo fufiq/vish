@@ -187,7 +187,7 @@ struct printer {
     if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
     if(db.is<n_hole>(s)) return; // The hole prints the source code as it is.
     if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
-    if(db.is<n_break>(s) || db.is<n_continue>(s)) return;
+    if(db.is<n_break>(s) || db.is<n_continue>(s) || db.is<n_hide>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
     if(db.is<n_call>(s)) {
@@ -258,7 +258,7 @@ struct printer {
     out += cat("struct ", str(st.name), " {");
     for(node_id f: st.fields) {
       auto const & v = db.as<n_var>(f);
-      out += ' ';
+      out += v.ct ? " ct " : " ";
       item(v.type);
       out += cat(" ", str(v.name));
       if(v.init) {
@@ -293,6 +293,7 @@ struct printer {
   }
 
   void print_node(node_id, n_break const &) { out += "break;"; }
+  void print_node(node_id, n_hide const & h) { out += cat("hide ", str(h.name), ";"); }
   void print_node(node_id, n_continue const &) { out += "continue;"; }
 
   void print_node(node_id, n_pack const & p) { // PAC outside the call (not in the text)

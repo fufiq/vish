@@ -1162,6 +1162,7 @@ struct jit_codegen {
   }
 
   jt gen(node_id n, n_break const &) { return jump_loop(n, true); }
+  jt gen(node_id, n_hide const &) { return jt::unit; } // Hiding the name - only when compiling
   jt gen(node_id n, n_continue const &) { return jump_loop(n, false); }
 
   jt jump_loop(node_id n, bool brk) {

@@ -1,0 +1,42 @@
+// args: 3
+// out: 3 1 closed
+// out: 7 2
+// fmt-stable
+// store-roundtrip
+// Typestate (§5.6, M2b): 
+//   — ct-поле агрегата —
+// состояние при компиляции; операции его меняют, require проверяет. own и
+// hide — имя исчезает: 
+//.
+struct file { i64 fd; ct bool open = true; }
+
+close(mut file f) { f.open = false; }
+read(file f) {
+  require(f.open);
+  f.fd
+}
+state(file f) => if(f.open) "open" else "closed";
+
+struct msg { i64 id; }
+send(own msg m) => m.id;
+
+// hide self: после вызова переменная вызывающего скрыта
+consume(mut msg m) {
+  auto id = m.id;
+  hide m;
+  id
+}
+
+main() {
+  auto n = parse_int(args[1]).value;
+  auto f = file{n};
+  auto r = read(f);
+  close(f);
+  auto g = file{1};
+  if(n > 5) close(g);   // состояние g — по ветке: продолжение расщеплено
+  print(r, g.fd, state(f));
+  auto m = msg{7};
+  auto k = send(m);
+  auto q = msg{2};
+  print(k, consume(q));
+}

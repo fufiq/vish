@@ -1,0 +1,13 @@
+// out: 7
+// error: имя m скрыто (hide/own)
+// error: скрыто здесь
+// own — явное перемещение: после вызова имя исчезает 
+//.
+struct msg { i64 id; }
+send(own msg m) => m.id;
+
+main() {
+  auto m = msg{7};
+  print(send(m));
+  print(m.id);
+}
