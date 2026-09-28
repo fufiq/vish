@@ -1,0 +1,22 @@
+// out: 42
+// out: ошибка: не число
+// Оператор ? — объявление прелюдии (operator (expr e)? => try(e)): «расто-макака
+// try» без макроса. Кадр оператора прозрачен для
+// return(caller): при ошибке выходим из load, написавшей x?, а не из оператора.
+try(expr e) {
+  r = e;
+  if(is_err(r)) return(caller) r;
+  r.value
+}
+
+load(s) {
+  n = parse_int(s)?;
+  print(n);
+  parse_int("0")
+}
+
+main() {
+  load("42");
+  r = load("x");
+  if(is_err(r)) print("ошибка: не число");
+}

@@ -203,7 +203,7 @@ struct interpreter {
 
   static bool operator_name(std::string_view n) {
     for(std::string_view role: {"infix", "prefix", "postfix"})
-      if(n.size() > role.size() && n.starts_with(role) && std::string_view("+-*/%<>=!&|^~@$\\").contains(n[role.size()])) return true;
+      if(n.size() > role.size() && n.starts_with(role) && std::string_view("+-*/%<>=!&|^~?@$\\").contains(n[role.size()])) return true;
     return false;
   }
 
@@ -229,11 +229,24 @@ struct interpreter {
   void elaborate() {
     if(elaborated) return;
     elaborated = true;
-    for(node_id item: db.as<n_module>(mod).items)
+    for(node_id item: db.as<n_module>(mod).items) {
       if(db.is<n_ct>(item)) {
+        ++ct_depth;
         flow f = eval(db.as<n_ct>(item).body, globals, 0);
+        --ct_depth;
         if(f.kind == flow_kind::thr) uncaught(f);
       }
+      if(db.is<n_var>(item) && db.as<n_var>(item).ct) { // ct x = e - in the order of the module
+        auto const & v = db.as<n_var>(item);
+        ++ct_depth;
+        flow f = eval(v.init, globals, 0);
+        --ct_depth;
+        if(f.kind == flow_kind::thr) uncaught(f);
+        if(!f.v.known()) fail(cat("ct ", str(v.name), ": значение должно быть известно при компиляции"), db[item].where);
+        ct_cells.insert(globals->declare(v.name, f.v));
+        ct_names.push_back(v.name);
+      }
+    }
   }
 
   // Unit fields: declaration + extension (in module order).
@@ -251,6 +264,7 @@ struct interpreter {
     auto it = functions.find(sym("main"));
     if(it == functions.end()) throw diagnostic("нет функции main", {});
     elaborate();
+    if(!checking() && !ct_names.empty()) canonical_ct(); // ct-state - in canonical order, not on the branches of execution
     it = functions.find(sym("main"));
     call_site site{db[it->second.front()].where, "main"};
     flow r;
@@ -341,6 +355,19 @@ struct interpreter {
     return out;
   }
 
+  // Canonical order ct (§7.3 p. 4): the result does not depend on which branches are
+  // executed - the ct-code of the program executes parsing of the entire program, and
+  // the execution takes its results at the call places and the final ct-variables.
+  void canonical_ct() {
+    interpreter & a = level_runs.emplace_back(db, mod, std::vector<std::string>{"ct"}, mode::check, std::nullopt, nullptr, this);
+    a.fuel = 2000000;
+    a.run_main();
+    for(auto const & [k, v]: a.ct_memo) ct_memo.try_emplace(k, v);
+    for(symbol n: a.ct_names)
+      if(value * mine = globals->find(n); mine && ct_cells.contains(mine))
+        if(value * theirs = a.globals->find(n)) *mine = *theirs;
+  }
+
   // Verification mode report.
   std::string report(std::string_view file, std::string_view src) const {
     std::string out;
@@ -380,6 +407,11 @@ struct interpreter {
         for(auto const & t: ts) list += (list.empty() ? "" : ", ") + t;
         out += cat("  ", inst, " бросает: ", list, "\n");
       }
+    }
+    if(!ct_order.empty()) {
+      out += "порядок инстанцирования (ct):\n";
+      for(auto const & [w, inst, v]: ct_order)
+        if(mine(w)) out += cat("  ", loc(w), " в ", inst, " → ", v, "\n");
     }
     std::string proofs;
     for(auto const & [w, what, node]: proven_list)
@@ -864,9 +896,18 @@ struct interpreter {
   // Only instance is cached with no side effect on the caller: no expr-arguments
   // (inline-function is part of the caller) and no mut/own/out-parameters (changes
   // of the caller cells cannot be reproduced).
+  bool has_ct(node_id n) const {
+    if(!n) return false;
+    if(db.is<n_ct>(n)) return true;
+    bool found = false;
+    db.for_each_child(n, [&](node_id c) { found = found || has_ct(c); });
+    return found;
+  }
+
   bool memoizable(node_id f, std::vector<value> const & vals) const {
     for(auto const & v: vals)
       if(v.is<thunk_v>()) return false;
+    if(has_ct(db.as<n_fn>(f).body)) return false; // ct - at the place of the call, not by argument
     for(node_id p: db.as<n_fn>(f).params) {
       auto m = db.as<n_param>(p).mode;
       if(m == param_mode::mut || m == param_mode::own || m == param_mode::out || m == param_mode::expr) return false;
@@ -1050,6 +1091,11 @@ struct interpreter {
     while(frame_rec const * up = cur->caller ? at(cur->caller) : nullptr) {
       if(cur->outline)
         fail(cat("return(", str(name), ") через outline-функцию ", str(cur->name), ": у неё нет семантики инлайна"), where);
+      // Operator frame is transparent: x? is a try(x) call record, not a new function
+      if(up->name && operator_name(str(up->name))) {
+        cur = up;
+        continue;
+      }
       if(to_caller || up->name == name) return up->id;
       cur = up;
     }
@@ -1320,10 +1366,28 @@ struct interpreter {
     return w;
   }
 
+  // ct-code is executed at instantiation - once on instance (call location,
+  // embedding context), in canonical order:
+// 
+//.
   flow eval_node(node_id n, n_ct const & c, scope * env, uint32_t frame) {
-    TZ_TRY(v, eval(c.body, env, frame));
-    if(checking() && !v.known()) fail(cat("ct: значение не вычислимо при компиляции (рт ", types.describe(v), ")"), db[n].where);
-    return ok(std::move(v));
+    auto key = std::pair{n.value, ctx};
+    if(auto it = ct_memo.find(key); it != ct_memo.end()) return ok(it->second);
+    ++ct_depth;
+    flow f;
+    try {
+      f = eval(c.body, env, frame);
+    } catch(...) {
+      --ct_depth;
+      throw;
+    }
+    --ct_depth;
+    if(!f.normal()) return f;
+    if(checking() && !f.v.known()) fail(cat("ct: значение не вычислимо при компиляции (рт ", types.describe(f.v), ")"), db[n].where);
+    ct_memo[key] = f.v;
+    if(checking() && !level_probe)
+      ct_order.push_back({db[n].where, stack.empty() ? std::string("модуль") : stack.back().what, f.v.known() ? show_v(f.v) : std::string("рт")});
+    return f;
   }
 
   // SFINAE block (§5.4):
@@ -1626,6 +1690,19 @@ struct interpreter {
     value const * c = env->find(db.as<n_ident>(n).name);
     if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
     return c && !c->is<thunk_v>() ? c : nullptr;
+  }
+
+  // v.[f] is a field by descriptor (from fields(T)) or by line name; the descriptor is
+  // known when compiled: the field cycle is disclosed (§7.4).
+  flow eval_node(node_id n, n_field const & f, scope * env, uint32_t frame) {
+    TZ_TRY(key, eval(f.key, env, frame));
+    std::string name;
+    if(key.is<std::string>()) name = key.as<std::string>();
+    else if(key.is<agg_v>() && !key.as<agg_v>().fields.empty() && key.as<agg_v>().fields[0].second.is<std::string>())
+      name = key.as<agg_v>().fields[0].second.as<std::string>();
+    else fail(cat("v.[f]: дескриптор поля должен быть известен при компиляции, получено ", types.describe(key)), db[n].where);
+    TZ_TRY(obj, eval(f.object, env, frame));
+    return ok(lift(obj, [&](value const & o) { return member(o, sym(name), db[n].where); }));
   }
 
   flow eval_node(node_id n, n_index const & i, scope * env, uint32_t frame) {
@@ -2737,7 +2814,6 @@ struct interpreter {
   flow eval_node(node_id n, n_op const & o, scope * env, uint32_t frame) {
     auto op = str(o.op);
     span where = db[n].where;
-    if(op == "?") return call_named(sym("try"), o.args, env, frame, where, n.value);
     // Operator declared to be an unbuilt primitive code calls its entity (overload by
     // type; embedded is also a candidate)
     if(!user_ops.empty() || o.postfix)
@@ -2844,6 +2920,8 @@ struct interpreter {
         }
         fail("присваивание не в переменную", db[o.args[0]].where);
       }
+      if(ct_cells.contains(target) && ct_depth == 0 && !level_probe)
+        fail("ct-переменная меняется только кодом при компиляции (ct { … })", where);
       bool pinned = target->pinned;
       if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
       if(op == "=") *target = std::move(rhs);
@@ -3859,6 +3937,11 @@ struct interpreter {
   std::deque<interpreter> level_runs;
   std::vector<std::string> level_details;
   std::set<uint32_t> implicit_decls; // x = e, declaring x
+  std::map<std::pair<uint32_t, uint64_t>, value> ct_memo; // (ct node, instance ) → value
+  std::vector<std::tuple<span, std::string, std::string>> ct_order; // policeman
+  std::set<value const *> ct_cells; // ct-variable module
+  std::vector<symbol> ct_names;
+  uint32_t ct_depth = 0;
   std::vector<override_rec> overrides;
   uint32_t override_depth = 0;
   uint64_t array_gen = 0; // generation of array buffers (performance)

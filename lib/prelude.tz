@@ -29,6 +29,9 @@ operator (a) >= (b) => ge(a, b);
 [[associative]] operator (bool a) || (expr bool b) => or(a, b);
 operator -(a) => neg(a);
 operator !(bool a) => not(a);
+// x? — try(x) вызывающего: «расто-макака try» без макроса;
+// кадр оператора прозрачен для return(caller) — выход из того, кто написал x?.
+operator (expr e)? => try(e);
 
 // while(c) тело — условие вычисляется на каждой итерации (expr).
 while(expr c, expr body) {

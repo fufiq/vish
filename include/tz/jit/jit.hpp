@@ -1352,7 +1352,7 @@ struct jit_codegen {
     db.for_each_child(n, [&](node_id c) { weigh_uses(c, name, uses); });
   }
 
-  jt gen(node_id n, n_ct const & c) { return gen_value(c.body); }
+  jt gen(node_id n, n_ct const &) { throw jit_unsupported{n, "ct не свёрнут в константу"}; } // ct for instantiation, not in runtime
 
   // Operator chain: A tree selected by parsing in this context (§4.4).
   jt gen(node_id n, n_chain const &) {
@@ -1404,6 +1404,7 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
+  if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
     bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept"; // pure: convolution or code generator

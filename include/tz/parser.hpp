@@ -560,6 +560,17 @@ struct parser {
     //
     bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
     bool qualified = is_const && ahead(k).kind == tok::ident && is_op("=", k + 1);
+    if(k == 0 && is_word("ct") && ahead(1).kind == tok::ident && is_op("=", 2)) { // ct x = e is the compile variable (§7.3)
+      uint32_t start = here().where.begin;
+      advance();
+      n_var v;
+      v.ct = true;
+      v.name = ident();
+      expect_op("=");
+      v.init = expression();
+      end_statement();
+      return db.add(std::move(v), {start, toks[pos - 1].where.end});
+    }
     bool ref = k == 0 && is_op("&") && ahead(1).kind == tok::ident && is_op("=", 2);
     if(!typed && !qualified && !ref) return std::nullopt;
     if(typed && is_word("auto", k)) throw diagnostic("auto не нужен: x = … объявляет с выводом типа", ahead(k).where);
@@ -589,7 +600,7 @@ struct parser {
 // ibid. Prefix and postfix operators are part of
   // operanda. Attribution (= += -= *= /=) is the form of the kernel, not the operator.
 
-  static bool op_char(char c) { return std::string_view("+-*/%<>=!&|^~@$\\").contains(c); }
+  static bool op_char(char c) { return std::string_view("+-*/%<>=!&|^~?@$\\").contains(c); }
 
   void learn_operator(n_fn const & f) {
     auto name = db.strings.text(f.name);
@@ -821,13 +832,16 @@ struct parser {
         e = db.add(n_index{e, i}, {start, toks[pos - 1].where.end});
       } else if(is_open('{') && here().glued && db.is<n_ident>(e)) {
         e = db.add(n_construct{e, brace_items()}, {start, toks[pos - 1].where.end});
+      } else if(is_op(".") && is_open('[', 1)) { // v.[f] - descriptor field
+        advance();
+        advance();
+        node_id key = expression();
+        expect_close(']');
+        e = db.add(n_field{e, key}, {start, toks[pos - 1].where.end});
       } else if(is_op(".") && !is_op("..")) {
         advance();
         symbol name = ident();
         e = db.add(n_member{e, name}, {start, toks[pos - 1].where.end});
-      } else if(is_op("?") && here().glued) {
-        advance();
-        e = db.add(n_op{db.strings.intern("?"), {e}}, {start, toks[pos - 1].where.end});
       } else {
         return e;
       }

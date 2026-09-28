@@ -91,6 +91,11 @@ struct n_member {
   node_id object;
   symbol name;
 };
+// v.[f] is a descriptor field known in compilation (§7.4)
+struct n_field {
+  node_id object;
+  node_id key;
+};
 struct n_index {
   node_id object;
   node_id index;
@@ -174,7 +179,7 @@ struct n_hole {
 }; // undisassembled fragment (§4.1)
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
-    n_call, n_op, n_member, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
+    n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
     n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice>;
 
 struct node {

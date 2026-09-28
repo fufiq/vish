@@ -155,6 +155,7 @@ struct printer {
 
   void print_node(node_id, n_var const & v) {
     if(v.is_const) out += "const ";
+    if(v.ct) out += "ct ";
     if(v.ref) out += "&";
     if(v.type && !db.is<n_auto>(v.type)) {
       item(v.type);
@@ -346,11 +347,6 @@ struct printer {
   void print_node(node_id n, n_op const & o) {
     auto op = str(o.op);
     if(o.args.size() == 1) {
-      if(op == "?") {
-        item(o.args[0]);
-        out += '?';
-        return;
-      }
       if(o.postfix) {
         operand(o.args[0], false, {});
         out += op;
@@ -478,6 +474,13 @@ struct printer {
     item(m.object);
     out += '.';
     out += str(m.name);
+  }
+
+  void print_node(node_id, n_field const & f) {
+    item(f.object);
+    out += ".[";
+    item(f.key);
+    out += ']';
   }
 
   void print_node(node_id, n_index const & i) {
