@@ -46,11 +46,22 @@ export interface ServerHello {
   program: string;
   revision: number;
 }
+// note - note node (cause of the hole): decoration, not text.
 export interface ViewNode {
   type: 's_node';
   id: NodeId;
   kind: string;
   pieces: Piece[];
+  note: string;
+}
+// Edit: node node subtree replaced (id node saved); comes to all customers - state
+// one.
+export interface Update {
+  type: 's_update';
+  view: number;
+  revision: number;
+  node: NodeId;
+  nodes: ViewNode[];
 }
 export interface View {
   type: 's_view';
@@ -70,7 +81,7 @@ export interface ServerError {
   type: 's_error';
   text: string;
 }
-export type ServerMsg = ServerHello | View | Cursor | ServerError;
+export type ServerMsg = ServerHello | View | Cursor | ServerError | Update;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

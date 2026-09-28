@@ -101,7 +101,7 @@ struct test_runner {
     node_id root;
     std::optional<vm_session> session;
     std::optional<editor_server> server;
-    wire_client client;
+    wire_client client, second; // [2] is the second client of the same VM.
     bool wire = path.extension() == ".wire";
     std::string last, why;
     for(std::size_t i = 0; i < lines.size(); ++i) {
@@ -119,6 +119,11 @@ struct test_runner {
           client.peer = &server->add_peer(fds[0]);
           client.fd = fds[1];
           client.db = &db;
+          int more[2];
+          if(!os::socket_pair(more)) return "socketpair не удался";
+          second.peer = &server->add_peer(more[0]);
+          second.fd = more[1];
+          second.db = &db;
         }
         continue;
       }
@@ -136,9 +141,19 @@ struct test_runner {
       }
       if(l.empty() || l.starts_with("//") || !session) continue;
       if(wire) {
-        last = client.exchange(*server, l);
-        if(!client.mismatch.empty()) why += cat("    строка ", i + 1, ": текст представления расходится с проекцией:\n", client.mismatch);
-        client.mismatch.clear();
+        bool two = l.starts_with("[2] ");
+        wire_client & who = two ? second : client;
+        last = who.exchange(*server, two ? l.substr(4) : l);
+        // Answers sent to another client (one state for all)
+        wire_client & other = two ? client : second;
+        if(other.sent) {
+          std::string also = other.collect();
+          if(!also.empty()) last += cat("другому клиенту:\n", also);
+        }
+        for(auto * w: {&client, &second}) {
+          if(!w->mismatch.empty()) why += cat("    строка ", i + 1, ": текст представления расходится с проекцией:\n", w->mismatch);
+          w->mismatch.clear();
+        }
         continue;
       }
       std::string body;
@@ -147,6 +162,7 @@ struct test_runner {
       last = session->exec(l, body);
     }
     if(wire && client.fd >= 0) os::close_fd(client.fd);
+    if(wire && second.fd >= 0) os::close_fd(second.fd);
     return why;
   }
 
@@ -173,11 +189,18 @@ struct test_runner {
           out += w;
           continue;
         }
+        // only node current projection (from root, in order of text)
         auto want = w.substr(1);
         std::string found = "#?";
-        for(auto const & x: nodes)
-          for(auto const & pc: x.pieces)
-            if(auto const * t = std::get_if<std::string>(&pc); t && found == "#?" && t->contains(want)) found = cat("#", x.id.value);
+        auto rec = [&](auto && self, node_id n) -> void {
+          auto const * x = node(n);
+          if(!x || found != "#?") return;
+          for(auto const & pc: x->pieces)
+            if(auto const * t = std::get_if<std::string>(&pc); t && t->contains(want)) found = cat("#", n.value);
+          for(auto const & pc: x->pieces)
+            if(auto const * c = std::get_if<node_id>(&pc)) self(self, *c);
+        };
+        rec(rec, root);
         out += found;
       }
       return out;
@@ -187,6 +210,12 @@ struct test_runner {
       os::write_all(fd, proto::frame(proto::parse_client(resolve(line))));
       ++sent;
       while(peer->handled < sent || !server.settled(*peer)) server.step();
+      for(auto & p: server.peers) // Sending to other customers should also go away.
+        while(!server.settled(p)) server.step();
+      return collect();
+    }
+
+    std::string collect() {
       in += os::read_ready(fd);
       std::string out;
       proto::take_frames(in, [&](std::string_view body) {
@@ -196,13 +225,29 @@ struct test_runner {
         if(auto * v = std::get_if<proto::s_view>(&m)) {
           nodes = v->nodes;
           root = v->root;
-          std::string t = text(root);
-          if(std::string want = printer(*db).print(root); t != want) mismatch = cat("собрано:\n", t, "\nпроекция:\n", want);
-          out += cat("текст:\n", t, "\n");
+          out += checked_text();
+        }
+        if(auto * u = std::get_if<proto::s_update>(&m)) {
+          for(auto const & n: u->nodes) {
+            if(auto * old = const_cast<proto::s_node *>(node(n.id))) *old = n;
+            else nodes.push_back(n);
+          }
+          out += checked_text();
         }
         if(auto * c = std::get_if<proto::s_cursor>(&m)) out += cat("курсор: ", cursor_line(*c), "\n");
       });
       return out;
+    }
+
+    // Collected from pieces of text and its reconciliation with projection for
+    // the editor (layout: a hole - only your text).
+    std::string checked_text() {
+      std::string t = text(root);
+      std::vector<node_layout> scratch;
+      printer pr(*db);
+      pr.layouts = &scratch;
+      if(std::string want = pr.print(root); t != want) mismatch = cat("собрано:\n", t, "\nпроекция:\n", want);
+      return cat("текст:\n", t, "\n");
     }
 
     proto::s_node const * node(node_id n) const {

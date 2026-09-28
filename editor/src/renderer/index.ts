@@ -45,6 +45,10 @@ function receive(m: ServerMsg): void {
       view = new ViewElement(app, m);
       app.focus();
       return;
+    case 's_update':
+      view?.update(m);
+      statusLine.textContent = `ревизия ${String(m.revision)}`;
+      return;
     case 's_cursor':
       view?.showCursor(m);
       return;

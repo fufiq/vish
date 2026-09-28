@@ -51,3 +51,7 @@ body {
   background: var(--tz-caret);
   pointer-events: none;
 }
+[noted] {
+  text-decoration: wavy underline var(--tz-caret);
+  text-underline-offset: 3px;
+}

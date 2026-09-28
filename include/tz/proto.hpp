@@ -57,16 +57,26 @@ struct s_hello {
   std::string program;
   uint64_t revision;
 };
-// Node projection: The view (name of the aggregate node) and the pieces are the text or place of the child.
+// Node projection: The view (name of the aggregate node) and the pieces are the text or
+// place of the child. Note node (cause of the hole): Decoration, not text.
 struct s_node {
   node_id id;
   std::string kind;
   std::vector<piece> pieces;
+  std::string note;
 };
 struct s_view {
   uint32_t view;
   node_id root;
   uint64_t revision;
+  std::vector<s_node> nodes;
+};
+// node node subtree replaced (id node saved, children new). It is sent to all
+// customers - one state.
+struct s_update {
+  uint32_t view;
+  uint64_t revision;
+  node_id node;
   std::vector<s_node> nodes;
 };
 // Cursor: node, number of the piece-text, offset in code points.
@@ -79,7 +89,7 @@ struct s_cursor {
 struct s_error {
   std::string text;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error>;
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update>;
 
 // --- staff ---
 

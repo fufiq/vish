@@ -97,6 +97,22 @@ struct parser {
     return id;
   }
 
+  // Editor unit (§13.1): `{…}` block or entire module element.
+  // 
+// Empty - text not
+  // It forms such a unit (its own brackets are broken): the edit goes up to the outer
+  // brackets. Mistakes inside are holes, like everywhere else.
+  node_id parse_unit(bool as_block) {
+    try {
+      node_id n = as_block ? block() : item();
+      if(!at_end()) return {};
+      db.link_parents(n);
+      return n;
+    } catch(diagnostic const &) {
+      return {};
+    }
+  }
+
   // parsing errors with import number in positions.
   std::vector<diagnostic> errors() const {
     std::vector<diagnostic> out;
@@ -215,6 +231,9 @@ struct parser {
       uint32_t start = toks[start_tok].where.begin;
       pos = start_tok;
       skip_to_statement_end();
+      // extra closing bracket: the pass is on it - the hole takes at least it,
+      // otherwise parsing does not move
+      if(pos == start_tok && !at_end()) advance();
       uint32_t end = toks[pos > 0 ? pos - 1 : 0].where.end;
       return db.add(n_hole{std::string(src.substr(start, end - start)), d.what()}, {start, end});
     }

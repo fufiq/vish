@@ -34,7 +34,8 @@ describe('живая VM', () => {
   it('поля типов TS — те же, что в схеме', () => {
     const fields = (t: string) => (schema.types[t] ?? []).map(([n]) => n);
     expect(fields('s_view')).toEqual(['view', 'root', 'revision', 'nodes']);
-    expect(fields('s_node')).toEqual(['id', 'kind', 'pieces']);
+    expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
+    expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);
     expect(fields('s_cursor')).toEqual(['view', 'node', 'piece', 'offset']);
     expect(fields('c_key')).toEqual(['view', 'key', 'mods']);
     expect(fields('c_pointer')).toEqual(['view', 'node', 'piece', 'offset']);
@@ -69,7 +70,6 @@ describe('живая VM', () => {
       for (let i = 0; i < 100 && got.length < 4; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      c.end();
       expect(got.map((m) => m.type)).toEqual([
         's_hello',
         's_view',
@@ -81,6 +81,29 @@ describe('живая VM', () => {
       expect(projectionText(view)).toBe(
         execFileSync(tz, ['fmt', program], { encoding: 'utf8' }),
       );
+      // entry at the end of the first line: `y=2;` → canonical `y = 2;` in the block
+      for (const key of ['y', '=', '2', ';']) {
+        c.write(encodeClient({ type: 'c_key', view: 1, key, mods: 0 }));
+      }
+      for (let i = 0; i < 100 && got.length < 4 + 4 * 2; ++i) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const nodes = new Map(view.nodes.map((n) => [n.id, n]));
+      for (const m of got) {
+        if (m.type === 's_update') for (const n of m.nodes) nodes.set(n.id, n);
+      }
+      expect(projectionText({ ...view, nodes: [...nodes.values()] })).toBe(
+        'main() {\n  y = 2;\n  s = "привет, мир";\n  print(s);\n}\n',
+      );
+      // cursor - immediately after `;` : before translating a line in a piece of ";\n" block
+      const typed = got.at(-1);
+      const kids =
+        typed?.type === 's_cursor' && typed.node !== null
+          ? nodes.get(typed.node)
+          : undefined;
+      expect(kids?.kind).toBe('n_block');
+      expect(typed).toMatchObject({ piece: 2, offset: 1 });
+      c.end();
       const end = got.at(3);
       // end of the first line - before translating the line in a piece "{\n" of the block
       const block = view.nodes.find((n) => n.kind === 'n_block');

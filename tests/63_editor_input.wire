@@ -1,0 +1,58 @@
+// Ввод в редакторе (M5, §13.1): клавиша — управляющий сигнал VM; правка
+// переразбирает только свои скобки — 
+// 
+// недописанное — дыры: 
+// Проекция сразу
+// каноническая; изменение получают все клиенты — состояние одно.
+// program: editor_text.tz
+open_view module
+[2] open_view module
+[2] pointer 1 @print 0 2
+// expect: курсор:   pr‸int(s);
+// набор внутри строки: переразбирается только блок, id блока тот же
+pointer 1 @привет 0 7
+key 1 !
+// expect: update view=1
+// expect: kind="n_block"
+// expect: курсор:   s = "привет!‸, мир";
+// второй клиент получил правку, его курсор остался на своём месте
+// expect: другому клиенту:
+// expect: курсор:   pr‸int(s);
+// пробелы ставит проекция: y=2; → y = 2;
+key 1 End
+key 1 y
+key 1 =
+key 1 2
+key 1 ;
+// expect: курсор:   y = 2;‸
+// expect-not: kind="n_hole"
+// недописанное — дыра только в своей инструкции (незакрытая скобка — до
+// конца инструкции), причина — примечание узла
+key 1 (
+// expect: kind="n_hole" pieces=["(\n  print(s);"] note="ожидалось ')'"
+// expect: курсор:   (‸
+key 1 Backspace
+// expect-not: n_hole
+// сломанные скобки блока — переразбирается внешнее (модуль), функция — дыры
+pointer 1 @main 0 7
+key 1 Delete
+// expect: update view=1 revision=
+// expect: kind="n_module"
+// expect: kind="n_hole" pieces=["main() \n  s = \"привет!, мир\";"]
+// expect: курсор: main() ‸
+// скобка на месте — снова функция с блоком
+key 1 {
+// expect: kind="n_fn" pieces=["main() " #
+// expect-not: n_hole
+// expect: курсор: main() {‸
+// правка со второго клиента — первому приходит изменение
+[2] key 1 x
+// expect: курсор:   prx‸int(s);
+// expect: другому клиенту:
+// expect: prxint(s);
+// края: Backspace в начале и Delete в конце — ничего; Ctrl+буква — не ввод
+pointer 1 @main 0 0
+key 1 Backspace
+// expect: курсор: ‸main() {
+key 1 a 2
+// expect: клавиша не обработана: a

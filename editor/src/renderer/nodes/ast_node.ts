@@ -14,6 +14,14 @@ export abstract class ASTNode extends HTMLElement {
   // Normal field: `accessor` (the smisl rule) does not execute Node 24 or Chromium
   // without being downgraded, and nodeId does not override inherited properties
   nodeId: NodeId = -1;
+  // note VM (cause of the hole) - hint and emphasis, not text
+  get note(): string {
+    return this.title;
+  }
+  set note(text: string) {
+    this.title = text;
+    this.toggleAttribute('noted', text !== '');
+  }
   readonly #texts = new Map<number, Text>();
 
   connectedCallback(): void {

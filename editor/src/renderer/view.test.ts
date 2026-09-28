@@ -22,11 +22,23 @@ const view: View = {
   root: 10,
   revision: 1,
   nodes: [
-    { type: 's_node', id: 10, kind: 'n_fn', pieces: ['main() ', 11] },
-    { type: 's_node', id: 11, kind: 'n_block', pieces: ['{\n  ', 12, ';\n}'] },
-    { type: 's_node', id: 12, kind: 'n_op', pieces: [13, ' = ', 14] },
-    { type: 's_node', id: 13, kind: 'n_ident', pieces: ['s'] },
-    { type: 's_node', id: 14, kind: 'n_str', pieces: ['"привет 🙂"'] },
+    { type: 's_node', id: 10, kind: 'n_fn', pieces: ['main() ', 11], note: '' },
+    {
+      type: 's_node',
+      id: 11,
+      kind: 'n_block',
+      pieces: ['{\n  ', 12, ';\n}'],
+      note: '',
+    },
+    { type: 's_node', id: 12, kind: 'n_op', pieces: [13, ' = ', 14], note: '' },
+    { type: 's_node', id: 13, kind: 'n_ident', pieces: ['s'], note: '' },
+    {
+      type: 's_node',
+      id: 14,
+      kind: 'n_str',
+      pieces: ['"привет 🙂"'],
+      note: '',
+    },
   ],
 };
 
@@ -46,6 +58,40 @@ describe('представление', () => {
     expect(v.byId.get(11)?.shadowRoot?.textContent).toBe('{\n  ;\n}');
     const t = v.byId.get(12)?.textOf(1);
     expect(t && pieceOfText.get(t)).toEqual({ node: 12, piece: 1 });
+  });
+
+  it('update пересобирает поддерево на месте, остальное не трогает', () => {
+    const host = document.createElement('div');
+    const v = new ViewElement(host, view);
+    const fn = v.byId.get(10);
+    v.update({
+      type: 's_update',
+      view: 1,
+      revision: 2,
+      node: 11,
+      nodes: [
+        {
+          type: 's_node',
+          id: 11,
+          kind: 'n_block',
+          pieces: ['{\n  ', 20, '\n}'],
+          note: '',
+        },
+        {
+          type: 's_node',
+          id: 20,
+          kind: 'n_hole',
+          pieces: ['s ='],
+          note: 'ожидалось выражение',
+        },
+      ],
+    });
+    expect(v.byId.get(10)).toBe(fn);
+    expect(v.root && composed(v.root)).toBe('main() {\n  s =\n}');
+    const hole = v.byId.get(20);
+    expect(hole?.title).toBe('ожидалось выражение');
+    expect(hole?.hasAttribute('noted')).toBe(true);
+    expect(v.byId.get(11)?.slot).toBe('c11');
   });
 
   it('смещения: кодовые точки ↔ UTF-16', () => {

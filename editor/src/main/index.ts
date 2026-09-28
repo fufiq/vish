@@ -25,8 +25,13 @@ let vm: ChildProcess | undefined;
 let socket: Socket | undefined;
 let win: BrowserWindow | undefined;
 
+// Out the window - only while it is alive: the VM socket closes after the window.
+function toWindow(channel: string, ...args: unknown[]): void {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
+}
+
 function status(text: string): void {
-  win?.webContents.send('vm:status', text);
+  toWindow('vm:status', text);
 }
 
 function tryConnect(): Promise<Socket> {
@@ -84,12 +89,12 @@ async function start(): Promise<void> {
   }
   status(`VM: ${socketPath}`);
   socket.on('data', (d: Buffer) => {
-    win?.webContents.send('vm:data', new Uint8Array(d));
+    toWindow('vm:data', new Uint8Array(d));
   });
   socket.on('close', () => {
     status('VM отключилась');
   });
-  win.webContents.send('vm:ready');
+  toWindow('vm:ready');
 }
 
 ipcMain.on('vm:send', (_e, bytes: Uint8Array) => {

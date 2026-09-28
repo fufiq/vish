@@ -8,6 +8,7 @@
 #pragma once
 
 #include "proto.hpp"
+#include "parser.hpp"
 #include "session.hpp"
 
 namespace tz {
@@ -27,8 +28,47 @@ struct editor_view {
   std::vector<node_layout> layouts;
   std::vector<caret> places; // cursor
   std::string lead; // the first byte of the symbol in each place ('\n' at the end)
+  std::string text; // projection
+  std::vector<uint32_t> byte_at; // byte
+  std::vector<std::pair<uint32_t, uint32_t>> range; // places node [beginning, end] - by layout number
+  std::vector<uint32_t> at; // node_id layout number (~0 is not in projection)
   uint32_t cursor = 0;
+
+  uint32_t layout_of(node_id n) const { return n.value < at.size() ? at[n.value] : ~uint32_t{0}; }
+  std::string_view text_of(std::pair<uint32_t, uint32_t> r) const {
+    return std::string_view(text).substr(byte_at[r.first], byte_at[r.second] - byte_at[r.first]);
+  }
 };
+
+// The length of the UTF-8 code point per byte k.
+std::size_t cp_len(std::string_view s, std::size_t k) {
+  std::size_t n = 1;
+  while(k + n < s.size() && (static_cast<unsigned char>(s[k + n]) & 0xC0) == 0x80) ++n;
+  return n;
+}
+
+// The place of `at` (in code points) of the `from` text is in the `to` text, which is
+// distinguished by spaces between lexemes (canonical projection after parsing): matching
+// characters go together, unnecessary spaces on either side are missed.
+uint32_t align(std::string_view from, uint32_t at, std::string_view to) {
+  auto space = [](char c) { return c == ' ' || c == '\n' || c == '\t'; };
+  std::size_t i = 0, j = 0;
+  uint32_t ci = 0, cj = 0;
+  while(ci < at && i < from.size()) {
+    std::size_t ni = cp_len(from, i), nj = j < to.size() ? cp_len(to, j) : 0;
+    if(nj && from.substr(i, ni) == to.substr(j, nj)) {
+      i += ni, j += nj, ++ci, ++cj;
+    } else if(space(from[i])) {
+      i += ni, ++ci;
+    } else if(nj && space(to[j])) {
+      j += nj, ++cj;
+    } else { // Divergence (literal written differently) - go together
+      i += ni, ++ci;
+      if(nj) j += nj, ++cj;
+    }
+  }
+  return cj;
+}
 
 uint32_t code_points(std::string_view s) {
   uint32_t n = 0;
@@ -181,7 +221,7 @@ struct editor_server {
     v.root = session.root;
     layout(v);
     proto::s_view out{v.id, v.root, session.db.revision, {}};
-    for(auto const & l: v.layouts) out.nodes.push_back({l.node, std::string(kind_name(session.db[l.node])), l.pieces});
+    for(auto const & l: v.layouts) out.nodes.push_back(wire_node(l));
     send(p, out);
     send_cursor(p, v);
   }
@@ -200,8 +240,127 @@ struct editor_server {
       if(v->cursor > 0) --v->cursor;
     } else if(m.key == "Home" || m.key == "End") {
       v->cursor = line_edge(*v, m.key == "End");
+    } else if(m.key == "Backspace") {
+      if(v->cursor > 0) return edit(*v, v->cursor - 1, v->cursor, "");
+    } else if(m.key == "Delete") {
+      if(v->cursor + 1 < v->places.size()) return edit(*v, v->cursor, v->cursor + 1, "");
+    } else if(m.key == "Enter") {
+      return edit(*v, v->cursor, v->cursor, "\n");
+    } else if(code_points(m.key) == 1 && !(m.mods & (mod_ctrl | mod_alt | mod_meta))) {
+      return edit(*v, v->cursor, v->cursor, m.key);
     } else return send(p, proto::s_error{cat("клавиша не обработана: ", m.key)});
     send_cursor(p, *v);
+  }
+
+  static constexpr uint32_t mod_ctrl = 2, mod_alt = 4, mod_meta = 8;
+
+  // --- Introduction: editing the text projection → over parsing brackets ---
+  //
+  // Edit places [a, b) on `ins`. The unit above parsing is the smallest brackets around
+  // the edit: block, then module element, then module.
+// 
+//  
+// If the brackets of the unit itself are broken, external ones are taken. Anyone.
+  // The text is disassembled: unwritten - holes
+// ibid. The unit node retains
+  // projection is immediately canonical (author's decision, 2026-09-29).
+  struct unit {
+    node_id node;
+    int kind; // 0 - block, 1 - module element, 2 - module
+    std::pair<uint32_t, uint32_t> range;
+  };
+
+  std::vector<unit> units_around(editor_view const & v, uint32_t a, uint32_t b) const {
+    std::vector<unit> out;
+    for(uint32_t k = 0; k < v.layouts.size(); ++k) {
+      node_id n = v.layouts[k].node;
+      auto r = v.range[k];
+      if(session.db.is<n_block>(n) && r.second - r.first >= 2 && a >= r.first + 1 && b <= r.second - 1) out.push_back({n, 0, r});
+    }
+    std::ranges::sort(out, {}, [](unit const & u) { return u.range.second - u.range.first; });
+    for(node_id item: session.db.as<n_module>(session.root).items) {
+      uint32_t k = v.layout_of(item);
+      if(k != ~uint32_t{0} && a >= v.range[k].first && b <= v.range[k].second) out.push_back({item, 1, v.range[k]});
+    }
+    out.push_back({session.root, 2, v.range[0]});
+    return out;
+  }
+
+  void edit(editor_view & v, uint32_t a, uint32_t b, std::string const & ins) {
+    ++edits;
+    for(auto const & u: units_around(v, a, b)) {
+      std::string_view old = v.text_of(u.range);
+      uint32_t base = v.byte_at[u.range.first];
+      std::string edited = cat(old.substr(0, v.byte_at[a] - base), ins, old.substr(v.byte_at[b] - base));
+      parser pr(session.db, edited, cat("<ввод #", edits, ">"));
+      node_id fresh = u.kind == 2 ? pr.parse_module() : pr.parse_unit(u.kind == 0);
+      if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
+      apply(v, u.node, fresh, edited, {a - u.range.first, b - u.range.first, code_points(ins)});
+      return;
+    }
+  }
+
+  // Replace the contents of the node unit and send the new projection to all
+  // representations of all clients; each cursor is carried over through unit
+  // alignment (before and after parsing). Editing within the unit (in places from
+  // its beginning): [from, to] replaced by inserted code points.
+  //
+  struct change {
+    uint32_t from, to, inserted;
+    // place before editing → place in the text after editing (up to parsing)
+    uint32_t map(uint32_t c) const { return c >= to ? c - (to - from) + inserted : c > from ? from : c; }
+  };
+
+  void apply(editor_view & av, node_id target, node_id fresh, std::string const & edited, change ch) {
+    struct before {
+      editor_view * v;
+      peer * p;
+      std::pair<uint32_t, uint32_t> r;
+    };
+    std::vector<before> views;
+    for(auto & p: peers)
+      for(auto & v: p.views)
+        if(v.root && v.root == session.root) {
+          uint32_t k = v.layout_of(target);
+          if(k == ~uint32_t{0}) continue;
+          views.push_back({&v, &p, v.range[k]});
+        }
+    session.db.replace(target, session.db[fresh].kind);
+    session.db.link_parents(session.root);
+    for(auto & b: views) {
+      editor_view & v = *b.v;
+      uint32_t c = v.cursor;
+      layout(v);
+      auto r = v.range[v.layout_of(target)];
+      std::string_view now = v.text_of(r);
+      // cursor of the author - immediately after entering; someone else - is moved by
+      // editing; then alignment with the canonical projection (she puts gaps)
+      if(&v == &av) c = r.first + align(edited, ch.from + ch.inserted, now);
+      else if(c >= b.r.second) c = c - b.r.second + r.second;
+      else if(c >= b.r.first) c = r.first + align(edited, ch.map(c - b.r.first), now);
+      v.cursor = std::min<uint32_t>(c, uint32_t(v.places.size() - 1));
+      send(*b.p, proto::s_update{v.id, session.db.revision, target, subtree(v, target)});
+      send_cursor(*b.p, v);
+    }
+  }
+
+  std::vector<proto::s_node> subtree(editor_view const & v, node_id n) const {
+    std::vector<proto::s_node> out;
+    auto rec = [&](auto && self, node_id x) -> void {
+      uint32_t k = v.layout_of(x);
+      if(k == ~uint32_t{0}) return;
+      out.push_back(wire_node(v.layouts[k]));
+      for(auto const & pc: v.layouts[k].pieces)
+        if(auto const * c = std::get_if<node_id>(&pc)) self(self, *c);
+    };
+    rec(rec, n);
+    return out;
+  }
+
+  proto::s_node wire_node(node_layout const & l) const {
+    std::string note;
+    if(session.db.is<n_hole>(l.node)) note = session.db.as<n_hole>(l.node).reason;
+    return {l.node, std::string(kind_name(session.db[l.node])), l.pieces, note};
   }
 
   void handle(peer & p, proto::c_pointer const & m) {
@@ -233,33 +392,43 @@ struct editor_server {
   // --- layout ---
 
   void layout(editor_view & v) {
+    v.layouts.clear();
     printer pr(session.db);
     pr.layouts = &v.layouts;
     pr.print(v.root);
-    std::vector<uint32_t> at(session.db.size(), ~uint32_t{0});
-    for(uint32_t k = 0; k < v.layouts.size(); ++k) at[v.layouts[k].node.value] = k;
+    v.at.assign(session.db.size(), ~uint32_t{0});
+    for(uint32_t k = 0; k < v.layouts.size(); ++k) v.at[v.layouts[k].node.value] = k;
     v.places.clear();
     v.lead.clear();
+    v.text.clear();
+    v.byte_at.clear();
+    v.range.assign(v.layouts.size(), {});
     caret last{};
-    walk(v, at, 0, last);
+    walk(v, 0, last);
     v.places.push_back(last); // texture
     v.lead += '\n';
+    v.byte_at.push_back(uint32_t(v.text.size()));
     v.cursor = 0;
   }
 
   // Places - before each code point; at the junction of pieces there is one place
   // (before the next symbol), the end of the piece is not considered a separate place.
-  void walk(editor_view & v, std::vector<uint32_t> const & at, uint32_t k, caret & last) {
+  void walk(editor_view & v, uint32_t k, caret & last) {
     node_layout const & l = v.layouts[k];
+    v.range[k].first = uint32_t(v.places.size());
     for(uint32_t i = 0; i < l.pieces.size(); ++i) {
       if(auto const * t = std::get_if<std::string>(&l.pieces[i])) {
-        uint32_t n = code_points(*t);
-        for(uint32_t o = 0; o < n; ++o) v.places.push_back({l.node, i, o});
-        for(char ch: *t)
-          if((static_cast<unsigned char>(ch) & 0xC0) != 0x80) v.lead += ch;
+        uint32_t n = code_points(*t), o = 0;
+        for(std::size_t j = 0; j < t->size(); j += cp_len(*t, j)) {
+          v.places.push_back({l.node, i, o++});
+          v.lead += (*t)[j];
+          v.byte_at.push_back(uint32_t(v.text.size() + j));
+        }
+        v.text += *t;
         if(n) last = {l.node, i, n};
-      } else walk(v, at, at[std::get<node_id>(l.pieces[i]).value], last);
+      } else walk(v, v.at[std::get<node_id>(l.pieces[i]).value], last);
     }
+    v.range[k].second = uint32_t(v.places.size());
   }
 
   uint32_t line_edge(editor_view const & v, bool end) const {
@@ -273,6 +442,7 @@ struct editor_server {
   }
 
   vm_session & session;
+  uint32_t edits = 0;
   os::uring ring;
   int listen_fd = -1;
   std::deque<peer> peers; // Deque: Customer links are stable

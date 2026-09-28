@@ -10,8 +10,14 @@ describe('кодек по схеме', () => {
       root: 7,
       revision: 42,
       nodes: [
-        { type: 's_node', id: 7, kind: 'n_fn', pieces: ['f(', 8, ') привет'] },
-        { type: 's_node', id: 8, kind: 'n_param', pieces: ['x'] },
+        {
+          type: 's_node',
+          id: 7,
+          kind: 'n_fn',
+          pieces: ['f(', 8, ') привет'],
+          note: '',
+        },
+        { type: 's_node', id: 8, kind: 'n_param', pieces: ['x'], note: '' },
       ],
     };
     const bytes = frame(schema, schema.server, msg);

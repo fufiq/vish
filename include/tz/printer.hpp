@@ -552,7 +552,9 @@ struct printer {
     out += '}';
   }
 
-  void print_node(node_id, n_hole const & h) { out += cat("/* дыра: ", h.reason, " */ ", h.text); }
+  // For the editor (layout), the hole is only your text: the reason is the node note,
+  // the scenery, not the editable text.
+  void print_node(node_id, n_hole const & h) { out += layouts ? h.text : cat("/* дыра: ", h.reason, " */ ", h.text); }
 
   ast_db const & db;
   filter keep;

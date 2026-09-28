@@ -1,4 +1,10 @@
-import type { Cursor, NodeId, View } from '../protocol/messages';
+import type {
+  Cursor,
+  NodeId,
+  Update,
+  View,
+  ViewNode,
+} from '../protocol/messages';
 import { ASTNode, pieceOfText, type PieceText } from './nodes/ast_node';
 import { BlockNode } from './nodes/block_node';
 import { tagOf } from './nodes/index';
@@ -11,25 +17,45 @@ export class ViewElement {
   readonly caret = document.createElement('div');
   root: ASTNode | undefined;
 
+  readonly nodes = new Map<NodeId, ViewNode>();
+
   constructor(
     readonly host: HTMLElement,
     readonly data: View,
   ) {
-    const nodes = new Map(data.nodes.map((n) => [n.id, n]));
-    const build = (id: NodeId): ASTNode => {
-      const n = nodes.get(id);
-      if (!n) throw new Error(`узел #${String(id)} не прислан`);
-      const el = document.createElement(tagOf(n.kind));
-      if (!(el instanceof ASTNode))
-        throw new Error(`вид ${n.kind} не зарегистрирован`);
-      el.nodeId = id;
-      this.byId.set(id, el);
-      el.show(n.pieces, build);
-      return el;
-    };
-    this.root = build(data.root);
+    for (const n of data.nodes) this.nodes.set(n.id, n);
+    this.root = this.#build(data.root);
     this.caret.className = 'tz-caret';
     host.replaceChildren(this.root, this.caret);
+  }
+
+  #build(id: NodeId): ASTNode {
+    const n = this.nodes.get(id);
+    if (!n) throw new Error(`узел #${String(id)} не прислан`);
+    const el = document.createElement(tagOf(n.kind));
+    if (!(el instanceof ASTNode)) {
+      throw new Error(`вид ${n.kind} не зарегистрирован`);
+    }
+    el.nodeId = id;
+    el.note = n.note;
+    this.byId.set(id, el);
+    el.show(n.pieces, (c) => this.#build(c));
+    return el;
+  }
+
+  // Edit from VM: the node subtree is reassembled and replaced by the old (the same
+  // slot parent); the rest of the DOM is left unmoved.
+  update(u: Update): void {
+    for (const n of u.nodes) this.nodes.set(n.id, n);
+    const old = this.byId.get(u.node);
+    const fresh = this.#build(u.node);
+    if (!old || old === this.root) {
+      this.root = fresh;
+      this.host.replaceChildren(fresh, this.caret);
+      return;
+    }
+    fresh.slot = old.slot;
+    old.replaceWith(fresh);
   }
 
   // Cursor VM: (node, piece, offset at code points) → symbol rectangle.
