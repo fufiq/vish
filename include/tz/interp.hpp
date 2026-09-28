@@ -120,6 +120,7 @@ struct report_event {
     live,
     proven,
     unproven,
+    rt_check,
     throws } kind;
   std::string a, b, c; // meaning depends on the species
   span where;
@@ -372,7 +373,69 @@ struct interpreter {
       if(mine(w) && !unproven.contains(node)) proofs += cat("  ", loc(w), " ", what, "\n");
     if(!proofs.empty()) out += "индексы, доказанные в границах (проверка снята):\n" + proofs;
     out += "экземпляры (рантайм-часть):\n" + instances();
+    // Staticity level (§12.3): what is left to check in runtime and what exceptions are possible
+    std::string lv;
+    for(auto const & [key, count]: instance_counts) {
+      if(prelude_instance(key)) continue;
+      auto ck = rt_checks.find(key);
+      auto th = throws_of.find(key);
+      std::size_t nc = ck == rt_checks.end() ? 0 : ck->second.size();
+      std::size_t nt = th == throws_of.end() ? 0 : th->second.size();
+      lv += cat("  ", key, ": ", nc == 0 && nt == 0 ? "всё доказано статически" : cat("рт-проверок ", nc, ", исключений ", nt), "\n");
+      if(ck != rt_checks.end())
+        for(auto const & [id, c]: ck->second)
+          if(mine(c.first)) lv += cat("    ", loc(c.first), " ", c.second, "\n");
+    }
+    if(!lv.empty()) out += "статичность экземпляров:\n" + lv;
     return out;
+  }
+
+  bool prelude_instance(std::string const & key) const {
+    if(!db.prelude) return false;
+    auto name = key.substr(0, key.find('('));
+    for(node_id item: db.as<n_module>(db.prelude).items)
+      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name) return true;
+    return false;
+  }
+
+  // static_level(f) is the static level of a function as a value (§12.3): parsing of the
+  // entire program, for all instance f is the number of run-time checks and possible
+  // exceptions.
+  value static_level(symbol f, span where) {
+    agg_v g{types.named("static_level"), {}};
+    if(level_probe) { // inside parsing for static_level - value unknown (external requirements checked)
+      g.fields = {{sym("checks"), erase(value(int64_t(0)))}, {sym("throws"), erase(value(int64_t(0)))}, {sym("detail"), erase(value(std::string()))}};
+      return value(std::move(g));
+    }
+    if(level_runs.empty()) {
+      level_runs.emplace_back(db, mod, std::vector<std::string>{"level"}, mode::check);
+      interpreter & a = level_runs.back();
+      a.level_probe = true;
+      a.fuel = 2000000;
+      try {
+        a.run_main();
+      } catch(diagnostic const & d) {
+        fail(cat("static_level: разбор программы не прошёл: ", d.what()), where);
+      }
+    }
+    interpreter & a = level_runs.back();
+    auto prefix = cat(str(f), "(");
+    std::set<std::string> checks, throws;
+    std::string detail;
+    for(auto const & [key, n]: a.instance_counts) {
+      if(!key.starts_with(prefix)) continue;
+      if(auto it = a.rt_checks.find(key); it != a.rt_checks.end())
+        for(auto const & [id, c]: it->second)
+          if(checks.insert(id).second) {
+            auto lc = locate(db.source(c.first.source), c.first.begin);
+            detail += cat(detail.empty() ? "" : "; ", c.second, " в строке ", lc.line);
+          }
+      if(auto it = a.throws_of.find(key); it != a.throws_of.end()) throws.insert(it->second.begin(), it->second.end());
+    }
+    if(!throws.empty()) detail += cat(detail.empty() ? "" : "; ", "исключения: ", join(std::vector<std::string>(throws.begin(), throws.end())));
+    level_details.push_back(cat(str(f), ": ", detail.empty() ? "всё доказано" : detail));
+    g.fields = {{sym("checks"), value(int64_t(checks.size()))}, {sym("throws"), value(int64_t(throws.size()))}, {sym("detail"), value(detail)}};
+    return value(std::move(g));
   }
 
   // Indexing proved by parsing within the array boundaries (“top-up optimization”: the
@@ -566,6 +629,7 @@ struct interpreter {
         if(proven.insert(ev.fn).second) proven_list.push_back({ev.where, ev.a, ev.fn});
         break;
       case report_event::unproven: unproven.insert(ev.fn); break;
+      case report_event::rt_check: rt_checks[ev.a][cat(ev.where.source, ":", ev.where.begin, ":", ev.b)] = {ev.where, ev.b}; break;
       case report_event::throws: throws_of[ev.a].insert(ev.b); break;
     }
   }
@@ -885,8 +949,12 @@ struct interpreter {
   flow eval_node(node_id n, n_require const & r, scope * env, uint32_t frame) {
     TZ_TRY(c, eval(r.cond, env, frame));
     auto b = known_bool(c, db[r.cond].where);
-    if(b && !*b) fail_rt("require_failed", "нарушено требование require", db[n].where);
-    if(checking() && !b) record_throw(vm_error_shape("require_failed"));
+    if(b && !*b) {
+      std::string why; // static_level - with a list of unproven
+      for(auto const & d: level_details) why += cat("; ", d);
+      fail_rt("require_failed", cat("нарушено требование require", why), db[n].where);
+    }
+    if(checking() && !b) rt_check("require_failed", db[n].where);
     return ok(); // run-time - Condition: runtime (§5.4)
   }
 
@@ -1159,6 +1227,14 @@ struct interpreter {
 
   void record_throw(value const & v) {
     if(!throw_sinks.empty()) throw_sinks.back()->push_back(v);
+  }
+
+  // Check remaining in the runtime (boundary, divider, require, overflow): possible
+  // exclusion and static level string of all instances in the chain§12.3:).
+  //
+  void rt_check(std::string_view type, span where) {
+    record_throw(vm_error_shape(type));
+    for(auto const & k: instance_keys) emit({report_event::rt_check, k, std::string(type), {}, where, {}});
   }
 
   // Exclusion Type for catch(T e): The name of the value tag (aggregate is its type).
@@ -1470,7 +1546,7 @@ struct interpreter {
       if(o.is<rt_v>() || !idx.known()) {
         if(checking()) {
           note_index(n, proven_here);
-          if(!proven_here) record_throw(vm_error_shape("out_of_bounds")); // run-time-index not proven
+          if(!proven_here) rt_check("out_of_bounds", where); // run-time-index not proven
         }
         value e = element_type(o, where);
         if(checking()) e.proof = index_result(i, o, idx, env);
@@ -1782,7 +1858,7 @@ struct interpreter {
       r.rt_index = true;
       bool proven_here = index_holds(i, idx, env);
       note_index(place_node, proven_here);
-      if(!proven_here) record_throw(vm_error_shape("out_of_bounds"));
+      if(!proven_here) rt_check("out_of_bounds", where);
     }
     r.gen = book.version(cell);
     return value(r);
@@ -2105,7 +2181,7 @@ struct interpreter {
     if(unknown(a) || unknown(b)) return value(rt_v{}); // type is still being removed (recursion)
     if(!a.known() || !b.known()) {
       // whole division into run-time - the divider can drop div_by_zero - "painting"
-      if(checking() && (op == "/" || op == "%") && !b.known() && types.describe(b) == "i64") record_throw(vm_error_shape("div_by_zero"));
+      if(checking() && (op == "/" || op == "%") && !b.known() && types.describe(b) == "i64") rt_check("div_by_zero", where);
       return erase(arith(op, *shape_or_fail(erase(a), where), *shape_or_fail(erase(b), where), where));
     }
     return arith(op, a, b, where);
@@ -2501,6 +2577,14 @@ struct interpreter {
     }
 
     stack.push_back(site);
+    if(checking()) instance_keys.push_back(key);
+    struct key_hold {
+      interpreter & vm;
+      bool on;
+      ~key_hold() {
+        if(on) vm.instance_keys.pop_back();
+      }
+    } kh{*this, checking()};
     uint64_t ctx_saved = std::exchange(ctx, inline_context(ctx, site.node)); // body in its context of embedding
     std::size_t journal_mark = journal.size();
     frame_floors.push_back({frame_counter, false});
@@ -2822,7 +2906,7 @@ struct interpreter {
         if(bad) fail_rt("overflow", cat("переполнение i64: ", x, " ", op, " ", y), where);
         return value(r);
       }
-      if(checking() && types.describe(a[0]) == "i64" && types.describe(a[1]) == "i64") record_throw(vm_error_shape("overflow")); // run-time - may throw
+      if(checking() && types.describe(a[0]) == "i64" && types.describe(a[1]) == "i64") rt_check("overflow", where); // run-time - may throw
       return binary(op, a[0], a[1], where);
     }
     if((n == "and" || n == "or") && a.size() == 2) {
@@ -2830,6 +2914,7 @@ struct interpreter {
       if(x && y) return value(n == "and" ? *x && *y : *x || *y);
       return erase(value(true));
     }
+    if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
       if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
       if(a[0].is<int64_t>() && a[1].is<array_v>()) {
@@ -2993,6 +3078,11 @@ struct interpreter {
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
   symbol sym_intercept, sym_is_index, sym_append; // kernel forms analyzed prior to the calculation of arguments
+  std::vector<std::string> instance_keys; // instance in the parsing chain
+  std::map<std::string, std::map<std::string, std::pair<span, std::string>>> rt_checks; // instance → run-time - checks
+  bool level_probe = false; // This is parsing for static_level.
+  std::vector<interpreter> level_runs;
+  std::vector<std::string> level_details;
   // Redefinition of context operations (§8.2):
 //.
   struct override_rec {
