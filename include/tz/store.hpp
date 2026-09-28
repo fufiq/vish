@@ -5,10 +5,9 @@
 #pragma once
 
 #include "ast.hpp"
+#include "os.hpp"
 #include "serial.hpp"
 
-#include <fstream>
-#include <sstream>
 
 namespace tz {
 
@@ -19,18 +18,12 @@ void save_db(ast_db const & db, node_id root, std::string const & path) {
   for(char c: tzdb_magic) w.put(c);
   w.put(root.value);
   for(auto const & e: db.journal()) w.put(e);
-  std::ofstream out(path, std::ios::binary);
-  if(!out) throw diagnostic(cat("не могу записать ", path), {});
-  out << w.bytes;
+  os::write_file(path, w.bytes);
 }
 
 std::vector<journal_entry> read_journal(std::string const & path, node_id & root) {
-  std::ifstream in(path, std::ios::binary);
-  if(!in) throw diagnostic(cat("не могу открыть ", path), {});
-  std::stringstream ss;
-  ss << in.rdbuf();
-  std::string bytes = ss.str();
-  reader r(bytes);
+  os::mapped_file file(path);
+  reader r(file.text());
   for(char c: tzdb_magic)
     if(r.get<char>() != c) throw diagnostic(cat(path, ": не файл базы tz"), {});
   root = node_id(r.get<uint32_t>());

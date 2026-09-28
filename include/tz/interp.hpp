@@ -19,16 +19,15 @@
 // (§6.2), overload with demand (§5.4), strict numbers (§5.8).
 #pragma once
 
+#include "os.hpp"
 #include "value.hpp"
 
 #include <deque>
 #include <functional>
-#include <iostream>
 #include <map>
 #include <optional>
 #include <unordered_map>
 #include <set>
-#include <sstream>
 
 namespace tz {
 
@@ -1648,10 +1647,14 @@ struct interpreter {
         have = true;
       }
       array_v r;
-      if(have || std::getline(std::cin, line)) {
-        std::stringstream ss(line);
-        double x;
-        while(ss >> x) r.push(value(x));
+      if(have || os::host_stdin().next(line)) { // stdin host - through the OS layer (M3: VM service)
+        for(auto w: words_of(line)) {
+          if(w.starts_with('+')) w.remove_prefix(1);
+          double x;
+          auto [end, ec] = std::from_chars(w.data(), w.data() + w.size(), x);
+          if(ec != std::errc{} || end != w.data() + w.size()) break; // as before: before the first non-number
+          r.push(value(x));
+        }
       }
       return value(std::move(r));
     }

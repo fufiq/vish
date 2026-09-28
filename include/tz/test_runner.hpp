@@ -18,6 +18,7 @@
 #pragma once
 
 #include "interp.hpp"
+#include "os.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
 #include "views.hpp"
@@ -26,8 +27,6 @@
 #include "jit/jit.hpp"
 
 #include <filesystem>
-#include <fstream>
-#include <sstream>
 
 namespace tz {
 
@@ -59,14 +58,12 @@ struct test_runner {
 
   static expect read_header(std::string const & src) {
     expect e;
-    std::istringstream in(src);
-    std::string line;
-    while(std::getline(in, line)) {
+    for(std::string_view line: lines_of(src)) {
       if(!line.starts_with("//")) {
         if(line.empty()) continue;
         break;
       }
-      auto body = std::string_view(line).substr(2);
+      auto body = line.substr(2);
       while(body.starts_with(' ')) body.remove_prefix(1);
       auto take = [&](std::string_view key, std::vector<std::string> & to) {
         if(!body.starts_with(key)) return false;
@@ -77,9 +74,7 @@ struct test_runner {
       };
       std::vector<std::string> args_line;
       if(take("args:", args_line)) {
-        std::istringstream as(args_line[0]);
-        std::string a;
-        while(as >> a) e.args.push_back(a);
+        for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
       } else if(take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled)) {
       } else if(body.starts_with("fmt-stable")) {
         e.fmt_stable = true;
@@ -96,9 +91,9 @@ struct test_runner {
   // // program: file.tz program (relative to script directory)
   // // expect: substring // expect-not: substring
   std::string run_session(std::filesystem::path const & path) {
-    std::ifstream in(path);
+    os::mapped_file text(path.string());
     std::vector<std::string> lines;
-    for(std::string l; std::getline(in, l);) lines.push_back(l);
+    for(auto l: lines_of(text.text())) lines.emplace_back(l);
     ast_db db;
     node_id root;
     std::optional<vm_session> session;
@@ -107,10 +102,8 @@ struct test_runner {
       auto const & l = lines[i];
       if(l.starts_with("// program:")) {
         auto file = path.parent_path() / std::string_view(l).substr(11 + (l.size() > 11 && l[11] == ' '));
-        std::ifstream f(file);
-        std::stringstream ss;
-        ss << f.rdbuf();
-        parser p(db, ss.str());
+        os::mapped_file f(file.string());
+        parser p(db, f.text());
         root = p.parse_module();
         session.emplace(db, root, file.filename().string());
         continue;
@@ -138,10 +131,8 @@ struct test_runner {
 
   std::string run_one(std::filesystem::path const & path) {
     if(path.extension() == ".session") return run_session(path);
-    std::ifstream in(path);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    std::string src = ss.str();
+    os::mapped_file file(path.string());
+    std::string src(file.text());
     expect e = read_header(src);
 
     ast_db db;
@@ -159,18 +150,15 @@ struct test_runner {
       if(once != twice) return "    проекция нестабильна: fmt∘fmt ≠ fmt\n";
     }
 
-    // Stdin/stdout redirected to lines
-    std::string stdin_text;
-    for(auto & l: e.stdin_lines) stdin_text += l + "\n";
-    std::istringstream fake_in(stdin_text);
-    auto * old_in = std::cin.rdbuf(fake_in.rdbuf());
+    // stdin - queue of interpreter lines (as in a session), output - in a row
+    auto input = [&] { return interpreter::known_inputs{e.stdin_lines}; };
 
     std::string out;
     std::string instances;
     if(errors.empty()) {
       std::vector<std::string> args{path.filename().string()};
       args.insert(args.end(), e.args.begin(), e.args.end());
-      interpreter vm(db, root, args);
+      interpreter vm(db, root, args, mode::run, input());
       vm.capture_output(&out);
       try {
         vm.run_main();
@@ -179,18 +167,15 @@ struct test_runner {
       }
       instances = vm.instances();
     }
-    std::cin.rdbuf(old_in);
 
     std::string why;
     for(auto & d: e.unknown) why += cat("    неизвестная директива теста: ", d, "\n");
     // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
     if(p.errors().empty()) {
-      std::istringstream fake3(stdin_text);
-      auto * old3 = std::cin.rdbuf(fake3.rdbuf());
       std::string out3, err3;
       std::vector<std::string> args{path.filename().string()};
       args.insert(args.end(), e.args.begin(), e.args.end());
-      interpreter vm3(db, root, args);
+      interpreter vm3(db, root, args, mode::run, input());
       jit_engine jit(db, root);
       vm3.use_jit(&jit);
       vm3.capture_output(&out3);
@@ -199,7 +184,6 @@ struct test_runner {
       } catch(diagnostic const & d) {
         err3 = render(d, path.filename().string(), db);
       }
-      std::cin.rdbuf(old3);
       auto first_loc = [](std::string const & t) { return t.substr(0, t.find(": ошибка")); };
       if(out3 != out) why += cat("    JIT: вывод отличается: ", in_quotes(out3), " против ", in_quotes(out), "\n", jit.stats());
       for(auto & fn: e.jit_compiled)
@@ -228,8 +212,7 @@ struct test_runner {
     }
     if(!e.residual.empty() && p.errors().empty()) {
       std::vector<std::string> args{path.filename().string()};
-      std::istringstream as(e.residual[0]);
-      for(std::string a; as >> a;) args.push_back(a);
+      for(auto a: words_of(e.residual[0])) args.emplace_back(a);
       interpreter vm(db, root, args, mode::check, interpreter::known_inputs{});
       try {
         vm.run_main();
@@ -242,9 +225,8 @@ struct test_runner {
         if(text.contains(bad)) why += cat("    лишнее в остаточной программе: ", in_quotes(bad), "\n", text);
     }
     if(!e.slice.empty() && p.errors().empty()) {
-      std::istringstream fs(e.slice[0]);
-      std::string fn, var;
-      fs >> fn >> var;
+      auto w = words_of(e.slice[0]);
+      std::string fn(w.size() > 0 ? w[0] : ""), var(w.size() > 1 ? w[1] : "");
       std::string text = slice_view(db).print(root, fn, var);
       for(auto & want: e.slice_has)
         if(!text.contains(want)) why += cat("    нет в срезе: ", in_quotes(want), "\n", text);
@@ -258,24 +240,19 @@ struct test_runner {
       node_id root2 = load_db(db2, tmp.string());
       std::filesystem::remove(tmp);
       if(printer(db).print(root) != printer(db2).print(root2)) why += "    проекция после загрузки базы отличается\n";
-      std::istringstream fake2(stdin_text);
-      auto * old2 = std::cin.rdbuf(fake2.rdbuf());
       std::string out2;
       std::vector<std::string> args{path.filename().string()};
       args.insert(args.end(), e.args.begin(), e.args.end());
-      interpreter vm2(db2, root2, args);
+      interpreter vm2(db2, root2, args, mode::run, input());
       vm2.capture_output(&out2);
       try {
         vm2.run_main();
       } catch(diagnostic const &) {
       }
-      std::cin.rdbuf(old2);
       if(out2 != out) why += cat("    вывод из базы отличается: ", in_quotes(out2), " против ", in_quotes(out), "\n");
     }
-    std::istringstream out_lines(out);
-    std::string line;
     uint32_t i = 0;
-    while(std::getline(out_lines, line)) {
+    for(std::string_view line: lines_of(out)) {
       if(i >= e.out.size()) {
         why += cat("    лишний вывод: ", line, "\n");
         continue;

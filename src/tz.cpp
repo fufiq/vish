@@ -3,6 +3,7 @@
 // The source of truth is AST (D7). Any command accepts either text (.tz - import text
 // projection to the database) or the base itself (.tzdb - journal).
 #include "tz/base.hpp"
+#include "tz/os.hpp"
 #include "tz/lexer.hpp"
 #include "tz/ast.hpp"
 #include "tz/parser.hpp"
@@ -15,23 +16,13 @@
 #include "tz/session.hpp"
 #include "tz/jit/jit.hpp"
 
-#include <iostream>
 
-#include <fstream>
-#include <sstream>
 
 namespace {
 
 using tz::cat;
 using tz::put;
 
-std::string read_file(std::string const & path) {
-  std::ifstream in(path, std::ios::binary);
-  if(!in) throw std::runtime_error(cat("не могу открыть ", path));
-  std::stringstream ss;
-  ss << in.rdbuf();
-  return ss.str();
-}
 
 int usage() {
   put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz test <каталог>          прогнать эталонные тесты\n"));
@@ -54,8 +45,8 @@ void load(program & p, std::string const & path) {
     p.root = tz::load_db(p.db, path);
     return;
   }
-  std::string text = read_file(path);
-  tz::parser parser(p.db, text);
+  tz::os::mapped_file file(path);
+  tz::parser parser(p.db, file.text());
   p.root = parser.parse_module();
   p.parse_errors = parser.errors();
 }
@@ -121,12 +112,13 @@ int main(int argc, char ** argv) {
 
     if(cmd == "vm") {
       tz::vm_session session(p.db, p.root, p.path);
-      for(std::string line; std::getline(std::cin, line);) {
+      auto & in = tz::os::host_stdin();
+      for(std::string line; in.next(line);) {
         if(line.empty() || line.starts_with("//")) continue;
         if(line == "quit") break;
         std::string body;
         if(line.starts_with("edit ")) // editing body - up to a line from one point
-          for(std::string l; std::getline(std::cin, l) && l != ".";) body += l + "\n";
+          for(std::string l; in.next(l) && l != ".";) body += l + "\n";
         put(stdout, cat("> ", line, "\n", session.exec(line, body)));
         std::fflush(stdout);
       }

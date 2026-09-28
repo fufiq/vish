@@ -16,12 +16,12 @@
 #pragma once
 
 #include "interp.hpp"
+#include "os.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
 #include "store.hpp"
 #include "views.hpp"
 
-#include <sstream>
 
 namespace tz {
 
@@ -30,11 +30,10 @@ struct vm_session {
 
   // Execute one command; to edit transfer the body to `body`.
   std::string exec(std::string const & line, std::string const & body = {}) {
-    std::istringstream in(line);
-    std::string cmd;
-    in >> cmd;
+    auto words = words_of(line);
+    std::string cmd = words.empty() ? std::string() : std::string(words[0]);
     std::vector<std::string> args;
-    for(std::string a; in >> a;) args.push_back(a);
+    for(std::size_t k = 1; k < words.size(); ++k) args.emplace_back(words[k]);
     try {
       if(cmd == "check") return check();
       if(cmd == "stdin") {
