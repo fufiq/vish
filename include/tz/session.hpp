@@ -24,7 +24,6 @@
 #include "store.hpp"
 #include "views.hpp"
 
-
 namespace tz {
 
 struct vm_session {

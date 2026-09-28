@@ -8,7 +8,6 @@
 #include "os.hpp"
 #include "serial.hpp"
 
-
 namespace tz {
 
 constexpr std::string_view tzdb_magic = "TZDB0001";

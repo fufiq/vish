@@ -10,48 +10,17 @@
 
 namespace tz::x64 {
 
-enum reg : uint8_t { rax,
-  rcx,
-  rdx,
-  rbx,
-  rsp,
-  rbp,
-  rsi,
-  rdi,
-  r8,
-  r9,
-  r10,
-  r11,
-  r12,
-  r13,
-  r14,
-  r15 };
-enum xmm : uint8_t { xmm0,
-  xmm1,
-  xmm2,
-  xmm3,
-  xmm4,
-  xmm5,
-  xmm6,
-  xmm7 };
+// clang-format off
+enum reg : uint8_t { rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15 };
+// clang-format on
+// clang-format off
+enum xmm : uint8_t { xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15 };
+// clang-format on
 
 // Transition conditions/setcc.
-enum cond : uint8_t { o = 0,
-  no,
-  b,
-  ae,
-  e,
-  ne,
-  be,
-  a,
-  s,
-  ns,
-  p,
-  np,
-  l,
-  ge,
-  le,
-  g };
+// clang-format off
+enum cond : uint8_t { o = 0, no, b, ae, e, ne, be, a, s, ns, p, np, l, ge, le, g };
+// clang-format on
 
 struct label {
   bool bound() const { return pos >= 0; }
