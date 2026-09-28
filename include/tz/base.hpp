@@ -7,9 +7,10 @@
 
 #include <cstdint>
 #include <cstring>
-#include <format>
+#include <charconv>
+#include <concepts>
+#include <cstdio>
 #include <meta>
-#include <print>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -19,6 +20,51 @@
 #include <vector>
 
 namespace tz {
+
+// --- lineage ---
+//
+// A string is assembled from parts: numbers are compiled through to_chars, the rest is as text.
+// 
+// Conclusion - fwrite/fprintf.
+
+void append(std::string& out, std::string_view s) { out.append(s); }
+void append(std::string& out, const char* s) { out.append(s); } // Otherwise, literature will go to bool.
+void append(std::string& out, char c) { out.push_back(c); }
+void append(std::string& out, bool b) { out.append(b ? "true" : "false"); }
+void append(std::string& out, std::integral auto x) {
+    char buf[24];
+    out.append(buf, std::to_chars(buf, buf + sizeof buf, x).ptr);
+}
+void append(std::string& out, double x) { // the shortest record that is read back
+    char buf[32];
+    out.append(buf, std::to_chars(buf, buf + sizeof buf, x).ptr);
+}
+
+std::string cat(const auto&... xs) {
+    std::string out;
+    (append(out, xs), ...);
+    return out;
+}
+
+// Line in quotation marks with screening (for test messages).
+std::string in_quotes(std::string_view s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') { out += '\\'; out += c; }
+        else if (c == '\n') out += "\\n";
+        else if (c == '\t') out += "\\t";
+        else out += c;
+    }
+    return out + '"';
+}
+
+// Add spaces to the right to the width n (in bytes).
+std::string pad(std::string s, std::size_t n) {
+    if (s.size() < n) s.append(n - s.size(), ' ');
+    return s;
+}
+
+void put(FILE* f, std::string_view s) { fwrite(s.data(), 1, s.size(), f); }
 
 // Typed index: id< node_tag> and id< symbol_tag> are not mixed.
 template <class tag>
@@ -127,10 +173,10 @@ line_col locate(std::string_view text, uint32_t offset) {
 
 std::string render(const diagnostic& d, std::string_view file, std::string_view text) {
     auto lc  = locate(text, d.where.begin);
-    auto out = std::format("{}:{}:{}: ошибка: {}\n", file, lc.line, lc.col, d.what());
+    auto out = cat(file, ":", lc.line, ":", lc.col, ": ошибка: ", d.what(), "\n");
     for (const auto& f : d.trace) {
         auto l = locate(text, f.where.begin);
-        out += std::format("  {}:{}:{}: {}\n", file, l.line, l.col, f.what);
+        out += cat("  ", file, ":", l.line, ":", l.col, ": ", f.what, "\n");
     }
     return out;
 }

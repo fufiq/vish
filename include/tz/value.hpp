@@ -362,9 +362,9 @@ struct type_registry {
             if (is_tuple(a)) {
                 std::string s;
                 for (uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + describe(a.get(i));
-                return std::format("tuple<{}>", s);
+                return cat("tuple<", s, ">");
             }
-            return std::format("array<{}>", a.empty() ? std::string("?") : describe(a.get(0)));
+            return cat("array<", a.empty() ? std::string("?") : describe(a.get(0)), ">");
         }
         return std::string(name(of(x)));
     }
@@ -383,7 +383,7 @@ std::string show(const value& x, const type_registry& types, const interner& str
         else if constexpr (std::is_same_v<T, bool>) return a ? "true" : "false";
         else if constexpr (std::is_same_v<T, int64_t>) return std::to_string(a);
         else if constexpr (std::is_same_v<T, double>) {
-            auto s = std::format("{}", a);
+            auto s = cat(a);
             if (!s.contains('.') && !s.contains('e') && !s.contains('n')) s += ".0";
             return s;
         } else if constexpr (std::is_same_v<T, std::string>) return a;
@@ -396,15 +396,15 @@ std::string show(const value& x, const type_registry& types, const interner& str
             }
             return s + "]";
         } else if constexpr (std::is_same_v<T, agg_v>) {
-            std::string s = std::format("{}{{", types.name(a.type));
+            std::string s = cat(types.name(a.type), "{");
             for (uint32_t i = 0; i < a.fields.size(); ++i) {
                 if (i) s += ", ";
-                s += std::format("{}: {}", strings.text(a.fields[i].first), show(a.fields[i].second, types, strings));
+                s += cat(strings.text(a.fields[i].first), ": ", show(a.fields[i].second, types, strings));
             }
             return s + "}";
         } else if constexpr (std::is_same_v<T, fn_v>) return "<fn>";
-        else if constexpr (std::is_same_v<T, rt_v>) return std::format("рт {}", types.describe(x));
-        else if constexpr (std::is_same_v<T, split_v>) return std::format("расщеплено {}", types.describe(x));
+        else if constexpr (std::is_same_v<T, rt_v>) return cat("рт ", types.describe(x));
+        else if constexpr (std::is_same_v<T, split_v>) return cat("расщеплено ", types.describe(x));
         else return "<expr>";
     }, x.v);
 }

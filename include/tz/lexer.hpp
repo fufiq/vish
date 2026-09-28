@@ -61,7 +61,7 @@ struct lexer {
                 ++pos;
                 t.kind = tok::op;
             } else {
-                throw diagnostic(std::format("неизвестный символ '{}'", c), {start, start + 1});
+                throw diagnostic(cat("неизвестный символ '", c, "'"), {start, start + 1});
             }
             t.where = {start, pos};
             t.text  = src.substr(start, pos - start);

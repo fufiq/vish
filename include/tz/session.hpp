@@ -48,12 +48,12 @@ struct vm_session {
             if (cmd == "edit" && args.size() == 1) return edit(args[0], body);
             if (cmd == "save" && args.size() == 1) {
                 save_db(db, root, args[0]);
-                return std::format("сохранено: {}\n", args[0]);
+                return cat("сохранено: ", args[0], "\n");
             }
         } catch (const diagnostic& d) {
             return render(d, name, db);
         }
-        return std::format("неизвестная команда: {}\n", line);
+        return cat("неизвестная команда: ", line, "\n");
     }
     std::string check() {
         cache.hits = cache.recomputed = 0;
@@ -68,8 +68,7 @@ struct vm_session {
         last_report = vm.report(name, db.source(0));
         std::string names;
         for (auto& n : cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
-        return err + std::format("check: пересчитано {} экземпл. ({}), из кэша {}\n", cache.recomputed,
-                                 names.empty() ? "—" : names, cache.hits);
+        return err + cat("check: пересчитано ", cache.recomputed, " экземпл. (", names.empty() ? "—" : names, "), из кэша ", cache.hits, "\n");
     }
 
     std::string run(const std::vector<std::string>& args) {
@@ -102,31 +101,31 @@ struct vm_session {
     // Function correction: the text is disassembled into the base (new import), the node of the old
     // function is replaced with new content - id and all references to the function are saved.
     std::string edit(const std::string& fn_name, const std::string& text) {
-        parser  p(db, text, std::format("<правка {} #{}>", fn_name, ++edits));
+        parser  p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
         node_id snippet = p.parse_module();
         auto    errs    = p.errors();
         if (!errs.empty()) {
             std::string out;
-            for (auto& e : errs) out += render(e, std::format("правка {}", fn_name), db);
+            for (auto& e : errs) out += render(e, cat("правка ", fn_name), db);
             return out + "правка отклонена\n";
         }
         node_id fresh;
         for (node_id item : db.as<n_module>(snippet).items)
             if (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) fresh = item;
-        if (!fresh) return std::format("в тексте правки нет функции {}\n", fn_name);
+        if (!fresh) return cat("в тексте правки нет функции ", fn_name, "\n");
 
         for (node_id item : db.as<n_module>(root).items)
             if (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) {
                 db.replace(item, db[fresh].kind);
                 db.link_parents(root);
-                return std::format("функция {} заменена (узел #{}, ревизия {})\n", fn_name, item.value, db.revision);
+                return cat("функция ", fn_name, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
             }
         // No new function was added to the module (changes the set of overloads)
         auto m = db.as<n_module>(root);
         m.items.push_back(fresh);
         db.replace(root, m);
         db.link_parents(root);
-        return std::format("функция {} добавлена\n", fn_name);
+        return cat("функция ", fn_name, " добавлена\n");
     }
 
     ast_db&     db;

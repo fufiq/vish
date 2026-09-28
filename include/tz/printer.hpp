@@ -54,7 +54,7 @@ struct printer {
     // --- instruction ---
 
     void print_node(node_id, const n_module& m) {
-        if (m.name) out += std::format("module {};\n", str(m.name));
+        if (m.name) out += cat("module ", str(m.name), ";\n");
         bool first = !m.name;
         for (node_id i : m.items) {
             if (!kept(i)) continue;
@@ -100,7 +100,7 @@ struct printer {
     void print_node(node_id, const n_var& v) {
         if (v.is_const) out += "const ";
         item(v.type);
-        out += std::format(" {} = ", str(v.name));
+        out += cat(" ", str(v.name), " = ");
         item(v.init);
         out += ';';
     }
@@ -162,7 +162,7 @@ struct printer {
     }
 
     void print_node(node_id, const n_for& f) {
-        out += std::format("for(auto {} : ", str(f.var));
+        out += cat("for(auto ", str(f.var), " : ");
         item(f.range);
         out += ") ";
         item(f.body);
@@ -196,7 +196,7 @@ struct printer {
     void print_node(node_id, const n_int& i) { out += std::to_string(i.value); }
 
     void print_node(node_id, const n_float& f) {
-        auto s = std::format("{}", f.value);
+        auto s = cat(f.value);
         if (!s.contains('.') && !s.contains('e')) s += ".0";
         out += s;
     }
@@ -220,7 +220,7 @@ struct printer {
             return;
         }
         operand(n, o.args[0]);
-        out += std::format(" {} ", op);
+        out += cat(" ", op, " ");
         operand(n, o.args[1]);
     }
 
@@ -293,7 +293,7 @@ struct printer {
         out += '}';
     }
 
-    void print_node(node_id, const n_hole& h) { out += std::format("/* дыра: {} */ {}", h.reason, h.text); }
+    void print_node(node_id, const n_hole& h) { out += cat("/* дыра: ", h.reason, " */ ", h.text); }
 
     const ast_db& db;
     filter        keep;

@@ -208,10 +208,10 @@ std::string render(const diagnostic& d, std::string_view file, const ast_db& db)
         return l.empty() ? file : std::string_view(l);
     };
     auto lc  = locate(db.source(d.where.source), d.where.begin);
-    auto out = std::format("{}:{}:{}: ошибка: {}\n", name(d.where), lc.line, lc.col, d.what());
+    auto out = cat(name(d.where), ":", lc.line, ":", lc.col, ": ошибка: ", d.what(), "\n");
     for (const auto& f : d.trace) {
         auto l = locate(db.source(f.where.source), f.where.begin);
-        out += std::format("  {}:{}:{}: {}\n", name(f.where), l.line, l.col, f.what);
+        out += cat("  ", name(f.where), ":", l.line, ":", l.col, ": ", f.what, "\n");
     }
     return out;
 }

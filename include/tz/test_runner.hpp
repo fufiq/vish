@@ -42,12 +42,12 @@ struct test_runner {
             std::string why = run_one(f);
             if (why.empty()) {
                 ++passed;
-                std::println("  ok   {}", f.filename().string());
+                put(stdout, cat("  ok   ", f.filename().string(), "\n"));
             } else {
-                std::println("  FAIL {}\n{}", f.filename().string(), why);
+                put(stdout, cat("  FAIL ", f.filename().string(), "\n", why, "\n"));
             }
         }
-        std::println("{}/{} тестов прошло", passed, files.size());
+        put(stdout, cat(passed, "/", files.size(), " тестов прошло\n"));
         return passed == files.size() ? 0 : 1;
     }
     struct expect {
@@ -123,13 +123,13 @@ struct test_runner {
             if (l.starts_with("// expect:")) {
                 auto want = std::string_view(l).substr(10);
                 while (want.starts_with(' ')) want.remove_prefix(1);
-                if (!last.contains(want)) why += std::format("    строка {}: нет {:?} в выводе:\n{}", i + 1, want, last);
+                if (!last.contains(want)) why += cat("    строка ", i + 1, ": нет ", in_quotes(want), " в выводе:\n", last);
                 continue;
             }
             if (l.starts_with("// expect-not:")) {
                 auto bad = std::string_view(l).substr(14);
                 while (bad.starts_with(' ')) bad.remove_prefix(1);
-                if (last.contains(bad)) why += std::format("    строка {}: лишнее {:?} в выводе:\n{}", i + 1, bad, last);
+                if (last.contains(bad)) why += cat("    строка ", i + 1, ": лишнее ", in_quotes(bad), " в выводе:\n", last);
                 continue;
             }
             if (l.empty() || l.starts_with("//") || !session) continue;
@@ -187,7 +187,7 @@ struct test_runner {
         std::cin.rdbuf(old_in);
 
         std::string why;
-        for (auto& d : e.unknown) why += std::format("    неизвестная директива теста: {}\n", d);
+        for (auto& d : e.unknown) why += cat("    неизвестная директива теста: ", d, "\n");
         // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
         if (p.errors().empty()) {
             std::istringstream fake3(stdin_text);
@@ -206,11 +206,11 @@ struct test_runner {
             }
             std::cin.rdbuf(old3);
             auto first_loc = [](const std::string& t) { return t.substr(0, t.find(": ошибка")); };
-            if (out3 != out) why += std::format("    JIT: вывод отличается: {:?} против {:?}\n{}", out3, out, jit.stats());
+            if (out3 != out) why += cat("    JIT: вывод отличается: ", in_quotes(out3), " против ", in_quotes(out), "\n", jit.stats());
             for (auto& fn : e.jit_compiled)
-                if (!jit.stats().contains(std::format("jit  {}(", fn))) why += std::format("    JIT не скомпилировал {}:\n{}", fn, jit.stats());
+                if (!jit.stats().contains(cat("jit  ", fn, "("))) why += cat("    JIT не скомпилировал ", fn, ":\n", jit.stats());
             if (first_loc(err3) != first_loc(errors) && !(errors.empty() && err3.empty()))
-                why += std::format("    JIT: ошибка отличается:\n{}против\n{}", err3, errors);
+                why += cat("    JIT: ошибка отличается:\n", err3, "против\n", errors);
         }
         if (!e.check.empty() || !e.check_lacks.empty() || !e.check_errors.empty()) {
             std::string check_errors, report;
@@ -224,11 +224,11 @@ struct test_runner {
                 report = chk.report(path.filename().string(), src);
             }
             for (auto& want : e.check)
-                if (!report.contains(want)) why += std::format("    нет в отчёте check: {:?}\n{}", want, report);
+                if (!report.contains(want)) why += cat("    нет в отчёте check: ", in_quotes(want), "\n", report);
             for (auto& bad : e.check_lacks)
-                if (report.contains(bad)) why += std::format("    лишнее в отчёте check: {:?}\n{}", bad, report);
+                if (report.contains(bad)) why += cat("    лишнее в отчёте check: ", in_quotes(bad), "\n", report);
             for (auto& want : e.check_errors)
-                if (!check_errors.contains(want)) why += std::format("    нет ошибки check: {:?}; есть: {}\n", want, check_errors);
+                if (!check_errors.contains(want)) why += cat("    нет ошибки check: ", in_quotes(want), "; есть: ", check_errors, "\n");
             if (e.check_errors.empty() && !check_errors.empty()) why += "    неожиданная ошибка check:\n" + check_errors;
         }
         if (!e.residual.empty() && p.errors().empty()) {
@@ -242,9 +242,9 @@ struct test_runner {
             }
             std::string text = residual_view(db, vm).print(root);
             for (auto& want : e.residual_has)
-                if (!text.contains(want)) why += std::format("    нет в остаточной программе: {:?}\n{}", want, text);
+                if (!text.contains(want)) why += cat("    нет в остаточной программе: ", in_quotes(want), "\n", text);
             for (auto& bad : e.residual_lacks)
-                if (text.contains(bad)) why += std::format("    лишнее в остаточной программе: {:?}\n{}", bad, text);
+                if (text.contains(bad)) why += cat("    лишнее в остаточной программе: ", in_quotes(bad), "\n", text);
         }
         if (!e.slice.empty() && p.errors().empty()) {
             std::istringstream fs(e.slice[0]);
@@ -252,12 +252,12 @@ struct test_runner {
             fs >> fn >> var;
             std::string text = slice_view(db).print(root, fn, var);
             for (auto& want : e.slice_has)
-                if (!text.contains(want)) why += std::format("    нет в срезе: {:?}\n{}", want, text);
+                if (!text.contains(want)) why += cat("    нет в срезе: ", in_quotes(want), "\n", text);
             for (auto& bad : e.slice_lacks)
-                if (text.contains(bad)) why += std::format("    лишнее в срезе: {:?}\n{}", bad, text);
+                if (text.contains(bad)) why += cat("    лишнее в срезе: ", in_quotes(bad), "\n", text);
         }
         if (e.store_roundtrip) {
-            auto tmp = std::filesystem::temp_directory_path() / std::format("tz-test-{}.tzdb", path.stem().string());
+            auto tmp = std::filesystem::temp_directory_path() / cat("tz-test-", path.stem().string(), ".tzdb");
             save_db(db, root, tmp.string());
             ast_db  db2;
             node_id root2 = load_db(db2, tmp.string());
@@ -275,22 +275,22 @@ struct test_runner {
             } catch (const diagnostic&) {
             }
             std::cin.rdbuf(old2);
-            if (out2 != out) why += std::format("    вывод из базы отличается: {:?} против {:?}\n", out2, out);
+            if (out2 != out) why += cat("    вывод из базы отличается: ", in_quotes(out2), " против ", in_quotes(out), "\n");
         }
         std::istringstream out_lines(out);
         std::string        line;
         uint32_t                i = 0;
         while (std::getline(out_lines, line)) {
-            if (i >= e.out.size()) { why += std::format("    лишний вывод: {}\n", line); continue; }
-            if (line != e.out[i]) why += std::format("    строка {}: ожидалось {:?}, получено {:?}\n", i + 1, e.out[i], line);
+            if (i >= e.out.size()) { why += cat("    лишний вывод: ", line, "\n"); continue; }
+            if (line != e.out[i]) why += cat("    строка ", i + 1, ": ожидалось ", in_quotes(e.out[i]), ", получено ", in_quotes(line), "\n");
             ++i;
         }
-        for (; i < e.out.size(); ++i) why += std::format("    не выведено: {:?}\n", e.out[i]);
+        for (; i < e.out.size(); ++i) why += cat("    не выведено: ", in_quotes(e.out[i]), "\n");
         for (auto& want : e.errors)
-            if (!errors.contains(want)) why += std::format("    нет ожидаемой ошибки: {:?}\n", want);
+            if (!errors.contains(want)) why += cat("    нет ожидаемой ошибки: ", in_quotes(want), "\n");
         if (e.errors.empty() && !errors.empty()) why += "    неожиданная ошибка:\n" + errors;
         for (auto& want : e.instances)
-            if (!instances.contains(want)) why += std::format("    нет экземпляра {:?}; есть:\n{}", want, instances);
+            if (!instances.contains(want)) why += cat("    нет экземпляра ", in_quotes(want), "; есть:\n", instances);
         return why;
     }
 };

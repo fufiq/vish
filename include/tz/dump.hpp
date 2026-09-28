@@ -28,15 +28,15 @@ struct dumper {
             using field_t = [:std::meta::type_of(m):];
             constexpr auto name = std::meta::identifier_of(m);
             if constexpr (std::is_same_v<field_t, symbol>) {
-                out += std::format(" {}={}", name, db.strings.text(k.[:m:]));
+                out += cat(" ", name, "=", db.strings.text(k.[:m:]));
             } else if constexpr (std::is_same_v<field_t, bool>) {
-                if (k.[:m:]) out += std::format(" {}", name);
+                if (k.[:m:]) out += cat(" ", name);
             } else if constexpr (std::is_same_v<field_t, int64_t> || std::is_same_v<field_t, double>) {
-                out += std::format(" {}={}", name, k.[:m:]);
+                out += cat(" ", name, "=", k.[:m:]);
             } else if constexpr (std::is_same_v<field_t, std::string>) {
-                out += std::format(" {}={:?}", name, k.[:m:]);
+                out += cat(" ", name, "=", in_quotes(k.[:m:]));
             } else if constexpr (std::is_enum_v<field_t>) {
-                out += std::format(" {}={}", name, uint32_t(k.[:m:]));
+                out += cat(" ", name, "=", uint32_t(k.[:m:]));
             }
         }
     }
@@ -47,7 +47,7 @@ struct dumper {
             if constexpr (std::is_same_v<field_t, node_id>) {
                 if (k.[:m:]) {
                     out.append(depth * 2, ' ');
-                    out += std::format("{}:\n", std::meta::identifier_of(m));
+                    out += cat(std::meta::identifier_of(m), ":\n");
                     visit(k.[:m:], depth + 1);
                 }
             } else if constexpr (std::is_same_v<field_t, node_list>) {

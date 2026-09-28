@@ -115,17 +115,17 @@ struct parser {
     void eat_op(std::string_view op) { for (uint32_t i = 0; i < op.size(); ++i) advance(); }
 
     void expect_op(std::string_view op) {
-        if (!is_op(op)) throw diagnostic(std::format("ожидалось '{}'", op), here().where);
+        if (!is_op(op)) throw diagnostic(cat("ожидалось '", op, "'"), here().where);
         eat_op(op);
     }
 
     void expect_open(char c) {
-        if (!is_open(c)) throw diagnostic(std::format("ожидалось '{}'", c), here().where);
+        if (!is_open(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
         advance();
     }
 
     void expect_close(char c) {
-        if (!is_close(c)) throw diagnostic(std::format("ожидалось '{}'", c), here().where);
+        if (!is_close(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
         advance();
     }
 

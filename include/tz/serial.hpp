@@ -83,7 +83,7 @@ struct reader {
     V get_variant(uint32_t index, std::index_sequence<I...>) {
         std::optional<V> out;
         ((index == I ? (out.emplace(std::in_place_index<I>, get<std::variant_alternative_t<I, V>>()), 0) : 0), ...);
-        if (!out) throw diagnostic(std::format("журнал повреждён: вид {} неизвестен", index), {});
+        if (!out) throw diagnostic(cat("журнал повреждён: вид ", index, " неизвестен"), {});
         return std::move(*out);
     }
 

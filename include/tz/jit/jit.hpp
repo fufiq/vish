@@ -106,7 +106,7 @@ struct jit_engine {
 
     // A compiled instance or nullptr (then an interpreter).
     jit_fn* get(node_id fn, const std::vector<jt>& types) {
-        std::string key = std::format("{}(", fn.value);
+        std::string key = cat(fn.value, "(");
         for (jt t : types) key += std::string(jt_name(t)) + ",";
         auto it = cache.find(key);
         if (it != cache.end() && still_valid(fns[it->second])) return fns[it->second].ok ? &fns[it->second] : nullptr;
@@ -125,9 +125,8 @@ struct jit_engine {
             const jit_fn* f = &fns[index];
             node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
             auto    name = db.strings.text(db.as<n_fn>(fn).name);
-            if (f->ok) out += std::format("  jit  {}({}) → {} байт машинного кода{}\n", name, types_str(f->params), f->bytes,
-                                   f->unchecked ? std::format(", без проверки границ: {}", f->unchecked) : "");
-            else out += std::format("  интерпретатор  {}({}): {}\n", name, types_str(f->params), f->reason);
+            if (f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", "\n");
+            else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
         }
         return out;
     }
@@ -194,7 +193,7 @@ struct jit_codegen {
         frames.push_back({fn, &epilogue, out.result, 0, true});
         jt body = gen_value(f.body);
         if (body != out.result && body != jt::unit)
-            throw jit_unsupported{f.body, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(out.result))};
+            throw jit_unsupported{f.body, cat("тип результата ", jt_name(body), " ≠ ", jt_name(out.result))};
         to_result(body);
 
         code.bind(epilogue);
@@ -396,7 +395,7 @@ struct jit_codegen {
 
     jt gen(node_id n, const n_ident& x) {
         const slot* s = find(x.name);
-        if (!s) throw jit_unsupported{n, std::format("имя {} вне кадра", db.strings.text(x.name))};
+        if (!s) throw jit_unsupported{n, cat("имя ", db.strings.text(x.name), " вне кадра")};
         if (s->thunk) { // expr parameter: the caller expression is calculated at each mention (§6.1)
             slot th = *s;
             return in_context(th.ctx, [&] { return gen_value(th.thunk); });
@@ -459,7 +458,7 @@ struct jit_codegen {
                 return t;
             }
             if (op == "!" && t == jt::bool_) { code.xor_imm8(rax, 1); return t; }
-            throw jit_unsupported{n, std::format("оператор {}", op)};
+            throw jit_unsupported{n, cat("оператор ", op)};
         }
         if (op == "&&" || op == "||") {
             label done;
@@ -473,7 +472,7 @@ struct jit_codegen {
         jt a = gen_value(o.args[0]);
         push_result(a);
         jt b_ = gen_value(o.args[1]);
-        if (a != b_) throw jit_unsupported{n, std::format("{} {} {}", jt_name(a), op, jt_name(b_))};
+        if (a != b_) throw jit_unsupported{n, cat(jt_name(a), " ", op, " ", jt_name(b_))};
         pop_to(a, true);
         return binary(n, op, a);
     }
@@ -511,7 +510,7 @@ struct jit_codegen {
             return float_compare(n, op);
         }
         if (t == jt::bool_ && (op == "==" || op == "!=")) return int_compare(n, op);
-        throw jit_unsupported{n, std::format("{} над {}", op, jt_name(t))};
+        throw jit_unsupported{n, cat(op, " над ", jt_name(t))};
     }
 
     jt int_compare(node_id n, std::string_view op) {
@@ -523,7 +522,7 @@ struct jit_codegen {
         else if (op == "<=") c = le;
         else if (op == ">") c = g;
         else if (op == ">=") c = ge;
-        else throw jit_unsupported{n, std::format("оператор {}", op)};
+        else throw jit_unsupported{n, cat("оператор ", op)};
         code.cmp(rax, rcx);
         code.setcc(c, rax);
         code.movzx_rax_al();
@@ -546,7 +545,7 @@ struct jit_codegen {
             code.ucomisd(xmm0, xmm1);
             code.setcc(op == ">" ? a : ae, rax);
         } else {
-            throw jit_unsupported{n, std::format("оператор {}", op)};
+            throw jit_unsupported{n, cat("оператор ", op)};
         }
         code.movzx_rax_al();
         return jt::bool_;
@@ -641,10 +640,10 @@ struct jit_codegen {
         for (node_id item : db.as<n_module>(eng.mod).items)
             if (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name
                 && db.as<n_fn>(item).params.size() == c.args.size()) {
-                if (target) throw jit_unsupported{n, std::format("перегрузка {} (M1a)", name)};
+                if (target) throw jit_unsupported{n, cat("перегрузка ", name, " (M1a)")};
                 target = item;
             }
-        if (!target) throw jit_unsupported{n, std::format("вызов {}", name)};
+        if (!target) throw jit_unsupported{n, cat("вызов ", name)};
         // Default semantic inlining (D10): the body is embedded in the context of the
         // call, the parameters are alias of the caller's seats, without ABI.
 //,
@@ -662,7 +661,7 @@ struct jit_codegen {
         jit_fn* callee = target == fn ? &out : eng.get(target, types);
         if (target == fn && types != out.params) callee = eng.get(target, types);
         if (!callee || (callee != &out && !callee->ok))
-            throw jit_unsupported{n, std::format("{} не компилируется", name)};
+            throw jit_unsupported{n, cat(name, " не компилируется")};
         out.deps.insert(callee->deps.begin(), callee->deps.end());
 
         // arguments - in adjacent frame slots, the address of the first - in rdi
@@ -717,7 +716,7 @@ struct jit_codegen {
             }
             if (p.mode == param_mode::out || p.mode == param_mode::mut) throw jit_unsupported{arg, "mut/out не на место"};
             jt t = gen_value(arg);
-            if (t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{arg, std::format("аргумент типа {}", jt_name(t))};
+            if (t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{arg, cat("аргумент типа ", jt_name(t))};
             slot s;
             s.type = t;
             s.off  = alloc();
@@ -736,7 +735,7 @@ struct jit_codegen {
         uint64_t cx   = std::exchange(ctx, interpreter::inline_context(ctx, n.value));
         frames.push_back({target, exit, result, depth, false});
         jt body = gen_value(g.body);
-        if (body != result && body != jt::unit) throw jit_unsupported{n, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(result))};
+        if (body != result && body != jt::unit) throw jit_unsupported{n, cat("тип результата ", jt_name(body), " ≠ ", jt_name(result))};
         code.bind(*exit);
         frames.pop_back();
         fn_base = base;
@@ -774,7 +773,7 @@ struct jit_codegen {
     jt gen(node_id n, const n_var& v) {
         using namespace x64;
         jt t = gen_value(v.init);
-        if (t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{n, std::format("переменная типа {}", jt_name(t))};
+        if (t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{n, cat("переменная типа ", jt_name(t))};
         slot s = declare(v.name, t);
         if (t == jt::f64_) code.movsd_store(rbp, s.off, xmm0);
         else code.store(rbp, s.off, rax);
@@ -886,7 +885,7 @@ struct jit_codegen {
     jt gen(node_id n, const n_ct& c) { return gen_value(c.body); }
 
     jt gen(node_id n, const auto&) {
-        throw jit_unsupported{n, std::format("узел {}", kind_name(db[n]))};
+        throw jit_unsupported{n, cat("узел ", kind_name(db[n]))};
     }
 
     jit_engine&                                   eng;
@@ -914,14 +913,14 @@ struct jit_codegen {
 std::optional<std::pair<node_id, std::string>> jit_prefilter(const ast_db& db, node_id module, node_id n) {
     if (!n) return std::nullopt;
     if (db.is<n_str>(n) || db.is<n_lambda>(n) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n))
-        return std::pair{n, std::format("узел {}", kind_name(db[n]))};
+        return std::pair{n, cat("узел ", kind_name(db[n]))};
     if (db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
     if (db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
         auto name  = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
         bool known = name == "f64" || name == "i64" || name == "range";
         for (node_id item : db.as<n_module>(module).items)
             known = known || (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name);
-        if (!known) return std::pair{n, std::format("вызов {}", name)};
+        if (!known) return std::pair{n, cat("вызов ", name)};
     }
     std::optional<std::pair<node_id, std::string>> found;
     db.for_each_child(n, [&](node_id c) { if (!found) found = jit_prefilter(db, module, c); });
@@ -933,7 +932,7 @@ void jit_engine::compile(node_id fn, jit_fn& out) {
     out.deps[mod.value] = db.node_revision(mod);
     if (auto bad = jit_prefilter(db, mod, db.as<n_fn>(fn).body)) {
         auto lc    = locate(db.source(db[bad->first].where.source), db[bad->first].where.begin);
-        out.reason = std::format("{} (строка {})", bad->second, lc.line);
+        out.reason = cat(bad->second, " (строка ", lc.line, ")");
         return;
     }
     // Static parsing instance: Types and compile-time node (value-approach)
@@ -948,13 +947,13 @@ void jit_engine::compile(node_id fn, jit_fn& out) {
         value r    = an.analyze_instance(fn, shapes);
         out.result = jt_of(r);
         if (out.result == jt::arr_i64 || out.result == jt::arr_f64) { out.reason = "результат — массив (пока интерпретатор)"; return; }
-        if (out.result == jt::other) { out.reason = std::format("тип результата {}", r.is<split_v>() ? "расщеплён" : "не скалярный"); return; }
+        if (out.result == jt::other) { out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный"); return; }
         jit_codegen(*this, fn, out, an).run();
     } catch (const jit_unsupported& u) {
         auto lc    = locate(db.source(db[u.node].where.source), db[u.node].where.begin);
-        out.reason = std::format("{} (строка {})", u.why, lc.line);
+        out.reason = cat(u.why, " (строка ", lc.line, ")");
     } catch (const diagnostic& d) {
-        out.reason = std::format("разбор: {}", d.what());
+        out.reason = cat("разбор: ", d.what());
     }
 }
 

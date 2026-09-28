@@ -22,26 +22,19 @@
 
 namespace {
 
+using tz::cat;
+using tz::put;
+
 std::string read_file(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error(std::format("не могу открыть {}", path));
+    if (!in) throw std::runtime_error(cat("не могу открыть ", path));
     std::stringstream ss;
     ss << in.rdbuf();
     return ss.str();
 }
 
 int usage() {
-    std::println(stderr, "использование (<программа> — файл .tz или база .tzdb):\n"
-                         "  tz fmt <программа>        каноническая текстовая проекция\n"
-                         "  tz ast <программа>        дерево AST\n"
-                         "  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n"
-                         "  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n"
-                         "  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n"
-                         "  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n"
-                         "  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n"
-                         "  tz log <база.tzdb>         журнал операций базы в тексте\n"
-                         "  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n"
-                         "  tz test <каталог>          прогнать эталонные тесты");
+    put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz test <каталог>          прогнать эталонные тесты\n"));
     return 2;
 }
 
@@ -68,7 +61,7 @@ void load(program& p, const std::string& path) {
 }
 
 int report_error(const program& p, const tz::diagnostic& d) {
-    std::print(stderr, "{}", tz::render(d, p.path, p.db));
+    put(stderr, tz::render(d, p.path, p.db));
     return 1;
 }
 
@@ -81,7 +74,7 @@ int main(int argc, char** argv) {
         if (cmd == "test") return tz::test_runner().run(argv[2]);
         if (cmd == "log") {
             tz::node_id root;
-            std::print("{}", tz::describe_journal(tz::read_journal(argv[2], root)));
+            put(stdout, tz::describe_journal(tz::read_journal(argv[2], root)));
             return 0;
         }
 
@@ -98,7 +91,7 @@ int main(int argc, char** argv) {
 
         program p;
         load(p, argv[at++]);
-        for (const auto& e : p.parse_errors) std::print(stderr, "{}", tz::render(e, p.path, p.db));
+        for (const auto& e : p.parse_errors) put(stderr, tz::render(e, p.path, p.db));
         bool parsed = p.parse_errors.empty();
 
         if (cmd == "save") {
@@ -107,21 +100,21 @@ int main(int argc, char** argv) {
             return parsed ? 0 : 1;
         }
         if (cmd == "fmt") {
-            std::print("{}", tz::printer(p.db).print(p.root));
+            put(stdout, tz::printer(p.db).print(p.root));
             return parsed ? 0 : 1;
         }
         if (cmd == "ast") {
-            std::print("{}", tz::dumper(p.db).dump(p.root));
+            put(stdout, tz::dumper(p.db).dump(p.root));
             return parsed ? 0 : 1;
         }
         if (cmd == "slice") {
             if (at + 1 >= argc) return usage();
             auto out = tz::slice_view(p.db).print(p.root, argv[at], argv[at + 1]);
             if (out.empty()) {
-                std::println(stderr, "не найдены функция {} или переменная {}", argv[at], argv[at + 1]);
+                put(stderr, cat("не найдены функция ", argv[at], " или переменная ", argv[at + 1], "\n"));
                 return 1;
             }
-            std::print("{}", out);
+            put(stdout, out);
             return 0;
         }
         if (!parsed) return 1; // We don't do the whole thing - M0
@@ -134,7 +127,7 @@ int main(int argc, char** argv) {
                 std::string body;
                 if (line.starts_with("edit ")) // editing body - up to a line from one point
                     for (std::string l; std::getline(std::cin, l) && l != ".";) body += l + "\n";
-                std::print("> {}\n{}", line, session.exec(line, body));
+                put(stdout, cat("> ", line, "\n", session.exec(line, body)));
                 std::fflush(stdout);
             }
             return 0;
@@ -152,8 +145,8 @@ int main(int argc, char** argv) {
             } catch (const tz::diagnostic& d) {
                 code = report_error(p, d);
             }
-            if (show_instances) std::print(stderr, "экземпляры:\n{}", vm.instances());
-            if (jit_stats) std::print(stderr, "JIT:\n{}", jit.stats());
+            if (show_instances) put(stderr, cat("экземпляры:\n", vm.instances()));
+            if (jit_stats) put(stderr, cat("JIT:\n", jit.stats()));
             return code;
         }
         if (cmd == "check") {
@@ -164,7 +157,7 @@ int main(int argc, char** argv) {
             } catch (const tz::diagnostic& d) {
                 code = report_error(p, d);
             }
-            std::print("{}", vm.report(p.path, p.src()));
+            put(stdout, vm.report(p.path, p.src()));
             return code;
         }
         if (cmd == "residual") {
@@ -181,15 +174,15 @@ int main(int argc, char** argv) {
             } catch (const tz::diagnostic& d) {
                 code = report_error(p, d);
             }
-            std::print("{}", tz::residual_view(p.db, vm).print(p.root));
+            put(stdout, tz::residual_view(p.db, vm).print(p.root));
             return code;
         }
         return usage();
     } catch (const tz::diagnostic& d) {
-        std::println(stderr, "{}", d.what());
+        put(stderr, cat(d.what(), "\n"));
         return 1;
     } catch (const std::exception& e) {
-        std::println(stderr, "{}", e.what());
+        put(stderr, cat(e.what(), "\n"));
         return 1;
     }
 }

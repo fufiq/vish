@@ -150,7 +150,7 @@ struct interpreter {
     std::optional<std::string> literal(const value& v) const {
         if (!v.known()) return std::nullopt;
         if (v.is<int64_t>() || v.is<double>() || v.is<bool>()) return show_v(v);
-        if (v.is<std::string>()) return std::format("{:?}", v.as<std::string>());
+        if (v.is<std::string>()) return cat(in_quotes(v.as<std::string>()));
         if (v.is<array_v>()) {
             std::string s = "array{";
             for (uint32_t i = 0; i < v.as<array_v>().size(); ++i) {
@@ -188,7 +188,7 @@ struct interpreter {
     // instance: function + (runtime-parts) of arguments → how many times.
     std::string instances() const {
         std::string out;
-        for (const auto& [key, count] : instance_counts) out += std::format("  {}  ×{}\n", key, count);
+        for (const auto& [key, count] : instance_counts) out += cat("  ", key, "  ×", count, "\n");
         return out;
     }
 
@@ -199,29 +199,29 @@ struct interpreter {
         auto loc = [&](span w) {
             auto        lc    = locate(db.source(w.source), w.begin);
             const auto& label = db.source_label(w.source);
-            return std::format("{}:{}", label.empty() ? file : std::string_view(label), lc.line);
+            return cat(label.empty() ? file : std::string_view(label), ":", lc.line);
         };
         out += "стадии:\n";
-        for (const auto& s : stages) out += std::format("  {} {}{} = {}\n", loc(s.where), s.path, s.name, s.what);
+        for (const auto& s : stages) out += cat("  ", loc(s.where), " ", s.path, s.name, " = ", s.what, "\n");
         if (!splits.empty()) {
             out += "расщепления:\n";
-            for (const auto& s : splits) out += std::format("  {} {} → {} продолжения: {}\n", loc(s.where), s.name, s.alts.size(), join(s.alts));
+            for (const auto& s : splits) out += cat("  ", loc(s.where), " ", s.name, " → ", s.alts.size(), " продолжения: ", join(s.alts), "\n");
         }
         if (!excluded.empty()) {
             out += "исключённые блоки try_compile:\n";
-            for (const auto& e : excluded) out += std::format("  {} {}{}\n", loc(e.where), e.path, e.why);
+            for (const auto& e : excluded) out += cat("  ", loc(e.where), " ", e.path, e.why, "\n");
         }
         if (!folded.empty()) {
             out += "свёрнуто в кт:\n";
-            for (const auto& [name, count] : folded) out += std::format("  {}  ×{}\n", name, count);
+            for (const auto& [name, count] : folded) out += cat("  ", name, "  ×", count, "\n");
         }
         if (!param_writes.empty()) {
             out += "функции меняют параметры (место вызывающего):\n";
-            for (const auto& w : param_writes) out += std::format("  {}\n", w);
+            for (const auto& w : param_writes) out += cat("  ", w, "\n");
         }
         if (!proven_list.empty()) {
             out += "индексы, доказанные в границах (проверка снята):\n";
-            for (const auto& [w, what] : proven_list) out += std::format("  {} {}\n", loc(w), what);
+            for (const auto& [w, what] : proven_list) out += cat("  ", loc(w), " ", what, "\n");
         }
         out += "экземпляры (рантайм-часть):\n" + instances();
         return out;
@@ -258,8 +258,8 @@ struct interpreter {
 
     [[noreturn]] void fail(std::string msg, span where, diag_kind kind = diag_kind::instantiation) {
         diagnostic d(std::move(msg), where, kind);
-        if (!path.empty()) d.note(std::format("в продолжении {}", path), where);
-        for (auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(std::format("в {}", it->what), it->where);
+        if (!path.empty()) d.note(cat("в продолжении ", path), where);
+        for (auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
         throw d;
     }
 
@@ -457,7 +457,7 @@ struct interpreter {
         if (unknown(v)) return std::nullopt;
         if (v.is<rt_v>() && types.describe(v) == "bool") return std::nullopt;
         if (v.is<split_v>()) return std::nullopt;
-        fail(std::format("условие должно быть bool, получено {}", types.describe(v)), where);
+        fail(cat("условие должно быть bool, получено ", types.describe(v)), where);
     }
 
     bool truthy(const value& v, span where) {
@@ -515,13 +515,11 @@ struct interpreter {
         if (auto it = functions.find(x.name); it != functions.end()) {
             for (node_id f : it->second)
                 if (inline_required(f))
-                    fail(std::format("функция {} использует семантику инлайна (expr-параметр или return(…)) и не может "
-                                     "быть значением; вызывайте её напрямую",
-                                     str(x.name)),
+                    fail(cat("функция ", str(x.name), " использует семантику инлайна (expr-параметр или return(…)) и не может быть значением; вызывайте её напрямую"),
                          db[n].where);
             return ok(value(fn_v{x.name, {}, nullptr}));
         }
-        fail(std::format("неизвестное имя {}", str(x.name)), db[n].where);
+        fail(cat("неизвестное имя ", str(x.name)), db[n].where);
     }
 
     // --- blockages ---
@@ -565,7 +563,7 @@ struct interpreter {
             scope*      cont = clone_scope(inner);
             scope_hold  hold{*this, cont};
             std::string saved = path;
-            path += std::format("[{}: {}] ", str(v.name), types.describe(alt));
+            path += cat("[", str(v.name), ": ", types.describe(alt), "] ");
             declare_var(s, v, alt, cont);
             flow f = run_block(b, i + 1, cont, frame);
             path  = saved;
@@ -579,7 +577,7 @@ struct interpreter {
         if (v.type && db.is<n_ident>(v.type)) check_type(init, db.as<n_ident>(v.type).name, db[v.init].where);
         if (checking())
             emit({report_event::stage, path, std::string(str(v.name)),
-                  init.known() ? std::format("кт {}", show_v(init)) : std::format("рт {}", types.describe(init)), db[s].where, {}});
+                  init.known() ? cat("кт ", show_v(init)) : cat("рт ", types.describe(init)), db[s].where, {}});
         env->declare(v.name, std::move(init));
     }
 
@@ -616,12 +614,11 @@ struct interpreter {
         bool to_caller = str(name) == "caller";
         for (int64_t i = here - 1; i >= 0; --i) {
             if (frames[i + 1].outline)
-                fail(std::format("return({}) через outline-функцию {}: у неё нет семантики инлайна", str(name),
-                                 str(frames[i + 1].name)),
+                fail(cat("return(", str(name), ") через outline-функцию ", str(frames[i + 1].name), ": у неё нет семантики инлайна"),
                      where);
             if (to_caller || frames[i].name == name) return frames[i].id;
         }
-        fail(std::format("return({}): нет такой внешней функции в цепочке вызовов", str(name)), where);
+        fail(cat("return(", str(name), "): нет такой внешней функции в цепочке вызовов"), where);
     }
 
     flow eval_node(node_id n, const n_require& r, scope* env, uint32_t frame) {
@@ -663,13 +660,13 @@ struct interpreter {
         TZ_TRY(r, eval(f.range, env, frame));
         if (r.is<rt_v>()) {
             const value* shape = shape_of(r);
-            if (!shape || !shape->is<array_v>()) fail(std::format("for ожидает массив, получено {}", types.describe(r)), db[f.range].where);
+            if (!shape || !shape->is<array_v>()) fail(cat("for ожидает массив, получено ", types.describe(r)), db[f.range].where);
             value elem = shape->as<array_v>().empty() ? value(rt_v{}) : shape->as<array_v>().get(0);
             const value* src = index_source(f, env);
             return abstract_loop(f.body, env, frame, f.var, elem, src,
                                  src ? db.as<n_ident>(db.as<n_member>(db.as<n_call>(f.range).args[0]).object).name : symbol{});
         }
-        if (!r.is<array_v>()) fail(std::format("for ожидает массив, получено {}", types.describe(r)), db[f.range].where);
+        if (!r.is<array_v>()) fail(cat("for ожидает массив, получено ", types.describe(r)), db[f.range].where);
         const auto& arr = r.as<array_v>();
         for (uint32_t k = 0; k < arr.size(); ++k) {
             scope*     inner = new_scope(env);
@@ -721,7 +718,7 @@ struct interpreter {
         // array for this call) proves nothing for the instance as a whole.
         for (const auto& [var_cell, arr_cell, arr_name] : index_proofs)
             if (ix && ix == var_cell && ar == arr_cell && db.is<n_ident>(i.object) && db.as<n_ident>(i.object).name == arr_name)
-                emit({report_event::proven, std::format("{}[{}]{}", str(db.as<n_ident>(i.object).name), str(db.as<n_ident>(i.index).name), write ? " (запись)" : ""),
+                emit({report_event::proven, cat(str(db.as<n_ident>(i.object).name), "[", str(db.as<n_ident>(i.index).name), "]", write ? " (запись)" : ""),
                       {}, {}, db[n].where, {}, n.value});
     }
 
@@ -873,7 +870,7 @@ struct interpreter {
 
     flow eval_node(node_id n, const n_ct& c, scope* env, uint32_t frame) {
         TZ_TRY(v, eval(c.body, env, frame));
-        if (checking() && !v.known()) fail(std::format("ct: значение не вычислимо при компиляции (рт {})", types.describe(v)), db[n].where);
+        if (checking() && !v.known()) fail(cat("ct: значение не вычислимо при компиляции (рт ", types.describe(v), ")"), db[n].where);
         return ok(std::move(v));
     }
 
@@ -903,7 +900,7 @@ struct interpreter {
             items.push_back(std::move(x));
         }
         auto tname = str(db.as<n_ident>(c.type).name);
-        if (tname != "array") fail(std::format("конструктор {}{{}} пока не поддержан", tname), db[n].where);
+        if (tname != "array") fail(cat("конструктор ", tname, "{} пока не поддержан"), db[n].where);
         for (const auto& x : items)
             if (!x.known()) return ok(erase(value(array_v::of({x})))); // At least one run-time element is an array of run-time
         return ok(value(array_v::of(std::move(items))));
@@ -930,7 +927,7 @@ struct interpreter {
         if (obj.is<agg_v>())
             for (auto& [k, v] : obj.as<agg_v>().fields)
                 if (k == name) return v;
-        fail(std::format("у значения типа {} нет поля {}", types.describe(obj), str(name)), where);
+        fail(cat("у значения типа ", types.describe(obj), " нет поля ", str(name)), where);
     }
 
     // A variable cell without copying a value (an array by name is not copied for a
@@ -966,7 +963,7 @@ struct interpreter {
     value element_type(const value& arr, span where) {
         if (unknown(arr)) return arr;
         const value* shape = shape_of(arr);
-        if (!shape || !shape->is<array_v>()) fail(std::format("индексация значения типа {}", types.describe(arr)), where);
+        if (!shape || !shape->is<array_v>()) fail(cat("индексация значения типа ", types.describe(arr)), where);
         const auto& a = shape->as<array_v>();
         if (a.empty()) return value(rt_v{});
         value t = erase(a.get(0));
@@ -977,20 +974,20 @@ struct interpreter {
 
     // Proven index of the array element: OutOfBounds (§12.1) - runtime - error.
     uint32_t checked_index(const value& arr, const value& idx, span where) {
-        if (!arr.is<array_v>()) fail(std::format("индексация значения типа {}", types.describe(arr)), where);
+        if (!arr.is<array_v>()) fail(cat("индексация значения типа ", types.describe(arr)), where);
         if (!idx.is<int64_t>()) fail("индекс должен быть i64", where);
         int64_t k = idx.as<int64_t>();
         uint32_t n = arr.as<array_v>().size();
-        if (k < 0 || uint64_t(k) >= n) fail(std::format("индекс {} вне границ массива размера {}", k, n), where, diag_kind::runtime);
+        if (k < 0 || uint64_t(k) >= n) fail(cat("индекс ", k, " вне границ массива размера ", n), where, diag_kind::runtime);
         return uint32_t(k);
     }
 
     flow eval_node(node_id n, const n_hole& h, scope*, uint32_t) {
-        fail(std::format("исполнение неразобранного фрагмента: {}", h.reason), db[n].where);
+        fail(cat("исполнение неразобранного фрагмента: ", h.reason), db[n].where);
     }
 
     flow eval_node(node_id n, const auto&, scope*, uint32_t) {
-        fail(std::format("узел {} нельзя исполнить", kind_name(db[n])), db[n].where);
+        fail(cat("узел ", kind_name(db[n]), " нельзя исполнить"), db[n].where);
     }
 
     // --- seats (lvalue) ---
@@ -998,7 +995,7 @@ struct interpreter {
     value* place(node_id n, scope* env, uint32_t frame) {
         if (db.is<n_ident>(n)) {
             if (value* c = env->find(db.as<n_ident>(n).name)) return c;
-            fail(std::format("неизвестная переменная {}", str(db.as<n_ident>(n).name)), db[n].where);
+            fail(cat("неизвестная переменная ", str(db.as<n_ident>(n).name)), db[n].where);
         }
         if (db.is<n_index>(n)) { // cell of the element is only in a common array
             const auto& i   = db.as<n_index>(n);
@@ -1048,8 +1045,7 @@ struct interpreter {
                     TZ_TRY(cur, eval(o.args[0], env, frame));
                     value res = op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
                     if (!unknown(cur) && !unknown(res) && types.describe(cur) != types.describe(res))
-                        fail(std::format("элемент массива типа {} нельзя заменить значением типа {}", types.describe(cur),
-                                         types.describe(res)),
+                        fail(cat("элемент массива типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)),
                              where);
                     return ok();
                 }
@@ -1072,7 +1068,7 @@ struct interpreter {
             if (x.is<int64_t>()) return value(int64_t(0 - uint64_t(x.as<int64_t>())));
             if (x.is<double>()) return value(-x.as<double>());
         }
-        fail(std::format("оператор {} не определён для {}", op, types.describe(x)), where);
+        fail(cat("оператор ", op, " не определён для ", types.describe(x)), where);
     }
 
     const value* shape_or_fail(const value& x, span where) {
@@ -1106,7 +1102,7 @@ struct interpreter {
             if (op == "==") return value(a.as<bool>() == b.as<bool>());
             if (op == "!=") return value(a.as<bool>() != b.as<bool>());
         }
-        fail(std::format("оператор {} не определён для {} и {}", op, types.describe(a), types.describe(b)), where);
+        fail(cat("оператор ", op, " не определён для ", types.describe(a), " и ", types.describe(b)), where);
     }
 
     value int_op(std::string_view op, int64_t x, int64_t y, span where) {
@@ -1136,7 +1132,7 @@ struct interpreter {
         if (op == ">") return value(x > y);
         if (op == "<=") return value(x <= y);
         if (op == ">=") return value(x >= y);
-        fail(std::format("неизвестный оператор {}", op), where);
+        fail(cat("неизвестный оператор ", op), where);
     }
 
     void check_type(const value& v, symbol tname, span where) {
@@ -1144,7 +1140,7 @@ struct interpreter {
         if (want == "auto") return;
         auto check1 = [&](const value& x) {
             if (types.describe(x) != want && types.name(types.of(x)) != want)
-                fail(std::format("ожидался тип {}, получен {}", want, types.describe(x)), where);
+                fail(cat("ожидался тип ", want, ", получен ", types.describe(x)), where);
         };
         if (v.is<split_v>()) for (const auto& a : v.as<split_v>().alts) check1(a);
         else check1(v);
@@ -1173,12 +1169,12 @@ struct interpreter {
     }
 
     flow call_value(const value& fv, const node_list& args, scope* env, uint32_t frame, span where, uint32_t node = 0) {
-        if (!fv.is<fn_v>()) fail(std::format("значение типа {} нельзя вызвать", types.describe(fv)), where);
+        if (!fv.is<fn_v>()) fail(cat("значение типа ", types.describe(fv), " нельзя вызвать"), where);
         const fn_v& f = fv.as<fn_v>();
         if (f.name) return call_named(f.name, args, env, frame, where, node);
         const node_list& params = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).params : db.as<n_fn>(f.lambda).params;
         node_id          body   = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).body : db.as<n_fn>(f.lambda).body;
-        if (params.size() != args.size()) fail(std::format("ожидалось {} аргументов, передано {}", params.size(), args.size()), where);
+        if (params.size() != args.size()) fail(cat("ожидалось ", params.size(), " аргументов, передано ", args.size()), where);
         scope*     inner = new_scope(f.env);
         scope_hold hold{*this, inner};
         for (uint32_t i = 0; i < params.size(); ++i) {
@@ -1295,7 +1291,7 @@ struct interpreter {
         for (node_id f : fns) {
             const auto& fn = db.as<n_fn>(f);
             if (fn.params.size() != args.size()) {
-                rejected.push_back(std::format("{}: ожидает {} аргументов", describe_fn(f), fn.params.size()));
+                rejected.push_back(cat(describe_fn(f), ": ожидает ", fn.params.size(), " аргументов"));
                 continue;
             }
             int         score = 0;
@@ -1305,7 +1301,7 @@ struct interpreter {
                 if (p.type && db.is<n_ident>(p.type)) {
                     auto want = str(db.as<n_ident>(p.type).name);
                     if (types.describe(vals[i]) != want && types.name(types.of(vals[i])) != want)
-                        why = std::format("параметр {} ожидает {}, передано {}", str(p.name), want, types.describe(vals[i]));
+                        why = cat("параметр ", str(p.name), " ожидает ", want, ", передано ", types.describe(vals[i]));
                     else ++score;
                 }
             }
@@ -1315,21 +1311,21 @@ struct interpreter {
                 score += n_req;
             }
             if (why.empty()) good.push_back({f, score});
-            else rejected.push_back(std::format("{}: {}", describe_fn(f), why));
+            else rejected.push_back(cat(describe_fn(f), ": ", why));
         }
 
         if (good.empty()) {
-            diagnostic d(std::format("нет подходящей перегрузки {}", site.what), site.where);
-            for (auto& r : rejected) d.note(std::format("кандидат {}", r), site.where);
-            if (!path.empty()) d.note(std::format("в продолжении {}", path), site.where);
-            for (auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(std::format("в {}", it->what), it->where);
+            diagnostic d(cat("нет подходящей перегрузки ", site.what), site.where);
+            for (auto& r : rejected) d.note(cat("кандидат ", r), site.where);
+            if (!path.empty()) d.note(cat("в продолжении ", path), site.where);
+            for (auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
             throw d;
         }
         std::ranges::sort(good, std::greater{}, &candidate::score);
         if (good.size() > 1 && good[0].score == good[1].score) {
-            diagnostic d(std::format("неоднозначный вызов {}", site.what), site.where);
+            diagnostic d(cat("неоднозначный вызов ", site.what), site.where);
             for (auto& c : good)
-                if (c.score == good[0].score) d.note(std::format("кандидат {}", describe_fn(c.fn)), db[c.fn].where);
+                if (c.score == good[0].score) d.note(cat("кандидат ", describe_fn(c.fn)), db[c.fn].where);
             throw d;
         }
         return invoke(good[0].fn, vals, args, env, site);
@@ -1357,15 +1353,15 @@ struct interpreter {
     flow invoke(node_id f, std::vector<value>& vals, const node_list& args, scope* env, const call_site& site) {
         const auto& fn = db.as<n_fn>(f);
         if (fn.outline && inline_required(f))
-            fail(std::format("{} помечена outline, но использует семантику инлайна", site.what), db[f].where);
+            fail(cat(site.what, " помечена outline, но использует семантику инлайна"), db[f].where);
         if (checking() && param_writes_checked.insert(f.value).second)
             for (uint32_t k = 0; k < fn.params.size(); ++k)
                 if (db.as<n_param>(fn.params[k]).mode != param_mode::expr && writes_param(f, k))
-                    param_writes.push_back(std::format("{}: меняет {}", describe_fn(f), str(db.as<n_param>(fn.params[k]).name)));
+                    param_writes.push_back(cat(describe_fn(f), ": меняет ", str(db.as<n_param>(fn.params[k]).name)));
 
         // instance key : only runtime is part of the argument
         bool        all_known = true;
-        std::string key       = std::format("{}(", str(fn.name));
+        std::string key       = cat(str(fn.name), "(");
         for (uint32_t i = 0; i < vals.size(); ++i) {
             if (i) key += ", ";
             if (vals[i].is<thunk_v>()) key += "expr";
@@ -1441,7 +1437,7 @@ struct interpreter {
             value prev = approx.contains(active_key) ? approx[active_key] : value(rt_v{});
             value next = erase(merge(prev, r.v));
             if (types.describe(next) == types.describe(prev) && !unknown(next)) break;
-            if (pass > 8) fail(std::format("тип результата рекурсивной {} не сходится: {}", str(fn.name), types.describe(next)), site.where);
+            if (pass > 8) fail(cat("тип результата рекурсивной ", str(fn.name), " не сходится: ", types.describe(next)), site.where);
             approx[active_key] = next;
         }
         stack.pop_back();
@@ -1455,7 +1451,7 @@ struct interpreter {
             journal.resize(journal_mark); // There is no folded call in runtime.
             observations_dirty = true;
         } else {
-            emit({report_event::instance, path.empty() ? key : std::format("{}   {}", key, path), {}, {}, {}, {}});
+            emit({report_event::instance, path.empty() ? key : cat(key, "   ", path), {}, {}, {}, {}});
             emit({report_event::live, {}, {}, {}, {}, {}, f.value}); // I need runtime.
         }
         bool outer_return = frame_floors.back().second;
@@ -1525,11 +1521,11 @@ struct interpreter {
 
     std::string describe_fn(node_id f) const {
         const auto& fn = db.as<n_fn>(f);
-        std::string s  = std::format("{}(", str(fn.name));
+        std::string s  = cat(str(fn.name), "(");
         for (uint32_t i = 0; i < fn.params.size(); ++i) {
             if (i) s += ", ";
             const auto& p = db.as<n_param>(fn.params[i]);
-            if (p.type && db.is<n_ident>(p.type)) s += std::format("{} ", str(db.as<n_ident>(p.type).name));
+            if (p.type && db.is<n_ident>(p.type)) s += cat(str(db.as<n_ident>(p.type).name), " ");
             s += str(p.name);
         }
         return s + ")";
@@ -1550,7 +1546,7 @@ struct interpreter {
             std::string line;
             for (uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + show_v(a[i]);
             if (captured) *captured += line + "\n";
-            else std::println("{}", line);
+            else put(stdout, cat(line, "\n"));
             return {};
         }
         if (n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
@@ -1561,7 +1557,7 @@ struct interpreter {
             auto t = types.name(a[0].as<type_v>().type);
             if (t == "i64") return value(int64_t(0));
             if (t == "f64") return value(double(0));
-            fail(std::format("zero не определён для {}", t), where);
+            fail(cat("zero не определён для ", t), where);
         }
         if (n == "range" && a.size() == 1) {
             if (!a[0].known() && types.describe(a[0]) == "i64") return erase(value(array_v::of({value(int64_t(0))})));
@@ -1618,17 +1614,17 @@ struct interpreter {
                 if (ch < '0' || ch > '9') { good = false; break; }
                 v = v * 10 + (ch - '0');
             }
-            return make(good, good ? v : 0, good ? "" : std::format("не число: {:?}", s));
+            return make(good, good ? v : 0, good ? "" : cat("не число: ", in_quotes(s)));
         }
         if (n == "is_err" && a.size() == 1 && types.describe(a[0]) == "result") {
             value okf = member(a[0], sym("ok"), where);
             return okf.known() ? value(!okf.as<bool>()) : erase(value(true));
         }
-        fail(std::format("неизвестная функция {}({})", n, [&] {
+        fail(cat("неизвестная функция ", n, "(", [&] {
             std::string s;
             for (uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + types.describe(a[i]);
             return s;
-        }()), where);
+        }(), ")"), where);
     }
 
 #undef TZ_TRY
