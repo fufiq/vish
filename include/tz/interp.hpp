@@ -62,6 +62,12 @@ struct cell_book {
     auto it = cells.find(c);
     return it == cells.end() ? 0 : it->second.second;
   }
+  std::unordered_map<value const *, uint32_t> changed_at; // last disability support (node +1)
+
+  void invalidated(value * c, node_id at) {
+    written(c, true);
+    changed_at[c] = at.value + 1;
+  }
   void written(value * c, bool whole) {
     auto & e = cells[c];
     if(whole) e.second = ++clock;
@@ -144,6 +150,7 @@ struct interpreter {
       std::optional<known_inputs> known = std::nullopt, check_cache * cache = nullptr)
       : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)) {
     sym_intercept = sym("intercept");
+    sym_append = sym("append");
     sym_is_index = sym("is_index");
     globals = new_scope(nullptr);
     array_v a;
@@ -525,6 +532,10 @@ struct interpreter {
     if(!db.is<n_ident>(target)) return;
     value * cell = env->find(db.as<n_ident>(target).name);
     if(!cell || cell->is<thunk_v>()) return;
+    if(cell->is<ref_v>()) { // recording through a link - in the support element
+      cell = cell->as<ref_v>().cell;
+      whole = false;
+    }
     if(!whole) cell->proof = 0;
     book.written(cell, whole);
   }
@@ -601,7 +612,8 @@ struct interpreter {
   }
 
   // The value of the variable; thunk (expr parameter) is calculated when mentioned.
-  flow read(value * cell) {
+  flow read(value * cell, span where = {}) {
+    if(cell->is<ref_v>()) return ok(deref(cell->as<ref_v>(), where));
     if(cell->is<thunk_v>()) {
       thunk_v t = cell->as<thunk_v>();
       if(db.is<n_lambda>(t.expr) && db.as<n_lambda>(t.expr).block)
@@ -745,7 +757,7 @@ struct interpreter {
   flow eval_node(node_id n, n_ident const & x, scope * env, uint32_t) {
     if(value * cell = env->find(x.name)) {
       not_hidden(*cell, x.name, db[n].where);
-      return read(cell);
+      return read(cell, db[n].where);
     }
     if(str(x.name) == "true") return ok(value(true));
     if(str(x.name) == "false") return ok(value(false));
@@ -775,7 +787,7 @@ struct interpreter {
     value last;
     for(uint32_t i = from; i < b.items.size(); ++i) {
       node_id s = b.items[i];
-      if(checking() && db.is<n_var>(s)) {
+      if(checking() && db.is<n_var>(s) && !db.as<n_var>(s).ref) {
         auto const & v = db.as<n_var>(s);
         mark_executed(s); // instruction
         TZ_TRY(init, eval(v.init, inner, frame));
@@ -821,6 +833,7 @@ struct interpreter {
   }
 
   flow eval_node(node_id n, n_var const & v, scope * env, uint32_t frame) {
+    if(v.ref) return declare_ref(n, v, env, frame);
     TZ_TRY(init, eval(v.init, env, frame));
     declare_var(n, v, std::move(init), env);
     return ok();
@@ -1071,6 +1084,11 @@ struct interpreter {
   bool writes_name(node_id n, symbol name) const {
     if(!n || db.is<n_fn>(n)) return false;
     if(db.is<n_hide>(n)) return db.as<n_hide>(n).name == name; // Hide Self - Changing the location of the caller
+    if(db.is<n_var>(n) && db.as<n_var>(n).ref) { // auto&e = name[i] - the entry in e changes the name
+      node_id t = db.as<n_var>(n).init;
+      while(db.is<n_index>(t)) t = db.as<n_index>(t).object;
+      if(db.is<n_ident>(t) && db.as<n_ident>(t).name == name) return true;
+    }
     if(db.is<n_lambda>(n)) { // construction block - part of the code; closure - no
       if(!db.as<n_lambda>(n).block) return false;
       for(node_id pn: db.as<n_lambda>(n).params)
@@ -1724,6 +1742,148 @@ struct interpreter {
     return out;
   }
 
+  // --- references to elements (§12.1, M2c) ---
+  //
+  //
+//  
+// The link is tied to a support - an array buffer. Operations,
+  // Disabled support (append, [[invalidates(xs)]]), change its version; the link with the
+  // old version is "dangerous-dangerous": in parsing - an error (in the way where
+  // disabled), in execution - the exception of invalidated_alias. Recording in other
+  // elements and values of elements - "dangerous-safe", allowed.
+
+  // auto&e = v[i] / place-argument of the variable parameter: reference to the element.
+  std::optional<value> element_ref(node_id place_node, scope * env, uint32_t frame, node_id born) {
+    if(!db.is<n_index>(place_node) || !db.is<n_ident>(db.as<n_index>(place_node).object)) return std::nullopt;
+    auto const & i = db.as<n_index>(place_node);
+    value * cell = env->find(db.as<n_ident>(i.object).name);
+    if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) return std::nullopt;
+    not_hidden(*cell, db.as<n_ident>(i.object).name, db[place_node].where);
+    flow fi = eval(i.index, env, frame);
+    if(!fi.normal()) return std::nullopt;
+    value idx = fi.v;
+    span where = db[place_node].where;
+    ref_v r;
+    r.cell = cell;
+    r.born = born.value + 1;
+    if(!checking()) {
+      if(!cell->is<array_v>()) return std::nullopt;
+      r.index = checked_index(*cell, idx, where);
+      r.gen = cell->as<array_v>().gen;
+      return value(r);
+    }
+    if(!cell->is<array_v>() && !(shape_of(*cell) && shape_of(*cell)->is<array_v>())) return std::nullopt;
+    if(cell->is<array_v>() && idx.known()) r.index = checked_index(*cell, idx, where);
+    else {
+      r.rt_index = true;
+      bool proven_here = index_holds(i, idx, env);
+      note_index(place_node, proven_here);
+      if(!proven_here) record_throw(vm_error_shape("out_of_bounds"));
+    }
+    r.gen = book.version(cell);
+    return value(r);
+  }
+
+  flow declare_ref(node_id n, n_var const & v, scope * env, uint32_t frame) {
+    if(db.is<n_ident>(v.init)) { // auto&a = b is the second name of the same cell.
+      value * cell = env->find(db.as<n_ident>(v.init).name);
+      if(!cell || cell->is<thunk_v>()) fail("auto& — ссылка на переменную или элемент массива", db[v.init].where);
+      not_hidden(*cell, db.as<n_ident>(v.init).name, db[v.init].where);
+      env->alias(v.name, cell);
+      return ok();
+    }
+    auto r = element_ref(v.init, env, frame, n);
+    if(!r) fail("auto& — ссылка на переменную или элемент массива переменной", db[v.init].where);
+    env->declare(v.name, std::move(*r));
+    return ok();
+  }
+
+  void ref_valid(ref_v const & r, span where) {
+    if(checking()) {
+      if(book.version(r.cell) == r.gen) return;
+      diagnostic d("ссылка на элемент использована после инвалидации опоры (опасное-опасное)", where);
+      d.note("ссылка взята здесь", db[node_id(r.born - 1)].where);
+      if(auto it = book.changed_at.find(r.cell); it != book.changed_at.end() && it->second) d.note("опора инвалидирована здесь", db[node_id(it->second - 1)].where);
+      if(!path.empty()) d.note(cat("в продолжении ", path), where);
+      for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+      throw d;
+    }
+    if(!r.cell->is<array_v>() || r.cell->as<array_v>().gen != r.gen)
+      fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+  }
+
+  value deref(ref_v const & r, span where) {
+    ref_valid(r, where);
+    value const & a = *r.cell;
+    if(!r.rt_index && a.is<array_v>()) return a.as<array_v>().get(checked_index(a, value(r.index), where));
+    return element_type(a, where);
+  }
+
+  flow ref_assign(ref_v const & r, std::string_view op, value const & rhs, span where) {
+    ref_valid(r, where);
+    value cur = deref(r, where);
+    value res = op == "=" ? rhs : binary(op.substr(0, 1), cur, rhs, where);
+    if(!r.rt_index && r.cell->is<array_v>()) {
+      if(!checking() || (res.known() && cur.known())) {
+        r.cell->as<array_v>().set(uint32_t(r.index), res);
+        return ok();
+      }
+    }
+    if(!unknown(cur) && !unknown(res) && types.describe(erase(cur)) != types.describe(erase(res)))
+      fail(cat("элемент массива типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)), where);
+    if(r.cell->is<array_v>()) *r.cell = erase(*r.cell); // element on run-time -index changed - array run-time
+    return ok();
+  }
+
+  // append(xs, x) is the growth of the array, the core push; the support xs is disabled.
+  flow append(node_list const & args, scope * env, uint32_t frame, node_id n) {
+    span where = db[n].where;
+    if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("append(массив, значение)", where);
+    value * cell = env->find(db.as<n_ident>(args[0]).name);
+    if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("append: первый аргумент — переменная-массив", where);
+    not_hidden(*cell, db.as<n_ident>(args[0]).name, where);
+    TZ_TRY(x, eval(args[1], env, frame));
+    if(!checking()) {
+      if(!cell->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
+      cell->as<array_v>().push(x);
+      cell->as<array_v>().gen = ++array_gen;
+      return ok();
+    }
+    invalidate(cell, n);
+    value const * shape = shape_of(*cell);
+    if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
+    if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
+      fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(*cell)), where);
+    if(cell->is<array_v>() && x.known()) cell->as<array_v>().push(x);
+    else *cell = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
+    return ok();
+  }
+
+  // The place of disability for the track is in the program code, not inside prelude.
+  void invalidate(value * cell, node_id at) {
+    bool lib = db.prelude && at && db[at].where.source == db[db.prelude].where.source;
+    uint32_t keep = book.changed_at[cell];
+    book.invalidated(cell, at);
+    if(lib && keep) book.changed_at[cell] = keep;
+  }
+
+  // [[invalidates(p)]] - An operation declares that it disables the support of the
+  // parameter p (semantics is an attribute of the library, not a compiler rule).
+  void declared_invalidations(node_id f, node_list const & args, scope * env, uint32_t site) {
+    if(!checking()) return;
+    auto const & fn = db.as<n_fn>(f);
+    for(node_id a: fn.attrs) {
+      if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "invalidates") continue;
+      for(node_id pn: db.as<n_call>(a).args) {
+        if(!db.is<n_ident>(pn)) continue;
+        for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
+          if(db.as<n_param>(fn.params[k]).name == db.as<n_ident>(pn).name && db.is<n_ident>(args[k]))
+            if(value * cell = env->find(db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>())
+              invalidate(cell->is<ref_v>() ? cell->as<ref_v>().cell : cell, node_id(site));
+      }
+    }
+  }
+
   // --- seats (lvalue) ---
 
   value * place(node_id n, scope * env, uint32_t frame) {
@@ -1797,6 +1957,8 @@ struct interpreter {
     if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
       TZ_TRY(rhs, eval(o.args[1], env, frame));
       written(o.args[0], env);
+      if(db.is<n_ident>(o.args[0]))
+        if(value * c = env->find(db.as<n_ident>(o.args[0]).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
       if(!checking() && db.is<n_index>(o.args[0])) { // entry into an element: set, not cell
         auto const & ix = db.as<n_index>(o.args[0]);
         value * arr = place(ix.object, env, frame);
@@ -1828,6 +1990,7 @@ struct interpreter {
       if(op == "=") *target = std::move(rhs);
       else *target = binary(std::string_view(op).substr(0, 1), *target, rhs, where);
       if(pinned) pin(*target, {}, where); // The ct field remains a state during compilation
+      if(target->is<array_v>() && db.is<n_ident>(o.args[0])) target->as<array_v>().gen = ++array_gen; // New buffer - old links are invalid
       return ok();
     }
     TZ_TRY(a, eval(o.args[0], env, frame));
@@ -1999,6 +2162,7 @@ struct interpreter {
         return call_value(fv, c.args, env, frame, where, n.value);
       }
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
+      if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
       if(name == sym_is_index && c.args.size() == 2 && !functions.contains(name))
         if(value const * arr = peek(c.args[1], env)) { // array by name - without a copy
           TZ_TRY(k, eval(c.args[0], env, frame));
@@ -2215,6 +2379,7 @@ struct interpreter {
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
     auto const & fn = db.as<n_fn>(f);
     check_inside(f, site);
+    declared_invalidations(f, args, env, site.node);
     // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
     for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
       if(db.as<n_param>(fn.params[k]).mode == param_mode::own && db.is<n_ident>(args[k]))
@@ -2300,7 +2465,7 @@ struct interpreter {
     for(uint32_t pass = 0;; ++pass) {
       scope * inner = new_scope(globals);
       scope_hold hold{*this, inner};
-      bind_values(fn.params, vals, args, env, inner);
+      bind_values(fn.params, vals, args, env, inner, f);
       if(checking()) active.insert(active_key);
       try {
         std::vector<value> escaped; // "painting": exceptions to instance
@@ -2389,9 +2554,15 @@ struct interpreter {
   }
 
   // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell.
-  void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner) {
+  void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner, node_id f = {}) {
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
+      // array element to variable parameter - reference to element, not copy
+      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && db.is<n_index>(args[i]) && writes_param(f, i))
+        if(auto r = element_ref(args[i], env, 0, args[i])) {
+          inner->declare(p.name, std::move(*r));
+          continue;
+        }
       if(p.mode != param_mode::expr && p.mode != param_mode::own && !vals[i].is<split_v>()) {
         if(value * cell = place_or_null(args[i], env); cell && !cell->is<split_v>()) {
           inner->alias(p.name, cell);
@@ -2763,7 +2934,8 @@ struct interpreter {
   std::vector<fact> facts;
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
-  symbol sym_intercept, sym_is_index; // kernel forms analyzed prior to the calculation of arguments
+  symbol sym_intercept, sym_is_index, sym_append; // kernel forms analyzed prior to the calculation of arguments
+  uint64_t array_gen = 0; // generation of array buffers (performance)
   std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
   std::unordered_map<uint64_t, symbol> op_entities;
   std::unordered_map<uint32_t, bool> assoc_ops;

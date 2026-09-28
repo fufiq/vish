@@ -46,6 +46,7 @@ struct array_v {
     items = src.items;
     int_items = src.int_items;
     float_items = src.float_items;
+    gen = src.gen;
     borrowed = nullptr;
     return *this;
   }
@@ -91,6 +92,7 @@ struct array_v {
   std::vector<int64_t> int_items;
   std::vector<double> float_items;
   array_v const * borrowed = nullptr;
+  uint64_t gen = 0; // Buffer generation: changes with growth and replacement (element references, §12.1)
 };
 
 struct agg_v {
@@ -134,8 +136,19 @@ struct split_v {
   std::vector<value> alts;
 };
 
+// Reference to the array element (§12.1): the support is the array buffer in the
+// cell. Lives only in the auto& variable and in the parameter; when reading, check
+// the generation (execution) or cell version (parsing), then the element.
+struct ref_v {
+  value * cell = nullptr;
+  int64_t index = 0;
+  bool rt_index = false; // The index is known only in runtime (parsing).
+  uint64_t gen = 0; // Buffer generation (execution) / cell version (parsing)
+  uint32_t born = 0; // node where (+1) is taken
+};
+
 struct value {
-  std::variant<unit_v, bool, int64_t, double, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v> v;
+  std::variant<unit_v, bool, int64_t, double, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v, ref_v> v;
   // Proof of meaning (check mode): fact number +1 -
 // , "r - range(xs.size)." A copy of the meaning carries a fact.
   // The new value (i + 1) is not.

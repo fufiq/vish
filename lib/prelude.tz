@@ -58,3 +58,8 @@ for(auto xs, expr body) {
 // catch.
 // intercept выбирает первый блок, чей параметр принимает брошенное значение.
 try(expr body) catch(expr... handlers) => intercept(body, handlers);
+
+// push(xs, x) — рост массива: буфер может переехать, ссылки на элементы
+// недействительны (
+//). Семантика — атрибутом библиотеки.
+[[invalidates(xs)]] push(mut auto xs, auto x) => append(xs, x);

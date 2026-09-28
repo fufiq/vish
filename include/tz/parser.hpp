@@ -549,12 +549,15 @@ struct parser {
       ++k;
     }
     bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
-    if(!typed) return std::nullopt;
+    bool ref = ahead(k).kind == tok::ident && is_op("&", k + 1) && ahead(k + 2).kind == tok::ident && is_op("=", k + 3); // auto& e = v[i]
+    if(!typed && !ref) return std::nullopt;
     uint32_t start = here().where.begin;
     if(is_const) advance();
     n_var v;
     v.is_const = is_const;
+    v.ref = ref;
     v.type = type_expr();
+    if(ref) eat_op("&");
     v.name = ident();
     expect_op("=");
     v.init = expression();

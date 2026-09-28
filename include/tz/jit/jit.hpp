@@ -1041,7 +1041,7 @@ struct jit_codegen {
           continue;
         }
       }
-      if(p.mode == param_mode::out || p.mode == param_mode::mut) throw jit_unsupported{arg, "mut/out не на место"};
+      if(p.mode == param_mode::out || p.mode == param_mode::mut || an.param_written(target, i)) throw jit_unsupported{arg, "изменяемый параметр не на переменную (ссылка на элемент — интерпретатор)"};
       jt t = gen_value(arg);
       if(t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{arg, cat("аргумент типа ", jt_name(t))};
       slot s;
@@ -1100,6 +1100,7 @@ struct jit_codegen {
 
   jt gen(node_id n, n_var const & v) {
     using namespace x64;
+    if(v.ref) throw jit_unsupported{n, "auto& (ссылка на элемент — интерпретатор)"};
     jt t = gen_value(v.init);
     if(t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{n, cat("переменная типа ", jt_name(t))};
     slot s = declare(v.name, t);

@@ -156,7 +156,7 @@ struct printer {
   void print_node(node_id, n_var const & v) {
     if(v.is_const) out += "const ";
     item(v.type);
-    out += cat(" ", str(v.name), " = ");
+    out += cat(v.ref ? "& " : " ", str(v.name), " = ");
     item(v.init);
     out += ';';
   }

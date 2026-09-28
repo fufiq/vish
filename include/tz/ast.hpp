@@ -51,6 +51,7 @@ struct n_var {
   node_id init;
   bool is_const = false;
   bool ct = false; // Compilation field state: struct file { ct bool open = true; }
+  bool ref = false; // auto&e = v[i] - reference to place (§12.1)
 };
 struct n_block {
   node_list items;
