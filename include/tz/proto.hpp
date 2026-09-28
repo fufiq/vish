@@ -89,7 +89,23 @@ struct s_cursor {
 struct s_error {
   std::string text;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update>;
+// Supplement: options for the place (node, piece, offset - the beginning of the typed
+// word); selected - selected. An empty list to hide. The status of the list is in VM,
+// just like the cursor: the client only draws.
+struct s_item {
+  std::string name;
+  std::string kind;
+  std::string detail;
+};
+struct s_complete {
+  uint32_t view;
+  node_id node;
+  uint32_t piece;
+  uint32_t offset;
+  uint32_t selected;
+  std::vector<s_item> items;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete>;
 
 // --- staff ---
 
@@ -177,16 +193,27 @@ std::string describe(auto const & msg) {
   return out + '\n';
 }
 
-// parsing text form: words in the order of fields; missing fields are zeros.
+// parsing text form: words in the order of fields; missing fields - zeros; in the
+// line `\s` - space (space key: `key 1 \s 2` - Ctrl + Space).
 void parse_fields(auto & m, std::vector<std::string_view> const & words) {
   std::size_t at = 1;
   template for(constexpr auto f: fields_of<std::remove_cvref_t<decltype(m)>>()) {
     using F = [:std::meta::type_of(f):];
     if(at < words.size()) {
       auto w = words[at++];
-      if constexpr(std::is_same_v<F, std::string>) m.[:f:] = std::string(w);
-      else if constexpr(std::is_same_v<F, node_id>) m.[:f:] = node_id(uint32_t(std::stoul(std::string(w.substr(w.starts_with('#'))))));
-      else m.[:f:] = F(std::stoull(std::string(w)));
+      if constexpr(std::is_same_v<F, std::string>) {
+        std::string t(w);
+        for(std::size_t k; (k = t.find("\\s")) != std::string::npos;) t.replace(k, 2, " ");
+        m.[:f:] = t;
+      }
+      else {
+        auto digits = w.substr(std::is_same_v<F, node_id> && w.starts_with('#'));
+        uint64_t x = 0;
+        auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), x);
+        if(ec != std::errc{} || end != digits.data() + digits.size()) throw diagnostic(cat("протокол: не число: ", w), {});
+        if constexpr(std::is_same_v<F, node_id>) m.[:f:] = node_id(uint32_t(x));
+        else m.[:f:] = F(x);
+      }
     }
   }
 }

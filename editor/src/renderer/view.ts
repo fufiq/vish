@@ -1,4 +1,5 @@
 import type {
+  Complete,
   Cursor,
   NodeId,
   Update,
@@ -15,6 +16,7 @@ import { tagOf } from './nodes/index';
 export class ViewElement {
   readonly byId = new Map<NodeId, ASTNode>();
   readonly caret = document.createElement('div');
+  readonly popup = document.createElement('ul');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -26,7 +28,9 @@ export class ViewElement {
     for (const n of data.nodes) this.nodes.set(n.id, n);
     this.root = this.#build(data.root);
     this.caret.className = 'tz-caret';
-    host.replaceChildren(this.root, this.caret);
+    this.popup.className = 'tz-complete';
+    this.popup.hidden = true;
+    host.replaceChildren(this.root, this.caret, this.popup);
   }
 
   #build(id: NodeId): ASTNode {
@@ -51,32 +55,70 @@ export class ViewElement {
     const fresh = this.#build(u.node);
     if (!old || old === this.root) {
       this.root = fresh;
-      this.host.replaceChildren(fresh, this.caret);
+      this.host.replaceChildren(fresh, this.caret, this.popup);
       return;
     }
     fresh.slot = old.slot;
     old.replaceWith(fresh);
   }
 
-  // Cursor VM: (node, piece, offset at code points) → symbol rectangle.
-  showCursor(c: Cursor): void {
-    const text =
-      c.node === null ? undefined : this.byId.get(c.node)?.textOf(c.piece);
-    if (!text) {
-      this.caret.hidden = true;
-      return;
-    }
-    const at = utf16Offset(text.data, c.offset);
+  // Place VM (node, piece, offset in code points) → rectangle of the symbol in
+  // the coordinates of the view window.
+  #box(
+    node: NodeId | null,
+    piece: number,
+    offset: number,
+  ): { left: number; top: number; height: number } | undefined {
+    const text = node === null ? undefined : this.byId.get(node)?.textOf(piece);
+    if (!text) return undefined;
+    const at = utf16Offset(text.data, offset);
     const range = document.createRange();
     range.setStart(text, at);
     range.setEnd(text, Math.min(at + 1, text.length));
     const box = range.getBoundingClientRect();
     const origin = this.host.getBoundingClientRect();
-    this.caret.hidden = false;
-    this.caret.style.left = `${String(box.left - origin.left + this.host.scrollLeft)}px`;
-    this.caret.style.top = `${String(box.top - origin.top + this.host.scrollTop)}px`;
+    return {
+      left: box.left - origin.left + this.host.scrollLeft,
+      top: box.top - origin.top + this.host.scrollTop,
+      height: box.height,
+    };
+  }
+
+  // Cadet VM.
+  showCursor(c: Cursor): void {
+    const box = this.#box(c.node, c.piece, c.offset);
+    this.caret.hidden = !box;
+    if (!box) return;
+    this.caret.style.left = `${String(box.left)}px`;
+    this.caret.style.top = `${String(box.top)}px`;
     this.caret.style.height = `${String(box.height)}px`;
     this.caret.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  // The list of additions - under the beginning of the typed word; selected - from VM.
+  showCompletion(m: Complete): void {
+    const box = this.#box(m.node, m.piece, m.offset);
+    this.popup.hidden = m.items.length === 0 || !box;
+    if (this.popup.hidden || !box) return;
+    this.popup.replaceChildren(
+      ...m.items.map((item, i) => {
+        const li = document.createElement('li');
+        li.toggleAttribute('selected', i === m.selected);
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = item.name;
+        const detail = document.createElement('span');
+        detail.className = 'detail';
+        detail.textContent = `${item.detail} ${item.kind}`.trim();
+        li.append(name, detail);
+        return li;
+      }),
+    );
+    this.popup.style.left = `${String(box.left)}px`;
+    this.popup.style.top = `${String(box.top + box.height)}px`;
+    this.popup
+      .querySelector('[selected]')
+      ?.scrollIntoView({ block: 'nearest' });
   }
 
   // Click point → place in the text node (indicator for VM).

@@ -3645,6 +3645,15 @@ struct interpreter {
     if(!frames.empty()) frames.back().rt_effect = true;
   }
 
+  // Built-in, visible program (VM services): name and parameters - for addition in
+  // the editor. The internal ones (stream *, net *, * checked, file *) wrap prelude -
+  // they are not here. New visible built-in over here.
+  static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
+      {"print", "(x)"}, {"read_floats", "(stdin)"}, {"parse_int", "(s)"}, {"range", "(n)"},
+      {"fill", "(n, x)"}, {"text", "(x)"}, {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"},
+      {"emit", "(quote)"}, {"static_level", "(f)"}, {"is_err", "(r)"}, {"zero", "(T)"},
+      {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
+
   value builtin(symbol name, std::vector<value> & a, span where) {
     auto n = str(name);
     if(n == "print") {

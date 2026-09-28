@@ -10,10 +10,13 @@ const api = {
       cb(bytes);
     });
   },
+  // Subscription and question immediately: after rebooting the window, the socket is
+  // already connected, and the main process will answer vm:ready again.
   onReady(cb: () => void): void {
     ipcRenderer.on('vm:ready', () => {
       cb();
     });
+    ipcRenderer.send('vm:ask');
   },
   onStatus(cb: (text: string) => void): void {
     ipcRenderer.on('vm:status', (_e, text: string) => {

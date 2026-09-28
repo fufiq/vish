@@ -1,0 +1,76 @@
+// Supplement (M5, §13.1):
+// 
+// Live list:
+// 
+// ; nothing inserts itself. List status is in VM.
+// program: stats.tz
+open_view module
+// name set - list itself, prefix before subsequence
+pointer 1 @read_floats 0 0
+key 1 End
+key 1 p
+key 1 r
+// expect: курсор:   pr‸
+// expect: complete view=1 node=#
+// expect: selected=0 items=
+// expect: name="print" kind="функция" detail="(x) — VM"
+// expect: name="port" kind="функция" detail="(n)"
+// expect: name="parse_int"
+// arrows with an open list - the choice in VM, the cursor does not move
+key 1 ArrowDown
+// expect: selected=1
+// expect-not: cursor
+key 1 ArrowUp
+key 1 ArrowUp
+// expect: selected=2
+// Enter - Accept: word replaced by selected, list closed
+key 1 ArrowDown
+key 1 Enter
+// expect: курсор:   print‸
+// expect: selected=0 items=⏎update
+// The typed matched the only option - there is nothing to show
+key 1 ;
+key 1 m
+key 1 e
+// expect: name="mean"
+key 1 a
+key 1 n
+// expect: курсор:   mean‸
+// expect: items=⏎
+key 1 ;
+// expect-not: complete
+// semicolon after print - an empty call becomes a print instruction.
+// expect: print;⏎  mean;⏎
+// Ctrl+Space without a word - everything visible: first near (announced in the block to
+// the place), then module, prelude, built-in VM
+key 1 \s 2
+// expect: items=⏎  name="xs" kind="переменная"
+// expect: name="sum_sq" kind="функция" detail="(xs)"
+// expect: name="while" kind="функция" detail="(c, body)"
+// expect: name="read_floats" kind="функция" detail="(stdin) — VM"
+key 1 Escape
+// expect: items=⏎
+// cursor movement closes the list
+key 1 \s 2
+key 1 ArrowLeft
+// expect: selected=0 items=⏎
+// expect: cursor
+// c functions: parameter and declared to the place; parameter of the block of construction for
+pointer 1 @f64 0 0
+key 1 \s 2
+// expect: items=⏎  name="s" kind="переменная"
+// expect: name="xs" kind="параметр"
+key 1 Escape
+pointer 1 @sq:3 0 0
+key 1 \s 2
+// expect: items=⏎  name="x" kind="параметр" detail="блок конструкции"
+key 1 Escape
+// post-sitting
+pointer 1 @0.0 0 0
+key 1 \s 2
+// expect: items=⏎  name="xs" kind="параметр"
+// expect-not: name="s" kind="переменная"
+key 1 Escape
+// in line and number - is not supplemented
+key 1 7
+// expect-not: complete

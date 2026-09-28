@@ -94,6 +94,44 @@ describe('представление', () => {
     expect(v.byId.get(11)?.slot).toBe('c11');
   });
 
+  it('список дополнения: пункты и выбранный — как прислала VM', () => {
+    // In jsdom there is no layout - rectangle of space zero
+    Range.prototype.getBoundingClientRect = () => new DOMRect();
+    Element.prototype.scrollIntoView = () => undefined;
+    const host = document.createElement('div');
+    const v = new ViewElement(host, view);
+    const item = (name: string) => ({
+      type: 's_item' as const,
+      name,
+      kind: 'функция',
+      detail: '(x)',
+    });
+    v.showCompletion({
+      type: 's_complete',
+      view: 1,
+      node: 13,
+      piece: 0,
+      offset: 0,
+      selected: 1,
+      items: [item('print'), item('port')],
+    });
+    expect(v.popup.hidden).toBe(false);
+    expect(
+      [...v.popup.children].map((li) => li.hasAttribute('selected')),
+    ).toEqual([false, true]);
+    expect(v.popup.children.item(1)?.textContent).toBe('port(x) функция');
+    v.showCompletion({
+      type: 's_complete',
+      view: 1,
+      node: 13,
+      piece: 0,
+      offset: 0,
+      selected: 0,
+      items: [],
+    });
+    expect(v.popup.hidden).toBe(true);
+  });
+
   it('смещения: кодовые точки ↔ UTF-16', () => {
     expect(codePoints('при🙂')).toBe(4);
     expect(utf16Offset('при🙂x', 4)).toBe(5);

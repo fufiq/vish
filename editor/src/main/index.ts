@@ -97,6 +97,10 @@ async function start(): Promise<void> {
   toWindow('vm:ready');
 }
 
+ipcMain.on('vm:ask', () => {
+  if (socket && !socket.destroyed && !socket.connecting) toWindow('vm:ready');
+});
+
 ipcMain.on('vm:send', (_e, bytes: Uint8Array) => {
   socket?.write(bytes);
 });

@@ -36,6 +36,15 @@ describe('живая VM', () => {
     expect(fields('s_view')).toEqual(['view', 'root', 'revision', 'nodes']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
     expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);
+    expect(fields('s_complete')).toEqual([
+      'view',
+      'node',
+      'piece',
+      'offset',
+      'selected',
+      'items',
+    ]);
+    expect(fields('s_item')).toEqual(['name', 'kind', 'detail']);
     expect(fields('s_cursor')).toEqual(['view', 'node', 'piece', 'offset']);
     expect(fields('c_key')).toEqual(['view', 'key', 'mods']);
     expect(fields('c_pointer')).toEqual(['view', 'node', 'piece', 'offset']);
@@ -85,7 +94,8 @@ describe('живая VM', () => {
       for (const key of ['y', '=', '2', ';']) {
         c.write(encodeClient({ type: 'c_key', view: 1, key, mods: 0 }));
       }
-      for (let i = 0; i < 100 && got.length < 4 + 4 * 2; ++i) {
+      const updates = () => got.filter((m) => m.type === 's_update').length;
+      for (let i = 0; i < 100 && updates() < 4; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
       const nodes = new Map(view.nodes.map((n) => [n.id, n]));
@@ -96,7 +106,8 @@ describe('живая VM', () => {
         'main() {\n  y = 2;\n  s = "привет, мир";\n  print(s);\n}\n',
       );
       // cursor - immediately after `;` : before translating a line in a piece of ";\n" block
-      const typed = got.at(-1);
+      await new Promise((r) => setTimeout(r, 30)); // tail: cursor, addition
+      const typed = got.filter((m) => m.type === 's_cursor').at(-1);
       const kids =
         typed?.type === 's_cursor' && typed.node !== null
           ? nodes.get(typed.node)

@@ -81,7 +81,25 @@ export interface ServerError {
   type: 's_error';
   text: string;
 }
-export type ServerMsg = ServerHello | View | Cursor | ServerError | Update;
+// Supplement: options for the beginning of the typed word; selected - selected;
+// an empty list - hide. List status is in VM.
+export interface CompletionItem {
+  type: 's_item';
+  name: string;
+  kind: string;
+  detail: string;
+}
+export interface Complete {
+  type: 's_complete';
+  view: number;
+  node: NodeId | null;
+  piece: number;
+  offset: number;
+  selected: number;
+  items: CompletionItem[];
+}
+export type ServerMsg =
+  ServerHello | View | Cursor | ServerError | Update | Complete;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

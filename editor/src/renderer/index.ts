@@ -52,6 +52,9 @@ function receive(m: ServerMsg): void {
     case 's_cursor':
       view?.showCursor(m);
       return;
+    case 's_complete':
+      view?.showCompletion(m);
+      return;
     case 's_error':
       statusLine.textContent = `VM: ${m.text}`;
       return;

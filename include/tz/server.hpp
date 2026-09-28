@@ -8,6 +8,7 @@
 #pragma once
 
 #include "proto.hpp"
+#include "complete.hpp"
 #include "parser.hpp"
 #include "session.hpp"
 
@@ -33,6 +34,11 @@ struct editor_view {
   std::vector<std::pair<uint32_t, uint32_t>> range; // places node [beginning, end] - by layout number
   std::vector<uint32_t> at; // node_id layout number (~0 is not in projection)
   uint32_t cursor = 0;
+  // Supplement: is open, options selected, the beginning of the typed word
+  bool completing = false;
+  std::vector<completion_item> items;
+  uint32_t selected = 0;
+  uint32_t word_begin = 0;
 
   uint32_t layout_of(node_id n) const { return n.value < at.size() ? at[n.value] : ~uint32_t{0}; }
   std::string_view text_of(std::pair<uint32_t, uint32_t> r) const {
@@ -230,26 +236,85 @@ struct editor_server {
     if(editor_view * v = find(p, m.view)) v->root = {};
   }
 
-  // The keys interpret the view: for now - the movement of the cursor on the text projection.
+  // The keys interpret the view: with an open addition - a list (arrows, Enter -
+  // accept, Escape - close), otherwise the movement of the cursor and input.
   void handle(peer & p, proto::c_key const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    if(v->completing && !v->items.empty()) {
+      if(m.key == "ArrowDown" || m.key == "ArrowUp") {
+        uint32_t n = uint32_t(v->items.size());
+        v->selected = (v->selected + (m.key == "ArrowDown" ? 1 : n - 1)) % n;
+        return send_completion(p, *v);
+      }
+      if(m.key == "Enter") { // Accept: the typed word is replaced by the selected name
+        std::string name = v->items[v->selected].name;
+        close_completion(p, *v);
+        return edit(*v, v->word_begin, v->cursor, name);
+      }
+      if(m.key == "Escape") return close_completion(p, *v);
+    }
+    if(m.key == " " && (m.mods & mod_ctrl)) return complete(p, *v, true);
     if(m.key == "ArrowRight") {
       if(v->cursor + 1 < v->places.size()) ++v->cursor;
     } else if(m.key == "ArrowLeft") {
       if(v->cursor > 0) --v->cursor;
     } else if(m.key == "Home" || m.key == "End") {
       v->cursor = line_edge(*v, m.key == "End");
-    } else if(m.key == "Backspace") {
-      if(v->cursor > 0) return edit(*v, v->cursor - 1, v->cursor, "");
-    } else if(m.key == "Delete") {
-      if(v->cursor + 1 < v->places.size()) return edit(*v, v->cursor, v->cursor + 1, "");
+    } else if(m.key == "Escape") {
+    } else if(m.key == "Backspace" && v->cursor > 0) {
+      edit(*v, v->cursor - 1, v->cursor, "");
+      return complete(p, *v, false);
+    } else if(m.key == "Delete" && v->cursor + 1 < v->places.size()) {
+      close_completion(p, *v);
+      return edit(*v, v->cursor, v->cursor + 1, "");
+    } else if(m.key == "Backspace" || m.key == "Delete") { // edge of the text - nothing
     } else if(m.key == "Enter") {
       return edit(*v, v->cursor, v->cursor, "\n");
     } else if(code_points(m.key) == 1 && !(m.mods & (mod_ctrl | mod_alt | mod_meta))) {
-      return edit(*v, v->cursor, v->cursor, m.key);
+      edit(*v, v->cursor, v->cursor, m.key);
+      return complete(p, *v, false);
     } else return send(p, proto::s_error{cat("клавиша не обработана: ", m.key)});
+    close_completion(p, *v);
     send_cursor(p, *v);
+  }
+
+  // --- complement ---
+
+  static bool ident_char(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+  // Live addition to the word in front of the cursor; forced (Ctrl + Space) - and without a word.
+  void complete(peer & p, editor_view & v, bool forced) {
+    uint32_t b = v.cursor;
+    while(b > 0 && ident_char(v.lead[b - 1])) --b;
+    std::string word;
+    for(uint32_t k = b; k < v.cursor; ++k) word += v.lead[k];
+    bool number = !word.empty() && word[0] >= '0' && word[0] <= '9';
+    uint32_t place = b < v.cursor ? b : (v.cursor > 0 ? v.cursor - 1 : v.cursor);
+    node_id at = v.places.empty() ? node_id{} : v.places[place].node;
+    if(number || (!forced && word.empty()) || session.db.is<n_str>(at)) return close_completion(p, v);
+    auto items = filter_completions(context_identifiers(session.db, at), word);
+    // The only option that matches the typed one is to show nothing.
+    if(items.empty() || (items.size() == 1 && items[0].name == word)) return close_completion(p, v);
+    v.items = std::move(items);
+    v.selected = 0;
+    v.word_begin = b;
+    v.completing = true;
+    send_completion(p, v);
+  }
+
+  void close_completion(peer & p, editor_view & v) {
+    if(!v.completing) return;
+    v.completing = false;
+    v.items.clear();
+    send_completion(p, v);
+  }
+
+  void send_completion(peer & p, editor_view const & v) {
+    caret c = v.word_begin < v.places.size() ? v.places[v.word_begin] : caret{};
+    proto::s_complete out{v.id, c.node, c.piece, c.offset, v.selected, {}};
+    for(auto const & x: v.items) out.items.push_back({x.name, x.kind, x.detail});
+    send(p, out);
   }
 
   static constexpr uint32_t mod_ctrl = 2, mod_alt = 4, mod_meta = 8;
@@ -340,6 +405,7 @@ struct editor_server {
       else if(c >= b.r.first) c = r.first + align(edited, ch.map(c - b.r.first), now);
       v.cursor = std::min<uint32_t>(c, uint32_t(v.places.size() - 1));
       send(*b.p, proto::s_update{v.id, session.db.revision, target, subtree(v, target)});
+      if(&v != &av) close_completion(*b.p, v); // crossword
       send_cursor(*b.p, v);
     }
   }
@@ -372,6 +438,7 @@ struct editor_server {
       if(c.node != m.node || c.piece != m.piece) continue;
       if(c.offset == m.offset || (m.offset && c.offset + 1 == m.offset && (k + 1 == v->places.size() || v->places[k + 1].node != c.node || v->places[k + 1].piece != c.piece))) {
         v->cursor = c.offset == m.offset ? k : k + 1;
+        close_completion(p, *v);
         return send_cursor(p, *v);
       }
     }

@@ -1,5 +1,8 @@
 :root {
   color-scheme: light dark;
+  --tz-popup: #f1eee8;
+  --tz-selected: #e2dccf;
+  --tz-detail: #8a847c;
   --tz-bg: #fbfaf7;
   --tz-fg: #1f1d1a;
   --tz-syntax: #6b6660;
@@ -13,6 +16,9 @@
     --tz-syntax: #9a948a;
     --tz-caret: #fb923c;
     --tz-status: #7d776e;
+    --tz-popup: #262422;
+    --tz-selected: #3a3631;
+    --tz-detail: #8f887e;
   }
 }
 html,
@@ -29,6 +35,12 @@ body {
     14px/1.5 'JetBrains Mono',
     'Fira Code',
     monospace;
+  /* проекция показывает настоящий текст: `=>` — два символа, не лигатура;
+     после `font:` — сокращение сбрасывает font-variant-* */
+  font-variant-ligatures: none;
+  font-feature-settings:
+    'calt' 0,
+    'liga' 0;
 }
 #app {
   position: relative;
@@ -54,4 +66,32 @@ body {
 [noted] {
   text-decoration: wavy underline var(--tz-caret);
   text-underline-offset: 3px;
+}
+.tz-complete {
+  position: absolute;
+  margin: 2px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  min-width: 220px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--tz-popup);
+  border: 1px solid color-mix(in srgb, var(--tz-fg) 14%, transparent);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.25);
+  white-space: nowrap;
+  z-index: 1;
+}
+.tz-complete li {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 1px 10px;
+}
+.tz-complete li[selected] {
+  background: var(--tz-selected);
+}
+.tz-complete .detail {
+  color: var(--tz-detail);
+  font-size: 12px;
 }

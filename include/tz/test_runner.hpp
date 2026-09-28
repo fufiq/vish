@@ -90,9 +90,9 @@ struct test_runner {
 
   // Scenario of the VM session: commands and after each waiting for its conclusion.
   // // program: file.tz program (relative to script directory)
-  // // expect: substring // expect-not: substring Script .wire - the same through the
-  // editor's protocol: the line is the client's message in text form, the output is the
-  // VM answers that passed through the real socket.
+  // // expect: substring // expect-not: substring (ой - translation of a line) Scenario .wire - the same through
+  // the protocol of the editor (@ substring[:N] - node): the line is the message of the client in text form, the
+  // output is the answers of VM, passed through this socket.
   std::string run_session(std::filesystem::path const & path) {
     os::mapped_file text(path.string());
     std::vector<std::string> lines;
@@ -128,14 +128,14 @@ struct test_runner {
         continue;
       }
       if(l.starts_with("// expect:")) {
-        auto want = std::string_view(l).substr(10);
-        while(want.starts_with(' ')) want.remove_prefix(1);
+        auto want_line = lines_joined(std::string_view(l).substr(10));
+        std::string_view want = want_line;
         if(!last.contains(want)) why += cat("    строка ", i + 1, ": нет ", in_quotes(want), " в выводе:\n", last);
         continue;
       }
       if(l.starts_with("// expect-not:")) {
-        auto bad = std::string_view(l).substr(14);
-        while(bad.starts_with(' ')) bad.remove_prefix(1);
+        auto bad_line = lines_joined(std::string_view(l).substr(14));
+        std::string_view bad = bad_line;
         if(last.contains(bad)) why += cat("    строка ", i + 1, ": лишнее ", in_quotes(bad), " в выводе:\n", last);
         continue;
       }
@@ -143,7 +143,12 @@ struct test_runner {
       if(wire) {
         bool two = l.starts_with("[2] ");
         wire_client & who = two ? second : client;
-        last = who.exchange(*server, two ? l.substr(4) : l);
+        try {
+          last = who.exchange(*server, two ? l.substr(4) : l);
+        } catch(diagnostic const & d) {
+          why += cat("    строка ", i + 1, ": ", d.what(), "\n");
+          continue;
+        }
         // Answers sent to another client (one state for all)
         wire_client & other = two ? client : second;
         if(other.sent) {
@@ -164,6 +169,15 @@ struct test_runner {
     if(wire && client.fd >= 0) os::close_fd(client.fd);
     if(wire && second.fd >= 0) os::close_fd(second.fd);
     return why;
+  }
+
+  // Waiting for the script: without leading spaces; е - translation of the
+  // output line (\n inside quotation marks - shielding in the output itself).
+  static std::string lines_joined(std::string_view s) {
+    while(s.starts_with(' ')) s.remove_prefix(1);
+    std::string out(s);
+    for(std::size_t k; (k = out.find("⏎")) != std::string::npos;) out.replace(k, std::string_view("⏎").size(), "\n");
+    return out;
   }
 
   // The protocol client is in the same process: writes a frame at its end of a pair of
@@ -189,14 +203,23 @@ struct test_runner {
           out += w;
           continue;
         }
-        // only node current projection (from root, in order of text)
+        // only node current projection (from root, in order of text); @text:N
+        // is the Nth such node
         auto want = w.substr(1);
+        uint32_t nth = 1;
+        if(auto colon = want.rfind(':'); colon != std::string_view::npos && colon + 1 < want.size() && want[colon + 1] >= '1' && want[colon + 1] <= '9') {
+          std::from_chars(want.data() + colon + 1, want.data() + want.size(), nth);
+          want = want.substr(0, colon);
+        }
         std::string found = "#?";
         auto rec = [&](auto && self, node_id n) -> void {
           auto const * x = node(n);
           if(!x || found != "#?") return;
           for(auto const & pc: x->pieces)
-            if(auto const * t = std::get_if<std::string>(&pc); t && t->contains(want)) found = cat("#", n.value);
+            if(auto const * t = std::get_if<std::string>(&pc); t && t->contains(want)) {
+              if(--nth == 0) found = cat("#", n.value);
+              break;
+            }
           for(auto const & pc: x->pieces)
             if(auto const * c = std::get_if<node_id>(&pc)) self(self, *c);
         };
