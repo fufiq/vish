@@ -51,7 +51,7 @@ struct test_runner {
   }
   struct expect {
     std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_lacks, check_errors;
-    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, unknown;
+    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, unknown;
     bool fmt_stable = false;
     bool store_roundtrip = false;
   };
@@ -75,7 +75,7 @@ struct test_runner {
       std::vector<std::string> args_line;
       if(take("args:", args_line)) {
         for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
-      } else if(take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled)) {
+      } else if(take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats)) {
       } else if(body.starts_with("fmt-stable")) {
         e.fmt_stable = true;
       } else if(body.starts_with("store-roundtrip")) {
@@ -186,6 +186,8 @@ struct test_runner {
       }
       auto first_loc = [](std::string const & t) { return t.substr(0, t.find(": ошибка")); };
       if(out3 != out) why += cat("    JIT: вывод отличается: ", in_quotes(out3), " против ", in_quotes(out), "\n", jit.stats());
+      for(auto & want: e.jit_stats)
+        if(!jit.stats().contains(want)) why += cat("    нет в статистике JIT: ", in_quotes(want), "\n", jit.stats());
       for(auto & fn: e.jit_compiled)
         if(!jit.stats().contains(cat("jit  ", fn, "("))) why += cat("    JIT не скомпилировал ", fn, ":\n", jit.stats());
       if(first_loc(err3) != first_loc(errors) && !(errors.empty() && err3.empty()))

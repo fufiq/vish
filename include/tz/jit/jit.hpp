@@ -26,10 +26,14 @@ namespace tz {
 // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // clang-format off
-enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4 };
+enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4, thrown = 5 };
 // clang-format on
 uint64_t jit_fault = 0;
 uint64_t jit_fault_node = 0;
+// The exception that comes out of machine code is the "second way"
+// value and its type.
+uint64_t jit_thrown = 0;
+uint64_t jit_thrown_type = 0; // jt
 
 // Pointer to a dense array buffer of the desired layout; nullptr - layout is not the
 // same (deoptimization: the interpreter will perform).
@@ -98,6 +102,7 @@ struct jit_fn {
   std::map<uint32_t, uint64_t> deps; // revision of functions included in the code
   std::size_t bytes = 0; // size
   uint32_t unchecked = 0; // indexation without border checks (proven by parsing)
+  uint32_t jumps = 0; // throw that became a transition to catch (static exceptions)
 };
 
 struct jit_unsupported {
@@ -129,7 +134,7 @@ struct jit_engine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", "\n");
+      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -223,6 +228,7 @@ struct jit_codegen {
     code.patch32(frame_patch, int32_t((uint32_t(slots) * 8 + 15) & ~15u));
     out.bytes = code.size();
     out.unchecked = bce;
+    out.jumps = throw_jumps;
     out.code = code.finalize();
     out.entry = out.code.entry;
     out.ok = true;
@@ -258,7 +264,27 @@ struct jit_codegen {
     x64::label at;
     jit_fault_kind kind;
     node_id node;
+    x64::label * to = nullptr; // VM error inside try: transition to catch
+    uint32_t pop = 0; // ... taking the temporary off the stack
   };
+
+  // The handler catch in machine code.
+  struct catch_info {
+    std::string type; // empty - any (base)
+    x64::label * at;
+    slot var; // where the throw puts the value
+    bool binds = false;
+  };
+  struct try_frame {
+    std::vector<catch_info> catches;
+    uint32_t depth;
+  };
+
+  static std::string_view vm_type(jit_fault_kind k) {
+    return k == jit_fault_kind::bounds ? "out_of_bounds" : k == jit_fault_kind::div_zero ? "div_by_zero"
+        : k == jit_fault_kind::require                                                   ? "require_failed"
+                                                                                         : "";
+  }
 
   static bool is_array(jt t) { return t == jt::arr_i64 || t == jt::arr_f64; }
 
@@ -413,6 +439,15 @@ struct jit_codegen {
   }
 
   x64::label & fault(jit_fault_kind k, node_id n) {
+    // VM error inside try with a suitable catch - go there (the object of error is the
+    // aggregate, in the machine code it is not: catch should not use it)
+    for(auto t = tries.rbegin(); t != tries.rend(); ++t)
+      for(auto & c: t->catches)
+        if(c.type.empty() || c.type == vm_type(k)) {
+          if(c.binds) throw jit_unsupported{n, "catch использует объект ошибки VM"};
+          stubs.push_back(stub{{}, k, n, c.at, depth - t->depth});
+          return stubs.back().at;
+        }
     stubs.push_back(stub{{}, k, n});
     return stubs.back().at;
   }
@@ -420,6 +455,11 @@ struct jit_codegen {
   void emit_stub(stub & st) {
     using namespace x64;
     code.bind(st.at);
+    if(st.to) {
+      if(st.pop) code.add_rsp(int32_t(8 * st.pop));
+      code.jmp(*st.to);
+      return;
+    }
     code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault));
     code.store_imm32(rax, 0, int32_t(st.kind));
     code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault_node));
@@ -896,6 +936,7 @@ struct jit_codegen {
       if(t == jt::other || t == jt::unit) throw jit_unsupported{a, "тип аргумента"};
       types.push_back(t);
     }
+    if(!tries.empty()) throw jit_unsupported{n, "настоящий вызов внутри try (M2a: только встраивание)"};
     jit_fn * callee = target == fn ? &out : eng.get(target, types);
     if(target == fn && types != out.params) callee = eng.get(target, types);
     if(!callee || (callee != &out && !callee->ok))
@@ -1126,6 +1167,104 @@ struct jit_codegen {
     return jt::unit;
   }
 
+  // --- exceptions (§8.1 ) ---
+  //
+  // 
+// The type of abandoned is known statically.
+  // So catch is selected when compiling: throw = write value + jmp. Not caught in machine
+  // code - output "second way" (jit_thrown), then catches the interpreter.
+  //
+
+  static std::string_view scalar_name(jt t) { return t == jt::i64_ ? "i64" : t == jt::f64_ ? "f64"
+        : t == jt::bool_                                                                   ? "bool"
+                                                                                           : ""; }
+
+  jt gen(node_id n, n_throw const & t) {
+    using namespace x64;
+    jt ty = gen_value(t.value);
+    if(scalar_name(ty).empty()) throw jit_unsupported{n, "throw не скаляра"};
+    for(auto tf = tries.rbegin(); tf != tries.rend(); ++tf)
+      for(auto & c: tf->catches)
+        if(c.type.empty() || c.type == scalar_name(ty)) {
+          if(c.binds) {
+            if(c.var.type != ty) throw jit_unsupported{n, "тип catch"};
+            store_var(c.var);
+          }
+          if(depth > tf->depth) code.add_rsp(int32_t(8 * (depth - tf->depth)));
+          code.jmp(*c.at);
+          ++throw_jumps;
+          return jt::unit;
+        }
+    to_result(ty); // Not caught here: second way out
+    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_thrown));
+    code.store(rcx, 0, rax);
+    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_thrown_type));
+    code.store_imm32(rcx, 0, int32_t(ty));
+    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault_node));
+    code.store_imm32(rcx, 0, int32_t(n.value));
+    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.store_imm32(rcx, 0, int32_t(jit_fault_kind::thrown));
+    code.jmp(epilogue);
+    return jt::unit;
+  }
+
+  jt gen(node_id n, n_try const & t) {
+    using namespace x64;
+    auto const * o = obs(n);
+    jt result = o && o->seen ? jt_of(o->v) : jt::unit;
+    if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип try"};
+    try_frame tf{{}, depth};
+    for(node_id cn: t.catches) {
+      auto const & c = db.as<n_catch>(cn);
+      catch_info ci;
+      ci.type = c.type ? std::string(db.strings.text(db.as<n_ident>(c.type).name)) : std::string();
+      ci.at = &inline_exits.emplace_back();
+      ci.binds = c.name.valid() && db.strings.text(c.name) != "_";
+      if(ci.binds) {
+        jt vt = ci.type == "i64" ? jt::i64_ : ci.type == "f64" ? jt::f64_
+            : ci.type == "bool"                                ? jt::bool_
+                                                               : jt::other;
+        if(vt == jt::other) {
+          // catch(e) without type or catch(агрегат e): the value of a type unknown in
+          // machine code is only valid if the name is not used.
+          uint32_t uses = 0;
+          weigh_uses(c.body, c.name, uses);
+          if(uses) throw jit_unsupported{cn, "catch использует значение, неизвестное машинному коду"};
+          ci.binds = false;
+        } else {
+          ci.var.type = vt;
+          ci.var.off = alloc();
+        }
+      }
+      tf.catches.push_back(ci);
+    }
+    label * end = &inline_exits.emplace_back();
+    tries.push_back(tf);
+    jt b = gen_value(t.body);
+    tries.pop_back();
+    if(b != result && b != jt::unit) throw jit_unsupported{n, "тип тела try"};
+    code.jmp(*end);
+    for(std::size_t k = 0; k < t.catches.size(); ++k) {
+      auto const & c = db.as<n_catch>(t.catches[k]);
+      catch_info const & ci = tf.catches[k];
+      code.bind(*ci.at);
+      scopes.emplace_back();
+      if(ci.binds) scopes.back().push_back({c.name, ci.var});
+      jt cb = gen_value(c.body);
+      pop_scopes(scopes.size() - 1);
+      if(cb != result && cb != jt::unit) throw jit_unsupported{t.catches[k], "тип catch"};
+      code.jmp(*end);
+    }
+    code.bind(*end);
+    return result;
+  }
+
+  void weigh_uses(node_id n, symbol name, uint32_t & uses) const {
+    if(!n) return;
+    if(db.is<n_ident>(n) && db.as<n_ident>(n).name == name) ++uses;
+    db.for_each_child(n, [&](node_id c) { weigh_uses(c, name, uses); });
+  }
+
   jt gen(node_id n, n_ct const & c) { return gen_value(c.body); }
 
   jt gen(node_id n, auto const &) {
@@ -1146,6 +1285,8 @@ struct jit_codegen {
   uint32_t depth = 0;
   uint32_t frame_patch = 0;
   uint32_t fn_base = 0; // first area of the current (built-in) function
+  std::vector<try_frame> tries; // machine-coded
+  uint32_t throw_jumps = 0;
   uint32_t gpr_used = 0, xmm_used = 0; // occupied variable registers (pool bits)
   std::vector<std::pair<int8_t, int32_t>> live_xmm; // f64 in registers: (register, home slot)
   std::vector<std::pair<x64::reg, int32_t>> saved; // saved registers of caller
@@ -1254,6 +1395,15 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   auto fault = jit_fault_kind(jit_fault);
   // No Deoptimizations: Type - Contract for the entire program
 // The mismatch is a VM error.
+  if(fault == jit_fault_kind::thrown) { // Exception by the second way - catches the interpreter
+    node_id at{uint32_t(jit_fault_node)};
+    jit_fault = 0;
+    jt ty = jt(jit_thrown_type);
+    value v = ty == jt::f64_ ? value(std::bit_cast<double>(jit_thrown)) : ty == jt::bool_ ? value(jit_thrown != 0)
+                                                                                          : value(int64_t(jit_thrown));
+    throw_stack = stack;
+    return flow{flow_kind::thr, std::move(v), at.value};
+  }
   if(fault != jit_fault_kind::none) {
     node_id at{uint32_t(jit_fault_node)};
     jit_fault = 0;
