@@ -17,11 +17,11 @@ constexpr std::string_view tzdb_magic = "TZDB0001";
 void save_db(const ast_db& db, node_id root, const std::string& path) {
     writer w;
     for (char c : tzdb_magic) w.put(c);
-    w.put(root.value());
+    w.put(root.value);
     for (const auto& e : db.journal()) w.put(e);
     std::ofstream out(path, std::ios::binary);
     if (!out) throw diagnostic(std::format("не могу записать {}", path), {});
-    out << w.bytes();
+    out << w.bytes;
 }
 
 std::vector<journal_entry> read_journal(const std::string& path, node_id& root) {

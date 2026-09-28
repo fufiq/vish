@@ -18,18 +18,17 @@
 
 namespace tz {
 
-class parser {
-public:
+struct parser {
     // The parser reads a copy of the text stored by the database when importing: tokens and
     // holes refer to it, not to the caller string (which may be temporary).
-    parser(ast_db& db, std::string_view src, std::string label = {}) : db_(db) {
-        source_ = db_.record_import(std::string(src), std::move(label));
-        src_    = db_.source(source_);
+    parser(ast_db& db, std::string_view text, std::string label = {}) : db(db) {
+        source = db.record_import(std::string(text), std::move(label));
+        src    = db.source(source);
         try {
-            toks_ = lexer(src_).run();
+            toks = lexer(src).run();
         } catch (const diagnostic& d) {
-            errors_.push_back(with_source(d));
-            toks_.assign(1, token{});
+            diags.push_back(with_source(d));
+            toks.assign(1, token{});
         }
         match_brackets();
     }
@@ -39,58 +38,56 @@ public:
         n_module  m;
         if (is_word("module")) {
             advance();
-            m.name = db_.strings.intern(dotted_name());
+            m.name = db.strings.intern(dotted_name());
             expect_op(";");
         }
         while (!at_end()) m.items.push_back(recover_statement([&] { return item(); }));
-        auto id = db_.add(std::move(m), {start, here().where.end});
-        db_.link_parents(id);
+        auto id = db.add(std::move(m), {start, here().where.end});
+        db.link_parents(id);
         return id;
     }
 
     // parsing errors with import number in positions.
     std::vector<diagnostic> errors() const {
         std::vector<diagnostic> out;
-        for (auto d : errors_) out.push_back(with_source(d));
+        for (auto d : diags) out.push_back(with_source(d));
         return out;
     }
-
-private:
     // --- Phase 1: paired brackets ---
 
     void match_brackets() {
-        match_.assign(toks_.size(), ~uint32_t{0});
+        match.assign(toks.size(), ~uint32_t{0});
         std::vector<uint32_t> stack;
-        for (uint32_t i = 0; i < toks_.size(); ++i) {
-            if (toks_[i].kind == tok::open) stack.push_back(i);
-            else if (toks_[i].kind == tok::close) {
+        for (uint32_t i = 0; i < toks.size(); ++i) {
+            if (toks[i].kind == tok::open) stack.push_back(i);
+            else if (toks[i].kind == tok::close) {
                 // Unpaired Closing: Remove unclosed openers until suitable so that one lost `(`
                 // does not break the enveloping `{ }`.
-                auto fits = [&](uint32_t o) { return pairs(toks_[o].ch(), toks_[i].ch()); };
+                auto fits = [&](uint32_t o) { return pairs(toks[o].ch(), toks[i].ch()); };
                 if (std::ranges::none_of(stack, fits)) {
-                    errors_.push_back(diagnostic("непарная скобка", toks_[i].where));
+                    diags.push_back(diagnostic("непарная скобка", toks[i].where));
                     continue;
                 }
                 while (!fits(stack.back())) {
-                    errors_.push_back(diagnostic("незакрытая скобка", toks_[stack.back()].where));
+                    diags.push_back(diagnostic("незакрытая скобка", toks[stack.back()].where));
                     stack.pop_back();
                 }
-                match_[stack.back()] = i;
-                match_[i]            = stack.back();
+                match[stack.back()] = i;
+                match[i]            = stack.back();
                 stack.pop_back();
             }
         }
-        for (uint32_t i : stack) errors_.push_back(diagnostic("незакрытая скобка", toks_[i].where));
+        for (uint32_t i : stack) diags.push_back(diagnostic("незакрытая скобка", toks[i].where));
     }
 
     static bool pairs(char o, char c) { return (o == '(' && c == ')') || (o == '[' && c == ']') || (o == '{' && c == '}'); }
 
     // --- navigation ---
 
-    const token& here() const { return toks_[pos_]; }
-    const token& ahead(uint32_t k) const { return toks_[std::min<uint32_t>(pos_ + k, toks_.size() - 1)]; }
+    const token& here() const { return toks[pos]; }
+    const token& ahead(uint32_t k) const { return toks[std::min<uint32_t>(pos + k, toks.size() - 1)]; }
     bool         at_end() const { return here().kind == tok::end; }
-    void         advance() { if (!at_end()) ++pos_; }
+    void         advance() { if (!at_end()) ++pos; }
 
     bool is_word(std::string_view w, uint32_t k = 0) const { return ahead(k).kind == tok::ident && ahead(k).text == w; }
     bool is_open(char c, uint32_t k = 0) const { return ahead(k).kind == tok::open && ahead(k).ch() == c; }
@@ -134,7 +131,7 @@ private:
 
     symbol ident() {
         if (here().kind != tok::ident) throw diagnostic("ожидалось имя", here().where);
-        auto s = db_.strings.intern(here().text);
+        auto s = db.strings.intern(here().text);
         advance();
         return s;
     }
@@ -156,16 +153,16 @@ private:
     // Disassemble one structure; in case of an error - n_hole to the end of the structure
     // (up to `;` at this level of brackets or to the end of the nearest group).
     node_id recover_statement(auto&& f) {
-        uint32_t start_tok = pos_;
+        uint32_t start_tok = pos;
         try {
             return f();
         } catch (const diagnostic& d) {
-            errors_.push_back(d);
-            uint32_t start = toks_[start_tok].where.begin;
-            pos_      = start_tok;
+            diags.push_back(d);
+            uint32_t start = toks[start_tok].where.begin;
+            pos      = start_tok;
             skip_to_statement_end();
-            uint32_t end = toks_[pos_ > 0 ? pos_ - 1 : 0].where.end;
-            return db_.add(n_hole{std::string(src_.substr(start, end - start)), d.what()}, {start, end});
+            uint32_t end = toks[pos > 0 ? pos - 1 : 0].where.end;
+            return db.add(n_hole{std::string(src.substr(start, end - start)), d.what()}, {start, end});
         }
     }
 
@@ -173,10 +170,10 @@ private:
         while (!at_end()) {
             if (here().kind == tok::close) return;             // terminus
             if (here().kind == tok::open) {                    // skip the whole group
-                uint32_t m = match_[pos_];
+                uint32_t m = match[pos];
                 if (m == ~uint32_t{0}) { advance(); continue; }
-                pos_ = m + 1;
-                if (toks_[m].ch() == '}') return;              // block completes the design
+                pos = m + 1;
+                if (toks[m].ch() == '}') return;              // block completes the design
                 continue;
             }
             bool semi = is_op(";");
@@ -205,9 +202,9 @@ private:
         else if (!in_block && ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
         else return std::nullopt;
         // after ) shall be => or {
-        uint32_t close = match_[pos_ + name_at + 1];
+        uint32_t close = match[pos + name_at + 1];
         if (close == ~uint32_t{0}) return std::nullopt;
-        uint32_t after = close + 1 - pos_;
+        uint32_t after = close + 1 - pos;
         if (!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
 
         uint32_t  start = here().where.begin;
@@ -225,7 +222,7 @@ private:
         } else {
             f.body = block();
         }
-        return db_.add(std::move(f), {start, toks_[pos_ - 1].where.end});
+        return db.add(std::move(f), {start, toks[pos - 1].where.end});
     }
 
     static bool is_keyword(std::string_view w) {
@@ -259,16 +256,16 @@ private:
             if (is_op("...")) { eat_op("..."); p.pack = true; }
         }
         p.name = ident();
-        return db_.add(std::move(p), {start, toks_[pos_ - 1].where.end});
+        return db.add(std::move(p), {start, toks[pos - 1].where.end});
     }
 
     node_id type_expr() {
         uint32_t start = here().where.begin;
         if (is_word("auto")) {
             advance();
-            return db_.add(n_auto{}, {start, toks_[pos_ - 1].where.end});
+            return db.add(n_auto{}, {start, toks[pos - 1].where.end});
         }
-        return db_.add(n_ident{ident()}, {start, toks_[pos_ - 1].where.end});
+        return db.add(n_ident{ident()}, {start, toks[pos - 1].where.end});
     }
 
     node_id block() {
@@ -278,15 +275,15 @@ private:
         while (!is_close('}') && !at_end()) {
             node_id s = recover_statement([&] { return statement(); });
             b.items.push_back(s);
-            if (is_close('}') && last_was_value_) b.has_value = true;
+            if (is_close('}') && last_was_value) b.has_value = true;
         }
         expect_close('}');
-        return db_.add(std::move(b), {start, toks_[pos_ - 1].where.end});
+        return db.add(std::move(b), {start, toks[pos - 1].where.end});
     }
 
     // Instructions. last_was_value_ is an expression without `;`.
     node_id statement() {
-        last_was_value_ = false;
+        last_was_value = false;
         uint32_t start       = here().where.begin;
 
         if (auto f = try_fn_decl(true)) return *f;
@@ -298,13 +295,13 @@ private:
             if (is_open('(') && here().glued) {
                 advance();
                 uint32_t t0 = here().where.begin;
-                target = db_.add(n_ident{ident()}, {t0, toks_[pos_ - 1].where.end});
+                target = db.add(n_ident{ident()}, {t0, toks[pos - 1].where.end});
                 expect_close(')');
             }
             node_id v;
             if (!is_op(";") && !is_close('}')) v = expression();
             end_statement();
-            return db_.add(n_return{v, target}, {start, toks_[pos_ - 1].where.end});
+            return db.add(n_return{v, target}, {start, toks[pos - 1].where.end});
         }
         if (is_word("require") && is_open('(', 1)) {
             advance();
@@ -312,11 +309,11 @@ private:
             node_id c = expression();
             expect_close(')');
             end_statement();
-            return db_.add(n_require{c}, {start, toks_[pos_ - 1].where.end});
+            return db.add(n_require{c}, {start, toks[pos - 1].where.end});
         }
         if (is_word("try_compile") && is_open('{', 1)) {
             advance();
-            return db_.add(n_try_compile{block()}, {start, toks_[pos_ - 1].where.end});
+            return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
         }
         if (is_word("for") && is_open('(', 1)) return for_statement();
         if (is_word("while") && is_open('(', 1)) {
@@ -325,20 +322,20 @@ private:
             node_id c = expression();
             expect_close(')');
             node_id body = statement_or_block();
-            return db_.add(n_while{c, body}, {start, toks_[pos_ - 1].where.end});
+            return db.add(n_while{c, body}, {start, toks[pos - 1].where.end});
         }
         if (auto v = try_var_decl()) return *v;
 
         node_id e = expression();
         if (is_op(";")) eat_op(";");
-        else if (is_close('}')) last_was_value_ = true;
+        else if (is_close('}')) last_was_value = true;
         else if (!ends_with_block(e)) throw diagnostic("ожидалось ';'", here().where);
         return e;
     }
 
     bool ends_with_block(node_id e) const {
-        return db_.is<n_if>(e) || db_.is<n_block>(e) || db_.is<n_while>(e) || db_.is<n_for>(e)
-            || (db_.is<n_call>(e) && !db_.as<n_call>(e).args.empty() && db_.is<n_block>(db_.as<n_call>(e).args.back()));
+        return db.is<n_if>(e) || db.is<n_block>(e) || db.is<n_while>(e) || db.is<n_for>(e)
+            || (db.is<n_call>(e) && !db.as<n_call>(e).args.empty() && db.is<n_block>(db.as<n_call>(e).args.back()));
     }
 
     void end_statement() {
@@ -368,7 +365,7 @@ private:
         expect_op("=");
         v.init = expression();
         end_statement();
-        return db_.add(std::move(v), {start, toks_[pos_ - 1].where.end});
+        return db.add(std::move(v), {start, toks[pos - 1].where.end});
     }
 
     node_id for_statement() {
@@ -381,7 +378,7 @@ private:
         node_id range = expression();
         expect_close(')');
         node_id body = statement_or_block();
-        return db_.add(n_for{var, range, body}, {start, toks_[pos_ - 1].where.end});
+        return db.add(n_for{var, range, body}, {start, toks[pos - 1].where.end});
     }
 
     // --- Expression: parsing by priority n ---
@@ -412,10 +409,10 @@ private:
         node_id lhs = unary();
         while (auto b = peek_binop()) {
             if (b->prec < min_prec) break;
-            uint32_t start = db_[lhs].where.begin;
+            uint32_t start = db[lhs].where.begin;
             eat_op(b->op);
             node_id rhs = expression(b->right ? b->prec : b->prec + 1);
-            lhs = db_.add(n_op{db_.strings.intern(b->op), {lhs, rhs}}, {start, db_[rhs].where.end});
+            lhs = db.add(n_op{db.strings.intern(b->op), {lhs, rhs}}, {start, db[rhs].where.end});
         }
         return lhs;
     }
@@ -426,7 +423,7 @@ private:
             if (is_op(op) && !is_op("=>")) {
                 eat_op(op);
                 node_id x = unary();
-                return db_.add(n_op{db_.strings.intern(op), {x}}, {start, db_[x].where.end});
+                return db.add(n_op{db.strings.intern(op), {x}}, {start, db[x].where.end});
             }
         }
         return postfix(primary());
@@ -434,26 +431,26 @@ private:
 
     node_id postfix(node_id e) {
         for (;;) {
-            uint32_t start = db_[e].where.begin;
+            uint32_t start = db[e].where.begin;
             if (is_open('(') && here().glued) {
                 node_list args = call_args();
                 // tail unit: f(x) { ... } - last expr argument (§4.4)
                 if (is_open('{')) args.push_back(block());
-                e = db_.add(n_call{e, std::move(args)}, {start, toks_[pos_ - 1].where.end});
+                e = db.add(n_call{e, std::move(args)}, {start, toks[pos - 1].where.end});
             } else if (is_open('[') && here().glued) {
                 advance();
                 node_id i = expression();
                 expect_close(']');
-                e = db_.add(n_index{e, i}, {start, toks_[pos_ - 1].where.end});
-            } else if (is_open('{') && here().glued && db_.is<n_ident>(e)) {
-                e = db_.add(n_construct{e, brace_items()}, {start, toks_[pos_ - 1].where.end});
+                e = db.add(n_index{e, i}, {start, toks[pos - 1].where.end});
+            } else if (is_open('{') && here().glued && db.is<n_ident>(e)) {
+                e = db.add(n_construct{e, brace_items()}, {start, toks[pos - 1].where.end});
             } else if (is_op(".") && !is_op("..")) {
                 advance();
                 symbol name = ident();
-                e = db_.add(n_member{e, name}, {start, toks_[pos_ - 1].where.end});
+                e = db.add(n_member{e, name}, {start, toks[pos - 1].where.end});
             } else if (is_op("?") && here().glued) {
                 advance();
-                e = db_.add(n_op{db_.strings.intern("?"), {e}}, {start, toks_[pos_ - 1].where.end});
+                e = db.add(n_op{db.strings.intern("?"), {e}}, {start, toks[pos - 1].where.end});
             } else {
                 return e;
             }
@@ -490,37 +487,37 @@ private:
         switch (t.kind) {
         case tok::int_lit: {
             advance();
-            return db_.add(n_int{parse_int(t.text)}, t.where);
+            return db.add(n_int{parse_int(t.text)}, t.where);
         }
         case tok::float_lit: {
             advance();
-            return db_.add(n_float{parse_float(t.text)}, t.where);
+            return db.add(n_float{parse_float(t.text)}, t.where);
         }
         case tok::str_lit: {
             advance();
-            return db_.add(n_str{unescape(t.text)}, t.where);
+            return db.add(n_str{unescape(t.text)}, t.where);
         }
         case tok::ident: {
             if (t.text == "if" && is_open('(', 1)) return if_expression();
             if (t.text == "ct") {
                 advance();
                 node_id body = is_open('{') ? block() : unary();
-                return db_.add(n_ct{body}, {start, toks_[pos_ - 1].where.end});
+                return db.add(n_ct{body}, {start, toks[pos - 1].where.end});
             }
             advance();
-            return db_.add(n_ident{db_.strings.intern(t.text)}, t.where);
+            return db.add(n_ident{db.strings.intern(t.text)}, t.where);
         }
         case tok::open: {
             if (t.ch() == '{') return block();
             if (t.ch() == '(') {
                 // lambda: (parameters) => body
-                uint32_t close = match_[pos_];
-                if (close != ~uint32_t{0} && is_op("=>", close + 1 - pos_)) {
+                uint32_t close = match[pos];
+                if (close != ~uint32_t{0} && is_op("=>", close + 1 - pos)) {
                     n_lambda l;
                     l.params = param_list();
                     eat_op("=>");
                     l.body = is_open('{') ? block() : expression();
-                    return db_.add(std::move(l), {start, toks_[pos_ - 1].where.end});
+                    return db.add(std::move(l), {start, toks[pos - 1].where.end});
                 }
                 advance();
                 node_id e = expression();
@@ -547,7 +544,7 @@ private:
             advance();
             else_ = branch();
         }
-        return db_.add(n_if{c, then_, else_}, {start, toks_[pos_ - 1].where.end});
+        return db.add(n_if{c, then_, else_}, {start, toks[pos - 1].where.end});
     }
 
     // Branch if: Block, nested if or expression/instruction.
@@ -585,21 +582,21 @@ private:
     }
 
     diagnostic with_source(diagnostic d) const {
-        span w   = d.where();
-        w.source = source_;
-        diagnostic out(d.what(), w, d.kind());
-        for (auto f : d.trace()) { f.where.source = source_; out.note(f.what, f.where); }
+        span w   = d.where;
+        w.source = source;
+        diagnostic out(d.what(), w, d.kind);
+        for (auto f : d.trace) { f.where.source = source; out.note(f.what, f.where); }
         return out;
     }
 
-    ast_db&                 db_;
-    uint32_t                     source_ = 0;
-    std::string_view        src_;
-    std::vector<token>      toks_;
-    std::vector<uint32_t>        match_;
-    uint32_t                     pos_ = 0;
-    bool                    last_was_value_ = false;
-    std::vector<diagnostic> errors_;
+    ast_db&                 db;
+    uint32_t                     source = 0;
+    std::string_view        src;
+    std::vector<token>      toks;
+    std::vector<uint32_t>        match;
+    uint32_t                     pos = 0;
+    bool                    last_was_value = false;
+    std::vector<diagnostic> diags;
 };
 
 } // namespace tz

@@ -101,19 +101,18 @@ struct jit_unsupported {
     std::string why;
 };
 
-class jit_engine {
-public:
-    jit_engine(ast_db& db, node_id module) : db_(db), module_(module) {}
+struct jit_engine {
+    jit_engine(ast_db& db, node_id module) : db(db), mod(module) {}
 
     // A compiled instance or nullptr (then an interpreter).
     jit_fn* get(node_id fn, const std::vector<jt>& types) {
-        std::string key = std::format("{}(", fn.value());
+        std::string key = std::format("{}(", fn.value);
         for (jt t : types) key += std::string(jt_name(t)) + ",";
-        auto it = cache_.find(key);
-        if (it != cache_.end() && still_valid(*it->second)) return it->second->ok ? it->second.get() : nullptr;
+        auto it = cache.find(key);
+        if (it != cache.end() && still_valid(*it->second)) return it->second->ok ? it->second.get() : nullptr;
         auto  owned = std::make_unique<jit_fn>();
         auto* f     = owned.get();
-        cache_[key] = std::move(owned);
+        cache[key] = std::move(owned);
         f->params   = types;
         compile(fn, *f);
         return f->ok ? f : nullptr;
@@ -121,17 +120,15 @@ public:
 
     std::string stats() const {
         std::string out;
-        for (const auto& [key, f] : cache_) {
+        for (const auto& [key, f] : cache) {
             node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
-            auto    name = db_.strings.text(db_.as<n_fn>(fn).name);
+            auto    name = db.strings.text(db.as<n_fn>(fn).name);
             if (f->ok) out += std::format("  jit  {}({}) → {} байт машинного кода{}\n", name, types_str(f->params), f->bytes,
                                    f->unchecked ? std::format(", без проверки границ: {}", f->unchecked) : "");
             else out += std::format("  интерпретатор  {}({}): {}\n", name, types_str(f->params), f->reason);
         }
         return out;
     }
-
-private:
     static std::string types_str(const std::vector<jt>& ts) {
         std::string s;
         for (jt t : ts) s += (s.empty() ? "" : ", ") + std::string(jt_name(t));
@@ -140,81 +137,76 @@ private:
 
     bool still_valid(const jit_fn& f) const {
         for (const auto& [node, rev] : f.deps)
-            if (db_.node_revision(node_id(node)) != rev) return false;
+            if (db.node_revision(node_id(node)) != rev) return false;
         return true;
     }
 
     void compile(node_id fn, jit_fn& out);
-
-    friend class jit_codegen;
-    ast_db&                                        db_;
-    node_id                                        module_;
-    std::map<std::string, std::unique_ptr<jit_fn>> cache_;
+    ast_db&                                        db;
+    node_id                                        mod;
+    std::map<std::string, std::unique_ptr<jit_fn>> cache;
 };
 
 // --- code generation one instance ---
 
-class jit_codegen {
-public:
+struct jit_codegen {
     jit_codegen(jit_engine& eng, node_id fn, jit_fn& out, interpreter& analysis)
-        : eng_(eng), db_(eng.db_), fn_(fn), out_(out), an_(analysis) {}
+        : eng(eng), db(eng.db), fn(fn), out(out), an(analysis) {}
 
     void run() {
         using namespace x64;
-        const auto& f = db_.as<n_fn>(fn_);
-        as_.push(rbp);
-        as_.mov(rbp, rsp);
-        as_.sub_rsp(0);
-        frame_patch_ = as_.here() - 4;
+        const auto& f = db.as<n_fn>(fn);
+        code.push(rbp);
+        code.mov(rbp, rsp);
+        code.sub_rsp(0);
+        frame_patch = code.here() - 4;
 
         // parameters: from the array of arguments (rdi) to the frame
-        scopes_.emplace_back();
+        scopes.emplace_back();
         std::vector<std::pair<slot, uint32_t>> arrays;
         for (uint32_t i = 0; i < f.params.size(); ++i) {
-            const auto& p = db_.as<n_param>(f.params[i]);
+            const auto& p = db.as<n_param>(f.params[i]);
             if (p.mode == param_mode::expr || p.mode == param_mode::out || p.mode == param_mode::own)
                 throw jit_unsupported{f.params[i], "режим параметра"};
-            if (!is_array(out_.params[i]) && an_.param_written(fn_, i)) // The scalar is transmitted by the value: there is no return record
+            if (!is_array(out.params[i]) && an.param_written(fn, i)) // The scalar is transmitted by the value: there is no return record
                 throw jit_unsupported{f.params[i], "меняет скалярный параметр (только встраивание)"};
-            slot s = declare(p.name, out_.params[i]);
-            as_.load(rax, rdi, int32_t(8 * i));
-            as_.store(rbp, s.off, rax);
+            slot s = declare(p.name, out.params[i]);
+            code.load(rax, rdi, int32_t(8 * i));
+            code.store(rbp, s.off, rax);
             if (is_array(s.type)) arrays.push_back({s, i});
         }
         // Arrays: dense buffer and size - once at the input (the size in the code does not change)
         for (auto [s, i] : arrays) {
-            as_.load(rdi, rbp, s.off);
-            as_.mov(rsi, uint64_t(s.type == jt::arr_i64 ? 1 : 2));
+            code.load(rdi, rbp, s.off);
+            code.mov(rsi, uint64_t(s.type == jt::arr_i64 ? 1 : 2));
             call_native(reinterpret_cast<void*>(&jit_array_data));
-            as_.test(rax, rax);
-            as_.jcc(e, fault(jit_fault_kind::layout, f.params[i])); // Type parsing guaranteed: we don't get here
-            as_.store(rbp, s.data_off, rax);
-            as_.load(rdi, rbp, s.off);
+            code.test(rax, rax);
+            code.jcc(e, fault(jit_fault_kind::layout, f.params[i])); // Type parsing guaranteed: we don't get here
+            code.store(rbp, s.data_off, rax);
+            code.load(rdi, rbp, s.off);
             call_native(reinterpret_cast<void*>(&jit_array_size));
-            as_.store(rbp, s.size_off, rax);
+            code.store(rbp, s.size_off, rax);
         }
 
-        frames_.push_back({fn_, &epilogue_, out_.result, 0, true});
+        frames.push_back({fn, &epilogue, out.result, 0, true});
         jt body = gen_value(f.body);
-        if (body != out_.result && body != jt::unit)
-            throw jit_unsupported{f.body, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(out_.result))};
+        if (body != out.result && body != jt::unit)
+            throw jit_unsupported{f.body, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(out.result))};
         to_result(body);
 
-        as_.bind(epilogue_);
-        as_.mov(rsp, rbp);
-        as_.pop(rbp);
-        as_.ret();
-        for (auto& st : stubs_) emit_stub(st);
+        code.bind(epilogue);
+        code.mov(rsp, rbp);
+        code.pop(rbp);
+        code.ret();
+        for (auto& st : stubs) emit_stub(st);
 
-        as_.patch32(frame_patch_, int32_t((uint32_t(slots_) * 8 + 15) & ~15u));
-        out_.bytes     = as_.size();
-        out_.unchecked = bce_;
-        out_.code  = as_.finalize();
-        out_.entry = out_.code.entry();
-        out_.ok    = true;
+        code.patch32(frame_patch, int32_t((uint32_t(slots) * 8 + 15) & ~15u));
+        out.bytes     = code.size();
+        out.unchecked = bce;
+        out.code  = code.finalize();
+        out.entry = out.code.entry;
+        out.ok    = true;
     }
-
-private:
     struct slot {
         int32_t     off = 0;
         jt      type = jt::unit;
@@ -247,7 +239,7 @@ private:
     static bool is_array(jt t) { return t == jt::arr_i64 || t == jt::arr_f64; }
 
 
-    int32_t alloc() { return -8 * int32_t(++slots_); }
+    int32_t alloc() { return -8 * int32_t(++slots); }
 
     slot declare(symbol name, jt t) { // The vector of the regions can move
         slot s;
@@ -257,100 +249,100 @@ private:
             s.data_off = alloc();
             s.size_off = alloc();
         }
-        scopes_.back().push_back({name, s});
+        scopes.back().push_back({name, s});
         return s;
     }
 
     // The name in the visible areas of the current function (the built-in function
     // does not see the local names of the caller - only its parameters - alias).
     const slot* find(symbol name) const {
-        for (uint32_t k = uint32_t(scopes_.size()); k-- > fn_base_;)
-            for (auto it = scopes_[k].rbegin(); it != scopes_[k].rend(); ++it)
+        for (uint32_t k = uint32_t(scopes.size()); k-- > fn_base;)
+            for (auto it = scopes[k].rbegin(); it != scopes[k].rend(); ++it)
                 if (it->first == name) return &it->second;
         return nullptr;
     }
 
     // Perform gen in the context of the caller (for the expr parameter): areas and
     // frames that appear after the embedding point are removed at this time.
-    auto in_context(uint32_t ctx, auto&& f) {
-        const context& c = contexts_[ctx];
-        std::vector<std::vector<std::pair<symbol, slot>>> scopes(std::make_move_iterator(scopes_.begin() + c.scopes),
-                                                                 std::make_move_iterator(scopes_.end()));
-        std::vector<frame> frames(frames_.begin() + c.frames, frames_.end());
-        scopes_.resize(c.scopes);
-        frames_.resize(c.frames);
-        uint32_t base = std::exchange(fn_base_, c.fn_base);
-        uint64_t cx   = std::exchange(ctx_, c.ctx);
+    auto in_context(uint32_t index, auto&& f) {
+        const context& c = contexts[index];
+        std::vector<std::vector<std::pair<symbol, slot>>> later_scopes(std::make_move_iterator(scopes.begin() + c.scopes),
+                                                                       std::make_move_iterator(scopes.end()));
+        std::vector<frame> later_frames(frames.begin() + c.frames, frames.end());
+        scopes.resize(c.scopes);
+        frames.resize(c.frames);
+        uint32_t base = std::exchange(fn_base, c.fn_base);
+        uint64_t cx   = std::exchange(ctx, c.ctx);
         auto r   = f();
-        fn_base_ = base;
-        ctx_     = cx;
-        for (auto& sc : scopes) scopes_.push_back(std::move(sc));
-        frames_.insert(frames_.end(), frames.begin(), frames.end());
+        fn_base = base;
+        ctx     = cx;
+        for (auto& sc : later_scopes) scopes.push_back(std::move(sc));
+        frames.insert(frames.end(), later_frames.begin(), later_frames.end());
         return r;
     }
 
     // The variable slot; the expr parameter associated with the name of the caller is its slot.
     const slot* resolve(symbol name) {
         const slot* s = find(name);
-        if (s && s->thunk && db_.is<n_ident>(s->thunk)) {
-            symbol inner = db_.as<n_ident>(s->thunk).name;
+        if (s && s->thunk && db.is<n_ident>(s->thunk)) {
+            symbol inner = db.as<n_ident>(s->thunk).name;
             return in_context(s->ctx, [&] { return resolve(inner); });
         }
         return s;
     }
 
     x64::label& fault(jit_fault_kind k, node_id n) {
-        stubs_.push_back(std::make_unique<stub>(stub{{}, k, n}));
-        return stubs_.back()->at;
+        stubs.push_back(std::make_unique<stub>(stub{{}, k, n}));
+        return stubs.back()->at;
     }
 
     void emit_stub(const std::unique_ptr<stub>& st) {
         using namespace x64;
-        as_.bind(st->at);
-        as_.mov(rax, reinterpret_cast<uint64_t>(&jit_fault));
-        as_.store_imm32(rax, 0, int32_t(st->kind));
-        as_.mov(rax, reinterpret_cast<uint64_t>(&jit_fault_node));
-        as_.store_imm32(rax, 0, int32_t(st->node.value()));
-        as_.mov(rax, uint64_t(0));
-        as_.jmp(epilogue_);
+        code.bind(st->at);
+        code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault));
+        code.store_imm32(rax, 0, int32_t(st->kind));
+        code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault_node));
+        code.store_imm32(rax, 0, int32_t(st->node.value));
+        code.mov(rax, uint64_t(0));
+        code.jmp(epilogue);
     }
 
     // Call runtime; align the stack by 16 before calling.
     void call_native(void* fn) {
         using namespace x64;
-        bool pad = depth_ % 2 != 0;
-        if (pad) as_.sub_rsp(8);
-        as_.mov(rax, reinterpret_cast<uint64_t>(fn));
-        as_.call(rax);
-        if (pad) as_.add_rsp(8);
+        bool pad = depth % 2 != 0;
+        if (pad) code.sub_rsp(8);
+        code.mov(rax, reinterpret_cast<uint64_t>(fn));
+        code.call(rax);
+        if (pad) code.add_rsp(8);
     }
 
     // Result: i64/bool/array - rax, f64 - xmm0. Rax for return.
     void to_result(jt t) {
-        if (t == jt::f64_) as_.movq(x64::rax, x64::xmm0);
+        if (t == jt::f64_) code.movq(x64::rax, x64::xmm0);
     }
 
     void push_result(jt t) {
-        if (t == jt::f64_) as_.movq(x64::rax, x64::xmm0);
-        as_.push(x64::rax);
-        ++depth_;
+        if (t == jt::f64_) code.movq(x64::rax, x64::xmm0);
+        code.push(x64::rax);
+        ++depth;
     }
 
     void pop_to(jt t, bool into_second) {
         using namespace x64;
         // second operand already in rax/xmm0 → transfer to rcx/xmm1, the first from the stack
         if (into_second) {
-            if (t == jt::f64_) as_.movsd(xmm1, xmm0);
-            else as_.mov(rcx, rax);
+            if (t == jt::f64_) code.movsd(xmm1, xmm0);
+            else code.mov(rcx, rax);
         }
-        as_.pop(rax);
-        --depth_;
-        if (t == jt::f64_) as_.movq(xmm0, rax);
+        code.pop(rax);
+        --depth;
+        if (t == jt::f64_) code.movq(xmm0, rax);
     }
 
     // Observation of node in the current embedding context: Each call site has its own
     // copy of the body with its own types and compile-time.
-    const interpreter::observation* obs(node_id n) const { return an_.observed(n, ctx_); }
+    const interpreter::observation* obs(node_id n) const { return an.observed(n, ctx); }
 
     jt type_of(node_id n) const {
         const auto* o = obs(n);
@@ -360,21 +352,21 @@ private:
     // A constant if the value of node at parsing is known and pure ("top").
     bool try_constant(node_id n, jt& t) {
         using namespace x64;
-        if (db_.is<n_var>(n) || db_.is<n_block>(n) || db_.is<n_return>(n) || db_.is<n_for>(n) || db_.is<n_while>(n)) return false;
-        if (db_.is<n_op>(n)) {
-            auto op = db_.strings.text(db_.as<n_op>(n).op);
+        if (db.is<n_var>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_for>(n) || db.is<n_while>(n)) return false;
+        if (db.is<n_op>(n)) {
+            auto op = db.strings.text(db.as<n_op>(n).op);
             if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") return false;
         }
         const auto* o = obs(n);
         if (!o || !o->seen || o->effect || o->diverted || !o->v.known()) return false;
-        if (o->v.is<int64_t>()) { as_.mov(rax, uint64_t(o->v.as<int64_t>())); t = jt::i64_; return true; }
-        if (o->v.is<bool>()) { as_.mov(rax, uint64_t(o->v.as<bool>())); t = jt::bool_; return true; }
+        if (o->v.is<int64_t>()) { code.mov(rax, uint64_t(o->v.as<int64_t>())); t = jt::i64_; return true; }
+        if (o->v.is<bool>()) { code.mov(rax, uint64_t(o->v.as<bool>())); t = jt::bool_; return true; }
         if (o->v.is<double>()) {
             uint64_t bits;
             double x = o->v.as<double>();
             std::memcpy(&bits, &x, 8);
-            as_.mov(rax, bits);
-            as_.movq(xmm0, rax);
+            code.mov(rax, bits);
+            code.movq(xmm0, rax);
             t = jt::f64_;
             return true;
         }
@@ -386,41 +378,41 @@ private:
     jt gen_value(node_id n) {
         jt t;
         if (try_constant(n, t)) return t;
-        return std::visit([&](const auto& k) { return gen(n, k); }, db_[n].kind);
+        return std::visit([&](const auto& k) { return gen(n, k); }, db[n].kind);
     }
 
-    jt gen(node_id, const n_int& x) { as_.mov(x64::rax, uint64_t(x.value)); return jt::i64_; }
+    jt gen(node_id, const n_int& x) { code.mov(x64::rax, uint64_t(x.value)); return jt::i64_; }
 
     jt gen(node_id, const n_float& x) {
         uint64_t bits;
         std::memcpy(&bits, &x.value, 8);
-        as_.mov(x64::rax, bits);
-        as_.movq(x64::xmm0, x64::rax);
+        code.mov(x64::rax, bits);
+        code.movq(x64::xmm0, x64::rax);
         return jt::f64_;
     }
 
     jt gen(node_id n, const n_ident& x) {
         const slot* s = find(x.name);
-        if (!s) throw jit_unsupported{n, std::format("имя {} вне кадра", db_.strings.text(x.name))};
+        if (!s) throw jit_unsupported{n, std::format("имя {} вне кадра", db.strings.text(x.name))};
         if (s->thunk) { // expr parameter: the caller expression is calculated at each mention (§6.1)
             slot th = *s;
             return in_context(th.ctx, [&] { return gen_value(th.thunk); });
         }
-        if (s->type == jt::f64_) as_.movsd_load(x64::xmm0, x64::rbp, s->off);
-        else as_.load(x64::rax, x64::rbp, s->off);
+        if (s->type == jt::f64_) code.movsd_load(x64::xmm0, x64::rbp, s->off);
+        else code.load(x64::rax, x64::rbp, s->off);
         return s->type;
     }
 
     const slot& array_slot(node_id obj) {
-        if (!db_.is<n_ident>(obj)) throw jit_unsupported{obj, "массив не из переменной"};
-        const slot* s = resolve(db_.as<n_ident>(obj).name);
+        if (!db.is<n_ident>(obj)) throw jit_unsupported{obj, "массив не из переменной"};
+        const slot* s = resolve(db.as<n_ident>(obj).name);
         if (!s || !is_array(s->type)) throw jit_unsupported{obj, "не массив"};
         return *s;
     }
 
     jt gen(node_id n, const n_member& m) {
-        if (db_.strings.text(m.name) != "size") throw jit_unsupported{n, "поле"};
-        as_.load(x64::rax, x64::rbp, array_slot(m.object).size_off);
+        if (db.strings.text(m.name) != "size") throw jit_unsupported{n, "поле"};
+        code.load(x64::rax, x64::rbp, array_slot(m.object).size_off);
         return jt::i64_;
     }
 
@@ -429,50 +421,50 @@ private:
     // JIT does not prove itself, but takes language knowledge from parsing.
     void gen_checked_index(const slot& s, node_id index, node_id n) {
         using namespace x64;
-        if (an_.bounds_proven(n)) {
+        if (an.bounds_proven(n)) {
             if (gen_value(index) != jt::i64_) throw jit_unsupported{index, "индекс не i64"};
-            ++bce_;
+            ++bce;
             return;
         }
         if (gen_value(index) != jt::i64_) throw jit_unsupported{index, "индекс не i64"};
-        as_.load(rcx, rbp, s.size_off);
-        as_.cmp(rax, rcx);
-        as_.jcc(ae, fault(jit_fault_kind::bounds, n));
+        code.load(rcx, rbp, s.size_off);
+        code.cmp(rax, rcx);
+        code.jcc(ae, fault(jit_fault_kind::bounds, n));
     }
 
     jt gen(node_id n, const n_index& i) {
         using namespace x64;
         slot s = array_slot(i.object);
         gen_checked_index(s, i.index, n);
-        as_.load(rcx, rbp, s.data_off);
-        if (s.type == jt::arr_f64) { as_.movsd_load_idx(xmm0, rcx, rax); return jt::f64_; }
-        as_.load_idx(rax, rcx, rax);
+        code.load(rcx, rbp, s.data_off);
+        if (s.type == jt::arr_f64) { code.movsd_load_idx(xmm0, rcx, rax); return jt::f64_; }
+        code.load_idx(rax, rcx, rax);
         return jt::i64_;
     }
 
     jt gen(node_id n, const n_op& o) {
         using namespace x64;
-        auto op = db_.strings.text(o.op);
+        auto op = db.strings.text(o.op);
         if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") { gen_assign(n, o, op); return jt::unit; }
         if (o.args.size() == 1) {
             jt t = gen_value(o.args[0]);
-            if (op == "-" && t == jt::i64_) { as_.neg(rax); return t; }
+            if (op == "-" && t == jt::i64_) { code.neg(rax); return t; }
             if (op == "-" && t == jt::f64_) {
-                as_.mov(rax, uint64_t(0x8000000000000000ull));
-                as_.movq(xmm1, rax);
-                as_.xorpd(xmm0, xmm1);
+                code.mov(rax, uint64_t(0x8000000000000000ull));
+                code.movq(xmm1, rax);
+                code.xorpd(xmm0, xmm1);
                 return t;
             }
-            if (op == "!" && t == jt::bool_) { as_.xor_imm8(rax, 1); return t; }
+            if (op == "!" && t == jt::bool_) { code.xor_imm8(rax, 1); return t; }
             throw jit_unsupported{n, std::format("оператор {}", op)};
         }
         if (op == "&&" || op == "||") {
             label done;
             if (gen_value(o.args[0]) != jt::bool_) throw jit_unsupported{n, "логика не над bool"};
-            as_.test(rax, rax);
-            as_.jcc(op == "&&" ? e : ne, done);
+            code.test(rax, rax);
+            code.jcc(op == "&&" ? e : ne, done);
             if (gen_value(o.args[1]) != jt::bool_) throw jit_unsupported{n, "логика не над bool"};
-            as_.bind(done);
+            code.bind(done);
             return jt::bool_;
         }
         jt a = gen_value(o.args[0]);
@@ -487,32 +479,32 @@ private:
     jt binary(node_id n, std::string_view op, jt t) {
         using namespace x64;
         if (t == jt::i64_) {
-            if (op == "+") { as_.add(rax, rcx); return t; }
-            if (op == "-") { as_.sub(rax, rcx); return t; }
-            if (op == "*") { as_.imul(rax, rcx); return t; }
+            if (op == "+") { code.add(rax, rcx); return t; }
+            if (op == "-") { code.sub(rax, rcx); return t; }
+            if (op == "*") { code.imul(rax, rcx); return t; }
             if (op == "/" || op == "%") {
                 label normal, done;
-                as_.test(rcx, rcx);
-                as_.jcc(e, fault(jit_fault_kind::div_zero, n));
-                as_.cmp_imm8(rcx, -1); // INT_MIN / -1 should not fall: modular arithmetic
-                as_.jcc(ne, normal);
-                if (op == "/") as_.neg(rax);
-                else as_.mov(rax, uint64_t(0));
-                as_.jmp(done);
-                as_.bind(normal);
-                as_.cqo();
-                as_.idiv(rcx);
-                if (op == "%") as_.mov(rax, rdx);
-                as_.bind(done);
+                code.test(rcx, rcx);
+                code.jcc(e, fault(jit_fault_kind::div_zero, n));
+                code.cmp_imm8(rcx, -1); // INT_MIN / -1 should not fall: modular arithmetic
+                code.jcc(ne, normal);
+                if (op == "/") code.neg(rax);
+                else code.mov(rax, uint64_t(0));
+                code.jmp(done);
+                code.bind(normal);
+                code.cqo();
+                code.idiv(rcx);
+                if (op == "%") code.mov(rax, rdx);
+                code.bind(done);
                 return t;
             }
             return int_compare(n, op);
         }
         if (t == jt::f64_) {
-            if (op == "+") { as_.addsd(xmm0, xmm1); return t; }
-            if (op == "-") { as_.subsd(xmm0, xmm1); return t; }
-            if (op == "*") { as_.mulsd(xmm0, xmm1); return t; }
-            if (op == "/") { as_.divsd(xmm0, xmm1); return t; }
+            if (op == "+") { code.addsd(xmm0, xmm1); return t; }
+            if (op == "-") { code.subsd(xmm0, xmm1); return t; }
+            if (op == "*") { code.mulsd(xmm0, xmm1); return t; }
+            if (op == "/") { code.divsd(xmm0, xmm1); return t; }
             return float_compare(n, op);
         }
         if (t == jt::bool_ && (op == "==" || op == "!=")) return int_compare(n, op);
@@ -529,9 +521,9 @@ private:
         else if (op == ">") c = g;
         else if (op == ">=") c = ge;
         else throw jit_unsupported{n, std::format("оператор {}", op)};
-        as_.cmp(rax, rcx);
-        as_.setcc(c, rax);
-        as_.movzx_rax_al();
+        code.cmp(rax, rcx);
+        code.setcc(c, rax);
+        code.movzx_rax_al();
         return jt::bool_;
     }
 
@@ -539,29 +531,29 @@ private:
     jt float_compare(node_id n, std::string_view op) {
         using namespace x64;
         if (op == "==" || op == "!=") {
-            as_.ucomisd(xmm0, xmm1);
-            as_.setcc(op == "==" ? e : ne, rax);
-            as_.setcc(op == "==" ? np : p, rcx);
-            if (op == "==") as_.and_al_cl();
-            else as_.or_al_cl();
+            code.ucomisd(xmm0, xmm1);
+            code.setcc(op == "==" ? e : ne, rax);
+            code.setcc(op == "==" ? np : p, rcx);
+            if (op == "==") code.and_al_cl();
+            else code.or_al_cl();
         } else if (op == "<" || op == "<=") {
-            as_.ucomisd(xmm1, xmm0);
-            as_.setcc(op == "<" ? a : ae, rax);
+            code.ucomisd(xmm1, xmm0);
+            code.setcc(op == "<" ? a : ae, rax);
         } else if (op == ">" || op == ">=") {
-            as_.ucomisd(xmm0, xmm1);
-            as_.setcc(op == ">" ? a : ae, rax);
+            code.ucomisd(xmm0, xmm1);
+            code.setcc(op == ">" ? a : ae, rax);
         } else {
             throw jit_unsupported{n, std::format("оператор {}", op)};
         }
-        as_.movzx_rax_al();
+        code.movzx_rax_al();
         return jt::bool_;
     }
 
     void gen_assign(node_id n, const n_op& o, std::string_view op) {
         using namespace x64;
         node_id target = o.args[0];
-        if (db_.is<n_ident>(target)) {
-            const slot* sp = resolve(db_.as<n_ident>(target).name);
+        if (db.is<n_ident>(target)) {
+            const slot* sp = resolve(db.as<n_ident>(target).name);
             if (!sp || sp->thunk || is_array(sp->type)) throw jit_unsupported{target, "присваивание"};
             slot  cell = *sp; // meaning: embedding on the right side can shift areas
             const slot* s = &cell;
@@ -569,47 +561,47 @@ private:
             if (t != s->type) throw jit_unsupported{n, "тип присваивания"};
             if (op != "=") { // The current is the first operand, the right is the second
                 push_result(t);
-                if (t == jt::f64_) as_.movsd_load(xmm0, rbp, s->off);
-                else as_.load(rax, rbp, s->off);
+                if (t == jt::f64_) code.movsd_load(xmm0, rbp, s->off);
+                else code.load(rax, rbp, s->off);
                 pop_second(t);
                 binary(n, op.substr(0, 1), t);
             }
-            if (t == jt::f64_) as_.movsd_store(rbp, s->off, xmm0);
-            else as_.store(rbp, s->off, rax);
+            if (t == jt::f64_) code.movsd_store(rbp, s->off, xmm0);
+            else code.store(rbp, s->off, rax);
             return;
         }
-        if (db_.is<n_index>(target)) {
-            const auto& ix = db_.as<n_index>(target);
+        if (db.is<n_index>(target)) {
+            const auto& ix = db.as<n_index>(target);
             slot        s  = array_slot(ix.object);
             jt          et = s.type == jt::arr_f64 ? jt::f64_ : jt::i64_;
             if (gen_value(o.args[1]) != et) throw jit_unsupported{n, "тип элемента"};
             push_result(et);                        // [rsp+8] - right side (after index)
             gen_checked_index(s, ix.index, target); // rax - index
-            as_.push(rax);                          // [rsp] - index
-            ++depth_;
+            code.push(rax);                          // [rsp] - index
+            ++depth;
             if (op != "=") {
-                as_.load(rcx, rbp, s.data_off);
+                code.load(rcx, rbp, s.data_off);
                 if (et == jt::f64_) {
-                    as_.movsd_load_idx(xmm0, rcx, rax);
-                    as_.load(r8, rsp, 8);
-                    as_.movq(xmm1, r8);
+                    code.movsd_load_idx(xmm0, rcx, rax);
+                    code.load(r8, rsp, 8);
+                    code.movq(xmm1, r8);
                 } else {
-                    as_.load_idx(rax, rcx, rax);
-                    as_.load(rcx, rsp, 8);
+                    code.load_idx(rax, rcx, rax);
+                    code.load(rcx, rsp, 8);
                 }
                 binary(n, op.substr(0, 1), et);
             } else if (et == jt::f64_) {
-                as_.load(rax, rsp, 8);
-                as_.movq(xmm0, rax);
+                code.load(rax, rsp, 8);
+                code.movq(xmm0, rax);
             } else {
-                as_.load(rax, rsp, 8);
+                code.load(rax, rsp, 8);
             }
-            as_.pop(rdx);
-            as_.add_rsp(8);
-            depth_ -= 2;
-            as_.load(rcx, rbp, s.data_off);
-            if (et == jt::f64_) as_.movsd_store_idx(rcx, rdx, xmm0);
-            else as_.store_idx(rcx, rdx, rax);
+            code.pop(rdx);
+            code.add_rsp(8);
+            depth -= 2;
+            code.load(rcx, rbp, s.data_off);
+            if (et == jt::f64_) code.movsd_store_idx(rcx, rdx, xmm0);
+            else code.store_idx(rcx, rdx, rax);
             return;
         }
         throw jit_unsupported{target, "цель присваивания"};
@@ -619,33 +611,33 @@ private:
     void pop_second(jt t) {
         using namespace x64;
         if (t == jt::f64_) {
-            as_.pop(rax);
-            as_.movq(xmm1, rax);
+            code.pop(rax);
+            code.movq(xmm1, rax);
         } else {
-            as_.pop(rcx);
+            code.pop(rcx);
         }
-        --depth_;
+        --depth;
     }
 
     jt gen(node_id n, const n_call& c) {
         using namespace x64;
-        if (!db_.is<n_ident>(c.callee)) throw jit_unsupported{n, "вызов не по имени"};
-        auto name = db_.strings.text(db_.as<n_ident>(c.callee).name);
+        if (!db.is<n_ident>(c.callee)) throw jit_unsupported{n, "вызов не по имени"};
+        auto name = db.strings.text(db.as<n_ident>(c.callee).name);
         if (name == "f64" && c.args.size() == 1) {
             if (gen_value(c.args[0]) != jt::i64_) throw jit_unsupported{n, "f64(не i64)"};
-            as_.cvtsi2sd(xmm0, rax);
+            code.cvtsi2sd(xmm0, rax);
             return jt::f64_;
         }
         if (name == "i64" && c.args.size() == 1) {
             if (gen_value(c.args[0]) != jt::f64_) throw jit_unsupported{n, "i64(не f64)"};
-            as_.cvttsd2si(rax, xmm0);
+            code.cvttsd2si(rax, xmm0);
             return jt::i64_;
         }
         // User function: single candidate by name and arnost, without requiring
         node_id target;
-        for (node_id item : db_.as<n_module>(eng_.module_).items)
-            if (db_.is<n_fn>(item) && db_.strings.text(db_.as<n_fn>(item).name) == name
-                && db_.as<n_fn>(item).params.size() == c.args.size()) {
+        for (node_id item : db.as<n_module>(eng.mod).items)
+            if (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name
+                && db.as<n_fn>(item).params.size() == c.args.size()) {
                 if (target) throw jit_unsupported{n, std::format("перегрузка {} (M1a)", name)};
                 target = item;
             }
@@ -656,66 +648,66 @@ private:
         // 
         // 
         // . Recursion and outline are a real challenge.
-        bool recursive = std::ranges::any_of(frames_, [&](const frame& f) { return f.fn == target; });
-        if (!recursive && !db_.as<n_fn>(target).outline) return inline_call(n, c, target);
+        bool recursive = std::ranges::any_of(frames, [&](const frame& f) { return f.fn == target; });
+        if (!recursive && !db.as<n_fn>(target).outline) return inline_call(n, c, target);
         std::vector<jt> types;
         for (node_id a : c.args) {
             jt t = type_of(a);
             if (t == jt::other || t == jt::unit) throw jit_unsupported{a, "тип аргумента"};
             types.push_back(t);
         }
-        jit_fn* callee = target == fn_ ? &out_ : eng_.get(target, types);
-        if (target == fn_ && types != out_.params) callee = eng_.get(target, types);
-        if (!callee || (callee != &out_ && !callee->ok))
+        jit_fn* callee = target == fn ? &out : eng.get(target, types);
+        if (target == fn && types != out.params) callee = eng.get(target, types);
+        if (!callee || (callee != &out && !callee->ok))
             throw jit_unsupported{n, std::format("{} не компилируется", name)};
-        out_.deps.insert(callee->deps.begin(), callee->deps.end());
+        out.deps.insert(callee->deps.begin(), callee->deps.end());
 
         // arguments - in adjacent frame slots, the address of the first - in rdi
-        uint32_t first = slots_ + 1;
+        uint32_t first = slots + 1;
         for (uint32_t i = 0; i < c.args.size(); ++i) alloc();
         int32_t base = -8 * int32_t(first + c.args.size() - 1);
         for (uint32_t i = 0; i < c.args.size(); ++i) {
             jt t = gen_value(c.args[i]);
             if (is_array(t)) { // the array is transmitted by a pointer to array_v
-                as_.load(rax, rbp, array_slot(c.args[i]).off);
+                code.load(rax, rbp, array_slot(c.args[i]).off);
             }
             to_result(t);
-            as_.store(rbp, base + int32_t(8 * i), rax);
+            code.store(rbp, base + int32_t(8 * i), rax);
         }
-        as_.lea(rdi, rbp, base);
-        bool pad = depth_ % 2 != 0;
-        if (pad) as_.sub_rsp(8);
-        as_.mov(rax, reinterpret_cast<uint64_t>(&callee->entry));
-        as_.call_mem(rax, 0);
-        if (pad) as_.add_rsp(8);
+        code.lea(rdi, rbp, base);
+        bool pad = depth % 2 != 0;
+        if (pad) code.sub_rsp(8);
+        code.mov(rax, reinterpret_cast<uint64_t>(&callee->entry));
+        code.call_mem(rax, 0);
+        if (pad) code.add_rsp(8);
         // Error in the code called - come out, the mark is already
-        as_.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
-        as_.cmp_mem_imm8(rcx, 0, 0);
-        as_.jcc(ne, epilogue_);
-        if (callee->result == jt::f64_) as_.movq(xmm0, rax);
+        code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+        code.cmp_mem_imm8(rcx, 0, 0);
+        code.jcc(ne, epilogue);
+        if (callee->result == jt::f64_) code.movq(xmm0, rax);
         return callee->result;
     }
 
     jt inline_call(node_id n, const n_call& c, node_id target) {
         using namespace x64;
-        const auto& g = db_.as<n_fn>(target);
-        context     at{uint32_t(scopes_.size()), fn_base_, uint32_t(frames_.size()), ctx_};
-        uint32_t         ctx = uint32_t(contexts_.size());
-        contexts_.push_back(at);
+        const auto& g = db.as<n_fn>(target);
+        context     at{uint32_t(scopes.size()), fn_base, uint32_t(frames.size()), ctx};
+        uint32_t    ctx_index = uint32_t(contexts.size());
+        contexts.push_back(at);
         // arguments: place - alias slot, expr - expression with context, other - calculated in your slot
         std::vector<std::pair<symbol, slot>> params;
         for (uint32_t i = 0; i < g.params.size(); ++i) {
-            const auto& p   = db_.as<n_param>(g.params[i]);
+            const auto& p   = db.as<n_param>(g.params[i]);
             node_id     arg = c.args[i];
             if (p.mode == param_mode::expr) {
                 slot s;
                 s.thunk = arg;
-                s.ctx   = ctx;
+                s.ctx   = ctx_index;
                 params.push_back({p.name, s});
                 continue;
             }
-            if (p.mode != param_mode::own && db_.is<n_ident>(arg)) {
-                if (const slot* s = find(db_.as<n_ident>(arg).name)) {
+            if (p.mode != param_mode::own && db.is<n_ident>(arg)) {
+                if (const slot* s = find(db.as<n_ident>(arg).name)) {
                     params.push_back({p.name, *s}); // alias: both reading and writing are caller cells
                     continue;
                 }
@@ -726,28 +718,28 @@ private:
             slot s;
             s.type = t;
             s.off  = alloc();
-            if (t == jt::f64_) as_.movsd_store(rbp, s.off, xmm0);
-            else as_.store(rbp, s.off, rax);
+            if (t == jt::f64_) code.movsd_store(rbp, s.off, xmm0);
+            else code.store(rbp, s.off, rax);
             params.push_back({p.name, s});
         }
         const auto* o      = obs(n);
         jt          result = o && o->seen ? jt_of(o->v) : jt::unit;
         if (result == jt::other || is_array(result)) throw jit_unsupported{n, "тип результата встроенной функции"};
-        out_.deps[target.value()] = db_.node_revision(target);
+        out.deps[target.value] = db.node_revision(target);
 
         auto exit = std::make_unique<label>();
-        scopes_.emplace_back(std::move(params));
-        uint32_t base = std::exchange(fn_base_, uint32_t(scopes_.size() - 1));
-        uint64_t cx   = std::exchange(ctx_, interpreter::inline_context(ctx_, n.value()));
-        frames_.push_back({target, exit.get(), result, depth_, false});
+        scopes.emplace_back(std::move(params));
+        uint32_t base = std::exchange(fn_base, uint32_t(scopes.size() - 1));
+        uint64_t cx   = std::exchange(ctx, interpreter::inline_context(ctx, n.value));
+        frames.push_back({target, exit.get(), result, depth, false});
         jt body = gen_value(g.body);
         if (body != result && body != jt::unit) throw jit_unsupported{n, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(result))};
-        as_.bind(*exit);
-        frames_.pop_back();
-        fn_base_ = base;
-        ctx_     = cx;
-        scopes_.resize(at.scopes);
-        inline_exits_.push_back(std::move(exit));
+        code.bind(*exit);
+        frames.pop_back();
+        fn_base = base;
+        ctx     = cx;
+        scopes.resize(at.scopes);
+        inline_exits.push_back(std::move(exit));
         return result;
     }
 
@@ -755,25 +747,25 @@ private:
         using namespace x64;
         label else_, done;
         if (gen_value(i.cond) != jt::bool_) throw jit_unsupported{i.cond, "условие не bool"};
-        as_.test(rax, rax);
-        as_.jcc(e, else_);
+        code.test(rax, rax);
+        code.jcc(e, else_);
         jt t = gen_value(i.then_);
-        as_.jmp(done);
-        as_.bind(else_);
+        code.jmp(done);
+        code.bind(else_);
         jt u = i.else_ ? gen_value(i.else_) : jt::unit;
-        as_.bind(done);
+        code.bind(done);
         if (t != u && t != jt::unit && u != jt::unit) throw jit_unsupported{n, "ветки разных типов (расщепление)"};
         return t == u ? t : jt::unit;
     }
 
     jt gen(node_id n, const n_block& b) {
-        scopes_.emplace_back();
+        scopes.emplace_back();
         jt last = jt::unit;
         for (uint32_t k = 0; k < b.items.size(); ++k) {
             last = gen_value(b.items[k]);
             if (!(b.has_value && k + 1 == b.items.size())) last = jt::unit;
         }
-        scopes_.pop_back();
+        scopes.pop_back();
         return last;
     }
 
@@ -782,35 +774,35 @@ private:
         jt t = gen_value(v.init);
         if (t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{n, std::format("переменная типа {}", jt_name(t))};
         slot s = declare(v.name, t);
-        if (t == jt::f64_) as_.movsd_store(rbp, s.off, xmm0);
-        else as_.store(rbp, s.off, rax);
+        if (t == jt::f64_) code.movsd_store(rbp, s.off, xmm0);
+        else code.store(rbp, s.off, rax);
         return jt::unit;
     }
 
     // return(f) / return(caller) - from the external in the embedding chain (§6.1): just
     // a transition to its output.
     jt gen(node_id n, const n_return& r) {
-        uint32_t k = uint32_t(frames_.size() - 1);
+        uint32_t k = uint32_t(frames.size() - 1);
         if (r.target) {
-            symbol name      = db_.as<n_ident>(r.target).name;
-            bool   to_caller = db_.strings.text(name) == "caller";
+            symbol name      = db.as<n_ident>(r.target).name;
+            bool   to_caller = db.strings.text(name) == "caller";
             bool   found     = false;
             while (k > 0) {
-                if (db_.as<n_fn>(frames_[k].fn).outline) throw jit_unsupported{n, "return через outline"};
+                if (db.as<n_fn>(frames[k].fn).outline) throw jit_unsupported{n, "return через outline"};
                 --k;
-                if (to_caller || db_.as<n_fn>(frames_[k].fn).name == name) { found = true; break; }
+                if (to_caller || db.as<n_fn>(frames[k].fn).name == name) { found = true; break; }
             }
             if (!found) throw jit_unsupported{n, "return: цель вне машинного кода"};
         }
-        frame fr = frames_[k];
+        frame fr = frames[k];
         jt    t  = r.value ? gen_value(r.value) : jt::unit;
         if (t != fr.result) throw jit_unsupported{n, "тип return"};
         if (fr.top) {
             to_result(t);
-            as_.jmp(epilogue_); // epilogue restores rsp
+            code.jmp(epilogue); // epilogue restores rsp
         } else {
-            if (depth_ > fr.depth) as_.add_rsp(int32_t(8 * (depth_ - fr.depth))); // transient
-            as_.jmp(*fr.exit);
+            if (depth > fr.depth) code.add_rsp(int32_t(8 * (depth - fr.depth))); // transient
+            code.jmp(*fr.exit);
         }
         return jt::unit;
     }
@@ -818,101 +810,101 @@ private:
     jt gen(node_id n, const n_require& r) {
         using namespace x64;
         if (gen_value(r.cond) != jt::bool_) throw jit_unsupported{r.cond, "require не bool"};
-        as_.test(rax, rax);
-        as_.jcc(e, fault(jit_fault_kind::require, n));
+        code.test(rax, rax);
+        code.jcc(e, fault(jit_fault_kind::require, n));
         return jt::unit;
     }
 
     jt gen(node_id n, const n_while& w) {
         using namespace x64;
         label top, done;
-        as_.bind(top);
+        code.bind(top);
         if (gen_value(w.cond) != jt::bool_) throw jit_unsupported{w.cond, "условие не bool"};
-        as_.test(rax, rax);
-        as_.jcc(e, done);
+        code.test(rax, rax);
+        code.jcc(e, done);
         gen_value(w.body);
-        as_.jmp(top);
-        as_.bind(done);
+        code.jmp(top);
+        code.bind(done);
         return jt::unit;
     }
 
     jt gen(node_id n, const n_for& f) {
         using namespace x64;
-        scopes_.emplace_back();
+        scopes.emplace_back();
         label top, done;
         // For(i : range(n) ) - Counting cycle without array: language knows what range is
-        if (db_.is<n_call>(f.range) && db_.is<n_ident>(db_.as<n_call>(f.range).callee)
-            && db_.strings.text(db_.as<n_ident>(db_.as<n_call>(f.range).callee).name) == "range"
-            && db_.as<n_call>(f.range).args.size() == 1) {
-            node_id bound = db_.as<n_call>(f.range).args[0];
+        if (db.is<n_call>(f.range) && db.is<n_ident>(db.as<n_call>(f.range).callee)
+            && db.strings.text(db.as<n_ident>(db.as<n_call>(f.range).callee).name) == "range"
+            && db.as<n_call>(f.range).args.size() == 1) {
+            node_id bound = db.as<n_call>(f.range).args[0];
             if (gen_value(bound) != jt::i64_) throw jit_unsupported{f.range, "range(не i64)"};
             int32_t   limit = alloc();
             slot  var   = declare(f.var, jt::i64_);
-            as_.store(rbp, limit, rax);
-            as_.mov(rax, uint64_t(0));
-            as_.store(rbp, var.off, rax);
-            as_.bind(top);
-            as_.load(rax, rbp, var.off);
-            as_.load(rcx, rbp, limit);
-            as_.cmp(rax, rcx);
-            as_.jcc(ge, done);
+            code.store(rbp, limit, rax);
+            code.mov(rax, uint64_t(0));
+            code.store(rbp, var.off, rax);
+            code.bind(top);
+            code.load(rax, rbp, var.off);
+            code.load(rcx, rbp, limit);
+            code.cmp(rax, rcx);
+            code.jcc(ge, done);
             gen_value(f.body);
-            as_.load(rax, rbp, var.off);
-            as_.mov(rcx, uint64_t(1));
-            as_.add(rax, rcx);
-            as_.store(rbp, var.off, rax);
-            as_.jmp(top);
+            code.load(rax, rbp, var.off);
+            code.mov(rcx, uint64_t(1));
+            code.add(rax, rcx);
+            code.store(rbp, var.off, rax);
+            code.jmp(top);
         } else { // variable array
             slot        arr  = array_slot(f.range);
             jt          et   = arr.type == jt::arr_f64 ? jt::f64_ : jt::i64_;
             int32_t         idx  = alloc();
             slot        var  = declare(f.var, et);
-            as_.mov(rax, uint64_t(0));
-            as_.store(rbp, idx, rax);
-            as_.bind(top);
-            as_.load(rax, rbp, idx);
-            as_.load(rcx, rbp, arr.size_off);
-            as_.cmp(rax, rcx);
-            as_.jcc(ge, done);
-            as_.load(rcx, rbp, arr.data_off);
-            if (et == jt::f64_) { as_.movsd_load_idx(xmm0, rcx, rax); as_.movsd_store(rbp, var.off, xmm0); }
-            else { as_.load_idx(rax, rcx, rax); as_.store(rbp, var.off, rax); }
+            code.mov(rax, uint64_t(0));
+            code.store(rbp, idx, rax);
+            code.bind(top);
+            code.load(rax, rbp, idx);
+            code.load(rcx, rbp, arr.size_off);
+            code.cmp(rax, rcx);
+            code.jcc(ge, done);
+            code.load(rcx, rbp, arr.data_off);
+            if (et == jt::f64_) { code.movsd_load_idx(xmm0, rcx, rax); code.movsd_store(rbp, var.off, xmm0); }
+            else { code.load_idx(rax, rcx, rax); code.store(rbp, var.off, rax); }
             gen_value(f.body);
-            as_.load(rax, rbp, idx);
-            as_.mov(rcx, uint64_t(1));
-            as_.add(rax, rcx);
-            as_.store(rbp, idx, rax);
-            as_.jmp(top);
+            code.load(rax, rbp, idx);
+            code.mov(rcx, uint64_t(1));
+            code.add(rax, rcx);
+            code.store(rbp, idx, rax);
+            code.jmp(top);
         }
-        as_.bind(done);
-        scopes_.pop_back();
+        code.bind(done);
+        scopes.pop_back();
         return jt::unit;
     }
 
     jt gen(node_id n, const n_ct& c) { return gen_value(c.body); }
 
     jt gen(node_id n, const auto&) {
-        throw jit_unsupported{n, std::format("узел {}", kind_name(db_[n]))};
+        throw jit_unsupported{n, std::format("узел {}", kind_name(db[n]))};
     }
 
-    jit_engine&                                   eng_;
-    ast_db&                                       db_;
-    node_id                                       fn_;
-    jit_fn&                                       out_;
-    interpreter&                                  an_;
-    x64::assembler                                as_;
-    x64::label                                    epilogue_;
-    std::vector<std::unique_ptr<stub>>            stubs_;
-    std::vector<std::vector<std::pair<symbol, slot>>> scopes_;
-    uint32_t                                           slots_ = 0;
-    uint32_t                                           bce_ = 0; // stripped
-    uint32_t                                           depth_ = 0;
-    uint32_t                                           frame_patch_ = 0;
-    uint32_t                                           fn_base_ = 0; // first area of the current (built-in) function
-    uint64_t                                           ctx_ = 0;     // Embedded context (as in parsing)
-    std::vector<frame>                            frames_;
-    std::vector<context>                          contexts_;
-    std::vector<std::unique_ptr<x64::label>>      inline_exits_;
+    jit_engine&                                   eng;
+    ast_db&                                       db;
+    node_id                                       fn;
+    jit_fn&                                       out;
+    interpreter&                                  an;
+    x64::assembler                                code;
+    x64::label                                    epilogue;
+    std::vector<std::unique_ptr<stub>>            stubs;
+    std::vector<std::vector<std::pair<symbol, slot>>> scopes;
+    uint32_t                                           slots = 0;
+    uint32_t                                           bce = 0; // stripped
+    uint32_t                                           depth = 0;
+    uint32_t                                           frame_patch = 0;
+    uint32_t                                           fn_base = 0; // first area of the current (built-in) function
+    uint64_t                                           ctx = 0;     // Embedded context (as in parsing)
+    std::vector<frame>                            frames;
+    std::vector<context>                          contexts;
+    std::vector<std::unique_ptr<x64::label>>      inline_exits;
 };
 
 // Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth
@@ -935,15 +927,15 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(const ast_db& db, n
 }
 
 void jit_engine::compile(node_id fn, jit_fn& out) {
-    out.deps[fn.value()]      = db_.node_revision(fn);
-    out.deps[module_.value()] = db_.node_revision(module_);
-    if (auto bad = jit_prefilter(db_, module_, db_.as<n_fn>(fn).body)) {
-        auto lc    = locate(db_.source(db_[bad->first].where.source), db_[bad->first].where.begin);
+    out.deps[fn.value]      = db.node_revision(fn);
+    out.deps[mod.value] = db.node_revision(mod);
+    if (auto bad = jit_prefilter(db, mod, db.as<n_fn>(fn).body)) {
+        auto lc    = locate(db.source(db[bad->first].where.source), db[bad->first].where.begin);
         out.reason = std::format("{} (строка {})", bad->second, lc.line);
         return;
     }
     // Static parsing instance: Types and compile-time node (value-approach)
-    interpreter        an(db_, module_, {"jit"}, mode::check);
+    interpreter        an(db, mod, {"jit"}, mode::check);
     an.set_fuel(200000);
     std::vector<value> shapes;
     for (jt t : out.params) {
@@ -957,7 +949,7 @@ void jit_engine::compile(node_id fn, jit_fn& out) {
         if (out.result == jt::other) { out.reason = std::format("тип результата {}", r.is<split_v>() ? "расщеплён" : "не скалярный"); return; }
         jit_codegen(*this, fn, out, an).run();
     } catch (const jit_unsupported& u) {
-        auto lc    = locate(db_.source(db_[u.node].where.source), db_[u.node].where.begin);
+        auto lc    = locate(db.source(db[u.node].where.source), db[u.node].where.begin);
         out.reason = std::format("{} (строка {})", u.why, lc.line);
     } catch (const diagnostic& d) {
         out.reason = std::format("разбор: {}", d.what());
@@ -970,20 +962,20 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
     // variable array possible: machine code receives an array of caller
     for (const auto& v : vals) if (v.is<thunk_v>()) return std::nullopt;
-    const auto& params = db_.as<n_fn>(f).params;
+    const auto& params = db.as<n_fn>(f).params;
     for (uint32_t i = 0; i < params.size(); ++i) {
-        auto m = db_.as<n_param>(params[i]).mode;
+        auto m = db.as<n_param>(params[i]).mode;
         if (m == param_mode::expr || m == param_mode::own || m == param_mode::out) return std::nullopt;
         // scalar that the function changes: there is no return entry from the interpreter
         if (!vals[i].is<array_v>() && writes_param(f, i)) return std::nullopt;
     }
-    std::vector<jt> types;
+    std::vector<jt> param_types;
     for (const auto& v : vals) {
         jt t = jt_of(v);
         if (t == jt::other || t == jt::unit) return std::nullopt;
-        types.push_back(t);
+        param_types.push_back(t);
     }
-    jit_fn* code = jit_->get(f, types);
+    jit_fn* code = jit->get(f, param_types);
     if (!code) return std::nullopt;
 
     std::vector<uint64_t> raw(vals.size());
@@ -1007,11 +999,11 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
         node_id at{uint32_t(jit_fault_node)};
         jit_fault = 0;
         if (fault == jit_fault_kind::layout)
-            throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db_[at].where);
+            throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[at].where);
         const char* what = fault == jit_fault_kind::bounds ? "индекс вне границ массива (машинный код)"
                          : fault == jit_fault_kind::div_zero ? "деление на ноль (машинный код)"
                                                             : "нарушено требование require (машинный код)";
-        fail(what, db_[at].where, diag_kind::runtime);
+        fail(what, db[at].where, diag_kind::runtime);
     }
     emit({report_event::instance, key, {}, {}, {}, {}});
     switch (code->result) {

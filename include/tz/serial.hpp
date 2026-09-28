@@ -18,14 +18,13 @@ template <class... T> struct is_variant<std::variant<T...>> : std::true_type {};
 template <class T> struct is_id : std::false_type {};
 template <class T> struct is_id<id<T>> : std::true_type {};
 
-class writer {
-public:
+struct writer {
     void put(const auto& x) {
         using T = std::remove_cvref_t<decltype(x)>;
         if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) {
             raw(&x, sizeof x);
         } else if constexpr (is_id<T>::value) {
-            put(x.value());
+            put(x.value);
         } else if constexpr (std::is_same_v<T, std::string>) {
             put(uint32_t(x.size()));
             raw(x.data(), x.size());
@@ -41,17 +40,13 @@ public:
         }
     }
 
-    const std::string& bytes() const { return out_; }
+    void raw(const void* p, std::size_t n) { bytes.append(static_cast<const char*>(p), n); }
 
-private:
-    void raw(const void* p, std::size_t n) { out_.append(static_cast<const char*>(p), n); }
-
-    std::string out_;
+    std::string bytes;
 };
 
-class reader {
-public:
-    explicit reader(std::string_view in) : in_(in) {}
+struct reader {
+    explicit reader(std::string_view in) : in(in) {}
 
     template <class T>
     T get() {
@@ -64,8 +59,8 @@ public:
         } else if constexpr (std::is_same_v<T, std::string>) {
             uint32_t n = get<uint32_t>();
             need(n);
-            std::string s(in_.substr(pos_, n));
-            pos_ += n;
+            std::string s(in.substr(pos, n));
+            pos += n;
             return s;
         } else if constexpr (is_vector<T>::value) {
             uint32_t n = get<uint32_t>();
@@ -83,9 +78,7 @@ public:
         }
     }
 
-    bool at_end() const { return pos_ >= in_.size(); }
-
-private:
+    bool at_end() const { return pos >= in.size(); }
     template <class V, std::size_t... I>
     V get_variant(uint32_t index, std::index_sequence<I...>) {
         std::optional<V> out;
@@ -95,17 +88,17 @@ private:
     }
 
     void need(std::size_t n) const {
-        if (pos_ + n > in_.size()) throw diagnostic("журнал повреждён: неожиданный конец", {});
+        if (pos + n > in.size()) throw diagnostic("журнал повреждён: неожиданный конец", {});
     }
 
     void raw(void* p, std::size_t n) {
         need(n);
-        std::memcpy(p, in_.data() + pos_, n);
-        pos_ += n;
+        std::memcpy(p, in.data() + pos, n);
+        pos += n;
     }
 
-    std::string_view in_;
-    std::size_t      pos_ = 0;
+    std::string_view in;
+    std::size_t      pos = 0;
 };
 
 } // namespace tz

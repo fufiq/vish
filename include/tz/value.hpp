@@ -28,8 +28,7 @@ struct type_v { type_id type; };
 // not own and lives no longer than the call; a copy or record of the loan array makes its
 // own copy.
 //
-class array_v {
-public:
+struct array_v {
     enum class layout : uint8_t { generic, ints, floats };
 
     array_v() = default;
@@ -37,12 +36,12 @@ public:
     array_v(array_v&& o) noexcept = default;
     array_v& operator=(const array_v& o) {
         if (this == &o) return *this;
-        const array_v& src = o.borrowed_ ? *o.borrowed_ : o;
-        layout_   = src.layout_;
-        items_    = src.items_;
-        ints_     = src.ints_;
-        floats_   = src.floats_;
-        borrowed_ = nullptr;
+        const array_v& src = o.borrowed ? *o.borrowed : o;
+        repr   = src.repr;
+        items    = src.items;
+        int_items     = src.int_items;
+        float_items   = src.float_items;
+        borrowed = nullptr;
         return *this;
     }
     array_v& operator=(array_v&& o) noexcept = default;
@@ -50,7 +49,7 @@ public:
     static array_v of(std::vector<value> items);
     static array_v borrow(const array_v& cell) { // caller
         array_v a;
-        a.borrowed_ = cell.borrowed_ ? cell.borrowed_ : &cell;
+        a.borrowed = cell.borrowed ? cell.borrowed : &cell;
         return a;
     }
 
@@ -59,30 +58,28 @@ public:
     value  get(uint32_t i) const;
     void   set(uint32_t i, value v);
     void   push(value v);
-    layout kind() const { return r().layout_; }
+    layout kind() const { return r().repr; }
 
-    const int64_t* ints() const { return r().ints_.data(); }
-    const double* floats() const { return r().floats_.data(); }
-    int64_t*       ints_mut() { own(); return ints_.data(); }
-    double*       floats_mut() { own(); return floats_.data(); }
+    const int64_t* ints() const { return r().int_items.data(); }
+    const double* floats() const { return r().float_items.data(); }
+    int64_t*       ints_mut() { own(); return int_items.data(); }
+    double*       floats_mut() { own(); return float_items.data(); }
     value*     generic_cell(uint32_t i) {
         if (kind() != layout::generic) return nullptr;
         own();
-        return &items_[i];
+        return &items[i];
     }
-
-private:
-    const array_v& r() const { return borrowed_ ? *borrowed_ : *this; }
+    const array_v& r() const { return borrowed ? *borrowed : *this; }
     void           own() {
-        if (borrowed_) *this = *borrowed_;
+        if (borrowed) *this = *borrowed;
     }
     void to_generic();
 
-    layout             layout_ = layout::generic;
-    std::vector<value> items_;
-    std::vector<int64_t>   ints_;
-    std::vector<double>   floats_;
-    const array_v*     borrowed_ = nullptr;
+    layout             repr = layout::generic;
+    std::vector<value> items;
+    std::vector<int64_t>   int_items;
+    std::vector<double>   float_items;
+    const array_v*     borrowed = nullptr;
 };
 
 struct agg_v { type_id type; std::vector<std::pair<symbol, value>> fields; };
@@ -138,51 +135,51 @@ array_v array_v::of(std::vector<value> items) {
 
 uint32_t array_v::size() const {
     const array_v& a = r();
-    switch (a.layout_) {
-    case layout::ints: return uint32_t(a.ints_.size());
-    case layout::floats: return uint32_t(a.floats_.size());
-    default: return uint32_t(a.items_.size());
+    switch (a.repr) {
+    case layout::ints: return uint32_t(a.int_items.size());
+    case layout::floats: return uint32_t(a.float_items.size());
+    default: return uint32_t(a.items.size());
     }
 }
 
 value array_v::get(uint32_t i) const {
     const array_v& a = r();
-    switch (a.layout_) {
-    case layout::ints: return value(a.ints_[i]);
-    case layout::floats: return value(a.floats_[i]);
-    default: return a.items_[i];
+    switch (a.repr) {
+    case layout::ints: return value(a.int_items[i]);
+    case layout::floats: return value(a.float_items[i]);
+    default: return a.items[i];
     }
 }
 
 void array_v::to_generic() {
     own();
-    if (layout_ == layout::generic) return;
-    std::vector<value> items;
-    for (uint32_t i = 0; i < size(); ++i) items.push_back(get(i));
-    ints_.clear();
-    floats_.clear();
-    items_  = std::move(items);
-    layout_ = layout::generic;
+    if (repr == layout::generic) return;
+    std::vector<value> all;
+    for (uint32_t i = 0; i < size(); ++i) all.push_back(get(i));
+    int_items.clear();
+    float_items.clear();
+    items = std::move(all);
+    repr = layout::generic;
 }
 
 void array_v::push(value v) {
     own();
-    if (size() == 0 && layout_ == layout::generic) { // first element selects the layout
-        if (v.is<int64_t>()) layout_ = layout::ints;
-        else if (v.is<double>()) layout_ = layout::floats;
+    if (size() == 0 && repr == layout::generic) { // first element selects the layout
+        if (v.is<int64_t>()) repr = layout::ints;
+        else if (v.is<double>()) repr = layout::floats;
     }
-    if (layout_ == layout::ints && v.is<int64_t>()) { ints_.push_back(v.as<int64_t>()); return; }
-    if (layout_ == layout::floats && v.is<double>()) { floats_.push_back(v.as<double>()); return; }
+    if (repr == layout::ints && v.is<int64_t>()) { int_items.push_back(v.as<int64_t>()); return; }
+    if (repr == layout::floats && v.is<double>()) { float_items.push_back(v.as<double>()); return; }
     to_generic();
-    items_.push_back(std::move(v));
+    items.push_back(std::move(v));
 }
 
 void array_v::set(uint32_t i, value v) {
     own();
-    if (layout_ == layout::ints && v.is<int64_t>()) { ints_[i] = v.as<int64_t>(); return; }
-    if (layout_ == layout::floats && v.is<double>()) { floats_[i] = v.as<double>(); return; }
+    if (repr == layout::ints && v.is<int64_t>()) { int_items[i] = v.as<int64_t>(); return; }
+    if (repr == layout::floats && v.is<double>()) { float_items[i] = v.as<double>(); return; }
     to_generic();
-    items_[i] = std::move(v);
+    items[i] = std::move(v);
 }
 
 // Whether the samples are the same types (structurally, without values).
@@ -261,15 +258,14 @@ bool same_shape(const value& a, const value& b) {
 }
 
 // Register of types: closed system of types VM - id instead of strings (§5.1, §9.2).
-class type_registry {
-public:
+struct type_registry {
     type_registry() {
         for (auto n : {"unit", "bool", "i64", "f64", "str", "type", "array", "fn", "expr", "tuple"}) intern_builtin(n);
     }
 
     type_id builtin(std::string_view name) const {
-        for (uint32_t i = 0; i < names_.size(); ++i)
-            if (names_[i] == name) return type_id(i);
+        for (uint32_t i = 0; i < names.size(); ++i)
+            if (names[i] == name) return type_id(i);
         return {};
     }
 
@@ -278,7 +274,7 @@ public:
         return intern_builtin(name);
     }
 
-    std::string_view name(type_id t) const { return t ? std::string_view(names_[t.value()]) : "?"; }
+    std::string_view name(type_id t) const { return t ? std::string_view(names[t.value]) : "?"; }
 
     type_id of(const value& x) const {
         if (x.is<rt_v>()) return x.as<rt_v>().shape ? of(*x.as<rt_v>().shape) : type_id{};
@@ -317,14 +313,12 @@ public:
         }
         return std::string(name(of(x)));
     }
-
-private:
     type_id intern_builtin(std::string_view n) {
-        names_.emplace_back(n);
-        return type_id(uint32_t(names_.size() - 1));
+        names.emplace_back(n);
+        return type_id(uint32_t(names.size() - 1));
     }
 
-    std::vector<std::string> names_;
+    std::vector<std::string> names;
 };
 
 std::string show(const value& x, const type_registry& types, const interner& strings) {

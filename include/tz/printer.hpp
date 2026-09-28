@@ -12,8 +12,7 @@
 
 namespace tz {
 
-class printer {
-public:
+struct printer {
     // keep(n) == False - node drops out of projection (slice).
     using filter = std::function<bool(node_id)>;
 
@@ -25,217 +24,215 @@ public:
     };
 
     explicit printer(const ast_db& db, filter keep = {}, substitution subst = {})
-        : db_(db), keep_(std::move(keep)), subst_(std::move(subst)) {}
+        : db(db), keep(std::move(keep)), subst(std::move(subst)) {}
 
     std::string print(node_id n) {
-        out_.clear();
+        out.clear();
         item(n);
-        return out_;
+        return out;
     }
+    bool kept(node_id n) const { return !keep || keep(n); }
 
-private:
-    bool kept(node_id n) const { return !keep_ || keep_(n); }
-
-    std::string_view str(symbol s) const { return db_.strings.text(s); }
+    std::string_view str(symbol s) const { return db.strings.text(s); }
 
     void line() {
-        out_ += '\n';
-        out_.append(indent_ * 2, ' ');
+        out += '\n';
+        out.append(indent * 2, ' ');
     }
 
     void item(node_id n) {
         if (!n || !kept(n)) return;
-        if (subst_.node) {
-            if (node_id other = subst_.node(n); other && other != n) { item(other); return; }
+        if (subst.node) {
+            if (node_id other = subst.node(n); other && other != n) { item(other); return; }
         }
-        if (subst_.text) {
-            if (auto t = subst_.text(n)) { out_ += *t; return; }
+        if (subst.text) {
+            if (auto t = subst.text(n)) { out += *t; return; }
         }
-        std::visit([&](const auto& k) { print_node(n, k); }, db_[n].kind);
+        std::visit([&](const auto& k) { print_node(n, k); }, db[n].kind);
     }
 
     // --- instruction ---
 
     void print_node(node_id, const n_module& m) {
-        if (m.name) out_ += std::format("module {};\n", str(m.name));
+        if (m.name) out += std::format("module {};\n", str(m.name));
         bool first = !m.name;
         for (node_id i : m.items) {
             if (!kept(i)) continue;
-            if (!first) out_ += '\n';
+            if (!first) out += '\n';
             first = false;
             item(i);
-            if (!db_.is<n_fn>(i)) terminate(i);
-            out_ += '\n';
+            if (!db.is<n_fn>(i)) terminate(i);
+            out += '\n';
         }
     }
 
     void print_node(node_id, const n_fn& f) {
-        if (f.outline) out_ += "outline ";
-        if (f.result_type) { item(f.result_type); out_ += ' '; }
-        out_ += str(f.name);
+        if (f.outline) out += "outline ";
+        if (f.result_type) { item(f.result_type); out += ' '; }
+        out += str(f.name);
         params(f.params);
         if (f.expr_body) {
-            out_ += " => ";
+            out += " => ";
             item(f.body);
-            out_ += ';';
+            out += ';';
         } else {
-            out_ += ' ';
+            out += ' ';
             item(f.body);
         }
     }
 
     void params(const node_list& ps) {
-        out_ += '(';
+        out += '(';
         for (uint32_t i = 0; i < ps.size(); ++i) {
-            if (i) out_ += ", ";
+            if (i) out += ", ";
             item(ps[i]);
         }
-        out_ += ')';
+        out += ')';
     }
 
     void print_node(node_id, const n_param& p) {
         static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct "};
-        out_ += modes[uint32_t(p.mode)];
-        if (p.type) { item(p.type); out_ += p.pack ? "... " : " "; }
-        out_ += str(p.name);
+        out += modes[uint32_t(p.mode)];
+        if (p.type) { item(p.type); out += p.pack ? "... " : " "; }
+        out += str(p.name);
     }
 
     void print_node(node_id, const n_var& v) {
-        if (v.is_const) out_ += "const ";
+        if (v.is_const) out += "const ";
         item(v.type);
-        out_ += std::format(" {} = ", str(v.name));
+        out += std::format(" {} = ", str(v.name));
         item(v.init);
-        out_ += ';';
+        out += ';';
     }
 
     void print_node(node_id, const n_block& b) {
         std::vector<node_id> items;
         for (node_id i : b.items) if (kept(i)) items.push_back(i);
-        if (items.empty()) { out_ += "{}"; return; }
-        out_ += '{';
-        ++indent_;
+        if (items.empty()) { out += "{}"; return; }
+        out += '{';
+        ++indent;
         for (uint32_t i = 0; i < items.size(); ++i) {
             line();
             item(items[i]);
             bool value = b.has_value && items[i] == b.items.back();
             if (!value) terminate(items[i]);
         }
-        --indent_;
+        --indent;
         line();
-        out_ += '}';
+        out += '}';
     }
 
     // `;` after the instruction, unless it ends in a block and puts it itself.
     void terminate(node_id s) {
-        if (db_.is<n_var>(s) || db_.is<n_fn>(s) || db_.is<n_require>(s) || db_.is<n_return>(s)) return;
-        if (db_.is<n_hole>(s)) return; // The hole prints the source code as it is.
-        if (db_.is<n_for>(s) || db_.is<n_while>(s) || db_.is<n_block>(s) || db_.is<n_try_compile>(s)) return;
-        if (db_.is<n_if>(s) && ends_in_block(s)) return;
-        if (db_.is<n_call>(s)) {
-            const auto& c = db_.as<n_call>(s);
-            if (!c.args.empty() && db_.is<n_block>(c.args.back())) return;
+        if (db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
+        if (db.is<n_hole>(s)) return; // The hole prints the source code as it is.
+        if (db.is<n_for>(s) || db.is<n_while>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s)) return;
+        if (db.is<n_if>(s) && ends_in_block(s)) return;
+        if (db.is<n_call>(s)) {
+            const auto& c = db.as<n_call>(s);
+            if (!c.args.empty() && db.is<n_block>(c.args.back())) return;
         }
-        out_ += ';';
+        out += ';';
     }
 
     bool ends_in_block(node_id n) const {
-        const auto& i = db_.as<n_if>(n);
+        const auto& i = db.as<n_if>(n);
         node_id     last = i.else_ ? i.else_ : i.then_;
-        if (db_.is<n_if>(last)) return ends_in_block(last);
+        if (db.is<n_if>(last)) return ends_in_block(last);
         // Branch-instruction itself puts `;`
-        return db_.is<n_block>(last) || db_.is<n_return>(last) || db_.is<n_require>(last);
+        return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_require>(last);
     }
 
     void print_node(node_id, const n_return& r) {
-        out_ += "return";
-        if (r.target) { out_ += '('; item(r.target); out_ += ')'; }
-        if (r.value) { out_ += ' '; item(r.value); }
-        out_ += ';';
+        out += "return";
+        if (r.target) { out += '('; item(r.target); out += ')'; }
+        if (r.value) { out += ' '; item(r.value); }
+        out += ';';
     }
 
     void print_node(node_id, const n_require& r) {
-        out_ += "require(";
+        out += "require(";
         item(r.cond);
-        out_ += ");";
+        out += ");";
     }
 
     void print_node(node_id, const n_try_compile& t) {
-        out_ += "try_compile ";
+        out += "try_compile ";
         item(t.body);
     }
 
     void print_node(node_id, const n_for& f) {
-        out_ += std::format("for(auto {} : ", str(f.var));
+        out += std::format("for(auto {} : ", str(f.var));
         item(f.range);
-        out_ += ") ";
+        out += ") ";
         item(f.body);
-        if (!db_.is<n_block>(f.body)) terminate(f.body);
+        if (!db.is<n_block>(f.body)) terminate(f.body);
     }
 
     void print_node(node_id, const n_while& w) {
-        out_ += "while(";
+        out += "while(";
         item(w.cond);
-        out_ += ") ";
+        out += ") ";
         item(w.body);
-        if (!db_.is<n_block>(w.body)) terminate(w.body);
+        if (!db.is<n_block>(w.body)) terminate(w.body);
     }
 
     // --- expression ---
 
     void print_node(node_id, const n_if& i) {
-        out_ += "if(";
+        out += "if(";
         item(i.cond);
-        out_ += ") ";
+        out += ") ";
         item(i.then_);
         if (i.else_) {
-            if (db_.is<n_block>(i.then_)) out_ += " else ";
-            else out_ += " else ";
+            if (db.is<n_block>(i.then_)) out += " else ";
+            else out += " else ";
             item(i.else_);
         }
     }
 
-    void print_node(node_id, const n_ident& i) { out_ += str(i.name); }
-    void print_node(node_id, const n_auto&) { out_ += "auto"; }
-    void print_node(node_id, const n_int& i) { out_ += std::to_string(i.value); }
+    void print_node(node_id, const n_ident& i) { out += str(i.name); }
+    void print_node(node_id, const n_auto&) { out += "auto"; }
+    void print_node(node_id, const n_int& i) { out += std::to_string(i.value); }
 
     void print_node(node_id, const n_float& f) {
         auto s = std::format("{}", f.value);
         if (!s.contains('.') && !s.contains('e')) s += ".0";
-        out_ += s;
+        out += s;
     }
 
     void print_node(node_id, const n_str& s) {
-        out_ += '"';
+        out += '"';
         for (char c : s.value) {
-            if (c == '"' || c == '\\') { out_ += '\\'; out_ += c; }
-            else if (c == '\n') out_ += "\\n";
-            else out_ += c;
+            if (c == '"' || c == '\\') { out += '\\'; out += c; }
+            else if (c == '\n') out += "\\n";
+            else out += c;
         }
-        out_ += '"';
+        out += '"';
     }
 
     void print_node(node_id n, const n_op& o) {
         auto op = str(o.op);
         if (o.args.size() == 1) {
-            if (op == "?") { item(o.args[0]); out_ += '?'; return; }
-            out_ += op;
+            if (op == "?") { item(o.args[0]); out += '?'; return; }
+            out += op;
             operand(n, o.args[0]);
             return;
         }
         operand(n, o.args[0]);
-        out_ += std::format(" {} ", op);
+        out += std::format(" {} ", op);
         operand(n, o.args[1]);
     }
 
     // Brackets around the operand - only if its operator connects weaker.
     void operand(node_id parent, node_id child) {
-        bool paren = db_.is<n_op>(child) && db_.as<n_op>(child).args.size() == 2
-                  && prec(db_.as<n_op>(child).op) < prec(db_.as<n_op>(parent).op);
-        paren = paren || (db_.is<n_op>(child) && db_.as<n_op>(parent).args.size() == 1 && db_.as<n_op>(child).args.size() == 2);
-        paren = paren || db_.is<n_if>(child);
-        if (paren) out_ += '(';
+        bool paren = db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2
+                  && prec(db.as<n_op>(child).op) < prec(db.as<n_op>(parent).op);
+        paren = paren || (db.is<n_op>(child) && db.as<n_op>(parent).args.size() == 1 && db.as<n_op>(child).args.size() == 2);
+        paren = paren || db.is<n_if>(child);
+        if (paren) out += '(';
         item(child);
-        if (paren) out_ += ')';
+        if (paren) out += ')';
     }
 
     int prec(symbol op) const {
@@ -251,58 +248,58 @@ private:
 
     void print_node(node_id, const n_call& c) {
         item(c.callee);
-        out_ += '(';
+        out += '(';
         uint32_t n = uint32_t(c.args.size());
-        bool trailing = n > 0 && db_.is<n_block>(c.args.back());
+        bool trailing = n > 0 && db.is<n_block>(c.args.back());
         for (uint32_t i = 0; i < n - (trailing ? 1 : 0); ++i) {
-            if (i) out_ += ", ";
+            if (i) out += ", ";
             item(c.args[i]);
         }
-        out_ += ')';
-        if (trailing) { out_ += ' '; item(c.args.back()); }
+        out += ')';
+        if (trailing) { out += ' '; item(c.args.back()); }
     }
 
     void print_node(node_id, const n_member& m) {
         item(m.object);
-        out_ += '.';
-        out_ += str(m.name);
+        out += '.';
+        out += str(m.name);
     }
 
     void print_node(node_id, const n_index& i) {
         item(i.object);
-        out_ += '[';
+        out += '[';
         item(i.index);
-        out_ += ']';
+        out += ']';
     }
 
     void print_node(node_id, const n_ct& c) {
-        out_ += "ct ";
+        out += "ct ";
         item(c.body);
     }
 
     void print_node(node_id, const n_lambda& l) {
         params(l.params);
-        out_ += " => ";
+        out += " => ";
         item(l.body);
     }
 
     void print_node(node_id, const n_construct& c) {
         item(c.type);
-        out_ += '{';
+        out += '{';
         for (uint32_t i = 0; i < c.items.size(); ++i) {
-            if (i) out_ += ", ";
+            if (i) out += ", ";
             item(c.items[i]);
         }
-        out_ += '}';
+        out += '}';
     }
 
-    void print_node(node_id, const n_hole& h) { out_ += std::format("/* дыра: {} */ {}", h.reason, h.text); }
+    void print_node(node_id, const n_hole& h) { out += std::format("/* дыра: {} */ {}", h.reason, h.text); }
 
-    const ast_db& db_;
-    filter        keep_;
-    substitution  subst_;
-    std::string   out_;
-    uint32_t           indent_ = 0;
+    const ast_db& db;
+    filter        keep;
+    substitution  subst;
+    std::string   out;
+    uint32_t           indent = 0;
 };
 
 } // namespace tz

@@ -22,68 +22,58 @@ namespace tz {
 
 // Typed index: id< node_tag> and id< symbol_tag> are not mixed.
 template <class tag>
-class id {
-public:
+struct id {
     static constexpr uint32_t none_value = ~uint32_t{0};
 
     constexpr id() = default;
-    constexpr explicit id(uint32_t v) : value_(v) {}
+    constexpr explicit id(uint32_t v) : value(v) {}
 
-    constexpr uint32_t  value() const { return value_; }
-    constexpr bool valid() const { return value_ != none_value; }
+    constexpr bool valid() const { return value != none_value; }
     constexpr explicit operator bool() const { return valid(); }
     constexpr auto operator<=>(const id&) const = default;
-
-private:
-    uint32_t value_ = none_value;
+    uint32_t value = none_value;
 };
 
 // Arena: a dense array of objects of the same kind addressed by the index.
 template <class T, class tag = T>
-class arena {
-public:
+struct arena {
     using handle = id<tag>;
 
     handle add(T value) {
-        items_.push_back(std::move(value));
-        return handle(uint32_t(items_.size() - 1));
+        items.push_back(std::move(value));
+        return handle(uint32_t(items.size() - 1));
     }
 
-    T&       operator[](handle h)       pre(h.value() < items_.size()) { return items_[h.value()]; }
-    const T& operator[](handle h) const pre(h.value() < items_.size()) { return items_[h.value()]; }
+    T&       operator[](handle h)       pre(h.value < items.size()) { return items[h.value]; }
+    const T& operator[](handle h) const pre(h.value < items.size()) { return items[h.value]; }
 
-    uint32_t  size() const { return uint32_t(items_.size()); }
-    auto begin() const { return items_.begin(); }
-    auto end() const { return items_.end(); }
-    void clear() { items_.clear(); }
-
-private:
-    std::vector<T> items_;
+    uint32_t  size() const { return uint32_t(items.size()); }
+    auto begin() const { return items.begin(); }
+    auto end() const { return items.end(); }
+    void clear() { items.clear(); }
+    std::vector<T> items;
 };
 
 // Internated line: Comparison - Comparison of numbers.
 struct symbol_tag;
 using symbol = id<symbol_tag>;
 
-class interner {
-public:
+struct interner {
     symbol intern(std::string_view s) {
-        if (auto it = index_.find(std::string(s)); it != index_.end()) return it->second;
-        symbol sym(uint32_t(strings_.size()));
-        strings_.emplace_back(s);
-        index_.emplace(strings_.back(), sym);
+        if (auto it = index.find(std::string(s)); it != index.end()) return it->second;
+        symbol sym(uint32_t(strings.size()));
+        strings.emplace_back(s);
+        index.emplace(strings.back(), sym);
         return sym;
     }
 
-    uint32_t size() const { return uint32_t(strings_.size()); }
+    uint32_t size() const { return uint32_t(strings.size()); }
 
     std::string_view text(symbol s) const {
-        return s.valid() ? std::string_view(strings_[s.value()]) : std::string_view("<none>");
+        return s.valid() ? std::string_view(strings[s.value]) : std::string_view("<none>");
     }
-
-private:
-    std::vector<std::string> strings_;
-    std::unordered_map<std::string, symbol> index_;
+    std::vector<std::string> strings;
+    std::unordered_map<std::string, symbol> index;
 };
 
 // Position in the text projection (for diagnostics and feedback with the editor).
@@ -100,30 +90,24 @@ struct span {
 enum class diag_kind : uint8_t { instantiation, runtime };
 
 // Diagnosis is a track, not a single line.
-class diagnostic : public std::runtime_error {
-public:
+struct diagnostic : std::runtime_error {
     struct frame {
         std::string what;
         span        where;
     };
 
     diagnostic(std::string message, span where, diag_kind kind = diag_kind::instantiation)
-        : std::runtime_error(message), where_(where), kind_(kind) {}
+        : std::runtime_error(message), where(where), kind(kind) {}
 
-    diag_kind kind() const { return kind_; }
 
     diagnostic& note(std::string what, span where = {}) {
-        trace_.push_back({std::move(what), where});
+        trace.push_back({std::move(what), where});
         return *this;
     }
 
-    span                      where() const { return where_; }
-    const std::vector<frame>& trace() const { return trace_; }
-
-private:
-    span               where_;
-    diag_kind          kind_;
-    std::vector<frame> trace_;
+    span               where;
+    diag_kind          kind;
+    std::vector<frame> trace;
 };
 
 // The line / column for span - only when output to a person.
@@ -142,9 +126,9 @@ line_col locate(std::string_view text, uint32_t offset) {
 }
 
 std::string render(const diagnostic& d, std::string_view file, std::string_view text) {
-    auto lc  = locate(text, d.where().begin);
+    auto lc  = locate(text, d.where.begin);
     auto out = std::format("{}:{}:{}: ошибка: {}\n", file, lc.line, lc.col, d.what());
-    for (const auto& f : d.trace()) {
+    for (const auto& f : d.trace) {
         auto l = locate(text, f.where.begin);
         out += std::format("  {}:{}:{}: {}\n", file, l.line, l.col, f.what);
     }

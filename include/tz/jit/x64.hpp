@@ -16,41 +16,31 @@ enum xmm : uint8_t { xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7 };
 // Transition conditions/setcc.
 enum cond : uint8_t { o = 0, no, b, ae, e, ne, be, a, s, ns, p, np, l, ge, le, g };
 
-class label {
-public:
-    bool bound() const { return pos_ >= 0; }
-
-private:
-    friend class assembler;
-    int64_t              pos_ = -1;
-    std::vector<uint32_t> fixups_; // rel32 locations waiting for addresses
+struct label {
+    bool bound() const { return pos >= 0; }
+    int64_t              pos = -1;
+    std::vector<uint32_t> fixups; // rel32 locations waiting for addresses
 };
 
 // Executable Code: Owns pages, releases them.
-class code_block {
-public:
+struct code_block {
     code_block() = default;
-    code_block(void* mem, std::size_t size) : mem_(mem), size_(size) {}
-    code_block(code_block&& o) noexcept : mem_(std::exchange(o.mem_, nullptr)), size_(o.size_) {}
+    code_block(void* mem, std::size_t size) : entry(mem), size(size) {}
+    code_block(code_block&& o) noexcept : entry(std::exchange(o.entry, nullptr)), size(o.size) {}
     code_block& operator=(code_block&& o) noexcept {
-        std::swap(mem_, o.mem_);
-        std::swap(size_, o.size_);
+        std::swap(entry, o.entry);
+        std::swap(size, o.size);
         return *this;
     }
     ~code_block() {
-        if (mem_) munmap(mem_, size_);
+        if (entry) munmap(entry, size);
     }
 
-    void*       entry() const { return mem_; }
-    std::size_t size() const { return size_; }
-
-private:
-    void*       mem_  = nullptr;
-    std::size_t size_ = 0;
+    void*       entry  = nullptr;
+    std::size_t size = 0;
 };
 
-class assembler {
-public:
+struct assembler {
     // --- whole ---
 
     void mov(reg dst, reg src) { op_rr(0x89, src, dst); }
@@ -182,21 +172,21 @@ public:
         rel32(l);
     }
     void bind(label& l) {
-        l.pos_ = int64_t(buf_.size());
-        for (uint32_t at : l.fixups_) patch32(at, int32_t(l.pos_ - int64_t(at + 4)));
-        l.fixups_.clear();
+        l.pos = int64_t(buf.size());
+        for (uint32_t at : l.fixups) patch32(at, int32_t(l.pos - int64_t(at + 4)));
+        l.fixups.clear();
     }
 
-    uint32_t  here() const { return uint32_t(buf_.size()); }
-    void patch32(uint32_t at, int32_t v) { std::memcpy(buf_.data() + at, &v, 4); }
+    uint32_t  here() const { return uint32_t(buf.size()); }
+    void patch32(uint32_t at, int32_t v) { std::memcpy(buf.data() + at, &v, 4); }
     void i32le(int32_t v) { for (int k = 0; k < 4; ++k) byte(uint8_t(uint32_t(v) >> (8 * k))); }
 
     // The finished executable block (W^X).
     code_block finalize() {
-        std::size_t size = (buf_.size() + 4095) & ~std::size_t(4095);
+        std::size_t size = (buf.size() + 4095) & ~std::size_t(4095);
         void*       mem  = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (mem == MAP_FAILED) throw diagnostic("JIT: не удалось выделить память кода", {});
-        std::memcpy(mem, buf_.data(), buf_.size());
+        std::memcpy(mem, buf.data(), buf.size());
         if (mprotect(mem, size, PROT_READ | PROT_EXEC) != 0) {
             munmap(mem, size);
             throw diagnostic("JIT: не удалось сделать код исполняемым", {});
@@ -204,10 +194,8 @@ public:
         return code_block(mem, size);
     }
 
-    std::size_t size() const { return buf_.size(); }
-
-private:
-    void byte(uint8_t b) { buf_.push_back(b); }
+    std::size_t size() const { return buf.size(); }
+    void byte(uint8_t b) { buf.push_back(b); }
     void u64le(uint64_t v) { for (int k = 0; k < 8; ++k) byte(uint8_t(v >> (8 * k))); }
 
     void rex(bool w, uint8_t r, uint8_t x, uint8_t b_) {
@@ -276,11 +264,11 @@ private:
     void rel32(label& l) {
         uint32_t at = here();
         i32le(0);
-        if (l.bound()) patch32(at, int32_t(l.pos_ - int64_t(at + 4)));
-        else l.fixups_.push_back(at);
+        if (l.bound()) patch32(at, int32_t(l.pos - int64_t(at + 4)));
+        else l.fixups.push_back(at);
     }
 
-    std::vector<uint8_t> buf_;
+    std::vector<uint8_t> buf;
 };
 
 } // namespace tz::x64

@@ -31,8 +31,7 @@
 
 namespace tz {
 
-class test_runner {
-public:
+struct test_runner {
     int run(const std::string& dir) {
         std::vector<std::filesystem::path> files;
         for (auto& e : std::filesystem::directory_iterator(dir))
@@ -51,8 +50,6 @@ public:
         std::println("{}/{} тестов прошло", passed, files.size());
         return passed == files.size() ? 0 : 1;
     }
-
-private:
     struct expect {
         std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_lacks, check_errors;
         std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, unknown;

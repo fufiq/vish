@@ -7,7 +7,7 @@ set -e
 cd "$(dirname "$0")"
 
 CXX=${CXX:-g++-16}
-FLAGS="-std=c++26 -freflection -fcontracts -Iinclude -Wall -Wextra -Wno-unused-parameter"
+FLAGS="-std=c++26 -freflection -fcontracts -Iinclude -Wall -Wextra -Wno-unused-parameter ${EXTRA:-}"
 mkdir -p out
 
 case "${1:-release}" in

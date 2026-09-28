@@ -73,76 +73,75 @@ struct journal_entry {
     journal_op op;
 };
 
-class ast_db {
-public:
+struct ast_db {
     node_id add(node_kind k, span where) {
-        ++revision_;
-        where.source = uint32_t(sources_.empty() ? 0 : sources_.size() - 1);
-        node_id id   = nodes_.add(node{std::move(k), where, {}});
-        node_rev_.push_back(revision_);
-        log({j_add{id.value(), nodes_[id].kind, where}});
+        ++revision;
+        where.source = uint32_t(sources.empty() ? 0 : sources.size() - 1);
+        node_id id   = nodes.add(node{std::move(k), where, {}});
+        node_rev.push_back(revision);
+        log({j_add{id.value, nodes[id].kind, where}});
         return id;
     }
 
     // node revision - when it was last changed (for reactive disability).
-    uint64_t node_revision(node_id n) const { return node_rev_[n.value()]; }
+    uint64_t node_revision(node_id n) const { return node_rev[n.value]; }
 
     node_id add(auto k, span where) {
         return add(node_kind(std::move(k)), where);
     }
 
-    node&       operator[](node_id n)       { return nodes_[n]; }
-    const node& operator[](node_id n) const { return nodes_[n]; }
+    node&       operator[](node_id n)       { return nodes[n]; }
+    const node& operator[](node_id n) const { return nodes[n]; }
 
-    template <class kind> bool        is(node_id n) const { return n && std::holds_alternative<kind>(nodes_[n].kind); }
-    template <class kind> kind&       as(node_id n)       { return std::get<kind>(nodes_[n].kind); }
-    template <class kind> const kind& as(node_id n) const { return std::get<kind>(nodes_[n].kind); }
+    template <class kind> bool        is(node_id n) const { return n && std::holds_alternative<kind>(nodes[n].kind); }
+    template <class kind> kind&       as(node_id n)       { return std::get<kind>(nodes[n].kind); }
+    template <class kind> const kind& as(node_id n) const { return std::get<kind>(nodes[n].kind); }
 
     void replace(node_id n, node_kind k) {
-        ++revision_;
-        nodes_[n].kind        = std::move(k);
-        node_rev_[n.value()]  = revision_;
-        log({j_replace{n.value(), nodes_[n].kind}});
+        ++revision;
+        nodes[n].kind        = std::move(k);
+        node_rev[n.value]  = revision;
+        log({j_replace{n.value, nodes[n].kind}});
     }
 
     // Assign a parent to all descendants - bypass through reflection of node fields.
     void link_parents(node_id root) {
-        ++revision_;
+        ++revision;
         link_rec(root);
-        log({j_link{root.value()}});
+        log({j_link{root.value}});
     }
 
     // Text input - operation on the base (§3.1): the text is stored in journal, the
     // positions node (span) indicate it.
     uint32_t record_import(std::string text, std::string label = {}) {
-        sources_.push_back(text);
-        labels_.push_back(label);
+        sources.push_back(text);
+        labels.push_back(label);
         log({j_import{std::move(text), std::move(label)}});
-        return uint32_t(sources_.size() - 1);
+        return uint32_t(sources.size() - 1);
     }
 
     // Import tag for diagnostics (empty - main file).
     const std::string& source_label(uint32_t i) const {
         static const std::string empty;
-        return i < labels_.size() ? labels_[i] : empty;
+        return i < labels.size() ? labels[i] : empty;
     }
 
     const std::string& source(uint32_t i = 0) const {
         static const std::string empty;
-        return i < sources_.size() ? sources_[i] : empty;
+        return i < sources.size() ? sources[i] : empty;
     }
 
     // journal with new strings before each operation.
     std::vector<journal_entry> journal() const {
         std::vector<journal_entry> out;
         uint32_t                        emitted = 0;
-        for (const auto& [strings_count, e] : log_) {
+        for (const auto& [strings_count, e] : oplog) {
             for (; emitted < strings_count; ++emitted)
                 out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
             out.push_back(e);
         }
         for (; emitted < strings.size(); ++emitted)
-            out.push_back({revision_, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
+            out.push_back({revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
         return out;
     }
 
@@ -152,9 +151,9 @@ public:
             std::visit([&](const auto& op) {
                 using T = std::remove_cvref_t<decltype(op)>;
                 if constexpr (std::is_same_v<T, j_intern>) {
-                    if (strings.intern(op.text).value() != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
+                    if (strings.intern(op.text).value != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
                 } else if constexpr (std::is_same_v<T, j_add>) {
-                    if (add(op.kind, op.where).value() != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
+                    if (add(op.kind, op.where).value != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
                 } else if constexpr (std::is_same_v<T, j_replace>) {
                     replace(node_id(op.id), op.kind);
                 } else if constexpr (std::is_same_v<T, j_link>) {
@@ -168,20 +167,17 @@ public:
 
     // All daughter node_id node: One realization for all species through reflection.
     void for_each_child(node_id n, auto&& f) const {
-        std::visit([&](const auto& k) { for_each_child_of(k, f); }, nodes_[n].kind);
+        std::visit([&](const auto& k) { for_each_child_of(k, f); }, nodes[n].kind);
     }
 
-    uint64_t revision() const { return revision_; }
-    uint32_t size() const { return nodes_.size(); }
+    uint32_t size() const { return nodes.size(); }
 
     interner strings;
-
-private:
-    void log(journal_op op) { log_.push_back({strings.size(), journal_entry{revision_, std::move(op)}}); }
+    void log(journal_op op) { oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}}); }
 
     void link_rec(node_id root) {
         for_each_child(root, [&](node_id child) {
-            nodes_[child].parent = root;
+            nodes[child].parent = root;
             link_rec(child);
         });
     }
@@ -197,12 +193,12 @@ private:
         }
     }
 
-    arena<node, node_tag>                            nodes_;
-    uint64_t                                              revision_ = 0;
-    std::vector<std::pair<uint32_t, journal_entry>>       log_; // (line interned at time, operation)
-    std::deque<std::string>                          sources_; // Deque: Text references are stable
-    std::vector<std::string>                         labels_;
-    std::vector<uint64_t>                                 node_rev_;
+    arena<node, node_tag>                            nodes;
+    uint64_t                                              revision = 0;
+    std::vector<std::pair<uint32_t, journal_entry>>       oplog; // (line interned at time, operation)
+    std::deque<std::string>                          sources; // Deque: Text references are stable
+    std::vector<std::string>                         labels;
+    std::vector<uint64_t>                                 node_rev;
 };
 
 // Diagnostics on the basis: the text is taken from the import to which the node belongs.
@@ -211,9 +207,9 @@ std::string render(const diagnostic& d, std::string_view file, const ast_db& db)
         const auto& l = db.source_label(w.source);
         return l.empty() ? file : std::string_view(l);
     };
-    auto lc  = locate(db.source(d.where().source), d.where().begin);
-    auto out = std::format("{}:{}:{}: ошибка: {}\n", name(d.where()), lc.line, lc.col, d.what());
-    for (const auto& f : d.trace()) {
+    auto lc  = locate(db.source(d.where.source), d.where.begin);
+    auto out = std::format("{}:{}:{}: ошибка: {}\n", name(d.where), lc.line, lc.col, d.what());
+    for (const auto& f : d.trace) {
         auto l = locate(db.source(f.where.source), f.where.begin);
         out += std::format("  {}:{}:{}: {}\n", name(f.where), l.line, l.col, f.what);
     }
