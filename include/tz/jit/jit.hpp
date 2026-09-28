@@ -18,7 +18,7 @@
 #include "../interp.hpp"
 #include "x64.hpp"
 
-#include <memory>
+#include <deque>
 #include <set>
 
 namespace tz {
@@ -109,18 +109,20 @@ struct jit_engine {
         std::string key = std::format("{}(", fn.value);
         for (jt t : types) key += std::string(jt_name(t)) + ",";
         auto it = cache.find(key);
-        if (it != cache.end() && still_valid(*it->second)) return it->second->ok ? it->second.get() : nullptr;
-        auto  owned = std::make_unique<jit_fn>();
-        auto* f     = owned.get();
-        cache[key] = std::move(owned);
-        f->params   = types;
+        if (it != cache.end() && still_valid(fns[it->second])) return fns[it->second].ok ? &fns[it->second] : nullptr;
+        // new instance - at the end of the arena; outdated remains in place: its input
+        // cell can be referenced by already compiled code
+        jit_fn* f  = &fns.emplace_back();
+        cache[key] = uint32_t(fns.size() - 1);
+        f->params  = types;
         compile(fn, *f);
         return f->ok ? f : nullptr;
     }
 
     std::string stats() const {
         std::string out;
-        for (const auto& [key, f] : cache) {
+        for (const auto& [key, index] : cache) {
+            const jit_fn* f = &fns[index];
             node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
             auto    name = db.strings.text(db.as<n_fn>(fn).name);
             if (f->ok) out += std::format("  jit  {}({}) → {} байт машинного кода{}\n", name, types_str(f->params), f->bytes,
@@ -144,7 +146,8 @@ struct jit_engine {
     void compile(node_id fn, jit_fn& out);
     ast_db&                                        db;
     node_id                                        mod;
-    std::map<std::string, std::unique_ptr<jit_fn>> cache;
+    std::deque<jit_fn>                             fns;   // instance arena (addresses stable)
+    std::map<std::string, uint32_t>                cache; // key instance → number in fns
 };
 
 // --- code generation one instance ---
@@ -292,17 +295,17 @@ struct jit_codegen {
     }
 
     x64::label& fault(jit_fault_kind k, node_id n) {
-        stubs.push_back(std::make_unique<stub>(stub{{}, k, n}));
-        return stubs.back()->at;
+        stubs.push_back(stub{{}, k, n});
+        return stubs.back().at;
     }
 
-    void emit_stub(const std::unique_ptr<stub>& st) {
+    void emit_stub(stub& st) {
         using namespace x64;
-        code.bind(st->at);
+        code.bind(st.at);
         code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault));
-        code.store_imm32(rax, 0, int32_t(st->kind));
+        code.store_imm32(rax, 0, int32_t(st.kind));
         code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault_node));
-        code.store_imm32(rax, 0, int32_t(st->node.value));
+        code.store_imm32(rax, 0, int32_t(st.node.value));
         code.mov(rax, uint64_t(0));
         code.jmp(epilogue);
     }
@@ -727,11 +730,11 @@ struct jit_codegen {
         if (result == jt::other || is_array(result)) throw jit_unsupported{n, "тип результата встроенной функции"};
         out.deps[target.value] = db.node_revision(target);
 
-        auto exit = std::make_unique<label>();
+        label* exit = &inline_exits.emplace_back();
         scopes.emplace_back(std::move(params));
         uint32_t base = std::exchange(fn_base, uint32_t(scopes.size() - 1));
         uint64_t cx   = std::exchange(ctx, interpreter::inline_context(ctx, n.value));
-        frames.push_back({target, exit.get(), result, depth, false});
+        frames.push_back({target, exit, result, depth, false});
         jt body = gen_value(g.body);
         if (body != result && body != jt::unit) throw jit_unsupported{n, std::format("тип результата {} ≠ {}", jt_name(body), jt_name(result))};
         code.bind(*exit);
@@ -739,7 +742,6 @@ struct jit_codegen {
         fn_base = base;
         ctx     = cx;
         scopes.resize(at.scopes);
-        inline_exits.push_back(std::move(exit));
         return result;
     }
 
@@ -894,7 +896,7 @@ struct jit_codegen {
     interpreter&                                  an;
     x64::assembler                                code;
     x64::label                                    epilogue;
-    std::vector<std::unique_ptr<stub>>            stubs;
+    std::deque<stub>                              stubs; // tag addresses stable
     std::vector<std::vector<std::pair<symbol, slot>>> scopes;
     uint32_t                                           slots = 0;
     uint32_t                                           bce = 0; // stripped
@@ -904,7 +906,7 @@ struct jit_codegen {
     uint64_t                                           ctx = 0;     // Embedded context (as in parsing)
     std::vector<frame>                            frames;
     std::vector<context>                          contexts;
-    std::vector<std::unique_ptr<x64::label>>      inline_exits;
+    std::deque<x64::label>                        inline_exits; // insertion
 };
 
 // Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth
@@ -958,7 +960,7 @@ void jit_engine::compile(node_id fn, jit_fn& out) {
 
 // Call instance by machine code from the interpreter (run mode).
 std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value>& vals, const node_list& args,
-                                                             const scope_ptr& env, const std::string& key) {
+                                                             scope* env, const std::string& key) {
     // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
     // variable array possible: machine code receives an array of caller
     for (const auto& v : vals) if (v.is<thunk_v>()) return std::nullopt;

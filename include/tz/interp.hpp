@@ -33,11 +33,15 @@
 namespace tz {
 
 // Lexical scope. Variables are cells; alias indicates the caller cell rather than
-// copying it.
+// copying it. Areas live in the interpreter arena (no pile on each and no reference
+// counters): block/call/iteration take the area and return it at the output; the area
+// captured by the lambda lives until the end of the run.
+//
 struct scope {
-    std::shared_ptr<scope>                  parent;
+    scope*                                  parent = nullptr;
     std::vector<std::pair<symbol, value*>> vars;
     std::deque<value>                       storage;
+    bool                                    captured = false;
 
     value* declare(symbol name, value v) {
         storage.push_back(std::move(v));
@@ -52,17 +56,7 @@ struct scope {
             if (it->first == name) return it->second;
         return parent ? parent->find(name) : nullptr;
     }
-
-    // Copy of the area for cloned continuation (checkout mode).
-    std::shared_ptr<scope> clone() const {
-        auto c    = std::make_shared<scope>();
-        c->parent = parent;
-        for (auto& [name, cell] : vars) c->declare(name, *cell);
-        return c;
-    }
 };
-
-using scope_ptr = std::shared_ptr<scope>;
 
 enum class mode : uint8_t { run, check };
 
@@ -104,7 +98,7 @@ struct interpreter {
     interpreter(ast_db& db, node_id module, std::vector<std::string> args, mode m = mode::run,
                 std::optional<known_inputs> known = std::nullopt, check_cache* cache = nullptr)
         : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)) {
-        globals = std::make_shared<scope>();
+        globals = new_scope(nullptr);
         array_v a;
         for (auto& s : args) a.push(value(s));
         value args_v(std::move(a));
@@ -173,8 +167,8 @@ struct interpreter {
     // types; the result is the type (or compile-time) of the result.
     value analyze_instance(node_id f, std::vector<value> args) {
         const auto& fn    = db.as<n_fn>(f);
-        auto        inner = std::make_shared<scope>();
-        inner->parent     = globals;
+        scope*      inner = new_scope(globals);
+        scope_hold  hold{*this, inner};
         for (uint32_t i = 0; i < fn.params.size() && i < args.size(); ++i) inner->declare(db.as<n_param>(fn.params[i]).name, args[i]);
         flow r = run_frame(fn.body, inner, fn.name, fn.outline);
         return r.v;
@@ -284,7 +278,53 @@ struct interpreter {
     if (!var##_f.normal()) return var##_f;   \
     value var = std::move(var##_f.v)
 
-    flow eval(node_id n, const scope_ptr& env, uint32_t frame) {
+    // --- arena ---
+
+    scope* new_scope(scope* parent) {
+        scope* s;
+        if (!free_scopes.empty()) {
+            s = free_scopes.back();
+            free_scopes.pop_back();
+        } else {
+            s = &scope_arena.emplace_back();
+        }
+        s->parent = parent;
+        return s;
+    }
+
+    void drop_scope(scope* s) {
+        if (s->captured) return;
+        s->vars.clear();
+        s->storage.clear();
+        s->parent = nullptr;
+        free_scopes.push_back(s);
+    }
+
+    // Lambda holds his entourage and all his ancestors.
+    static void capture(scope* s) {
+        for (; s && !s->captured; s = s->parent) s->captured = true;
+    }
+
+    // Copy of the area for cloned continuation (checkout mode).
+    scope* clone_scope(scope* from) {
+        scope* c = new_scope(from->parent);
+        for (auto& [name, cell] : from->vars) c->declare(name, *cell);
+        return c;
+    }
+
+    struct scope_hold { // The area returns to the arena and when excluded
+        interpreter& vm;
+        scope*       s;
+        ~scope_hold() { vm.drop_scope(s); }
+    };
+
+    struct proof_hold { // The proof of the index is removed when excluded.
+        interpreter& vm;
+        bool         pushed;
+        ~proof_hold() { if (pushed) vm.index_proofs.pop_back(); }
+    };
+
+    flow eval(node_id n, scope* env, uint32_t frame) {
         if (!checking()) return std::visit([&](const auto& k) { return eval_node(n, k, env, frame); }, db[n].kind);
         if (fuel && --*fuel == 0) fail("бюджет статического разбора исчерпан", db[n].where);
         // Check mode: observation - what value the node received and whether there was a
@@ -463,11 +503,11 @@ struct interpreter {
 
     // --- node: Literaries and names ---
 
-    flow eval_node(node_id, const n_int& x, const scope_ptr&, uint32_t) { return ok(value(x.value)); }
-    flow eval_node(node_id, const n_float& x, const scope_ptr&, uint32_t) { return ok(value(x.value)); }
-    flow eval_node(node_id, const n_str& x, const scope_ptr&, uint32_t) { return ok(value(x.value)); }
+    flow eval_node(node_id, const n_int& x, scope*, uint32_t) { return ok(value(x.value)); }
+    flow eval_node(node_id, const n_float& x, scope*, uint32_t) { return ok(value(x.value)); }
+    flow eval_node(node_id, const n_str& x, scope*, uint32_t) { return ok(value(x.value)); }
 
-    flow eval_node(node_id n, const n_ident& x, const scope_ptr& env, uint32_t) {
+    flow eval_node(node_id n, const n_ident& x, scope* env, uint32_t) {
         if (value* cell = env->find(x.name)) return read(cell);
         if (str(x.name) == "true") return ok(value(true));
         if (str(x.name) == "false") return ok(value(false));
@@ -486,15 +526,15 @@ struct interpreter {
 
     // --- blockages ---
 
-    flow eval_node(node_id n, const n_block& b, const scope_ptr& env, uint32_t frame) {
-        auto inner    = std::make_shared<scope>();
-        inner->parent = env;
+    flow eval_node(node_id n, const n_block& b, scope* env, uint32_t frame) {
+        scope*     inner = new_scope(env);
+        scope_hold hold{*this, inner};
         return run_block(b, 0, inner, frame);
     }
 
     // Execute the block instructions starting with from. In verification mode,
     // declaring a split-value variable clones a continuation.
-    flow run_block(const n_block& b, uint32_t from, const scope_ptr& inner, uint32_t frame) {
+    flow run_block(const n_block& b, uint32_t from, scope* inner, uint32_t frame) {
         value last;
         for (uint32_t i = from; i < b.items.size(); ++i) {
             node_id s = b.items[i];
@@ -513,7 +553,7 @@ struct interpreter {
         return ok(b.has_value ? std::move(last) : value());
     }
 
-    flow split_continuation(const n_block& b, uint32_t i, node_id s, const value& init, const scope_ptr& inner, uint32_t frame) {
+    flow split_continuation(const n_block& b, uint32_t i, node_id s, const value& init, scope* inner, uint32_t frame) {
         const auto&              v = db.as<n_var>(s);
         std::vector<std::string> names;
         for (const auto& a : init.as<split_v>().alts) names.push_back(types.describe(a));
@@ -522,7 +562,8 @@ struct interpreter {
         flow result;
         bool first = true;
         for (const auto& alt : init.as<split_v>().alts) {
-            auto        cont = inner->clone();
+            scope*      cont = clone_scope(inner);
+            scope_hold  hold{*this, cont};
             std::string saved = path;
             path += std::format("[{}: {}] ", str(v.name), types.describe(alt));
             declare_var(s, v, alt, cont);
@@ -534,7 +575,7 @@ struct interpreter {
         return result;
     }
 
-    void declare_var(node_id s, const n_var& v, value init, const scope_ptr& env) {
+    void declare_var(node_id s, const n_var& v, value init, scope* env) {
         if (v.type && db.is<n_ident>(v.type)) check_type(init, db.as<n_ident>(v.type).name, db[v.init].where);
         if (checking())
             emit({report_event::stage, path, std::string(str(v.name)),
@@ -542,18 +583,19 @@ struct interpreter {
         env->declare(v.name, std::move(init));
     }
 
-    flow eval_node(node_id n, const n_var& v, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_var& v, scope* env, uint32_t frame) {
         TZ_TRY(init, eval(v.init, env, frame));
         declare_var(n, v, std::move(init), env);
         return ok();
     }
 
-    flow eval_node(node_id n, const n_fn& f, const scope_ptr& env, uint32_t) {
+    flow eval_node(node_id n, const n_fn& f, scope* env, uint32_t) {
+        capture(env);
         env->declare(f.name, value(fn_v{{}, n, env})); // local function = lambda with a name
         return ok();
     }
 
-    flow eval_node(node_id n, const n_return& r, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_return& r, scope* env, uint32_t frame) {
         value v;
         if (r.value) {
             TZ_TRY(x, eval(r.value, env, frame));
@@ -582,7 +624,7 @@ struct interpreter {
         fail(std::format("return({}): нет такой внешней функции в цепочке вызовов", str(name)), where);
     }
 
-    flow eval_node(node_id n, const n_require& r, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_require& r, scope* env, uint32_t frame) {
         TZ_TRY(c, eval(r.cond, env, frame));
         auto b = known_bool(c, db[r.cond].where);
         if (b && !*b) fail("нарушено требование require", db[n].where, diag_kind::runtime);
@@ -591,7 +633,7 @@ struct interpreter {
 
     // --- branching ---
 
-    flow eval_node(node_id n, const n_if& i, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_if& i, scope* env, uint32_t frame) {
         TZ_TRY(c, eval(i.cond, env, frame));
         auto b = known_bool(c, db[i.cond].where);
         if (b) {
@@ -604,7 +646,7 @@ struct interpreter {
         return join_branches(std::move(t), std::move(e));
     }
 
-    flow eval_node(node_id n, const n_while& w, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_while& w, scope* env, uint32_t frame) {
         for (uint32_t guard = 0;; ++guard) {
             TZ_TRY(c, eval(w.cond, env, frame));
             auto b = known_bool(c, db[w.cond].where);
@@ -617,7 +659,7 @@ struct interpreter {
         }
     }
 
-    flow eval_node(node_id n, const n_for& f, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_for& f, scope* env, uint32_t frame) {
         TZ_TRY(r, eval(f.range, env, frame));
         if (r.is<rt_v>()) {
             const value* shape = shape_of(r);
@@ -630,8 +672,8 @@ struct interpreter {
         if (!r.is<array_v>()) fail(std::format("for ожидает массив, получено {}", types.describe(r)), db[f.range].where);
         const auto& arr = r.as<array_v>();
         for (uint32_t k = 0; k < arr.size(); ++k) {
-            auto inner    = std::make_shared<scope>();
-            inner->parent = env;
+            scope*     inner = new_scope(env);
+            scope_hold hold{*this, inner};
             inner->declare(f.var, arr.get(k));
             flow b = eval(f.body, inner, frame);
             if (b.kind == flow_kind::brk) break;
@@ -643,7 +685,7 @@ struct interpreter {
     // A cycle whose number of iterations is known only in runtime: the variables that
     // the body assigns are erased to type; the body is disassembled to a fixed point
     // of types (usually 1-2 passes).
-    flow abstract_loop(node_id body, const scope_ptr& env, uint32_t frame, symbol var, const value& elem,
+    flow abstract_loop(node_id body, scope* env, uint32_t frame, symbol var, const value& elem,
                        const value* indexes = nullptr, symbol indexes_name = {}) {
         std::set<symbol> assigned;
         collect_assigned(body, assigned);
@@ -652,12 +694,12 @@ struct interpreter {
         for (uint32_t pass = 0; pass < 4; ++pass) {
             std::vector<std::string> before;
             for (symbol s : assigned) if (value* c = env->find(s)) before.push_back(types.describe(*c));
-            auto inner    = std::make_shared<scope>();
-            inner->parent = env;
+            scope*     inner = new_scope(env);
+            scope_hold hold{*this, inner};
             if (var) inner->declare(var, elem);
+            proof_hold proof{*this, indexes != nullptr};
             if (indexes) index_proofs.push_back({inner->find(var), indexes, indexes_name});
             flow b = eval(body, inner, frame);
-            if (indexes) index_proofs.pop_back();
             if (b.kind == flow_kind::ret) record_return(b);
             std::vector<std::string> after;
             for (symbol s : assigned) if (value* c = env->find(s)) { *c = erase(*c); after.push_back(types.describe(*c)); }
@@ -670,7 +712,7 @@ struct interpreter {
 // Cycle variable for(i: range(a.size)) is the array index a, while
     // The body does not change either i or a completely and does not give a to change.
     // The growth of a (push) proof does not break. Returns cell a or nullptr.
-    void note_index_proof(node_id n, const scope_ptr& env, bool write = false) {
+    void note_index_proof(node_id n, scope* env, bool write = false) {
         if (!checking() || index_proofs.empty()) return;
         const auto&  i  = db.as<n_index>(n);
         const value* ix = peek(i.index, env);
@@ -683,7 +725,7 @@ struct interpreter {
                       {}, {}, db[n].where, {}, n.value});
     }
 
-    const value* index_source(const n_for& f, const scope_ptr& env) {
+    const value* index_source(const n_for& f, scope* env) {
         if (!db.is<n_call>(f.range)) return nullptr;
         const auto& c = db.as<n_call>(f.range);
         if (!db.is<n_ident>(c.callee) || str(db.as<n_ident>(c.callee).name) != "range" || c.args.size() != 1) return nullptr;
@@ -829,7 +871,7 @@ struct interpreter {
         db.for_each_child(n, [&](node_id c) { collect_assigned(c, out); });
     }
 
-    flow eval_node(node_id n, const n_ct& c, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_ct& c, scope* env, uint32_t frame) {
         TZ_TRY(v, eval(c.body, env, frame));
         if (checking() && !v.known()) fail(std::format("ct: значение не вычислимо при компиляции (рт {})", types.describe(v)), db[n].where);
         return ok(std::move(v));
@@ -837,7 +879,7 @@ struct interpreter {
 
     // SFINAE block (§5.4):
 // runtime - errors don't get jammed.
-    flow eval_node(node_id n, const n_try_compile& t, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_try_compile& t, scope* env, uint32_t frame) {
         auto saved_may = may_return;
         try {
             return eval(t.body, env, frame);
@@ -849,9 +891,12 @@ struct interpreter {
         }
     }
 
-    flow eval_node(node_id n, const n_lambda& l, const scope_ptr& env, uint32_t) { return ok(value(fn_v{{}, n, env})); }
+    flow eval_node(node_id n, const n_lambda& l, scope* env, uint32_t) {
+        capture(env);
+        return ok(value(fn_v{{}, n, env}));
+    }
 
-    flow eval_node(node_id n, const n_construct& c, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_construct& c, scope* env, uint32_t frame) {
         std::vector<value> items;
         for (node_id item : c.items) {
             TZ_TRY(x, eval(item, env, frame));
@@ -866,7 +911,7 @@ struct interpreter {
 
     // --- field access ---
 
-    flow eval_node(node_id n, const n_member& m, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_member& m, scope* env, uint32_t frame) {
         if (const value* o = peek(m.object, env); o && o->is<array_v>()) return ok(member(*o, m.name, db[n].where));
         TZ_TRY(obj, eval(m.object, env, frame));
         return ok(lift(obj, [&](const value& o) { return member(o, m.name, db[n].where); }));
@@ -890,13 +935,13 @@ struct interpreter {
 
     // A variable cell without copying a value (an array by name is not copied for a
     // single element or size).
-    const value* peek(node_id n, const scope_ptr& env) {
+    const value* peek(node_id n, scope* env) {
         if (!db.is<n_ident>(n)) return nullptr;
         const value* c = env->find(db.as<n_ident>(n).name);
         return c && !c->is<thunk_v>() ? c : nullptr;
     }
 
-    flow eval_node(node_id n, const n_index& i, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_index& i, scope* env, uint32_t frame) {
         span where = db[n].where;
         note_index_proof(n, env);
         if (const value* arr = peek(i.object, env); arr && arr->is<array_v>()) {
@@ -940,17 +985,17 @@ struct interpreter {
         return uint32_t(k);
     }
 
-    flow eval_node(node_id n, const n_hole& h, const scope_ptr&, uint32_t) {
+    flow eval_node(node_id n, const n_hole& h, scope*, uint32_t) {
         fail(std::format("исполнение неразобранного фрагмента: {}", h.reason), db[n].where);
     }
 
-    flow eval_node(node_id n, const auto&, const scope_ptr&, uint32_t) {
+    flow eval_node(node_id n, const auto&, scope*, uint32_t) {
         fail(std::format("узел {} нельзя исполнить", kind_name(db[n])), db[n].where);
     }
 
     // --- seats (lvalue) ---
 
-    value* place(node_id n, const scope_ptr& env, uint32_t frame) {
+    value* place(node_id n, scope* env, uint32_t frame) {
         if (db.is<n_ident>(n)) {
             if (value* c = env->find(db.as<n_ident>(n).name)) return c;
             fail(std::format("неизвестная переменная {}", str(db.as<n_ident>(n).name)), db[n].where);
@@ -967,7 +1012,7 @@ struct interpreter {
 
     // --- operator ---
 
-    flow eval_node(node_id n, const n_op& o, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_op& o, scope* env, uint32_t frame) {
         auto op    = str(o.op);
         span where = db[n].where;
         if (op == "?") return call_named(sym("try"), o.args, env, frame, where, n.value);
@@ -1036,7 +1081,7 @@ struct interpreter {
         return s;
     }
 
-    static bool unknown(const value& x) { return x.is<rt_v>() && !x.as<rt_v>().shape; }
+    static bool unknown(const value& x) { return x.is<rt_v>() && !x.as<rt_v>(); }
 
     // Binary operation; with run-time-operand, the result type is calculated on the samples.
     value binary(std::string_view op, const value& a, const value& b, span where) {
@@ -1107,7 +1152,7 @@ struct interpreter {
 
     // --- challenge ---
 
-    flow eval_node(node_id n, const n_call& c, const scope_ptr& env, uint32_t frame) {
+    flow eval_node(node_id n, const n_call& c, scope* env, uint32_t frame) {
         span where = db[n].where;
         if (db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
             const auto& m = db.as<n_member>(c.callee);
@@ -1127,15 +1172,15 @@ struct interpreter {
         return call_value(fv, c.args, env, frame, where, n.value);
     }
 
-    flow call_value(const value& fv, const node_list& args, const scope_ptr& env, uint32_t frame, span where, uint32_t node = 0) {
+    flow call_value(const value& fv, const node_list& args, scope* env, uint32_t frame, span where, uint32_t node = 0) {
         if (!fv.is<fn_v>()) fail(std::format("значение типа {} нельзя вызвать", types.describe(fv)), where);
         const fn_v& f = fv.as<fn_v>();
         if (f.name) return call_named(f.name, args, env, frame, where, node);
         const node_list& params = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).params : db.as<n_fn>(f.lambda).params;
         node_id          body   = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).body : db.as<n_fn>(f.lambda).body;
         if (params.size() != args.size()) fail(std::format("ожидалось {} аргументов, передано {}", params.size(), args.size()), where);
-        auto inner    = std::make_shared<scope>();
-        inner->parent = f.env;
+        scope*     inner = new_scope(f.env);
+        scope_hold hold{*this, inner};
         for (uint32_t i = 0; i < params.size(); ++i) {
             const auto& p = db.as<n_param>(params[i]);
             if (p.mode == param_mode::expr) { inner->declare(p.name, value(thunk_v{args[i], env, frame, ctx})); continue; }
@@ -1148,7 +1193,7 @@ struct interpreter {
 
     // Execute body function in a new frame. The result of the verification mode is a
     // merger of the usual result and all possible returns over run-time branches.
-    flow run_frame(node_id body, const scope_ptr& inner, symbol name, bool outline) {
+    flow run_frame(node_id body, scope* inner, symbol name, bool outline) {
         uint32_t me = ++frame_counter;
         frames.push_back({me, name, outline, false});
         flow r = eval(body, inner, me);
@@ -1168,7 +1213,7 @@ struct interpreter {
         return r;
     }
 
-    flow call_named(symbol name, const node_list& args, const scope_ptr& env, uint32_t frame, span where, uint32_t node = 0) {
+    flow call_named(symbol name, const node_list& args, scope* env, uint32_t frame, span where, uint32_t node = 0) {
         if (auto it = functions.find(name); it != functions.end())
             return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node});
         std::vector<value> vals;
@@ -1199,7 +1244,7 @@ struct interpreter {
 
     // overload: Candidates by arity and types; require at the beginning of the body -
     // candidate restriction (§5.4); choose the most specific.
-    flow call_overloaded(const std::vector<node_id>& fns, const node_list& args, const scope_ptr& env, uint32_t frame, call_site site) {
+    flow call_overloaded(const std::vector<node_id>& fns, const node_list& args, scope* env, uint32_t frame, call_site site) {
         std::vector<value> vals(args.size());
         for (uint32_t i = 0; i < args.size(); ++i) {
             bool expr_everywhere = true;
@@ -1220,7 +1265,7 @@ struct interpreter {
 
     // The split argument: Continuation-challenge is cloned by alternatives.
     flow dispatch_split(const std::vector<node_id>& fns, std::vector<value>& vals, uint32_t from, const node_list& args,
-                        const scope_ptr& env, uint32_t frame, const call_site& site) {
+                        scope* env, uint32_t frame, const call_site& site) {
         for (uint32_t i = from; i < vals.size(); ++i) {
             if (!vals[i].is<split_v>()) continue;
             value orig = vals[i];
@@ -1240,7 +1285,7 @@ struct interpreter {
     }
 
     flow select_and_invoke(const std::vector<node_id>& fns, std::vector<value>& vals, const node_list& args,
-                           const scope_ptr& env, uint32_t frame, const call_site& site) {
+                           scope* env, uint32_t frame, const call_site& site) {
         struct candidate {
             node_id fn;
             int     score;
@@ -1292,11 +1337,11 @@ struct interpreter {
 
     // require at the beginning of the body: run-time - Candidate condition does not
     // cut off - it is checked in runtime (§5.4).
-    std::tuple<bool, int, std::string> leading_requires(node_id f, std::vector<value>& vals, const node_list& args, const scope_ptr& env) {
+    std::tuple<bool, int, std::string> leading_requires(node_id f, std::vector<value>& vals, const node_list& args, scope* env) {
         const auto& fn = db.as<n_fn>(f);
         if (fn.expr_body || !db.is<n_block>(fn.body)) return {true, 0, ""};
-        auto probe    = std::make_shared<scope>();
-        probe->parent = globals;
+        scope*     probe = new_scope(globals);
+        scope_hold hold{*this, probe};
         bind_values(fn.params, vals, args, env, probe);
         int n = 0;
         for (node_id s : db.as<n_block>(fn.body).items) {
@@ -1309,7 +1354,7 @@ struct interpreter {
         return {true, n, ""};
     }
 
-    flow invoke(node_id f, std::vector<value>& vals, const node_list& args, const scope_ptr& env, const call_site& site) {
+    flow invoke(node_id f, std::vector<value>& vals, const node_list& args, scope* env, const call_site& site) {
         const auto& fn = db.as<n_fn>(f);
         if (fn.outline && inline_required(f))
             fail(std::format("{} помечена outline, но использует семантику инлайна", site.what), db[f].where);
@@ -1377,8 +1422,8 @@ struct interpreter {
         frame_floors.push_back({frame_counter, false});
         flow r;
         for (uint32_t pass = 0;; ++pass) {
-            auto inner    = std::make_shared<scope>();
-            inner->parent = globals;
+            scope*     inner = new_scope(globals);
+            scope_hold hold{*this, inner};
             bind_values(fn.params, vals, args, env, inner);
             if (checking()) active.insert(active_key);
             try {
@@ -1433,7 +1478,7 @@ struct interpreter {
         return r; // return, addressed to the caller (semantic inlining), goes further
     }
 
-    std::optional<flow> try_jit(node_id f, std::vector<value>& vals, const node_list& args, const scope_ptr& env,
+    std::optional<flow> try_jit(node_id f, std::vector<value>& vals, const node_list& args, scope* env,
                                 const std::string& key);
 
     bool valid(const check_cache::entry& e) const {
@@ -1443,7 +1488,7 @@ struct interpreter {
     }
 
     // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell.
-    void bind_values(const node_list& params, std::vector<value>& vals, const node_list& args, const scope_ptr& env, const scope_ptr& inner) {
+    void bind_values(const node_list& params, std::vector<value>& vals, const node_list& args, scope* env, scope* inner) {
         for (uint32_t i = 0; i < params.size(); ++i) {
             const auto& p = db.as<n_param>(params[i]);
             if (p.mode != param_mode::expr && p.mode != param_mode::own && !vals[i].is<split_v>()) {
@@ -1456,7 +1501,7 @@ struct interpreter {
         }
     }
 
-    value* place_or_null(node_id n, const scope_ptr& env) {
+    value* place_or_null(node_id n, scope* env) {
         if (!db.is<n_ident>(n)) return nullptr;
         value* c = env->find(db.as<n_ident>(n).name);
         return c && !c->is<thunk_v>() ? c : nullptr;
@@ -1509,7 +1554,7 @@ struct interpreter {
             return {};
         }
         if (n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
-            if (a[0].is<rt_v>() && !a[0].as<rt_v>().shape) fail("тип неизвестен", where);
+            if (a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);
             return value(type_v{types.of(a[0])});
         }
         if (n == "zero" && a.size() == 1 && a[0].is<type_v>()) {
@@ -1611,7 +1656,9 @@ struct interpreter {
     ast_db&                                 db;
     node_id                                 mod;
     mode                                    run_mode;
-    scope_ptr                               globals;
+    std::deque<scope>                       scope_arena;
+    std::vector<scope*>                     free_scopes;
+    scope*                                  globals = nullptr;
     std::map<symbol, std::vector<node_id>>  functions;
     type_registry                           types;
     std::vector<call_site>                  stack;

@@ -6,7 +6,8 @@
 
 #include "ast.hpp"
 
-#include <memory>
+#include <deque>
+#include <unordered_map>
 
 namespace tz {
 
@@ -88,14 +89,14 @@ struct agg_v { type_id type; std::vector<std::pair<symbol, value>> fields; };
 struct fn_v {
     symbol               name;       // overload
     node_id              lambda;     // lambda
-    std::shared_ptr<scope> env;      // lambda
+    scope*               env = nullptr; // Lambda encirclement (area in arena, captured)
 };
 
 // Uncomputed expression (expr parameter, §6.1): Calculated in the context of the
 // caller at each mention.
 struct thunk_v {
     node_id                expr;
-    std::shared_ptr<scope> env;
+    scope*                 env = nullptr; // Calling area (lives longer than the call)
     uint32_t                    frame; // function from which `return` within the expression
     uint64_t                    ctx = 0; // context in which the expression is written
 };
@@ -103,10 +104,16 @@ struct thunk_v {
 // Verification mode (value approach):
 //
 //
-// rt_v is an erased runtime value: only the type is known. The type is given by the sample
-// (shape): the meaning of this type, the leaves of which are also erased. shape == nullptr
-// - type unknown (e.g. recursion in static parsing).
-struct rt_v { std::shared_ptr<value> shape; };
+// rt_v is an erased runtime value: only the type is known. The type is given by the
+// sample (shape): the meaning of this type, the leaves of which are also erased. The
+// samples are interned in the shapes table, rt_v stores the number: no_shape - type
+// unknown (for example, recursion in static parsing).
+//
+constexpr uint32_t no_shape = ~uint32_t{0};
+struct rt_v {
+    uint32_t shape = no_shape;
+    explicit operator bool() const { return shape != no_shape; }
+};
 
 // split_v is the value of split context: the branch branch has its own type (§5.5).
 // It's not an "A" or a "B" type: a sequel is sorted out for each branch.
@@ -124,6 +131,54 @@ struct value {
 
     bool known() const { return !is<rt_v>() && !is<split_v>(); } // compile-time: value known
 };
+
+// Table of samples of types (arena): the same sample - one number.
+struct shape_table {
+    std::deque<value>                          items;
+    std::unordered_map<std::string, uint32_t> index;
+
+    uint32_t intern(value v) {
+        std::string key;
+        key_of(v, key);
+        if (auto it = index.find(key); it != index.end()) return it->second;
+        items.push_back(std::move(v));
+        index.emplace(std::move(key), uint32_t(items.size() - 1));
+        return uint32_t(items.size() - 1);
+    }
+
+    // Canonical text of the sample: only types and structure, without meaning.
+    static void key_of(const value& x, std::string& out) {
+        std::visit([&](const auto& a) {
+            using T = std::remove_cvref_t<decltype(a)>;
+            if constexpr (std::is_same_v<T, unit_v>) out += 'u';
+            else if constexpr (std::is_same_v<T, bool>) out += 'b';
+            else if constexpr (std::is_same_v<T, int64_t>) out += 'i';
+            else if constexpr (std::is_same_v<T, double>) out += 'f';
+            else if constexpr (std::is_same_v<T, std::string>) out += 's';
+            else if constexpr (std::is_same_v<T, type_v>) { out += 'T'; out += std::to_string(a.type.value); }
+            else if constexpr (std::is_same_v<T, rt_v>) { out += 'R'; out += std::to_string(a.shape); }
+            else if constexpr (std::is_same_v<T, array_v>) {
+                out += '[';
+                for (uint32_t i = 0; i < a.size(); ++i) { key_of(a.get(i), out); out += ','; }
+                out += ']';
+            } else if constexpr (std::is_same_v<T, agg_v>) {
+                out += 'G'; out += std::to_string(a.type.value); out += '{';
+                for (const auto& [k, v] : a.fields) { out += std::to_string(k.value); out += ':'; key_of(v, out); out += ','; }
+                out += '}';
+            } else if constexpr (std::is_same_v<T, split_v>) {
+                out += '(';
+                for (const auto& v : a.alts) { key_of(v, out); out += '|'; }
+                out += ')';
+            } else if constexpr (std::is_same_v<T, fn_v>) {
+                out += 'F'; out += std::to_string(a.name.value); out += '/'; out += std::to_string(a.lambda.value);
+            } else {
+                out += 'X'; out += std::to_string(x.v.index());
+            }
+        }, x.v);
+    }
+};
+
+shape_table shapes; // one on VM: Sample numbers common to all parsing
 
 // --- array_v: definitions after value ---
 
@@ -218,12 +273,12 @@ value erase(const value& x) {
     } else {
         return x; // Types, functions - always known
     }
-    return value(rt_v{std::make_shared<value>(std::move(shape))});
+    return value(rt_v{shapes.intern(std::move(shape))});
 }
 
 // Sample type of erased value (for operations on run-time).
 const value* shape_of(const value& x) {
-    if (x.is<rt_v>()) return x.as<rt_v>().shape.get();
+    if (x.is<rt_v>()) return x.as<rt_v>() ? &shapes.items[x.as<rt_v>().shape] : nullptr;
     return &x;
 }
 
@@ -277,7 +332,7 @@ struct type_registry {
     std::string_view name(type_id t) const { return t ? std::string_view(names[t.value]) : "?"; }
 
     type_id of(const value& x) const {
-        if (x.is<rt_v>()) return x.as<rt_v>().shape ? of(*x.as<rt_v>().shape) : type_id{};
+        if (x.is<rt_v>()) return x.as<rt_v>() ? of(*shape_of(x)) : type_id{};
         return std::visit([&](const auto& a) -> type_id {
             using T = std::remove_cvref_t<decltype(a)>;
             if constexpr (std::is_same_v<T, unit_v>) return type_id(0);
@@ -296,7 +351,7 @@ struct type_registry {
 
     // The full name of the value type, including the array element type: array<f64>.
     std::string describe(const value& x) const {
-        if (x.is<rt_v>()) return x.as<rt_v>().shape ? describe(*x.as<rt_v>().shape) : "?";
+        if (x.is<rt_v>()) return x.as<rt_v>() ? describe(*shape_of(x)) : "?";
         if (x.is<split_v>()) {
             std::string s;
             for (const auto& a : x.as<split_v>().alts) s += (s.empty() ? "" : " | ") + describe(a);
