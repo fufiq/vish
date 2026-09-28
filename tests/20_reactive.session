@@ -13,7 +13,7 @@ edit mean
 mean(xs) {
   auto s = 0.0;
   for(auto x : xs) s = s + x;
-  s / f64(xs.size) * 2.0
+  (s / f64(xs.size)) * 2.0
 }
 .
 // expect: функция mean заменена

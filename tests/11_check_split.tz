@@ -6,7 +6,7 @@
 // типам (foo => [T0 => bar, T1 => bar]), variant не создаётся.
 dot(a, b) {
   auto s = zero(typeof(a[0]));
-  for(auto i : range(a.size)) s = s + a[i] * b[i];
+  for(auto i : range(a.size)) s = s + (a[i] * b[i]);
   s
 }
 

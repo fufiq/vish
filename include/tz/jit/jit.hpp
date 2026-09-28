@@ -645,6 +645,11 @@ struct jit_codegen {
   jt gen(node_id n, n_op const & o) {
     using namespace x64;
     auto op = db.strings.text(o.op);
+    if(an.user_operator(n)) { // code operator: built-in operation if its overload is not accepted by these types
+      std::vector<std::string> ts;
+      for(node_id a: o.args) ts.push_back(std::string(jt_name(type_of(a))));
+      if(o.postfix || an.user_operator_applies(an.entity_of(o), ts)) throw jit_unsupported{n, cat("оператор ", op, ", объявленный кодом")};
+    }
     if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
       gen_assign(n, o, op);
       return jt::unit;
@@ -1315,6 +1320,13 @@ struct jit_codegen {
   }
 
   jt gen(node_id n, n_ct const & c) { return gen_value(c.body); }
+
+  // Operator chain: A tree selected by parsing in this context (§4.4).
+  jt gen(node_id n, n_chain const &) {
+    node_id t = an.chain_tree(n, ctx);
+    if(!t) throw jit_unsupported{n, "цепочка операторов: дерево зависит от пути"};
+    return gen_value(t);
+  }
 
   jt gen(node_id n, auto const &) {
     throw jit_unsupported{n, cat("узел ", kind_name(db[n]))};

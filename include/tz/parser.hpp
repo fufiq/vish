@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <optional>
 
 namespace tz {
@@ -52,6 +53,7 @@ struct parser {
 
   void learn(n_fn const & f) {
     if(!f.name) return;
+    learn_operator(f);
     bool any_clause = false;
     uint32_t head = 0;
     bool last_expr = false;
@@ -244,6 +246,7 @@ struct parser {
     node_list attrs = attributes();
     // Attributes enter the node before being added to the database, otherwise journal will not see them.
     if(is_word("struct") && ahead(1).kind == tok::ident && is_open('{', 2)) return struct_decl(std::move(attrs));
+    if(is_word("operator")) return operator_decl(std::move(attrs));
     if(auto f = try_fn_decl(false, attrs)) return *f;
     if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
     // Name { … } - extension of entity
@@ -377,7 +380,7 @@ struct parser {
   }
 
   static bool is_keyword(std::string_view w) {
-    return w == "if" || w == "loop" || w == "break" || w == "continue" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module" || w == "throw" || w == "struct";
+    return w == "if" || w == "loop" || w == "break" || w == "continue" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module" || w == "throw" || w == "struct" || w == "operator";
   }
 
   node_list param_list(symbol clause = {}) {
@@ -549,58 +552,220 @@ struct parser {
     return db.add(std::move(v), {start, toks[pos - 1].where.end});
   }
 
-  // --- Expression: parsing by priority n ---
+  // --- expressions: code operators (§4.4) ---
+  //
+  // Operators - ads in the area (prelude - first):
+// 
+// 
+//  
+// No Priorities: Multi-Tree Chain is a Node
+  // n_chain, the tree selects the types at instantiation. The same
+  // associative operator in a row - one tree
+// ibid. Prefix and postfix operators are part of
+  // operanda. Attribution (= += -= *= /=) is the form of the kernel, not the operator.
 
-  struct binop {
-    std::string_view op;
-    int prec;
-    bool right = false;
-  };
+  static bool op_char(char c) { return std::string_view("+-*/%<>=!&|^~@$\\").contains(c); }
 
-  // M0: A stitched group table (§4.4). More connects more.
-  std::optional<binop> peek_binop() const {
-    static constexpr std::array table{
-        binop{"=", 1, true},
-        binop{"+=", 1, true},
-        binop{"-=", 1, true},
-        binop{"*=", 1, true},
-        binop{"/=", 1, true},
-        binop{"||", 2},
-        binop{"&&", 3},
-        binop{"==", 4},
-        binop{"!=", 4},
-        binop{"<=", 4},
-        binop{">=", 4},
-        binop{"<", 4},
-        binop{">", 4},
-        binop{"+", 6},
-        binop{"-", 6},
-        binop{"*", 7},
-        binop{"/", 7},
-        binop{"%", 7},
-    };
-    std::string_view longest = longest_op(0);
-    if(longest.empty()) return std::nullopt;
-    for(auto const & b: table)
-      if(b.op == longest) return b;
-    return std::nullopt;
+  void learn_operator(n_fn const & f) {
+    auto name = db.strings.text(f.name);
+    for(std::string_view role: {"infix", "prefix", "postfix"})
+      if(name.size() > role.size() && name.starts_with(role) && op_char(name[role.size()])) {
+        op_forms & o = operators[std::string(name.substr(role.size()))];
+        (role == "infix" ? o.infix : role == "prefix" ? o.prefix
+                                                      : o.postfix) = true;
+        for(node_id a: f.attrs)
+          if(db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "associative") o.assoc = true;
+      }
   }
 
-  node_id expression(int min_prec = 0) {
-    node_id lhs = unary();
-    // if(c) return x; / if(c) { … } - branch finished the instruction: `-1` further - new instruction
-    bool closed = tail_statement || (db.is<n_if>(lhs) && if_closed(lhs));
-    while(auto b = closed ? std::nullopt : peek_binop()) {
-      if(b->prec < min_prec) break;
-      uint32_t start = db[lhs].where.begin;
-      eat_op(b->op);
-      node_id rhs = expression(b->right ? b->prec : b->prec + 1);
-      lhs = db.add(n_op{db.strings.intern(b->op), {lhs, rhs}}, {start, db[rhs].where.end});
+  bool is_role(std::string const & sym, int role) const { // 0 prefix, 1 infix, 2 postfix
+    auto it = operators.find(sym);
+    if(it == operators.end()) return false;
+    return role == 0 ? it->second.prefix : role == 1 ? it->second.infix
+                                                     : it->second.postfix;
+  }
+
+  // operator -(a) ... | operator (a) + (b) ... | operator (a)++ ... - the ad repeats the
+  // entry: the parameter is on the side of its branch (
+// ). entity is a function of infix+/prefix-/postfix++.
+  node_id operator_decl(node_list attrs) {
+    uint32_t start = here().where.begin;
+    advance();
+    n_fn f;
+    f.attrs = std::move(attrs);
+    std::string role, sym;
+    if(is_open('(')) {
+      f.params = param_list();
+      sym = symbol_run();
+      if(is_open('(')) {
+        role = "infix";
+        for(node_id pn: param_list()) f.params.push_back(pn);
+      } else role = "postfix";
+    } else {
+      role = "prefix";
+      sym = symbol_run();
+      f.params = param_list();
     }
+    if(sym == "=" || sym == "+=" || sym == "-=" || sym == "*=" || sym == "/=")
+      throw diagnostic(cat("присваивание ", sym, " — форма ядра, не оператор"), toks[pos - 1].where);
+    if(f.params.size() != (role == "infix" ? 2u : 1u)) throw diagnostic(cat("у оператора ", role, " ", sym, " неверное число параметров"), here().where);
+    f.name = db.strings.intern(role + sym);
+    if(is_op("=>")) {
+      eat_op("=>");
+      f.body = expression();
+      f.expr_body = true;
+      if(is_op(";")) eat_op(";");
+    } else {
+      f.body = block();
+    }
+    learn(f);
+    return db.add(std::move(f), {start, toks[pos - 1].where.end});
+  }
+
+  std::string symbol_run() { // carrier
+    std::string s;
+    while(here().kind == tok::op && op_char(here().ch()) && (s.empty() || here().glued) && !(s.empty() && is_op("=>"))) {
+      s += here().ch();
+      advance();
+    }
+    if(s.empty()) throw diagnostic("ожидались символы оператора", here().where);
+    return s;
+  }
+
+  // A series of operator symbols from the position of pos + k (without eating): to a
+  // non-operator token or `=>`.
+  uint32_t run_length(uint32_t k = 0) const {
+    uint32_t n = 0;
+    while(ahead(k + n).kind == tok::op && op_char(ahead(k + n).ch()) && !is_op("=>", k + n)) ++n;
+    return n;
+  }
+
+  // Dividing the series into characters of roles: postfixes*, [infix, prefixes*]. Glued
+  // symbols can be cut, space - boundary. You need exactly one break.
+  struct run_split {
+    std::vector<std::string> post, pre;
+    std::string infix;
+  };
+  void splits(uint32_t from, uint32_t i, uint32_t n, int phase, bool want_infix, run_split & cur, std::vector<run_split> & out) const {
+    if(out.size() > 1) return;
+    if(i == n) {
+      if(!want_infix || phase == 1) out.push_back(cur);
+      return;
+    }
+    std::string sym;
+    for(uint32_t len = 1; i + len <= n; ++len) {
+      if(len > 1 && !ahead(from + i + len - 1).glued) break;
+      sym += ahead(from + i + len - 1).ch();
+      if(phase == 0 && is_role(sym, 2)) {
+        cur.post.push_back(sym);
+        splits(from, i + len, n, 0, want_infix, cur, out);
+        cur.post.pop_back();
+      }
+      if(phase == 0 && want_infix && is_role(sym, 1)) {
+        cur.infix = sym;
+        splits(from, i + len, n, 1, want_infix, cur, out);
+        cur.infix.clear();
+      }
+      if(phase == 1 && is_role(sym, 0)) {
+        cur.pre.push_back(sym);
+        splits(from, i + len, n, 1, want_infix, cur, out);
+        cur.pre.pop_back();
+      }
+    }
+  }
+
+  std::string run_text(uint32_t n) const {
+    std::string s;
+    for(uint32_t i = 0; i < n; ++i) {
+      if(i && !ahead(i).glued) s += ' ';
+      s += ahead(i).ch();
+    }
+    return s;
+  }
+
+  bool starts_operand(uint32_t k) const {
+    token const & t = ahead(k);
+    if(t.kind == tok::ident) return !is_keyword(t.text) || t.text == "if" || t.text == "throw" || t.text == "ct";
+    if(t.kind == tok::int_lit || t.kind == tok::float_lit || t.kind == tok::str_lit) return true;
+    if(t.kind == tok::open) return t.ch() == '(' || t.ch() == '{';
+    return t.kind == tok::op && t.ch() == '#';
+  }
+
+  // Attribution is the shape of the nucleus on top of the chain: place = expression (right to left).
+  node_id expression() {
+    node_id lhs = chain();
+    if(tail_statement || (db.is<n_if>(lhs) && if_closed(lhs))) return lhs;
+    for(std::string_view a: {"+=", "-=", "*=", "/=", "="})
+      if(is_op(a)) {
+        uint32_t start = db[lhs].where.begin;
+        eat_op(a);
+        node_id rhs = expression();
+        return db.add(n_op{db.strings.intern(a), {lhs, rhs}}, {start, db[rhs].where.end});
+      }
     return lhs;
   }
 
-  node_id unary() {
+  node_id chain() {
+    uint32_t start = here().where.begin;
+    std::vector<std::string> pre;
+    if(uint32_t n = run_length(); n > 0 && !is_op("=>")) { // first operand prefix
+      std::vector<run_split> v;
+      run_split cur;
+      splits(0, 0, n, 1, false, cur, v);
+      if(v.empty()) throw diagnostic(cat("нет префиксного оператора «", run_text(n), "»"), here().where);
+      if(v.size() > 1) throw diagnostic(cat("запись операторов «", run_text(n), "» неоднозначна — разделите пробелом"), here().where);
+      pre = v[0].pre;
+      for(uint32_t i = 0; i < n; ++i) advance();
+    }
+    node_list atoms;
+    std::vector<std::string> infix;
+    for(;;) {
+      uint32_t a0 = here().where.begin;
+      node_id a = unary_core();
+      bool closed = tail_statement || (db.is<n_if>(a) && if_closed(a));
+      uint32_t n = closed ? 0 : run_length();
+      run_split sp;
+      bool more = false;
+      if(n > 0) {
+        more = starts_operand(n);
+        std::vector<run_split> v;
+        run_split cur;
+        splits(0, 0, n, 0, more, cur, v);
+        bool assign = is_op("=") || is_op("+=") || is_op("-=") || is_op("*=") || is_op("/=");
+        if(v.empty() && assign) n = 0, more = false; // further assignment - the form of the nucleus
+        else if(v.empty()) {
+          std::vector<run_split> w;
+          if(!more) splits(0, 0, n, 0, true, cur, w);
+          if(!w.empty()) throw diagnostic("ожидалось выражение", ahead(n).where); // a + ;
+          throw diagnostic(cat("нет оператора «", run_text(n), "»"), here().where);
+        } else if(v.size() > 1) throw diagnostic(cat("запись операторов «", run_text(n), "» неоднозначна — разделите пробелом"), here().where);
+        else {
+          sp = v[0];
+          for(uint32_t i = 0; i < n; ++i) advance();
+        }
+      }
+      for(auto const & p: sp.post) a = db.add(n_op{db.strings.intern(p), {a}, true}, {a0, toks[pos - 1].where.end});
+      for(auto it = pre.rbegin(); it != pre.rend(); ++it) a = db.add(n_op{db.strings.intern(*it), {a}}, {a0, db[a].where.end});
+      atoms.push_back(a);
+      if(!more) break;
+      infix.push_back(sp.infix);
+      pre = sp.pre;
+    }
+    if(atoms.size() == 1) return atoms[0];
+    bool same = std::ranges::all_of(infix, [&](auto const & s) { return s == infix[0]; });
+    if(infix.size() == 1 || (same && operators[infix[0]].assoc)) { // tree
+      node_id t = atoms[0];
+      for(std::size_t k = 0; k < infix.size(); ++k)
+        t = db.add(n_op{db.strings.intern(infix[k]), {t, atoms[k + 1]}}, {start, db[atoms[k + 1]].where.end});
+      return t;
+    }
+    n_chain c;
+    c.atoms = std::move(atoms);
+    for(auto const & s: infix) c.ops.push_back(db.strings.intern(s));
+    return db.add(std::move(c), {start, toks[pos - 1].where.end});
+  }
+
+  node_id unary_core() {
     uint32_t start = here().where.begin;
     if(is_op("#") && ahead(1).kind == tok::ident) { // #x - inserting a value into a quote
       eat_op("#");
@@ -611,13 +776,6 @@ struct parser {
       advance();
       node_id x = expression();
       return db.add(n_throw{x}, {start, db[x].where.end});
-    }
-    for(std::string_view op: {"-", "!", "~"}) {
-      if(is_op(op) && !is_op("=>")) {
-        eat_op(op);
-        node_id x = unary();
-        return db.add(n_op{db.strings.intern(op), {x}}, {start, db[x].where.end});
-      }
     }
     return postfix(primary());
   }
@@ -802,7 +960,7 @@ struct parser {
         }
         if(t.text == "ct") {
           advance();
-          node_id body = is_open('{') ? block() : unary();
+          node_id body = is_open('{') ? block() : unary_core();
           return db.add(n_ct{body}, {start, toks[pos - 1].where.end});
         }
         advance();
@@ -906,6 +1064,10 @@ struct parser {
   uint32_t statement_head = ~uint32_t{0}; // starting-point
   bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
   std::unordered_map<uint32_t, construct> constructs; // head-name
+  struct op_forms {
+    bool prefix = false, infix = false, postfix = false, assoc = false;
+  };
+  std::map<std::string, op_forms> operators; // symbolically
   std::vector<diagnostic> diags;
 };
 

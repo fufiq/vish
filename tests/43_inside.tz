@@ -1,0 +1,13 @@
+// error: commit существует только внутри блоков transaction
+// [[inside(g)]] — сущность существует только в блоках конструкции g
+// 
+//.
+[[inside(transaction)]] commit(mut auto log) { log += 1; }
+
+transaction(expr body) { body; }
+
+main() {
+  auto log = 0;
+  commit(log);
+  print(log);
+}

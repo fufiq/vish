@@ -152,8 +152,42 @@ struct interpreter {
       if(db.is<n_extend>(item)) register_item(item);
   }
 
+  // entity operator node: infix+/prefix-/postfix++.
+  symbol operator_entity(n_op const & o) {
+    uint64_t k = (uint64_t(o.op.value) << 2) | (o.args.size() == 2 ? 1 : o.postfix ? 2
+                                                                                   : 0);
+    auto [it, fresh] = op_entities.try_emplace(k, symbol{});
+    if(fresh) it->second = sym(cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix"
+                                                                            : "prefix",
+                  str(o.op)));
+    return it->second;
+  }
+
+  // The prelude operator, whose body is built-in primitive over parameters in order
+  // (operator (a) + (b) => add(a, b)): the VM operation is executed directly.
+  bool intrinsic_operator(node_id f) const {
+    auto const & fn = db.as<n_fn>(f);
+    if(!fn.expr_body || !db.is<n_call>(fn.body) || !db.is<n_ident>(db.as<n_call>(fn.body).callee)) return false;
+    static constexpr std::array prims{"add", "sub", "mul", "div", "rem", "eq", "ne", "lt", "gt", "le", "ge", "and", "or", "neg", "not"};
+    auto callee = str(db.as<n_ident>(db.as<n_call>(fn.body).callee).name);
+    if(std::ranges::find(prims, callee) == prims.end()) return false;
+    auto const & args = db.as<n_call>(fn.body).args;
+    if(args.size() != fn.params.size()) return false;
+    for(std::size_t k = 0; k < args.size(); ++k)
+      if(!db.is<n_ident>(args[k]) || db.as<n_ident>(args[k]).name != db.as<n_param>(fn.params[k]).name) return false;
+    return true;
+  }
+
+  static bool operator_name(std::string_view n) {
+    for(std::string_view role: {"infix", "prefix", "postfix"})
+      if(n.size() > role.size() && n.starts_with(role) && std::string_view("+-*/%<>=!&|^~@$\\").contains(n[role.size()])) return true;
+    return false;
+  }
+
   // Announcement in current elaboration: from a module or generated emit.
   void register_item(node_id item) {
+    if(db.is<n_fn>(item) && operator_name(str(db.as<n_fn>(item).name)) && !intrinsic_operator(item))
+      user_ops.insert(db.as<n_fn>(item).name.value);
     if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
     else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
     else if(db.is<n_extend>(item)) { // fields and attributes to entity, functions to overload
@@ -464,7 +498,7 @@ struct interpreter {
   }
 
   fact const * fact_of(value const & v, fact::kind_t k) const {
-    if(!v.proof || facts[v.proof - 1].kind != k) return nullptr;
+    if(!v.proof || v.proof > facts.size() || facts[v.proof - 1].kind != k) return nullptr;
     return &facts[v.proof - 1];
   }
 
@@ -1018,17 +1052,26 @@ struct interpreter {
         if(db.is<n_ident>(t) && db.as<n_ident>(t).name == name) return true;
       }
     }
-    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
-      auto const & c = db.as<n_call>(n);
-      if(auto it = functions.find(db.as<n_ident>(c.callee).name); it != functions.end())
-        for(uint32_t k = 0; k < c.args.size(); ++k) {
-          node_id a = c.args[k];
+    // The call (and the operator declared to be: a++ with a mut parameter) changes the place-argument
+    auto via = [&](symbol callee, node_list const & args) {
+      if(auto it = functions.find(callee); it != functions.end())
+        for(uint32_t k = 0; k < args.size(); ++k) {
+          node_id a = args[k];
           while(db.is<n_index>(a) || db.is<n_member>(a))
             a = db.is<n_index>(a) ? db.as<n_index>(a).object : db.as<n_member>(a).object;
           if(!db.is<n_ident>(a) || db.as<n_ident>(a).name != name) continue;
           for(node_id fn: it->second)
             if(writes_param(fn, k)) return true;
         }
+      return false;
+    };
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee) && via(db.as<n_ident>(db.as<n_call>(n).callee).name, db.as<n_call>(n).args)) return true;
+    if(db.is<n_op>(n) && !user_ops.empty()) {
+      auto const & o = db.as<n_op>(n);
+      symbol f = db.strings.intern(cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix"
+                                                                                : "prefix",
+          str(o.op)));
+      if(user_ops.contains(f.value) && via(f, o.args)) return true;
     }
     bool w = false;
     db.for_each_child(n, [&](node_id c) { w = w || writes_name(c, name); });
@@ -1432,6 +1475,211 @@ struct interpreter {
     fail(cat("узел ", kind_name(db[n]), " нельзя исполнить"), db[n].where);
   }
 
+  // --- Operator chain: parsing by brute force (§4.4) ---
+  //
+  // 
+//.
+  // The tree of the chain chooses the types: all parsing in which each instance operator
+  // (SFINAE) fits exactly one - it, otherwise an error. The same [[associative]] operator
+  // in a row is one tree. parsing for instantiation: for free chain name types, with
+  // cache. Types of operands and applications are considered by a separate interpreter in
+  // parsing mode (sample): no side effects and no computation of operands (a & & f() does
+  // not cause f).
+  flow eval_node(node_id n, n_chain const & c, scope * env, uint32_t frame) {
+    node_id tree = resolve_chain(n, c, env);
+    if(!tree) return ok(value(rt_v{})); // The type of operand is still displayed (recursion).
+    if(checking()) {
+      auto [it, fresh] = chain_trees.try_emplace({n.value, ctx}, tree);
+      if(!fresh && it->second != tree) it->second = node_id{}; // In this context, different trees
+    }
+    return eval(tree, env, frame);
+  }
+
+  // A chain tree in an embedding context (for machine code); no, not one.
+  node_id chain_tree(node_id n, uint64_t at) const {
+    auto it = chain_trees.find({n.value, at});
+    return it == chain_trees.end() ? node_id{} : it->second;
+  }
+
+  void free_names(node_id n, std::vector<symbol> & out) const {
+    if(!n) return;
+    if(db.is<n_ident>(n)) {
+      if(std::ranges::find(out, db.as<n_ident>(n).name) == out.end()) out.push_back(db.as<n_ident>(n).name);
+      return;
+    }
+    if(db.is<n_lambda>(n) || db.is<n_fn>(n)) return;
+    db.for_each_child(n, [&](node_id ch) { free_names(ch, out); });
+  }
+
+  node_id resolve_chain(node_id n, n_chain const & c, scope * env) {
+    auto & names = chain_names[n.value];
+    if(names.empty()) {
+      for(node_id a: c.atoms) free_names(a, names);
+      if(names.empty()) names.push_back(symbol{}); // literary
+    }
+    std::string key = cat(n.value, ":");
+    bool cacheable = true;
+    for(symbol s: names) {
+      value const * cell = s ? env->find(s) : nullptr;
+      if(!cell) {
+        key += "-,";
+        continue;
+      }
+      if(cell->is<thunk_v>()) cacheable = false; // type of expression of the caller - only a breakdown
+      else if(unknown(*cell)) return {};
+      else if(cell->is<array_v>() || cell->is<split_v>() || (cell->is<rt_v>() && types.of(*cell).value == 6)) key += types.describe(*cell) + ",";
+      else key += cat(types.of(*cell).value, ",");
+    }
+    if(cacheable)
+      if(auto it = resolved_chains.find(key); it != resolved_chains.end()) return it->second;
+    node_id tree = enumerate_chain(n, c, env);
+    if(tree && cacheable) resolved_chains[key] = tree;
+    return tree;
+  }
+
+  interpreter & prober() {
+    if(probes.empty()) {
+      probes.emplace_back(db, mod, std::vector<std::string>{}, mode::check);
+      probes.back().fuel = 200000;
+    }
+    return probes.back();
+  }
+
+  // Visible names - in one area of the sample, the values are erased to type;
+  // expr-parameter - the expression of the calling in the erased copy of its region.
+  scope * probe_scope(interpreter & p, scope * env, std::map<scope *, scope *> & seen) {
+    if(auto it = seen.find(env); it != seen.end()) return it->second;
+    scope * s = p.new_scope(p.globals);
+    seen[env] = s;
+    std::vector<symbol> declared;
+    for(scope * e = env; e; e = e->parent)
+      for(auto it = e->vars.rbegin(); it != e->vars.rend(); ++it) {
+        if(std::ranges::find(declared, it->first) != declared.end()) continue;
+        declared.push_back(it->first);
+        value const & v = *it->second;
+        if(v.is<thunk_v>()) {
+          thunk_v t = v.as<thunk_v>();
+          t.env = probe_scope(p, t.env, seen);
+          t.frame = 0;
+          s->declare(it->first, value(t));
+        } else {
+          value e = erase(v);
+          e.proof = 0; // Facts - their own parsing
+          s->declare(it->first, std::move(e));
+        }
+      }
+    return s;
+  }
+
+  node_id enumerate_chain(node_id n, n_chain const & c, scope * env) {
+    interpreter & p = prober();
+    std::map<scope *, scope *> seen;
+    scope * ps = probe_scope(p, env, seen);
+    struct drop_all {
+      interpreter & p;
+      std::map<scope *, scope *> & seen;
+      ~drop_all() {
+        for(auto & [from, to]: seen) p.drop_scope(to);
+      }
+    } hold{p, seen};
+    uint32_t k = uint32_t(c.atoms.size());
+    std::vector<value> shapes;
+    for(node_id a: c.atoms) {
+      flow f = p.eval(a, ps, 0);
+      if(!f.normal() || unknown(f.v)) return {}; // type still unknown
+      shapes.push_back(f.v);
+    }
+    // dp[i][j] - parsing of atoms i..j: type, number of trees (1 or "many"), root
+    struct entry {
+      value shape;
+      uint32_t count;
+      int32_t op = -1; // operator number at the root; -1 - atom
+      uint32_t li = 0, ri = 0; // parsing left and right
+    };
+    std::vector<std::vector<std::vector<entry>>> dp(k, std::vector<std::vector<entry>>(k));
+    for(uint32_t i = 0; i < k; ++i) dp[i][i].push_back({shapes[i], 1});
+    std::string why;
+    for(uint32_t len = 2; len <= k; ++len)
+      for(uint32_t i = 0; i + len - 1 < k; ++i) {
+        uint32_t j = i + len - 1;
+        for(uint32_t m = i; m < j; ++m) { // operator m - between atoms m and m + 1
+          bool assoc = op_associative(c.ops[m]);
+          for(uint32_t li = 0; li < dp[i][m].size(); ++li)
+            for(uint32_t ri = 0; ri < dp[m + 1][j].size(); ++ri) {
+              entry const & r = dp[m + 1][j][ri];
+              if(assoc && r.op >= 0 && c.ops[uint32_t(r.op)] == c.ops[m]) continue; // a + (b + c) ≡ (a + b) + c
+              auto res = probe_apply(p, c.ops[m], dp[i][m][li].shape, r.shape, why);
+              if(!res) continue;
+              uint32_t cnt = std::min(2u, dp[i][m][li].count * r.count);
+              auto & cell = dp[i][j];
+              auto same = std::ranges::find_if(cell, [&](entry const & e) { return types.describe(e.shape) == types.describe(*res); });
+              if(same != cell.end()) same->count = 2; // other parsing of the same type
+              else cell.push_back({*res, cnt, int32_t(m), li, ri});
+            }
+        }
+      }
+    auto const & top = dp[0][k - 1];
+    uint32_t total = 0;
+    for(auto const & e: top) total += e.count;
+    if(total == 0) fail(cat("ни один разбор цепочки не инстанцируется", why.empty() ? "" : cat(": ", why)), db[n].where);
+    if(total > 1) {
+      diagnostic d("цепочка операторов неоднозначна: подходят несколько разборов — расставьте скобки", db[n].where);
+      for(auto const & e: top) d.note(cat("разбор типа ", types.describe(e.shape)), db[n].where);
+      throw d;
+    }
+    // the only tree in node (one per chain and types: cache above)
+    auto build = [&](auto & self, uint32_t i, uint32_t j, uint32_t e) -> node_id {
+      entry const & x = dp[i][j][e];
+      if(x.op < 0) return c.atoms[i];
+      uint32_t m = uint32_t(x.op);
+      node_id l = self(self, i, m, x.li);
+      node_id r = self(self, m + 1, j, x.ri);
+      node_id t = db.add(n_op{c.ops[m], {l, r}}, {db[l].where.begin, db[r].where.end});
+      db[t].parent = n;
+      return t;
+    };
+    return build(build, 0, k - 1, 0);
+  }
+
+  bool op_associative(symbol op) {
+    auto [it, fresh] = assoc_ops.try_emplace(op.value, false);
+    if(fresh)
+      if(auto f = functions.find(sym(cat("infix", str(op)))); f != functions.end())
+        for(node_id fn: f->second)
+          for(node_id a: db.as<n_fn>(fn).attrs)
+            if(db.is<n_ident>(a) && str(db.as<n_ident>(a).name) == "associative") it->second = true;
+    return it->second;
+  }
+
+  // Type of application of infix operator to samples (or failure - SFINAE).
+  std::optional<value> probe_apply(interpreter & p, symbol op, value const & l, value const & r, std::string & why) {
+    std::string key = cat(str(op), "|", types.describe(l), "|", types.describe(r));
+    if(auto it = applied.find(key); it != applied.end()) return it->second;
+    auto & node = apply_nodes[op.value];
+    if(!node) {
+      node_id a = db.add(n_ident{sym("__l")}, {});
+      node_id b = db.add(n_ident{sym("__r")}, {});
+      node = db.add(n_op{op, {a, b}}, {});
+      db[a].parent = db[b].parent = node;
+    }
+    scope * s = p.new_scope(p.globals);
+    scope_hold hold{p, s};
+    value el = erase(l), er = erase(r);
+    el.proof = er.proof = 0;
+    s->declare(sym("__l"), std::move(el));
+    s->declare(sym("__r"), std::move(er));
+    std::optional<value> out;
+    try {
+      flow f = p.eval(node, s, 0);
+      if(f.normal() && !unknown(f.v)) out = f.v;
+    } catch(diagnostic const & d) {
+      if(d.kind == diag_kind::runtime) out = value(rt_v{});
+      else why = d.what();
+    }
+    applied[key] = out;
+    return out;
+  }
+
   // --- seats (lvalue) ---
 
   value * place(node_id n, scope * env, uint32_t frame) {
@@ -1463,6 +1711,31 @@ struct interpreter {
     auto op = str(o.op);
     span where = db[n].where;
     if(op == "?") return call_named(sym("try"), o.args, env, frame, where, n.value);
+    // Operator declared to be an unbuilt primitive code calls its entity (overload by
+    // type; embedded is also a candidate)
+    if(!user_ops.empty() || o.postfix)
+      if(symbol f = operator_entity(o); user_ops.contains(f.value)) {
+        call_site site{where, std::string(str(f)), n.value, frame};
+        auto user = user_candidates(f);
+        bool lazy = std::ranges::any_of(user, [&](node_id fn) {
+          return std::ranges::any_of(db.as<n_fn>(fn).params, [&](node_id p) { return db.as<n_param>(p).mode == param_mode::expr; });
+        });
+        if(o.postfix || lazy) return call_overloaded(functions[f], o.args, env, frame, site);
+        std::vector<value> vals;
+        for(node_id a: o.args) {
+          TZ_TRY(v, eval(a, env, frame));
+          vals.push_back(std::move(v));
+        }
+        std::vector<std::string> ts;
+        for(auto const & v: vals) ts.push_back(types.describe(v));
+        if(std::ranges::any_of(vals, [](value const & v) { return v.is<split_v>(); }) || user_operator_applies(f, ts))
+          return dispatch_split(user, vals, 0, o.args, env, frame, site);
+        // Built-in operation: user overload of these types is not accepted
+        if(o.args.size() == 1) return ok(lift(vals[0], [&](value const & a) { return unary(op, a, where); }));
+        if(op == "&&" || op == "||") return ok(builtin(sym(op == "&&" ? "and" : "or"), vals, where));
+        return ok(binary(op, vals[0], vals[1], where));
+      }
+    if(o.postfix) fail(cat("нет постфиксного оператора ", op), where);
     if(o.args.size() == 1) {
       TZ_TRY(x, eval(o.args[0], env, frame));
       return ok(lift(x, [&](value const & a) { return unary(op, a, where); }));
@@ -1836,6 +2109,7 @@ struct interpreter {
 
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
     auto const & fn = db.as<n_fn>(f);
+    check_inside(f, site);
     if(fn.outline && inline_required(f))
       fail(cat(site.what, " помечена outline, но использует семантику инлайна"), db[f].where);
     if(checking() && param_writes_checked.insert(f.value).second)
@@ -2025,11 +2299,74 @@ struct interpreter {
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
 
+  // Contextual condition [[inside(g)]] : entity exists only in the blocks of
+  // construction g.
+// 
+// Check the place of call in the text.
+  void check_inside(node_id f, call_site const & site) {
+    for(node_id a: db.as<n_fn>(f).attrs) {
+      if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "inside") continue;
+      auto const & c = db.as<n_call>(a);
+      if(c.args.size() != 1 || !db.is<n_ident>(c.args[0])) fail("[[inside(конструкция)]]", db[a].where);
+      symbol g = db.as<n_ident>(c.args[0]).name;
+      if(!site.node || !inside_block_of(node_id(site.node), g))
+        fail(cat(site.what, " существует только внутри блоков ", str(g)), site.where);
+    }
+  }
+
+  bool inside_block_of(node_id n, symbol g) const {
+    for(node_id c = n, p = db[n].parent; p; c = p, p = db[p].parent) {
+      if(db.is<n_fn>(p)) return false;
+      if(!db.is<n_call>(p)) continue;
+      auto const & call = db.as<n_call>(p);
+      if(!db.is<n_ident>(call.callee) || db.as<n_ident>(call.callee).name != g) continue;
+      bool block = db.is<n_block>(c) || (db.is<n_lambda>(c) && db.as<n_lambda>(c).block) || db.is<n_pack>(c) || (call.tail && call.args.back() == c);
+      if(block && std::ranges::find(call.args, c) != call.args.end()) return true;
+    }
+    return false;
+  }
+
   // The function uses inline semantics (§6.1): expr-parameter or address return.
   bool inline_required(node_id f) const {
     for(node_id p: db.as<n_fn>(f).params)
       if(db.as<n_param>(p).mode == param_mode::expr) return true;
     return has_addressed_return(db.as<n_fn>(f).body);
+  }
+
+  std::vector<node_id> user_candidates(symbol f) const {
+    std::vector<node_id> out;
+    if(auto it = functions.find(f); it != functions.end())
+      for(node_id fn: it->second)
+        if(!intrinsic_operator(fn)) out.push_back(fn);
+    return out;
+  }
+
+  // Does the user overload operator accept such types of operands?
+  bool user_operator_applies(symbol f, std::vector<std::string> const & ts) const {
+    for(node_id fn: user_candidates(f)) {
+      auto const & ps = db.as<n_fn>(fn).params;
+      bool fits = ps.size() == ts.size();
+      for(std::size_t k = 0; fits && k < ps.size(); ++k) {
+        auto const & p = db.as<n_param>(ps[k]);
+        if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != ts[k]) fits = false;
+      }
+      if(fits) return true;
+    }
+    return false;
+  }
+
+  symbol entity_of(n_op const & o) const {
+    return db.strings.intern(cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix"
+                                                                          : "prefix",
+        str(o.op)));
+  }
+
+  bool user_operator(node_id n) const { // node operator declared code (not primitive)
+    if(!db.is<n_op>(n)) return false;
+    auto const & o = db.as<n_op>(n);
+    if(o.postfix) return true;
+    if(user_ops.empty()) return false;
+    return user_ops.contains(db.strings.intern(cat(o.args.size() == 2 ? "infix" : "prefix", str(o.op))).value);
   }
 
   bool has_addressed_return(node_id n) const {
@@ -2135,13 +2472,24 @@ struct interpreter {
         r = value(std::move(xs));
       }
       if(!r.is<unit_v>()) {
-        if(checking() && a[0].proof && facts[a[0].proof - 1].kind == fact::size_of) { // range(xs.size) - xs indices
+        if(checking() && fact_of(a[0], fact::size_of)) { // range(xs.size) - xs indices
           fact f = facts[a[0].proof - 1];
           f.kind = fact::range_of;
           r.proof = add_fact(f);
         }
         return r;
       }
+    }
+    // prelude (operator (a) + (b) => add(a, b))
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 11> prim2{
+        {{"add", "+"}, {"sub", "-"}, {"mul", "*"}, {"div", "/"}, {"rem", "%"}, {"eq", "=="}, {"ne", "!="}, {"lt", "<"}, {"gt", ">"}, {"le", "<="}, {"ge", ">="}}};
+    for(auto [name, op]: prim2)
+      if(n == name && a.size() == 2) return binary(op, a[0], a[1], where);
+    if((n == "neg" || n == "not") && a.size() == 1) return unary(n == "neg" ? "-" : "!", a[0], where);
+    if((n == "and" || n == "or") && a.size() == 2) {
+      auto x = known_bool(a[0], where), y = known_bool(a[1], where);
+      if(x && y) return value(n == "and" ? *x && *y : *x || *y);
+      return erase(value(true));
     }
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
       if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
@@ -2306,6 +2654,15 @@ struct interpreter {
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
   symbol sym_intercept, sym_is_index; // kernel forms analyzed prior to the calculation of arguments
+  std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
+  std::unordered_map<uint64_t, symbol> op_entities;
+  std::unordered_map<uint32_t, bool> assoc_ops;
+  std::unordered_map<uint32_t, std::vector<symbol>> chain_names; // chain-name
+  std::unordered_map<std::string, node_id> resolved_chains; // (chain, types of names) → tree
+  std::map<std::pair<uint32_t, uint64_t>, node_id> chain_trees; // (chain, context) → tree (for JIT)
+  std::unordered_map<std::string, std::optional<value>> applied; // (operator, types) → type of result
+  std::unordered_map<uint32_t, node_id> apply_nodes; // l op r for a sample
+  std::vector<interpreter> probes; // parsing chains without side effects
   uint64_t effects = 0;
 };
 

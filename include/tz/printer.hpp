@@ -89,6 +89,28 @@ struct printer {
       item(f.result_type);
       out += ' ';
     }
+    auto name = str(f.name);
+    for(std::string_view role: {"infix", "prefix", "postfix"})
+      if(name.size() > role.size() && name.starts_with(role) && !std::isalnum(static_cast<unsigned char>(name[role.size()])) && name[role.size()] != '_') {
+        auto sym = name.substr(role.size());
+        out += "operator ";
+        if(role == "prefix") out += sym;
+        params({f.params[0]});
+        if(role == "postfix") out += sym;
+        if(role == "infix") {
+          out += cat(" ", sym, " ");
+          params({f.params[1]});
+        }
+        if(f.expr_body) {
+          out += " => ";
+          item(f.body);
+          out += ';';
+        } else {
+          out += ' ';
+          item(f.body);
+        }
+        return;
+      }
     out += str(f.name);
     // head and clauses: try(expr body) catch(expr... handlers)
     for(uint32_t i = 0; i < f.params.size() || i == 0;) {
@@ -324,34 +346,53 @@ struct printer {
         out += '?';
         return;
       }
+      if(o.postfix) {
+        operand(o.args[0], false, {});
+        out += op;
+        return;
+      }
       out += op;
-      operand(n, o.args[0]);
+      operand(o.args[0], false, {});
       return;
     }
-    operand(n, o.args[0]);
+    if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") { // appropriation
+      operand(o.args[0], false, {});
+      out += cat(" ", op, " ");
+      item(o.args[1]);
+      return;
+    }
+    operand(o.args[0], true, o.op);
     out += cat(" ", op, " ");
-    operand(n, o.args[1]);
+    operand(o.args[1], false, {});
   }
 
-  // Brackets around the operand - only if its operator connects weaker.
-  void operand(node_id parent, node_id child) {
-    bool paren = db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && prec(db.as<n_op>(child).op) < prec(db.as<n_op>(parent).op);
-    paren = paren || (db.is<n_op>(child) && db.as<n_op>(parent).args.size() == 1 && db.as<n_op>(child).args.size() == 2);
-    paren = paren || db.is<n_if>(child);
+  void print_node(node_id, n_chain const & c) {
+    for(uint32_t k = 0; k < c.atoms.size(); ++k) {
+      if(k) out += cat(" ", str(c.ops[k - 1]), " ");
+      operand(c.atoms[k], false, {});
+    }
+  }
+
+  // Brackets - where without them, parsing would give another tree: there are no
+  // priorities, so around any nested infix except the left operand of the same
+  // associative operator (a + b + c).
+  void operand(node_id child, bool left, symbol parent_op) {
+    bool infix = (db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2) || db.is<n_chain>(child);
+    bool paren = infix || db.is<n_if>(child);
+    if(infix && left && db.is<n_op>(child) && db.as<n_op>(child).op == parent_op && associative(parent_op)) paren = false;
     if(paren) out += '(';
     item(child);
     if(paren) out += ')';
   }
 
-  int prec(symbol op) const {
-    auto s = str(op);
-    if(s == "=" || s == "+=" || s == "-=" || s == "*=" || s == "/=") return 1;
-    if(s == "||") return 2;
-    if(s == "&&") return 3;
-    if(s == "==" || s == "!=" || s == "<" || s == ">" || s == "<=" || s == ">=") return 4;
-    if(s == "+" || s == "-") return 6;
-    if(s == "*" || s == "/" || s == "%") return 7;
-    return 9;
+  bool associative(symbol op) const {
+    for(uint32_t i = 0; i < db.size(); ++i) {
+      node_id f(i);
+      if(!db.is<n_fn>(f) || db.strings.text(db.as<n_fn>(f).name) != cat("infix", str(op))) continue;
+      for(node_id a: db.as<n_fn>(f).attrs)
+        if(db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "associative") return true;
+    }
+    return false;
   }
 
   // Challenge: head and clauses. The parameters of the construction block are printed in

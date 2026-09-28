@@ -76,7 +76,14 @@ struct n_call {
 struct n_op {
   symbol op;
   node_list args;
+  bool postfix = false; // one argument: a++ (otherwise prefix -a)
 }; // operator = operator entity call (§4.4)
+// A chain of infix operators, which has several trees parsing: the tree is
+// selected by brute force at instantiation - by type (§4.4).
+struct n_chain {
+  node_list atoms;
+  std::vector<symbol> ops; // ops[k] - between atoms[k] and atoms[k+1]
+};
 struct n_member {
   node_id object;
   symbol name;
@@ -160,7 +167,7 @@ struct n_hole {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_index, n_if, n_loop, n_break, n_continue, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_struct, n_extend, n_quote, n_splice>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice>;
 
 struct node {
   node_kind kind;

@@ -45,7 +45,7 @@ counters(auto n) {
   auto a = 0;
   auto b = 0;
   for(auto i : range(n)) { bump(a, 1); if(i % 4 == 0) bump(b, 1); }
-  a + 2 * b - n + n / 5 * 0 + 0 * a + b * 0 + 2 - 2 + 0
+  ((a + (2 * b) + ((n / 5) * 0) + (0 * a) + (b * 0) + 2) - (n + 2)) + 0
 }
 
 // expr-параметр: вычисляется только в выбранной ветке

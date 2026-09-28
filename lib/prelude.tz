@@ -7,6 +7,29 @@ module prelude;
 // 
 //.
 
+// Операторы — сущности языка (§4.4): 
+// Объявление повторяет запись:
+// параметры — на стороне своих веток. Приоритетов нет — цепочку с несколькими
+// деревьями разбирают типы (
+// там же); [[associative]] — инвариант из
+// логики: a + b + c — одно дерево. Тело из одного встроенного примитива —
+// операция VM (интерпретатор и машинный код исполняют её напрямую).
+[[associative]] operator (a) + (b) => add(a, b);
+operator (a) - (b) => sub(a, b);
+[[associative]] operator (a) * (b) => mul(a, b);
+operator (a) / (b) => div(a, b);
+operator (a) % (b) => rem(a, b);
+operator (a) == (b) => eq(a, b);
+operator (a) != (b) => ne(a, b);
+operator (a) < (b) => lt(a, b);
+operator (a) > (b) => gt(a, b);
+operator (a) <= (b) => le(a, b);
+operator (a) >= (b) => ge(a, b);
+[[associative]] operator (bool a) && (expr bool b) => and(a, b);
+[[associative]] operator (bool a) || (expr bool b) => or(a, b);
+operator -(a) => neg(a);
+operator !(bool a) => not(a);
+
 // while(c) тело — условие вычисляется на каждой итерации (expr).
 while(expr c, expr body) {
   loop {

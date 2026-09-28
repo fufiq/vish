@@ -34,7 +34,7 @@ escape(auto x) {
 
 main() {
   auto n = parse_int(args[1]).value;
-  print(outer(n), outer(0 - n + 6), outer(n - 0) - n);
+  print(outer(n), outer((0 - n) + 6), outer(n - 0) - n);
   print(outer(0 - 1), guard(0, n));
   print(try { escape(n) } catch(i64 e) { e });
 }
