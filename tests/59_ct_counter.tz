@@ -3,6 +3,8 @@
 // out: 0
 // check: порядок инстанцирования (ct):
 // fmt-stable
+// machine
+// machine-dump: 40
 // Compile-time состояние в порядке инстанцирования (§7.3, M4): 
 // 
 //.

@@ -51,6 +51,7 @@ struct m_thunk {
   node_id expr;
   uint32_t env = m_none;
   uint32_t frame = 0;
+  uint64_t ctx = 0; // context
 };
 // Parameter - alias of the caller's place (author's decision): area and slot. alias
 // is a place by number: a variable (scope, slot) or an element of its array (index
@@ -113,6 +114,14 @@ struct m_task {
   uint32_t owned = m_none; // The area that the task releases at the exit
   uint32_t a = 0, b = 0; // phase-out
   node_id extra; // selected by overload, the chain tree...
+  uint64_t ctx = 0; // Embedding context (chain of call places) - key ct-instance
+  uint64_t thunk_ctx = 0; // Block/body context of the structure that the task will cause
+};
+// The result of ct code instance : (ct node, embedding context) → value (§7.3).
+struct m_ct {
+  node_id node;
+  uint64_t ctx;
+  mval v;
 };
 
 // bootstrapping signal: break/continue/return (with target frame)/throw.
@@ -177,6 +186,8 @@ struct m_state {
   std::vector<m_stream> streams;
   bool deadlock = false; // Everyone is waiting for each other: the mistake will be the main one.
   uint64_t array_gen = 0; // array-buffering
+  std::vector<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
+  std::vector<symbol> ct_vars; // ct-variable module (change - only ct-code)
 };
 
 enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept, m_elem_ref };
@@ -316,6 +327,17 @@ struct process_machine {
         x.v);
   }
 
+  // The value is transferred to the memory of the process: the whole is known (not run-time, not splitting).
+  static bool portable(value const & x) {
+    if(x.is<array_v>()) {
+      for(uint32_t i = 0; i < x.as<array_v>().size(); ++i)
+        if(!portable(x.as<array_v>().get(i))) return false;
+      return true;
+    }
+    if(x.is<agg_v>()) return std::ranges::all_of(x.as<agg_v>().fields, [](auto const & f) { return portable(f.second); });
+    return !x.is<thunk_v>() && !x.is<rt_v>() && !x.is<split_v>() && !x.is<ref_v>();
+  }
+
   // Value type - no transfer (to select overload by parameter type).
   std::string describe(mval const & x) {
     return std::visit([&](auto const & a) -> std::string {
@@ -435,6 +457,7 @@ struct process_machine {
   void push_eval(node_id n, uint32_t scope, uint32_t frame) {
     auto & f = fib();
     f.tasks.push_back(m_task{m_eval, n, 0, scope, frame, uint32_t(f.vals.size())});
+    if(f.tasks.size() > 1) f.tasks.back().ctx = f.tasks[f.tasks.size() - 2].ctx;
   }
   // The task is completed with v.
   void finish(mval v) {
@@ -485,8 +508,21 @@ struct process_machine {
     for(auto const & a: args) av.items.push_back(mval{a});
     declare(st.globals, helper.sym("args"), mval{std::move(av)});
     declare(st.globals, helper.sym("stdin"), mval{m_agg{helper.types.named("stream"), {}}});
+    // ct-variables of the module and ct-code instance - in canonical order (§7.3): the
+    // results of parsing of the entire program assistant become the memory of the process
+    if(!helper.ct_names.empty()) helper.canonical_ct();
+    for(auto const & [k, v]: helper.ct_memo)
+      if(portable(v)) st.ct_memo.push_back({node_id(k.first), k.second, from_value(v, {})});
     for(node_id item: db.as<n_module>(root).items)
-      if(db.is<n_var>(item)) unsupported("переменные модуля", item);
+      if(db.is<n_var>(item)) {
+        auto const & v = db.as<n_var>(item);
+        if(!v.ct) unsupported("переменные модуля", item);
+        value * x = helper.globals->find(v.name);
+        if(!x) throw diagnostic(cat("ct ", helper.str(v.name), ": нет значения"), db[item].where);
+        st.ct_vars.push_back(v.name);
+        // the result, depending on the forks (branches give different), is not a value: read it ct- node from the memo
+        if(portable(*x)) declare(st.globals, v.name, from_value(*x, db[item].where));
+      }
     auto it = helper.functions.find(helper.sym("main"));
     if(it == helper.functions.end()) throw diagnostic("нет функции main", {});
     invoke(it->second, 0, 0, db[it->second.front()].where);
@@ -715,7 +751,9 @@ struct process_machine {
       declare(sc, p.name, std::move(a));
     }
     f.vals.resize(f.vals.size() - nargs);
+    uint64_t ctx = f.tasks.empty() ? 0 : f.tasks.back().ctx;
     f.tasks.push_back(m_task{m_call_body, chosen, 0, sc, id, uint32_t(f.vals.size()), sc, id});
+    f.tasks.back().ctx = interpreter::inline_context(ctx, site_node ? site_node.value : 0); // body in its context of embedding
   }
 
   // Leads require the candidate on the values of the arguments: the number performed
@@ -864,6 +902,7 @@ struct process_machine {
       t.extra = th.expr;
       t.scope = th.env;
       t.frame = th.frame;
+      t.ctx = th.ctx;
       t.phase = 0;
       return;
     }
@@ -1035,6 +1074,8 @@ struct process_machine {
         declare(t.scope, name, std::move(rhs)); // x = e is an announcement if there is no name.
         return finish(mval{m_unit{}});
       }
+      if(p.scope == st.globals && std::ranges::contains(st.ct_vars, name) && !in_ct())
+        throw diagnostic("ct-переменная меняется только кодом при компиляции (ct { … })", db[n].where);
       mval & c = cell(p);
       bool whole = !st.scopes[p.scope].vars[p.slot].v.is<m_alias>() || st.scopes[p.scope].vars[p.slot].v.as<m_alias>().index == m_none;
       c = op == "=" ? std::move(rhs) : primitive(prim_of(op), {c, rhs}, db[n].where);
@@ -1201,7 +1242,7 @@ struct process_machine {
         if(i >= ps.size() || db.as<n_param>(ps[i]).mode != param_mode::expr) expr_everywhere = false;
       }
       if(expr_everywhere) {
-        fib().vals.push_back(mval{m_thunk{args[i], t.scope, t.frame}});
+        fib().vals.push_back(mval{m_thunk{args[i], t.scope, t.frame, t.ctx}});
         continue;
       }
       // array element to variable parameter - reference to element, not copy
@@ -1263,6 +1304,7 @@ struct process_machine {
     t.extra = th.expr;
     t.a = th.env;
     t.b = th.frame;
+    t.thunk_ctx = th.ctx;
     t.phase = 4;
     block_args_step(n);
   }
@@ -1281,7 +1323,8 @@ struct process_machine {
     fib().vals.resize(t.base);
     t.phase = 5;
     t.owned = sc;
-    fib().tasks.push_back(m_task{m_lambda_body, t.extra, 0, sc, t.b, uint32_t(fib().vals.size()), m_none, 0, 0, l.body});
+    uint64_t ctx = t.thunk_ctx;
+    fib().tasks.push_back(m_task{m_lambda_body, t.extra, 0, sc, t.b, uint32_t(fib().vals.size()), m_none, 0, 0, l.body, ctx});
   }
 
   // throw e is an expression: the exception goes the second way before the interception (§5.7).
@@ -1328,6 +1371,7 @@ struct process_machine {
     fib().vals.push_back(mval{hs});
     t.extra = body.expr;
     t.a = body.env;
+    t.thunk_ctx = body.ctx;
     t.b = body.frame;
   }
 
@@ -1336,7 +1380,8 @@ struct process_machine {
     if(t.phase == 0) { // body
       t.phase = 1;
       auto & f = fib();
-      f.tasks.push_back(m_task{m_lambda_body, t.extra, 0, t.a, t.b, uint32_t(f.vals.size()), m_none, 0, 0, t.extra});
+      uint64_t ctx = t.thunk_ctx;
+      f.tasks.push_back(m_task{m_lambda_body, t.extra, 0, t.a, t.b, uint32_t(f.vals.size()), m_none, 0, 0, t.extra, ctx});
       return;
     }
     mval r = deref(pop_val()); // body or catch completed
@@ -1361,7 +1406,7 @@ struct process_machine {
       f.vals.resize(t.base + 1);
       t.phase = 2;
       t.owned = sc;
-      f.tasks.push_back(m_task{m_lambda_body, h, 0, sc, hs.frame, uint32_t(f.vals.size()), m_none, 0, 0, l.body});
+      f.tasks.push_back(m_task{m_lambda_body, h, 0, sc, hs.frame, uint32_t(f.vals.size()), m_none, 0, 0, l.body, hs.ctx});
       return true;
     }
     return false;
@@ -1375,7 +1420,7 @@ struct process_machine {
     capture(th.env);
     uint32_t id = uint32_t(st.fibers.size());
     st.fibers.emplace_back();
-    st.fibers.back().tasks.push_back(m_task{m_lambda_body, th.expr, 0, th.env, th.frame, 0, m_none, 0, 0, th.expr});
+    st.fibers.back().tasks.push_back(m_task{m_lambda_body, th.expr, 0, th.env, th.frame, 0, m_none, 0, 0, th.expr, th.ctx});
     st.ready.push_back(id);
     finish(mval{m_unit{}});
   }
@@ -1487,6 +1532,7 @@ struct process_machine {
   void push_elem_ref(node_id n, uint32_t scope, uint32_t frame) {
     auto & f = fib();
     f.tasks.push_back(m_task{m_elem_ref, n, 0, scope, frame, uint32_t(f.vals.size())});
+    if(f.tasks.size() > 1) f.tasks.back().ctx = f.tasks[f.tasks.size() - 2].ctx;
   }
   void elem_ref_step() {
     m_task & t = top();
@@ -1590,6 +1636,24 @@ struct process_machine {
     return {};
   }
 
+  // ct e/ct { … } - once per instance (call location, embedding context): result of
+  // canonical parsing or, if not, computation here (§7.3).
+  void eval_node(node_id n, n_ct const & c) {
+    m_task & t = top();
+    if(t.phase == 0) {
+      for(auto const & m: st.ct_memo)
+        if(m.node == n && m.ctx == t.ctx) return finish(mval(m.v));
+      t.phase = 1;
+      return push_eval(c.body, t.scope, t.frame);
+    }
+    mval v = deref(pop_val());
+    st.ct_memo.push_back({n, t.ctx, v});
+    finish(std::move(v));
+  }
+  bool in_ct() {
+    return std::ranges::any_of(fib().tasks, [&](m_task const & x) { return x.kind == m_eval && x.phase == 1 && db.is<n_ct>(x.node); });
+  }
+
   // try_compile { … } - SFINAE block: the instantiation error in it removes sfinae_cut.
   void eval_node(node_id, n_try_compile const & c) {
     m_task & t = top();
@@ -1630,7 +1694,8 @@ struct process_machine {
     uint32_t id = ++st.frame_counter;
     f.frames.push_back({id, symbol{}, false, t.frame});
     t.phase = 7;
-    f.tasks.push_back(m_task{m_call_body, t.extra, 0, sc, id, uint32_t(f.vals.size()), sc, id});
+    uint64_t ctx = t.ctx; // Closing - in the context of the calling
+    f.tasks.push_back(m_task{m_call_body, t.extra, 0, sc, id, uint32_t(f.vals.size()), sc, id, 0, {}, ctx});
   }
 
   void resume_call(node_id n) {
