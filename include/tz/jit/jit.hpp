@@ -1543,18 +1543,19 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
   jt t = jt(t_node >> 32);
   node_id at{uint32_t(t_node)};
   try {
-    span where = vm.db[at].where;
+    span where; // place - only if the error (below): on each exchange it is not necessary
     if(op == 5) {
       vm.yield();
       return 0;
     }
-    static constexpr std::string_view names[] = {"stream_new", "stream_write", "stream_read", "stream_more", "stream_close"};
-    std::vector<value> a;
-    if(op == 0) a.push_back(value(int64_t(bits)));
-    else a.push_back(vm.stream_value(id));
-    if(op == 1) a.push_back(t == jt::f64_ ? value(std::bit_cast<double>(bits)) : t == jt::bool_ ? value(bits != 0) : value(int64_t(bits)));
-    value r = vm.stream_op(names[op], a, where);
-    if(op == 0) return vm.stream_id(r, where);
+    if(op == 0) {
+      where = vm.db[at].where; // place of creation - element type key
+      std::vector<value> a{value(int64_t(bits))};
+      return vm.stream_id(vm.stream_op("stream_new", a, where), where);
+    }
+    static constexpr uint8_t ops[] = {0, interpreter::s_write, interpreter::s_read, interpreter::s_more, interpreter::s_close};
+    value x = op != 1 ? value() : t == jt::f64_ ? value(std::bit_cast<double>(bits)) : t == jt::bool_ ? value(bits != 0) : value(int64_t(bits));
+    value r = vm.stream_do(ops[op], std::size_t(id), x, where);
     if(op == 3) return r.is<bool>() && r.as<bool>();
     if(op == 2) {
       if(t == jt::i64_ && r.is<int64_t>()) return uint64_t(r.as<int64_t>());
@@ -1563,6 +1564,12 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       jit_fault = uint64_t(jit_fault_kind::layout); // type guaranteed by parsing
       jit_fault_node = at.value;
     }
+    return 0;
+  } catch(diagnostic & d) {
+    if(!d.where.end) d.where = vm.db[at].where;
+    jit_pending = std::make_exception_ptr(d);
+    jit_fault = uint64_t(jit_fault_kind::vm_error);
+    jit_fault_node = at.value;
     return 0;
   } catch(...) {
     jit_pending = std::current_exception();

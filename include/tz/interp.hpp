@@ -2910,30 +2910,41 @@ struct interpreter {
       if(n == "stream_more") return erase(value(true));
       return value();
     }
+    value none;
+    uint8_t op = n == "stream_write" ? s_write : n == "stream_read" ? s_read : n == "stream_more" ? s_more : n == "stream_close" ? s_close : s_bad;
+    if(op == s_bad) fail(cat("неизвестная операция потока ", n), where);
+    return stream_do(op, sid, a.size() > 1 ? a[1] : none, where);
+  }
+
+  // Execution flow operation by number: without value-flow and without argument
+  // vector - input for machine code. x is recorded (s_write).
+  enum : uint8_t { s_write, s_read, s_more, s_close, s_bad };
+  value stream_do(uint8_t op, std::size_t sid, value & x, span where) {
+    stream_rec & s = root->streams[sid];
     fiber_rec * me = &running();
-    if(n == "stream_write") {
+    if(op == s_write) {
       if(s.net) fail("в сеть — send(сеть, peer, байты)", where);
       if(s.file_fd >= 0) {
         if(!s.file_write) fail("файл открыт на чтение", where);
-        if(!a[1].is<std::string>()) fail(cat("в файл — байты (str), получено ", types.describe(a[1])), where);
-        s.peers[0].out.push_back(std::move(a[1].as<std::string>()));
+        if(!x.is<std::string>()) fail(cat("в файл — байты (str), получено ", types.describe(x)), where);
+        s.peers[0].out.push_back(std::move(x.as<std::string>()));
         file_write_next(sid);
         return value();
       }
-      if(!transferable(a[1])) fail(cat("в поток — только данные: ", types.describe(a[1])), where);
+      if(!transferable(x)) fail(cat("в поток — только данные: ", types.describe(x)), where);
       while(s.buf.size() >= s.cap && !s.closed) {
         s.writers.push_back(me);
         park();
       }
       if(s.closed) fail_rt("closed_stream", "запись в закрытый поток", where);
-      s.buf.push_back(std::move(a[1]));
+      s.buf.push_back(std::move(x));
       if(!s.readers.empty()) {
         wake_direct(s.readers.front());
         s.readers.pop_front();
       }
       return value();
     }
-    if(n == "stream_read" || n == "stream_more") {
+    if(op == s_read || op == s_more) {
       while(s.buf.empty() && !s.closed) {
         if(s.file_fd >= 0 && !s.file_write && !s.io_busy) { // File: The next piece is the application
           s.io_busy = true;
@@ -2944,7 +2955,7 @@ struct interpreter {
         s.readers.push_back(me);
         park();
       }
-      if(n == "stream_more") return value(!s.buf.empty());
+      if(op == s_more) return value(!s.buf.empty());
       if(s.buf.empty()) fail_rt("closed_stream", "чтение из закрытого пустого потока", where);
       value v = std::move(s.buf.front());
       s.buf.pop_front();
@@ -2954,14 +2965,14 @@ struct interpreter {
       }
       return v;
     }
-    if(n == "stream_close") {
+    if(op == s_close) {
       close_host(sid);
       s.closed = true;
       for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
       for(fiber_rec * w: std::exchange(s.writers, {})) wake(w);
       return value();
     }
-    fail(cat("неизвестная операция потока ", n), where);
+    fail("неизвестная операция потока", where);
   }
 
   // --- seats (lvalue) ---
