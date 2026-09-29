@@ -1,0 +1,41 @@
+// stdin: 1.5 2 4
+// out: 3
+// out: 7.5
+// out: 4.0
+// out: 16
+// out: 6
+// machine
+// machine-dump: 1
+// machine-dump: 60
+// machine-dump: 200
+// machine-dump: 400
+// Машина процессов (M5): исполнение без рекурсии, память — данные; дамп на
+// любом шаге и восстановление в новой базе из журнала дампа дают тот же вывод.
+// 
+// 
+//;.
+twice(i64 n) => n + n;
+twice(f64 x) => x * 2.0;
+
+total(xs) {
+  s = 0.0;
+  for(x : xs) s = s + x;
+  s
+}
+
+// return(caller) — выход из вызывающего (семантический инлайн)
+first_big(xs, lim) {
+  for(x : xs) if(x > lim) return x;
+  0.0
+}
+
+main() {
+  xs = read_floats(stdin);
+  print(xs.size);
+  print(total(xs));
+  print(first_big(xs, 3.0));
+  n = 0;
+  while(n < 10) n = n + 1;
+  print(twice(8));
+  print(twice(xs.size));
+}

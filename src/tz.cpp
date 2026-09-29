@@ -17,6 +17,7 @@
 #include "tz/session.hpp"
 #include "tz/server.hpp"
 #include "tz/merge.hpp"
+#include "tz/machine.hpp"
 #include "tz/jit/jit.hpp"
 
 namespace {
@@ -25,7 +26,7 @@ using tz::cat;
 using tz::put;
 
 int usage() {
-  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
+  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
   return 2;
 }
 
@@ -91,6 +92,13 @@ int main(int argc, char ** argv) {
       put(stdout, cat("записано: ", out, r.conflicts.empty() ? "" : " (конфликты — мой вариант; слить руками)", "\n"));
       return r.conflicts.empty() ? 0 : 1;
     }
+    // Renew the process from the dump - "to another VM" (M5): another tz process.
+    if(cmd == "resume") {
+      tz::os::mapped_file f(argv[2]);
+      tz::restored_process r(f.text());
+      r.m->run();
+      return int(r.m->st.exit_code);
+    }
     if(cmd == "log") {
       tz::node_id root;
       put(stdout, tz::describe_journal(tz::read_journal(argv[2], root)));
@@ -98,13 +106,21 @@ int main(int argc, char ** argv) {
     }
 
     int at = 2;
-    bool show_instances = false, use_jit = false, jit_stats = false;
+    bool show_instances = false, use_jit = false, jit_stats = false, machine = false;
+    uint64_t dump_after = 0;
+    std::string dump_path;
     while(cmd == "run" && at < argc && std::string_view(argv[at]).starts_with("--")) {
       std::string_view f = argv[at++];
       if(f == "--instances") show_instances = true;
       else if(f == "--jit") use_jit = true;
       else if(f == "--jit-stats") use_jit = jit_stats = true;
-      else return usage();
+      else if(f == "--machine") machine = true;
+      else if(f == "--dump-after" && at + 1 < argc) { // -dump-after N file.tzproc
+        machine = true;
+        std::string_view n = argv[at++];
+        std::from_chars(n.data(), n.data() + n.size(), dump_after);
+        dump_path = argv[at++];
+      } else return usage();
     }
     if(at >= argc) return usage();
 
@@ -160,6 +176,28 @@ int main(int argc, char ** argv) {
       server.listen(argv[at]);
       put(stderr, cat("tz serve: ", p.path, " на ", argv[at], "\n"));
       for(;;) server.step();
+    }
+    // Process machine (M5): execution without recursion, memory - data; c -dump-after
+    // - stop after N steps and write down the dump (tz resume).
+    if(cmd == "run" && machine) {
+      tz::process_machine m(p.db, p.root, p.path);
+      m.start(std::vector<std::string>(argv + at, argv + argc));
+      try {
+        if(dump_path.empty()) m.run();
+        else {
+          m.run(dump_after);
+          if(m.st.done) put(stderr, cat("процесс закончился раньше шага ", dump_after, "\n"));
+          else {
+            tz::os::write_file(dump_path, m.dump());
+            put(stderr, cat("дамп: ", dump_path, " (шаг ", m.st.steps, ")\n"));
+          }
+          return 0;
+        }
+      } catch(tz::diagnostic const & d) {
+        return report_error(p, d);
+      }
+      put(stderr, cat("шагов: ", m.st.steps, "\n"));
+      return int(m.st.exit_code);
     }
     if(cmd == "run") {
       std::vector<std::string> args{p.path};

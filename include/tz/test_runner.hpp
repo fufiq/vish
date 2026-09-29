@@ -25,6 +25,7 @@
 #include "store.hpp"
 #include "session.hpp"
 #include "server.hpp"
+#include "machine.hpp"
 #include "jit/jit.hpp"
 
 #include <filesystem>
@@ -54,6 +55,8 @@ struct test_runner {
     std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_lacks, check_errors;
     std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, unknown;
     bool fmt_stable = false;
+    bool machine = false; // The same program is a process machine: the same output
+    std::vector<std::string> machine_dump; // dump step: dump, restore to new base, count
     bool store_roundtrip = false;
   };
 
@@ -77,6 +80,10 @@ struct test_runner {
       if(take("args:", args_line)) {
         for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
       } else if(take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats)) {
+      } else if(take("machine-dump:", e.machine_dump)) {
+        e.machine = true;
+      } else if(body == "machine") {
+        e.machine = true;
       } else if(body.starts_with("fmt-stable")) {
         e.fmt_stable = true;
       } else if(body.starts_with("store-roundtrip")) {
@@ -456,6 +463,7 @@ struct test_runner {
       }
       if(out2 != out) why += cat("    вывод из базы отличается: ", in_quotes(out2), " против ", in_quotes(out), "\n");
     }
+    if(e.machine) why += machine_check(db, root, path, e, out);
     uint32_t i = 0;
     for(std::string_view line: lines_of(out)) {
       if(i >= e.out.size()) {
@@ -471,6 +479,42 @@ struct test_runner {
     if(e.errors.empty() && !errors.empty()) why += "    неожиданная ошибка:\n" + errors;
     for(auto & want: e.instances)
       if(!instances.contains(want)) why += cat("    нет экземпляра ", in_quotes(want), "; есть:\n", instances);
+    return why;
+  }
+
+  // Process machine (M5): the same conclusion as the interpreter; with dump - dump after
+  // N steps, recovery in a new database from journal dump ("in another VM") and counting:
+  // output to dump + after recovery = complete.
+  static std::string machine_check(ast_db & db, node_id root, std::filesystem::path const & path, expect const & e, std::string const & out) {
+    std::string why, mout;
+    try {
+      process_machine m(db, root, path.filename().string());
+      m.captured = &mout;
+      m.start(e.args, e.stdin_lines);
+      m.run();
+    } catch(diagnostic const & d) {
+      mout += render(d, path.filename().string(), db);
+    }
+    if(mout != out) why += cat("    машина процессов: вывод ", in_quotes(mout), " против ", in_quotes(out), "\n");
+    for(auto const & at: e.machine_dump) { // each directive - its launch with a dump at this step
+      uint64_t n = 0;
+      std::from_chars(at.data(), at.data() + at.size(), n);
+      std::string dout;
+      try {
+        process_machine m(db, root, path.filename().string());
+        m.captured = &dout;
+        m.start(e.args, e.stdin_lines);
+        m.run(n);
+        if(m.st.done) why += cat("    машина: процесс закончился раньше шага дампа ", n, "\n");
+        std::string bytes = m.dump();
+        restored_process r(bytes); // New base from journal dump - "another VM"
+        r.m->captured = &dout;
+        r.m->run();
+      } catch(diagnostic const & d) {
+        dout += render(d, path.filename().string(), db);
+      }
+      if(dout != out) why += cat("    дамп на шаге ", n, ": вывод ", in_quotes(dout), " против ", in_quotes(out), "\n");
+    }
     return why;
   }
 };
