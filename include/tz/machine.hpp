@@ -463,7 +463,9 @@ struct process_machine {
     throw d;
   }
 
+  bool unsupported_hit = false; // "Not supported" is not a program error: try_compile does not silence it
   [[noreturn]] void unsupported(std::string_view what, node_id n) {
+    unsupported_hit = true;
     throw diagnostic(cat("машина процессов: пока не поддержано — ", what), db[n].where);
   }
 
@@ -529,6 +531,7 @@ struct process_machine {
         default: throw diagnostic("машина: неизвестная задача", {});
       }
     } catch(diagnostic const & d) {
+      if(d.kind == diag_kind::instantiation && !unsupported_hit && sfinae_cut()) return true;
       // VM Error: Eliminating the language if there is someone to catch it (§5.7)
       if(d.kind != diag_kind::runtime || std::ranges::none_of(fib().tasks, [](m_task const & x) { return x.kind == m_intercept && x.phase == 1; })) {
         if(st.current == 0) throw;
@@ -588,6 +591,26 @@ struct process_machine {
           diag_kind::runtime);
     }
     throw diagnostic(s.kind == sig_return ? "return вне функции" : "break/continue вне цикла", {});
+  }
+
+  // Error instantiation within try_compile: the block is excluded (§5.4) - the tasks on
+  // it are removed, the execution goes on. runtime doesn't silence errors.
+  bool sfinae_cut() {
+    auto & f = fib();
+    auto at = std::ranges::find_if(f.tasks.rbegin(), f.tasks.rend(), [&](m_task const & x) { return x.kind == m_eval && x.phase == 1 && db.is<n_try_compile>(x.node); });
+    if(at == f.tasks.rend()) return false;
+    std::size_t keep = f.tasks.size() - std::size_t(at - f.tasks.rbegin());
+    while(f.tasks.size() > keep) {
+      m_task & t = f.tasks.back();
+      if(t.kind == m_call_body) end_frame(t);
+      release_scope(t.owned);
+      f.vals.resize(t.base);
+      f.tasks.pop_back();
+    }
+    f.pending = {};
+    f.vals.resize(f.tasks.back().base);
+    finish(mval{m_unit{}});
+    return true;
   }
 
   void end_frame(m_task const & t) {
@@ -1565,6 +1588,16 @@ struct process_machine {
       if(fits) return it->fn;
     }
     return {};
+  }
+
+  // try_compile { … } - SFINAE block: the instantiation error in it removes sfinae_cut.
+  void eval_node(node_id, n_try_compile const & c) {
+    m_task & t = top();
+    if(t.phase == 0) {
+      t.phase = 1;
+      return push_eval(c.body, t.scope, t.frame);
+    }
+    finish(deref(pop_val()));
   }
 
   void eval_node(node_id n, auto const &) { unsupported(kind_name(db[n]), n); }
