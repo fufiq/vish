@@ -1,6 +1,7 @@
 // args: 3
 // out: 4 6 12 true 7 2
 // out: 3 4 1
+// machine
 // jit-compiled: pick
 // jit-compiled: sum3
 // fmt-stable

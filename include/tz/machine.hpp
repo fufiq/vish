@@ -93,6 +93,13 @@ struct m_frame {
   symbol name;
   bool outline;
   uint32_t caller;
+  bool plain = false; // Context Redefinition Body: Inside - Normal Operations
+};
+// Redefinition of an operation by context (using operator ..., §8.2) - to the end of the frame of the function-context.
+struct m_override {
+  symbol entity; // infix+
+  node_id fn;
+  uint32_t frame;
 };
 
 // Task: Calculating node (or service step) with phase and data.
@@ -136,6 +143,7 @@ struct m_fiber {
   std::vector<mval> vals;
   std::vector<m_frame> frames;
   m_signal pending;
+  std::vector<m_override> overrides;
   uint8_t state = f_ready;
   m_error error;
 };
@@ -585,6 +593,8 @@ struct process_machine {
   void end_frame(m_task const & t) {
     auto & fr = fib().frames;
     if(!fr.empty() && fr.back().id == t.a) fr.pop_back();
+    auto & ov = fib().overrides; // The redefinition of context lives to the end of his frame
+    while(!ov.empty() && ov.back().frame == t.a) ov.pop_back();
   }
 
   // --- staffing ---
@@ -617,12 +627,13 @@ struct process_machine {
   void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where) {
     auto & f = fib();
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
-    node_id chosen;
+    node_id chosen = override_for(fns, args); // Operation in context (checked) - its redefinition
+    bool plain = bool(chosen);
     int best = -1;
     bool tie = false;
     for(node_id fnode: fns) {
       auto const & fn = db.as<n_fn>(fnode);
-      if(fn.params.size() != nargs) continue;
+      if(plain || fn.params.size() != nargs) continue;
       int score = 0;
       bool fits = true;
       for(uint32_t i = 0; i < nargs && fits; ++i) {
@@ -651,9 +662,13 @@ struct process_machine {
     auto const & fn = db.as<n_fn>(chosen);
     if(fn.outline && helper.inline_required(chosen))
       throw diagnostic(cat(helper.str(fn.name), " помечена outline, но использует семантику инлайна"), db[chosen].where);
-    for(node_id at: fn.attrs) // [[inside(g)]] - call location check (§7.4): not yet
-      if(db.is<n_call>(at) && db.is<n_ident>(db.as<n_call>(at).callee) && helper.str(db.as<n_ident>(db.as<n_call>(at).callee).name) == "inside")
-        unsupported("атрибут inside", chosen);
+    for(node_id at: fn.attrs) { // [[inside(g)]] - entity only in blocks g: at the place of call in the text (§7.4 )
+      if(!db.is<n_call>(at) || !db.is<n_ident>(db.as<n_call>(at).callee) || helper.str(db.as<n_ident>(db.as<n_call>(at).callee).name) != "inside") continue;
+      auto const & c = db.as<n_call>(at);
+      if(c.args.size() != 1 || !db.is<n_ident>(c.args[0])) throw diagnostic("[[inside(конструкция)]]", db[at].where);
+      symbol g = db.as<n_ident>(c.args[0]).name;
+      if(!site_node || !helper.inside_block_of(site_node, g)) throw diagnostic(cat(helper.str(fn.name), " существует только внутри блоков ", helper.str(g)), where);
+    }
     // function-operator from one primitive - VM operation
     if(helper.intrinsic_operator(chosen)) {
       std::string prim(helper.str(db.as<n_ident>(db.as<n_call>(fn.body).callee).name));
@@ -663,7 +678,7 @@ struct process_machine {
       return;
     }
     uint32_t id = ++st.frame_counter;
-    f.frames.push_back({id, fn.name, fn.outline, caller_frame});
+    f.frames.push_back({id, fn.name, fn.outline, caller_frame, plain});
     uint32_t sc = new_scope(st.globals);
     for(uint32_t i = 0; i < nargs; ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
@@ -1524,6 +1539,32 @@ struct process_machine {
     m_arr a;
     for(uint32_t i = 0; i < c.items.size(); ++i) a.items.push_back(deref(fib().vals[t.base + i]));
     finish(mval{std::move(a)});
+  }
+
+  // using operator ... - redefinition to the end of the frame of the function-context (checked).
+  void eval_node(node_id n, n_fn const & f) {
+    if(!f.scoped) unsupported("локальная функция", n);
+    fib().overrides.push_back({f.name, n, top().frame});
+    finish(mval{m_unit{}});
+  }
+
+  // Redefining the context for an operation: the nearest, whose parameter types take values.
+  node_id override_for(std::vector<node_id> const & fns, std::vector<mval> const & args) {
+    auto & f = fib();
+    if(f.overrides.empty() || args.size() != 2 || !db.is<n_op>(site_node) || fns.empty()) return {};
+    if(std::ranges::any_of(f.frames, [](m_frame const & fr) { return fr.plain; })) return {};
+    symbol entity = db.as<n_fn>(fns.front()).name;
+    for(auto it = f.overrides.rbegin(); it != f.overrides.rend(); ++it) {
+      if(it->entity != entity) continue;
+      auto const & ps = db.as<n_fn>(it->fn).params;
+      bool fits = ps.size() == args.size();
+      for(std::size_t k = 0; k < ps.size() && fits; ++k) {
+        auto const & p = db.as<n_param>(ps[k]);
+        if(p.type && db.is<n_ident>(p.type) && helper.str(db.as<n_ident>(p.type).name) != describe(deref(args[k]))) fits = false;
+      }
+      if(fits) return it->fn;
+    }
+    return {};
   }
 
   void eval_node(node_id n, auto const &) { unsupported(kind_name(db[n]), n); }
