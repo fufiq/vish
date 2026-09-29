@@ -1,5 +1,5 @@
 import type { NodeId, Piece } from '../../protocol/messages';
-import { ASTNode } from './ast_node';
+import { ASTNode, badgeSheet } from './ast_node';
 
 const sheet = new CSSStyleSheet();
 sheet.replaceSync(`
@@ -17,11 +17,15 @@ export abstract class BlockNode extends ASTNode {
     return this.#shadow;
   }
 
+  protected override badgeRoot(): ShadowRoot {
+    return this.#shadow;
+  }
+
   override show(
     pieces: readonly Piece[],
     child: (id: NodeId) => ASTNode,
   ): void {
-    this.#shadow.adoptedStyleSheets = [sheet];
+    this.#shadow.adoptedStyleSheets = [sheet, badgeSheet];
     const deco: Node[] = [];
     const kids: ASTNode[] = [];
     pieces.forEach((p, i) => {

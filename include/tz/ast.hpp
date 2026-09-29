@@ -229,7 +229,8 @@ struct ast_db {
     return id;
   }
 
-  // node revision - when it was last changed (for reactive disability).
+  // node revision - when the last time its subtree within a function changed (reactive
+  // disability: editing a block also changes the function revision).
   uint64_t node_revision(node_id n) const { return node_rev[n.value]; }
 
   node_id add(auto k, span where) {
@@ -249,7 +250,11 @@ struct ast_db {
   void replace(node_id n, node_kind k) {
     ++revision;
     nodes[n].kind = std::move(k);
-    node_rev[n.value] = revision;
+    // Up to function: Cache granularity - functions, not files
+    for(node_id x = n; x; x = nodes[x].parent) {
+      node_rev[x.value] = revision;
+      if(std::holds_alternative<n_fn>(nodes[x].kind)) break;
+    }
     log({j_replace{n.value, nodes[n].kind}});
   }
 

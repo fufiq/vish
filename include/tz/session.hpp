@@ -61,11 +61,14 @@ struct vm_session {
     cache.recomputed_names.clear();
     interpreter vm(db, root, {name}, mode::check, std::nullopt, &cache);
     std::string err;
+    errors.clear();
     try {
       vm.run_main();
     } catch(diagnostic const & d) {
       err = render(d, name, db);
+      errors.push_back(d);
     }
+    node_types = vm.node_types(); // For the Editor: Types and Errors in Place
     last_report = vm.report(name, db.source(db[root].where.source));
     std::string names;
     for(auto & n: cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
@@ -141,6 +144,9 @@ struct vm_session {
   std::vector<std::string> stdin_lines;
   uint32_t edits = 0;
   std::string last_report;
+  // Last check: node types in all contexts and errors (editor, §13.1).
+  std::map<uint32_t, std::vector<std::string>> node_types;
+  std::vector<diagnostic> errors;
 };
 
 } // namespace tz

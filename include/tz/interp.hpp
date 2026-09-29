@@ -308,6 +308,27 @@ struct interpreter {
 
   bool live(node_id fn) const { return live_fns.contains(fn.value); }
 
+  // Types of node in all contexts where it was executed (instance, embedding
+  // locations):
+// 
+// For editor: Types, members after `.`.
+  std::map<uint32_t, std::vector<std::string>> node_types() const {
+    build_observed();
+    std::map<uint32_t, std::vector<std::string>> out;
+    for(auto const & [key, o]: observations_ctx) {
+      if(!o.seen) continue;
+      auto & ts = out[key.first];
+      auto add = [&](value const & v) {
+        std::string t = types.describe(v);
+        if(!std::ranges::contains(ts, t)) ts.push_back(t);
+      };
+      if(o.v.is<split_v>()) // splitting - each alternative separately
+        for(auto const & a: o.v.as<split_v>().alts) add(a);
+      else add(o.v);
+    }
+    return out;
+  }
+
   // Show the meaning as literal, if possible.
   std::optional<std::string> literal(value const & v) const {
     if(!v.known()) return std::nullopt;

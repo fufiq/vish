@@ -98,8 +98,22 @@ export interface Complete {
   selected: number;
   items: CompletionItem[];
 }
+// Verification tags: "type" - types of declared name for all instance, "error" -
+// error in place (with a trace). They come in full after the audit.
+export interface Mark {
+  type: 's_mark';
+  node: NodeId;
+  kind: string;
+  text: string;
+}
+export interface Decor {
+  type: 's_decor';
+  view: number;
+  revision: number;
+  marks: Mark[];
+}
 export type ServerMsg =
-  ServerHello | View | Cursor | ServerError | Update | Complete;
+  ServerHello | View | Cursor | ServerError | Update | Complete | Decor;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

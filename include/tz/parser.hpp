@@ -33,6 +33,7 @@ struct parser {
     } catch(diagnostic const & d) {
       diags.push_back(with_source(d));
       toks.assign(1, token{});
+      lex_error = d.what();
     }
     match_brackets();
     for(uint32_t i = 0; i < db.size(); ++i)
@@ -84,6 +85,15 @@ struct parser {
   }
 
   node_id parse_module() {
+    // The text is not divided into lexemes (unclosed line) - the whole text is a hole:
+    //  
+    if(!lex_error.empty()) {
+      n_module m;
+      m.items.push_back(db.add(n_hole{std::string(src), lex_error}, {0, uint32_t(src.size())}));
+      auto id = db.add(std::move(m), {0, uint32_t(src.size())});
+      db.link_parents(id);
+      return id;
+    }
     uint32_t start = here().where.begin;
     n_module m;
     if(is_word("module")) {
@@ -103,6 +113,7 @@ struct parser {
   // It forms such a unit (its own brackets are broken): the edit goes up to the outer
   // brackets. Mistakes inside are holes, like everywhere else.
   node_id parse_unit(bool as_block) {
+    if(!lex_error.empty()) return {}; // Not broken down into lexemes - to the outer brackets n
     try {
       node_id n = as_block ? block() : item();
       if(!at_end()) return {};
@@ -1123,6 +1134,7 @@ struct parser {
   uint32_t source = 0;
   std::string_view src;
   std::vector<token> toks;
+  std::string lex_error; // The lexer failed (unclosed line) - the whole text is a hole
   std::vector<uint32_t> match;
   uint32_t pos = 0;
   bool last_was_value = false;

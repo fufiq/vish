@@ -52,6 +52,15 @@ function receive(m: ServerMsg): void {
     case 's_cursor':
       view?.showCursor(m);
       return;
+    case 's_decor': {
+      const error = view?.showMarks(m);
+      statusLine.textContent =
+        error === undefined
+          ? `ревизия ${String(m.revision)}`
+          : `ошибка: ${error.split('\n')[0] ?? ''}`;
+      statusLine.toggleAttribute('error', error !== undefined);
+      return;
+    }
     case 's_complete':
       view?.showCompletion(m);
       return;

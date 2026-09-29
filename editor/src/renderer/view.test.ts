@@ -132,6 +132,32 @@ describe('представление', () => {
     expect(v.popup.hidden).toBe(true);
   });
 
+  it('метки: значок типа в shadow узла, ошибка — атрибут и подсказка', () => {
+    const host = document.createElement('div');
+    const v = new ViewElement(host, view);
+    const mark = (node: number, kind: string, text: string) => ({
+      type: 's_mark' as const,
+      node,
+      kind,
+      text,
+    });
+    const first = v.showMarks({
+      type: 's_decor',
+      view: 1,
+      revision: 3,
+      marks: [mark(13, 'type', 'str'), mark(14, 'error', 'не так\n  в main')],
+    });
+    expect(first).toBe('не так\n  в main');
+    const s = v.byId.get(13);
+    expect(s?.textContent).toBe('s'); // leaflet
+    expect(s?.shadowRoot?.querySelector('.badge')?.textContent).toBe(': str');
+    expect(v.byId.get(14)?.hasAttribute('error')).toBe(true);
+    expect(v.byId.get(14)?.title).toBe('не так\n  в main');
+    v.showMarks({ type: 's_decor', view: 1, revision: 4, marks: [] });
+    expect(s?.shadowRoot?.querySelector('.badge')).toBeNull();
+    expect(v.byId.get(14)?.hasAttribute('error')).toBe(false);
+  });
+
   it('смещения: кодовые точки ↔ UTF-16', () => {
     expect(codePoints('при🙂')).toBe(4);
     expect(utf16Offset('при🙂x', 4)).toBe(5);

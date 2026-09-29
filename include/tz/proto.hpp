@@ -105,7 +105,20 @@ struct s_complete {
   uint32_t selected;
   std::vector<s_item> items;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete>;
+// Check tags on node : kind "type" - types of declared name for all instance ,
+// "error" - error in place of use (with a track). Decoration, not text; come in whole
+// after every revision.
+struct s_mark {
+  node_id node;
+  std::string kind;
+  std::string text;
+};
+struct s_decor {
+  uint32_t view;
+  uint64_t revision;
+  std::vector<s_mark> marks;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor>;
 
 // --- staff ---
 

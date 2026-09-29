@@ -45,6 +45,8 @@ describe('живая VM', () => {
       'items',
     ]);
     expect(fields('s_item')).toEqual(['name', 'kind', 'detail']);
+    expect(fields('s_decor')).toEqual(['view', 'revision', 'marks']);
+    expect(fields('s_mark')).toEqual(['node', 'kind', 'text']);
     expect(fields('s_cursor')).toEqual(['view', 'node', 'piece', 'offset']);
     expect(fields('c_key')).toEqual(['view', 'key', 'mods']);
     expect(fields('c_pointer')).toEqual(['view', 'node', 'piece', 'offset']);
@@ -76,15 +78,21 @@ describe('живая VM', () => {
       c.write(encodeClient({ type: 'c_hello', version: schema.version }));
       c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
       c.write(encodeClient({ type: 'c_key', view: 1, key: 'End', mods: 0 }));
-      for (let i = 0; i < 100 && got.length < 4; ++i) {
+      for (let i = 0; i < 100 && got.length < 5; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
+      // after submission - check-ins (check session)
       expect(got.map((m) => m.type)).toEqual([
         's_hello',
         's_view',
         's_cursor',
+        's_decor',
         's_cursor',
       ]);
+      const decor = got.at(3);
+      expect(
+        decor?.type === 's_decor' && decor.marks.map((m) => m.kind),
+      ).toContain('type');
       const view = got.at(1);
       if (view?.type !== 's_view') throw new Error('нет представления');
       expect(projectionText(view)).toBe(
@@ -115,7 +123,7 @@ describe('живая VM', () => {
       expect(kids?.kind).toBe('n_block');
       expect(typed).toMatchObject({ piece: 2, offset: 1 });
       c.end();
-      const end = got.at(3);
+      const end = got.at(4);
       // end of the first line - before translating the line in a piece "{\n" of the block
       const block = view.nodes.find((n) => n.kind === 'n_block');
       expect(end).toMatchObject({ node: block?.id, piece: 0, offset: 1 });

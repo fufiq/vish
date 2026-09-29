@@ -1,0 +1,32 @@
+// Editor Check Tags (M5, §13.1): After each edit, reactive session check; type of
+// announced name for all instance contexts:
+// 
+//  
+// Error - in place, with a track instantiation (§13.4).
+// program: editor_poly.tz
+open_view module
+// twice is called from i64 and f64 - both types
+// expect: kind="type" text="f64 | i64"
+// expect: kind="type" text="array<f64>"
+// expect-not: kind="error"
+// unknown name is an error on node of this name; the second instance did not reach
+pointer 1 @0 0 0
+key 1 Delete
+key 1 i
+// expect: kind="type" text="i64"
+// expect: kind="error" text="неизвестное имя i\n  в main"
+// corrected - no error, reactive check recalculated main (block correction changes
+// function revision - instance cache does not become obsolete)
+key 1 Backspace
+key 1 1
+// expect: kind="type" text="f64 | i64"
+// expect-not: kind="error"
+// unclosed line - text does not disappear: the module is a hole until there is no pair
+pointer 1 @1 0 0
+key 1 Delete
+key 1 "
+// expect: kind="n_hole" pieces=["twice(x) => x * x;
+// expect: print(twice(xs["]));
+key 1 "
+// expect-not: n_hole
+// expect: print(twice(xs[""]));

@@ -3,6 +3,8 @@
   --tz-popup: #f1eee8;
   --tz-selected: #e2dccf;
   --tz-detail: #8a847c;
+  --tz-type: #4d7c8a;
+  --tz-error: #c0392b;
   --tz-bg: #fbfaf7;
   --tz-fg: #1f1d1a;
   --tz-syntax: #6b6660;
@@ -19,6 +21,8 @@
     --tz-popup: #262422;
     --tz-selected: #3a3631;
     --tz-detail: #8f887e;
+    --tz-type: #7fb3c2;
+    --tz-error: #ef6b5b;
   }
 }
 html,
@@ -94,4 +98,11 @@ body {
 .tz-complete .detail {
   color: var(--tz-detail);
   font-size: 12px;
+}
+.tz-node[error] {
+  text-decoration: wavy underline var(--tz-error);
+  text-underline-offset: 3px;
+}
+#status[error] {
+  color: var(--tz-error);
 }

@@ -1,5 +1,6 @@
 import type {
   Complete,
+  Decor,
   Cursor,
   NodeId,
   Update,
@@ -93,6 +94,33 @@ export class ViewElement {
     this.caret.style.top = `${String(box.top)}px`;
     this.caret.style.height = `${String(box.height)}px`;
     this.caret.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  #marked = new Set<ASTNode>();
+
+  // Check marks: old ones are removed, sent. Returns the first error for the status
+  // string.
+  showMarks(d: Decor): string | undefined {
+    for (const el of this.#marked) el.setMarks(undefined, undefined);
+    this.#marked.clear();
+    const by = new Map<NodeId, { type?: string; error?: string }>();
+    let first: string | undefined;
+    for (const m of d.marks) {
+      const e = by.get(m.node) ?? {};
+      if (m.kind === 'type') e.type = m.text;
+      if (m.kind === 'error') {
+        e.error = m.text;
+        first ??= m.text;
+      }
+      by.set(m.node, e);
+    }
+    for (const [id, e] of by) {
+      const el = this.byId.get(id);
+      if (!el) continue;
+      el.setMarks(e.type, e.error);
+      this.#marked.add(el);
+    }
+    return first;
   }
 
   // The list of additions - under the beginning of the typed word; selected - from VM.

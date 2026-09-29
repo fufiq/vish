@@ -230,6 +230,8 @@ struct editor_server {
     for(auto const & l: v.layouts) out.nodes.push_back(wire_node(l));
     send(p, out);
     send_cursor(p, v);
+    recheck();
+    send_marks(p, v);
   }
 
   void handle(peer & p, proto::c_close_view const & m) {
@@ -408,6 +410,8 @@ struct editor_server {
       if(&v != &av) close_completion(*b.p, v); // crossword
       send_cursor(*b.p, v);
     }
+    recheck();
+    for(auto & b: views) send_marks(*b.p, *b.v);
   }
 
   std::vector<proto::s_node> subtree(editor_view const & v, node_id n) const {
@@ -443,6 +447,108 @@ struct editor_server {
       }
     }
     send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
+  }
+
+  // --- Checking tags: Types and errors in place ---
+  //
+  // After each revision, a reactive check session (only affected instance, §10.1 are
+  // counted); node types are counted across all instance contexts. As in KDevelop; an
+  // error is counted at a place of use with a instantiation (§13.4) track.
+  //
+
+  uint64_t checked_revision = ~uint64_t{0};
+
+  void recheck() {
+    if(checked_revision == session.db.revision) return;
+    session.check();
+    checked_revision = session.db.revision;
+  }
+
+  // Name types in the area: all its mentions in the subtree (without nested
+  // functions) and initializers `name = e`.
+  std::vector<std::string> types_of_name(node_id scope, symbol name) const {
+    std::vector<std::string> out;
+    auto take = [&](node_id n) {
+      if(auto it = session.node_types.find(n.value); it != session.node_types.end())
+        for(auto const & t: it->second)
+          if(!std::ranges::contains(out, t)) out.push_back(t);
+    };
+    auto rec = [&](auto && self, node_id n) -> void {
+      auto const & db = session.db;
+      if(db.is<n_ident>(n) && db.as<n_ident>(n).name == name) take(n);
+      if(db.is<n_op>(n) && db.strings.text(db.as<n_op>(n).op) == "=" && db.as<n_op>(n).args.size() == 2 && db.is<n_ident>(db.as<n_op>(n).args[0]) && db.as<n_ident>(db.as<n_op>(n).args[0]).name == name)
+        take(db.as<n_op>(n).args[1]);
+      if(db.is<n_var>(n) && db.as<n_var>(n).name == name && db.as<n_var>(n).init) take(db.as<n_var>(n).init);
+      db.for_each_child(n, [&](node_id c) {
+        if(!db.is<n_fn>(c)) self(self, c);
+      });
+    };
+    rec(rec, scope);
+    return out;
+  }
+
+  static std::string join_types(std::vector<std::string> ts) {
+    std::ranges::sort(ts); // order of contexts - hashes; show by name
+    std::string s;
+    for(auto const & t: ts) s += (s.empty() ? "" : " | ") + t;
+    return s;
+  }
+
+  // Name area: Nearest function or block of structure (lambda) up.
+  node_id scope_of(node_id n) const {
+    for(node_id x = session.db[n].parent; x; x = session.db[x].parent)
+      if(session.db.is<n_fn>(x) || session.db.is<n_lambda>(x)) return x;
+    return session.root;
+  }
+
+  // Node projection, in the text of which lies the place of diagnosis (the smallest).
+  node_id node_at(editor_view const & v, span w) const {
+    node_id best;
+    uint32_t size = ~uint32_t{0};
+    for(auto const & l: v.layouts) {
+      span const & s = session.db[l.node].where;
+      if(s.source == w.source && s.begin <= w.begin && w.end <= s.end && s.end - s.begin < size) {
+        best = l.node;
+        size = s.end - s.begin;
+      }
+    }
+    return best;
+  }
+
+  std::vector<proto::s_mark> marks(editor_view const & v) const {
+    auto const & db = session.db;
+    std::vector<proto::s_mark> out;
+    for(auto const & l: v.layouts) {
+      node_id n = l.node;
+      std::vector<std::string> ts;
+      node_id at = n;
+      if(db.is<n_param>(n)) ts = types_of_name(scope_of(n), db.as<n_param>(n).name);
+      else if(db.is<n_var>(n)) ts = types_of_name(scope_of(n), db.as<n_var>(n).name);
+      else if(db.is<n_op>(n) && db.strings.text(db.as<n_op>(n).op) == "=" && db.as<n_op>(n).args.size() == 2 && db.is<n_ident>(db.as<n_op>(n).args[0])) {
+        // `x = e` announces if the name is not yet available (author's decision: no auto)
+        at = db.as<n_op>(n).args[0];
+        symbol name = db.as<n_ident>(at).name;
+        bool known = false;
+        for(auto const & c: context_identifiers(db, n))
+          if(c.name == db.strings.text(name) && (c.kind == "переменная" || c.kind == "параметр")) known = true;
+        if(known) continue;
+        ts = types_of_name(scope_of(n), name);
+      } else continue;
+      if(!ts.empty()) out.push_back({at, "type", join_types(ts)});
+    }
+    for(auto const & d: session.errors) {
+      node_id n = node_at(v, d.where);
+      for(auto const & f: d.trace) // place in prelude - the first place of the program from Trace
+        if(!n) n = node_at(v, f.where);
+      std::string text = d.what();
+      for(auto const & f: d.trace) text += cat("\n  ", f.what);
+      if(n) out.push_back({n, "error", text});
+    }
+    return out;
+  }
+
+  void send_marks(peer & p, editor_view const & v) {
+    send(p, proto::s_decor{v.id, session.db.revision, marks(v)});
   }
 
   editor_view * find(peer & p, uint32_t id) {
