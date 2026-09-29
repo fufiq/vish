@@ -146,17 +146,26 @@ describe('представление', () => {
       type: 's_decor',
       view: 1,
       revision: 3,
-      marks: [mark(13, 'type', 'str'), mark(14, 'error', 'не так\n  в main')],
+      marks: [
+        mark(13, 'type', 'str'),
+        mark(14, 'error', 'не так\n  в main'),
+        mark(12, 'dead', 'x'),
+        mark(13, 'value', '1.5'),
+      ],
     });
     expect(first).toBe('не так\n  в main');
     const s = v.byId.get(13);
     expect(s?.textContent).toBe('s'); // leaflet
-    expect(s?.shadowRoot?.querySelector('.badge')?.textContent).toBe(': str');
+    expect(s?.shadowRoot?.querySelector('.badge')?.textContent).toBe(
+      ': str = 1.5',
+    );
+    expect(v.byId.get(12)?.hasAttribute('dead')).toBe(true);
     expect(v.byId.get(14)?.hasAttribute('error')).toBe(true);
     expect(v.byId.get(14)?.title).toBe('не так\n  в main');
     v.showMarks({ type: 's_decor', view: 1, revision: 4, marks: [] });
     expect(s?.shadowRoot?.querySelector('.badge')).toBeNull();
     expect(v.byId.get(14)?.hasAttribute('error')).toBe(false);
+    expect(v.byId.get(12)?.hasAttribute('dead')).toBe(false);
   });
 
   it('смещения: кодовые точки ↔ UTF-16', () => {

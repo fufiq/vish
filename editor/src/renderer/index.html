@@ -11,7 +11,10 @@
   <body>
     <div id="panes">
       <div id="app" class="pane" tabindex="0"></div>
-      <div id="side" class="pane" tabindex="0" hidden></div>
+      <div id="side-wrap" hidden>
+        <nav id="layers"></nav>
+        <div id="side" class="pane" tabindex="0"></div>
+      </div>
     </div>
     <form id="goto" hidden>
       <input id="goto-input" placeholder="перейти или добавить: foo(i64)" />

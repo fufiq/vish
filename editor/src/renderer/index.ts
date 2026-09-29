@@ -31,6 +31,8 @@ function byId(id: string): HTMLElement {
 
 const app = byId('app');
 const side = byId('side');
+const sideWrap = byId('side-wrap');
+const layersBar = byId('layers');
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
 const statusLine = byId('status');
@@ -52,7 +54,7 @@ function closeSide(): void {
     send({ type: 'c_close_view', view: v.data.view });
     views.delete(v.data.view);
   }
-  side.hidden = true;
+  sideWrap.hidden = true;
   activate([...views.values()].find((x) => x.host === app));
 }
 
@@ -64,7 +66,7 @@ function receive(m: ServerMsg): void {
       return;
     case 's_view': {
       const host = m.kind === 'fn' ? side : app;
-      side.hidden = side.hidden && host !== side;
+      sideWrap.hidden = sideWrap.hidden && host !== side;
       const v = new ViewElement(host, m);
       views.set(m.view, v);
       activate(v);
@@ -87,6 +89,9 @@ function receive(m: ServerMsg): void {
       statusLine.toggleAttribute('error', error !== undefined);
       return;
     }
+    case 's_layers':
+      showLayers(m.view, m.layers, m.selected);
+      return;
     case 's_complete':
       views.get(m.view)?.showCompletion(m);
       return;
@@ -94,6 +99,29 @@ function receive(m: ServerMsg): void {
       statusLine.textContent = `VM: ${m.text}`;
       return;
   }
+}
+
+// Tabs of the layers of the function: "all" and contexts of its use (compile-time / run-time).
+function showLayers(
+  view: number,
+  layers: readonly { key: string; kind: string }[],
+  selected: string,
+): void {
+  const tab = (key: string, label: string, kind: string) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (kind !== '') b.dataset.kind = kind;
+    b.toggleAttribute('selected', key === selected);
+    b.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      send({ type: 'c_layer', view, key });
+    });
+    return b;
+  };
+  layersBar.replaceChildren(
+    tab('', 'все', ''),
+    ...layers.map((l) => tab(l.key, l.key, l.kind)),
+  );
 }
 
 const split = new FrameSplitter();

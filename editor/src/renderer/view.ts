@@ -7,7 +7,12 @@ import type {
   View,
   ViewNode,
 } from '../protocol/messages';
-import { ASTNode, pieceOfText, type PieceText } from './nodes/ast_node';
+import {
+  ASTNode,
+  pieceOfText,
+  type NodeMarks,
+  type PieceText,
+} from './nodes/ast_node';
 import { BlockNode } from './nodes/block_node';
 import { tagOf } from './nodes/index';
 
@@ -109,13 +114,15 @@ export class ViewElement {
   // Check marks: old ones are removed, sent. Returns the first error for the status
   // string.
   showMarks(d: Decor): string | undefined {
-    for (const el of this.#marked) el.setMarks(undefined, undefined);
+    for (const el of this.#marked) el.setMarks({});
     this.#marked.clear();
-    const by = new Map<NodeId, { type?: string; error?: string }>();
+    const by = new Map<NodeId, NodeMarks>();
     let first: string | undefined;
     for (const m of d.marks) {
       const e = by.get(m.node) ?? {};
       if (m.kind === 'type') e.type = m.text;
+      if (m.kind === 'value') e.value = m.text;
+      if (m.kind === 'dead') e.dead = true;
       if (m.kind === 'error') {
         e.error = m.text;
         first ??= m.text;
@@ -125,7 +132,7 @@ export class ViewElement {
     for (const [id, e] of by) {
       const el = this.byId.get(id);
       if (!el) continue;
-      el.setMarks(e.type, e.error);
+      el.setMarks(e);
       this.#marked.add(el);
     }
     // icons shift text - cursor and list are put again

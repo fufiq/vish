@@ -309,6 +309,38 @@ struct interpreter {
 
   bool live(node_id fn) const { return live_fns.contains(fn.value); }
 
+  // Layers of function - contexts of its use
+// 
+// 
+// Layer is key
+  // instance: what was executed in the body, the types and known values of node when
+  // compiled; compile-time - the call is folded entirely, run-time - is needed in runtime.
+  struct layer_info {
+    bool ct = true;
+    std::map<uint32_t, std::vector<std::string>> types;
+    std::map<uint32_t, std::string> literal;
+  };
+  std::map<uint32_t, std::map<std::string, layer_info>> layers; // function → key instance → layer
+
+  node_id enclosing_fn(node_id n) const {
+    for(; n; n = db[n].parent)
+      if(db.is<n_fn>(n)) return n;
+    return {};
+  }
+
+  void note_layer(node_id f, std::string const & key, std::size_t from, bool folded) {
+    layer_info & l = layers[f.value][key];
+    l.ct = l.ct && folded;
+    for(std::size_t i = from; i < journal.size(); ++i) {
+      auto const & e = journal[i];
+      if(enclosing_fn(node_id(e.node)) != f) continue; // node of nested calls - their layers
+      auto & ts = l.types[e.node];
+      if(!e.seen) continue;
+      if(std::string t = types.describe(e.v); !std::ranges::contains(ts, t)) ts.push_back(t);
+      if(auto lit = literal(e.v)) l.literal[e.node] = *lit;
+    }
+  }
+
   // Types of node in all contexts where it was executed (instance, embedding
   // locations):
 // 
@@ -3447,7 +3479,13 @@ struct interpreter {
       if(auto it = cache->entries.find(memo_key); it != cache->entries.end() && valid(it->second)) {
         ++cache->hits;
         for(auto const & ev: it->second.events) emit(ev);
-        for(auto const & [node, v, seen, div, eff, folded]: it->second.journal) journal.push_back({node, v, seen, div, eff, ctx, folded});
+        std::size_t replay_mark = journal.size();
+        bool all_folded = !it->second.journal.empty();
+        for(auto const & [node, v, seen, div, eff, folded]: it->second.journal) {
+          journal.push_back({node, v, seen, div, eff, ctx, folded});
+          all_folded = all_folded && folded;
+        }
+        note_layer(f, key, replay_mark, all_folded);
         observations_dirty = true;
         if(it->second.effect) {
           ++effects;
@@ -3536,6 +3574,7 @@ struct interpreter {
 
     // curled up in compile-time: all arguments and result known, runtime no effects
     bool folded_now = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect;
+    if(checking()) note_layer(f, key, journal_mark, folded_now);
     if(folded_now) {
       emit({report_event::folded, std::string(str(fn.name)), {}, {}, {}, {}});
       // There is no curled call in runtime - only type observations

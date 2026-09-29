@@ -1,0 +1,13 @@
+// Программа для сценария 72_editor_layers.wire (сама по себе — обычный тест).
+// stdin: 3
+// out: 0.0
+// out: 9.0
+scale(x) {
+  if(x > 2.0) x * x else 0.0
+}
+
+main() {
+  xs = read_floats(stdin);
+  print(scale(1.5));
+  print(scale(xs[0]));
+}

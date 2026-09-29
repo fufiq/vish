@@ -44,7 +44,14 @@ export interface Goto {
   view: number;
   text: string;
 }
-export type ClientMsg = Hello | OpenView | CloseView | Key | Pointer | Goto;
+// Function representation layer: context key; everything.
+export interface LayerPick {
+  type: 'c_layer';
+  view: number;
+  key: string;
+}
+export type ClientMsg =
+  Hello | OpenView | CloseView | Key | Pointer | Goto | LayerPick;
 
 export interface ServerHello {
   type: 's_hello';
@@ -120,8 +127,27 @@ export interface Decor {
   revision: number;
   marks: Mark[];
 }
+// The layers of a function are the contexts of its use; kind: "compile-time" or "run-time".
+export interface Layer {
+  type: 's_layer';
+  key: string;
+  kind: string;
+}
+export interface Layers {
+  type: 's_layers';
+  view: number;
+  layers: Layer[];
+  selected: string;
+}
 export type ServerMsg =
-  ServerHello | View | Cursor | ServerError | Update | Complete | Decor;
+  | ServerHello
+  | View
+  | Cursor
+  | ServerError
+  | Update
+  | Complete
+  | Decor
+  | Layers;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

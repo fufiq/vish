@@ -54,7 +54,13 @@ struct c_goto {
   uint32_t view;
   std::string text;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto>;
+// The presentation layer of the function is the context of its use (key instance);
+// the blank key is “all”: labels for all contexts.
+struct c_layer {
+  uint32_t view;
+  std::string key;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer>;
 
 // --- VM customer ---
 
@@ -114,9 +120,11 @@ struct s_complete {
   uint32_t selected;
   std::vector<s_item> items;
 };
-// Check tags on node : kind "type" - types of declared name for all instance ,
-// "error" - error in place of use (with a track). Decoration, not text; come in whole
-// after every revision.
+// Check (check) on node : kind "type" - types of declared name for all instance (in
+// the layer - in its context), "error" - error in the place of use (with a trace),
+// "value" - known at compilation value in the layer, "dead" - in the context of the
+// layer was not executed. Decoration, not text; come in whole after every revision.
+//
 struct s_mark {
   node_id node;
   std::string kind;
@@ -127,7 +135,18 @@ struct s_decor {
   uint64_t revision;
   std::vector<s_mark> marks;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor>;
+// Feature representation layers: contexts of use; kind - "compile-time" (call folded when
+// compiled in its entirety) or "run-time"; selected - key or" (all).
+struct s_layer {
+  std::string key;
+  std::string kind;
+};
+struct s_layers {
+  uint32_t view;
+  std::vector<s_layer> layers;
+  std::string selected;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers>;
 
 // --- staff ---
 

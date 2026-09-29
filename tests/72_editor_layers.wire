@@ -1,0 +1,31 @@
+// Layers of function - contexts of its use
+// 
+// 
+//.
+// Текст один (общая логика), слой меняет метки: типы, значения, не исполняемое.
+// program: editor_layers.tz
+open_view module
+goto 1 scale
+key 1 Enter
+// Tabs: Compiled call (compile-time) and runtime - instance
+// expect: layers view=2 layers=⏎  key="scale(кт)" kind="кт"⏎  key="scale(рт f64)" kind="рт" selected=""
+// static layer: x = 1.5, condition known - branch x * x is not executed
+layer 2 scale(кт)
+// expect: kind="value" text="1.5"
+// expect: kind="value" text="false"
+// expect: kind="dead" text="не исполняется в этом контексте"
+// expect: selected="scale(кт)"
+// dynamic layer: condition unknown - both branches are alive
+layer 2 scale(рт\sf64)
+// expect: kind="type" text="f64"
+// expect-not: kind="dead"
+// expect-not: kind="value"
+// editing in the layer changes the overall function; the layer is retained
+pointer 2 @0.0 0 3
+key 2 1
+// expect: 0.01
+// expect: selected="scale(рт f64)"
+// “all” - labels in all contexts
+layer 2 
+// expect: selected=""
+// expect-not: kind="dead"

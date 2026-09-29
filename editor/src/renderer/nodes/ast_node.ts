@@ -8,9 +8,17 @@ export interface PieceText {
 }
 export const pieceOfText = new WeakMap<Text, PieceText>();
 
+export interface NodeMarks {
+  type?: string;
+  value?: string;
+  error?: string;
+  dead?: boolean;
+}
+
 export const badgeSheet = new CSSStyleSheet();
 badgeSheet.replaceSync(`
   .badge { color: var(--tz-type, gray); font-size: 0.85em; margin-left: 1px; }
+  .badge.value { color: var(--tz-value, gray); }
 `);
 
 // An AST node as a DOM element: DOM is a direct projection AST (smisl architecture).
@@ -37,18 +45,28 @@ export abstract class ASTNode extends HTMLElement {
   // a hint with a trace. The scenery, not the text.
   protected abstract badgeRoot(): ShadowRoot;
 
-  setMarks(type: string | undefined, error: string | undefined): void {
+  // m.value - value in the context of the layer (`= v` icon), m.dead - it does not
+  // execute (muffle).
+  setMarks(m: NodeMarks): void {
     this.#badge?.remove();
     this.#badge = undefined;
-    if (type !== undefined) {
+    const text = [
+      m.type === undefined ? '' : `: ${m.type}`,
+      m.value === undefined ? '' : ` = ${m.value}`,
+    ].join('');
+    if (text !== '') {
       this.#badge = document.createElement('span');
-      this.#badge.className = 'badge';
-      this.#badge.textContent = `: ${type}`;
+      this.#badge.className = m.value === undefined ? 'badge' : 'badge value';
+      this.#badge.textContent = text;
       this.badgeRoot().append(this.#badge);
     }
-    this.#error = error ?? '';
-    this.toggleAttribute('error', error !== undefined);
-    this.title = this.#error || this.#note;
+    this.#error = m.error ?? '';
+    this.toggleAttribute('error', m.error !== undefined);
+    this.toggleAttribute('dead', m.dead === true);
+    this.title =
+      this.#error ||
+      (m.dead ? 'не исполняется в этом контексте' : '') ||
+      this.#note;
   }
   readonly #texts = new Map<number, Text>();
 

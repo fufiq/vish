@@ -42,6 +42,7 @@ struct editor_view {
   uint32_t selected = 0;
   uint32_t word_begin = 0;
   std::string kind = "module"; // Module - Module without internal elements; fn - one function
+  std::string layer; // Presentation Layer: Key instance, "all contexts"
   // transition list (F12, Ctrl+P): by item - function or signature "add"
   struct nav_target {
     node_id fn;
@@ -758,9 +759,19 @@ struct editor_server {
     return best;
   }
 
+  // Presentation layer: Observations of a function in a selected context (no, all).
+  interpreter::layer_info const * layer_of(editor_view const & v) const {
+    if(v.kind != "fn" || v.layer.empty()) return nullptr;
+    auto fl = session.layers.find(v.root.value);
+    if(fl == session.layers.end()) return nullptr;
+    auto it = fl->second.find(v.layer);
+    return it == fl->second.end() ? nullptr : &it->second;
+  }
+
   std::vector<proto::s_mark> marks(editor_view const & v) const {
     auto const & db = session.db;
     std::vector<proto::s_mark> out;
+    if(auto const * l = layer_of(v)) return layer_marks(v, *l);
     for(auto const & l: v.layouts) {
       node_id n = l.node;
       std::vector<std::string> ts;
@@ -779,9 +790,57 @@ struct editor_server {
       } else continue;
       if(!ts.empty()) out.push_back({at, "type", join_types(ts)});
     }
+    for(auto const & m: marks_errors(v)) out.push_back(m); // place in prelude - the first place of the program from Trace
+    return out;
+  }
+
+  // Layer tags: types of ads in this context, known meanings of names that are not executed
+  // in it - muffle (the top such node); errors - as everywhere.
+  std::vector<proto::s_mark> layer_marks(editor_view const & v, interpreter::layer_info const & l) const {
+    auto const & db = session.db;
+    std::vector<proto::s_mark> out;
+    auto types_in = [&](node_id scope, symbol name) {
+      std::vector<std::string> ts;
+      auto rec = [&](auto && self, node_id n) -> void {
+        if(db.is<n_ident>(n) && db.as<n_ident>(n).name == name)
+          if(auto it = l.types.find(n.value); it != l.types.end())
+            for(auto const & t: it->second)
+              if(!std::ranges::contains(ts, t)) ts.push_back(t);
+        db.for_each_child(n, [&](node_id c) {
+          if(!db.is<n_fn>(c)) self(self, c);
+        });
+      };
+      rec(rec, scope);
+      return ts;
+    };
+    node_id f = v.root;
+    for(auto const & lay: v.layouts) {
+      node_id n = lay.node;
+      if(db.is<n_param>(n))
+        if(auto ts = types_in(f, db.as<n_param>(n).name); !ts.empty()) out.push_back({n, "type", join_types(ts)});
+      // meanings: names and conditions of forks (known condition - which branch lives)
+      bool cond = db[n].parent && db.is<n_if>(db[n].parent) && db.as<n_if>(db[n].parent).cond == n;
+      if((db.is<n_ident>(n) && db[n].parent && !db.is<n_call>(db[n].parent)) || cond)
+        if(auto it = l.literal.find(n.value); it != l.literal.end()) out.push_back({n, "value", it->second});
+      // not performed in this context: the node of the body without observation, the parent with observation n
+      bool body = n != f && enclosing(n) == f && !db.is<n_param>(n) && !(db[n].parent && db.is<n_param>(db[n].parent));
+      if(body && !l.types.contains(n.value) && (db[n].parent == f || l.types.contains(db[n].parent.value))) out.push_back({n, "dead", "не исполняется в этом контексте"});
+    }
+    for(auto const & m: marks_errors(v)) out.push_back(m);
+    return out;
+  }
+
+  node_id enclosing(node_id n) const {
+    for(node_id x = session.db[n].parent; x; x = session.db[x].parent)
+      if(session.db.is<n_fn>(x)) return x;
+    return {};
+  }
+
+  std::vector<proto::s_mark> marks_errors(editor_view const & v) const {
+    std::vector<proto::s_mark> out;
     for(auto const & d: session.errors) {
       node_id n = node_at(v, d.where);
-      for(auto const & f: d.trace) // place in prelude - the first place of the program from Trace
+      for(auto const & f: d.trace)
         if(!n) n = node_at(v, f.where);
       std::string text = d.what();
       for(auto const & f: d.trace) text += cat("\n  ", f.what);
@@ -792,6 +851,22 @@ struct editor_server {
 
   void send_marks(peer & p, editor_view const & v) {
     send(p, proto::s_decor{v.id, session.db.revision, marks(v)});
+    if(v.kind == "fn") send_layers(p, v);
+  }
+
+  // Tabs of the layers of the function: "all" and contexts of its use.
+  void send_layers(peer & p, editor_view const & v) {
+    proto::s_layers out{v.id, {}, v.layer};
+    if(auto fl = session.layers.find(v.root.value); fl != session.layers.end())
+      for(auto const & [key, l]: fl->second) out.layers.push_back({key, l.ct ? "кт" : "рт"});
+    send(p, out);
+  }
+
+  void handle(peer & p, proto::c_layer const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v || v->kind != "fn") return send(p, proto::s_error{cat("слои — у представления функции")});
+    v->layer = m.key;
+    send_marks(p, *v);
   }
 
   // --- transition and "add in place" ---
@@ -963,6 +1038,7 @@ struct editor_server {
       fv->kind = "fn";
     }
     fv->root = f;
+    fv->layer.clear();
     fv->cursor = 0;
     fv->completing = false;
     layout(*fv);

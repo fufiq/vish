@@ -41,6 +41,8 @@ describe('живая VM', () => {
       'kind',
     ]);
     expect(fields('c_goto')).toEqual(['view', 'text']);
+    expect(fields('c_layer')).toEqual(['view', 'key']);
+    expect(fields('s_layers')).toEqual(['view', 'layers', 'selected']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
     expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);
     expect(fields('s_complete')).toEqual([

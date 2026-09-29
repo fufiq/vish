@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "client": ["variant", "c_hello", "c_open_view", "c_close_view", "c_key", "c_pointer", "c_goto"],
-  "server": ["variant", "s_hello", "s_view", "s_cursor", "s_error", "s_update", "s_complete", "s_decor"],
+  "client": ["variant", "c_hello", "c_open_view", "c_close_view", "c_key", "c_pointer", "c_goto", "c_layer"],
+  "server": ["variant", "s_hello", "s_view", "s_cursor", "s_error", "s_update", "s_complete", "s_decor", "s_layers"],
   "node_kinds": ["n_module", "n_fn", "n_param", "n_var", "n_block", "n_ident", "n_int", "n_float", "n_str", "n_call", "n_op", "n_member", "n_field", "n_index", "n_if", "n_loop", "n_break", "n_continue", "n_hide", "n_return", "n_require", "n_try_compile", "n_ct", "n_lambda", "n_construct", "n_auto", "n_hole", "n_throw", "n_pack", "n_chain", "n_struct", "n_extend", "n_quote", "n_splice"],
   "types": {
     "c_hello": [["version", "u32"]],
@@ -10,6 +10,7 @@
     "c_key": [["view", "u32"], ["key", "string"], ["mods", "u32"]],
     "c_pointer": [["view", "u32"], ["node", "node"], ["piece", "u32"], ["offset", "u32"]],
     "c_goto": [["view", "u32"], ["text", "string"]],
+    "c_layer": [["view", "u32"], ["key", "string"]],
     "s_hello": [["version", "u32"], ["program", "string"], ["revision", "u64"]],
     "s_node": [["id", "node"], ["kind", "string"], ["pieces", ["vector", ["variant", "string", "node"]]], ["note", "string"]],
     "s_view": [["view", "u32"], ["root", "node"], ["revision", "u64"], ["nodes", ["vector", "s_node"]], ["kind", "string"]],
@@ -19,6 +20,8 @@
     "s_item": [["name", "string"], ["kind", "string"], ["detail", "string"]],
     "s_complete": [["view", "u32"], ["node", "node"], ["piece", "u32"], ["offset", "u32"], ["selected", "u32"], ["items", ["vector", "s_item"]]],
     "s_mark": [["node", "node"], ["kind", "string"], ["text", "string"]],
-    "s_decor": [["view", "u32"], ["revision", "u64"], ["marks", ["vector", "s_mark"]]]
+    "s_decor": [["view", "u32"], ["revision", "u64"], ["marks", ["vector", "s_mark"]]],
+    "s_layer": [["key", "string"], ["kind", "string"]],
+    "s_layers": [["view", "u32"], ["layers", ["vector", "s_layer"]], ["selected", "string"]]
   }
 }
