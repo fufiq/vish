@@ -38,7 +38,13 @@ export interface Pointer {
   piece: number;
   offset: number;
 }
-export type ClientMsg = Hello | OpenView | CloseView | Key | Pointer;
+// Signature transition (Ctrl+P): "foo(i64)" - VM responds with a list.
+export interface Goto {
+  type: 'c_goto';
+  view: number;
+  text: string;
+}
+export type ClientMsg = Hello | OpenView | CloseView | Key | Pointer | Goto;
 
 export interface ServerHello {
   type: 's_hello';
@@ -69,6 +75,8 @@ export interface View {
   root: NodeId;
   revision: number;
   nodes: ViewNode[];
+  // Module without internal elements; fn - one function (second panel)
+  kind: string;
 }
 export interface Cursor {
   type: 's_cursor';

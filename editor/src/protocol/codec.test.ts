@@ -9,6 +9,7 @@ describe('кодек по схеме', () => {
       view: 1,
       root: 7,
       revision: 42,
+      kind: 'module',
       nodes: [
         {
           type: 's_node',

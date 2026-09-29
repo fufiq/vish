@@ -1,0 +1,73 @@
+// Transition and add to place (M5, §13.3): “Select all the preloads/specializations... I
+// want to add... and let it lie somewhere inside without messing with me.” The main thing
+// is that I can contact him at any time... I can write foo(int) and go. The added overload
+// is the internal element of the module: in the base and in the execution, but not in the
+// presentation of the module.
+//
+// program: editor_overloads.tz
+open_view module
+// F12 on call: selected in instance - first, then all overload
+pointer 1 @area:3 0 1
+key 1 F12
+// expect: items=⏎  name="area(i64 n)" kind="перегрузка" detail="выбрана здесь"
+// expect: name="area(f64 x)" kind="перегрузка" detail=""
+// Enter - function in the second panel (presentation fn)
+key 1 Enter
+// expect: view view=2
+// expect: kind="fn"
+// expect: текст:⏎area(i64 n) => n * n;
+// Ctrl+P: Accurate by signature - first
+goto 2 area(f64)
+// expect: items=⏎  name="area(f64 x)" kind="перегрузка" detail="точно"
+key 2 Escape
+// No signature - "add" first
+goto 2 area(str)
+// expect: items=⏎  name="добавить area(str)" kind="добавить" detail="внутренняя перегрузка"
+key 2 Enter
+// parameter names - as in overload of the same arity; cursor - in the body
+// expect: текст:⏎area(str n) {⏎  ⏎}
+// expect: курсор:   ‸
+// Module view has not changed - internal is not visible
+// expect-not: update view=1
+// editing
+key 2 0
+// expect: area(str n) {⏎  0⏎}
+// body value survives the intermediate hole (`n.`)
+key 2 Backspace
+key 2 n
+key 2 .
+key 2 s
+key 2 i
+key 2 z
+key 2 e
+// expect: area(str n) {⏎  n.size⏎}
+// call non-existent function - error in place; F12 - "add" for argument types over all
+// instance
+pointer 1 @area:4 0 0
+key 1 End
+key 1 Enter
+key 1 l
+key 1 a
+key 1 b
+key 1 e
+key 1 l
+key 1 (
+key 1 x
+key 1 s
+key 1 .
+key 1 s
+key 1 i
+key 1 z
+key 1 e
+key 1 )
+key 1 ;
+// expect: label(xs.size);
+// expect: kind="error" text="неизвестная функция label(i64)
+key 1 ArrowLeft
+key 1 ArrowLeft
+key 1 F12
+// expect: items=⏎  name="добавить label(i64)" kind="добавить" detail="внутренняя перегрузка"
+key 1 Enter
+// expect: текст:⏎label(i64 a) {⏎  ⏎}
+// There is no more error at the call site, the text of the module - without a label
+// expect-not: kind="error"

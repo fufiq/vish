@@ -188,16 +188,27 @@ struct test_runner {
     editor_server::peer * peer = nullptr;
     uint32_t sent = 0;
     std::string in;
-    std::vector<proto::s_node> nodes;
-    node_id root;
+    std::vector<proto::s_node> nodes; // node common to all representations (base node numbers)
+    struct shown {
+      node_id root;
+      std::string kind;
+    };
+    std::map<uint32_t, shown> views; // Customer Representation: Root and View
+    node_id root; // root
     ast_db const * db = nullptr;
     std::string mismatch; // pieced text ) projection (tz fmt)
 
     // @substring is the number of the first node in whose own text it is: scripts do
     // not depend on node numbers (they shift from prelude).
-    std::string resolve(std::string const & line) const {
+    std::string resolve(std::string const & line) {
       std::string out;
-      for(auto w: words_of(line)) {
+      auto ws = words_of(line); // `сообщение N …` - Links are searched in representation N
+      if(ws.size() > 1) {
+        uint32_t id = 0;
+        std::from_chars(ws[1].data(), ws[1].data() + ws[1].size(), id);
+        if(views.contains(id)) root = views[id].root;
+      }
+      for(auto w: ws) {
         if(!out.empty()) out += ' ';
         if(!w.starts_with('@')) {
           out += w;
@@ -245,29 +256,40 @@ struct test_runner {
         proto::server_msg m;
         proto::decode(body, m);
         out += proto::describe(m);
-        if(auto * v = std::get_if<proto::s_view>(&m)) {
-          nodes = v->nodes;
-          root = v->root;
-          out += checked_text();
-        }
-        if(auto * u = std::get_if<proto::s_update>(&m)) {
-          for(auto const & n: u->nodes) {
+        auto take = [&](std::vector<proto::s_node> const & ns) {
+          for(auto const & n: ns) {
             if(auto * old = const_cast<proto::s_node *>(node(n.id))) *old = n;
             else nodes.push_back(n);
           }
-          out += checked_text();
+        };
+        if(auto * v = std::get_if<proto::s_view>(&m)) {
+          take(v->nodes);
+          views[v->view] = {v->root, v->kind};
+          root = v->root;
+          out += checked_text(v->view);
         }
-        if(auto * c = std::get_if<proto::s_cursor>(&m)) out += cat("курсор: ", cursor_line(*c), "\n");
+        if(auto * u = std::get_if<proto::s_update>(&m)) {
+          take(u->nodes);
+          root = views[u->view].root;
+          out += checked_text(u->view);
+        }
+        if(auto * c = std::get_if<proto::s_cursor>(&m)) {
+          root = views[c->view].root;
+          out += cat("курсор: ", cursor_line(*c), "\n");
+        }
       });
       return out;
     }
 
     // Collected from pieces of text and its reconciliation with projection for
     // the editor (layout: a hole - only your text).
-    std::string checked_text() {
+    std::string checked_text(uint32_t view) {
       std::string t = text(root);
       std::vector<node_layout> scratch;
-      printer pr(*db);
+      // The presentation of the module does not show the internal elements
+      std::vector<uint32_t> inner;
+      if(db->is<n_module>(root)) inner = db->as<n_module>(root).inner;
+      printer pr(*db, views[view].kind == "module" ? printer::filter([&](node_id n) { return !std::ranges::contains(inner, n.value); }) : printer::filter{});
       pr.layouts = &scratch;
       if(std::string want = pr.print(root); t != want) mismatch = cat("собрано:\n", t, "\nпроекция:\n", want);
       return cat("текст:\n", t, "\n");

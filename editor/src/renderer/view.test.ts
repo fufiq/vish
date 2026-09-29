@@ -21,6 +21,7 @@ const view: View = {
   view: 1,
   root: 10,
   revision: 1,
+  kind: 'module',
   nodes: [
     { type: 's_node', id: 10, kind: 'n_fn', pieces: ['main() ', 11], note: '' },
     {

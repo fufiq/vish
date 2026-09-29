@@ -85,6 +85,10 @@ export class ViewElement {
     };
   }
 
+  get listOpen(): boolean {
+    return !this.popup.hidden;
+  }
+
   #cursor: Cursor | undefined;
   #completion: Complete | undefined;
 

@@ -12,6 +12,8 @@
 #include "parser.hpp"
 #include "session.hpp"
 
+#include <ranges>
+
 namespace tz {
 
 // Place of the cursor in projection: node, a piece of text, offset in code points.
@@ -39,6 +41,13 @@ struct editor_view {
   std::vector<completion_item> items;
   uint32_t selected = 0;
   uint32_t word_begin = 0;
+  std::string kind = "module"; // Module - Module without internal elements; fn - one function
+  // transition list (F12, Ctrl+P): by item - function or signature "add"
+  struct nav_target {
+    node_id fn;
+    std::string add;
+  };
+  std::vector<nav_target> targets; // not empty - open list - transition, not addition
 
   uint32_t layout_of(node_id n) const { return n.value < at.size() ? at[n.value] : ~uint32_t{0}; }
   std::string_view text_of(std::pair<uint32_t, uint32_t> r) const {
@@ -245,8 +254,12 @@ struct editor_server {
     editor_view & v = p.views.emplace_back();
     v.id = uint32_t(p.views.size());
     v.root = session.root;
-    layout(v);
-    proto::s_view out{v.id, v.root, session.db.revision, {}};
+    show_view(p, v);
+  }
+
+  void show_view(peer & p, editor_view & v, bool relayout = true) {
+    if(relayout) layout(v);
+    proto::s_view out{v.id, v.root, session.db.revision, {}, v.kind};
     for(auto const & l: v.layouts) out.nodes.push_back(wire_node(l));
     send(p, out);
     send_cursor(p, v);
@@ -269,6 +282,11 @@ struct editor_server {
         v->selected = (v->selected + (m.key == "ArrowDown" ? 1 : n - 1)) % n;
         return send_completion(p, *v);
       }
+      if(m.key == "Enter" && !v->targets.empty()) { // Transition list: Open or add
+        auto t = v->targets[v->selected];
+        close_completion(p, *v);
+        return t.fn ? open_fn(p, t.fn) : add_overload(p, t.add);
+      }
       if(m.key == "Enter") { // Accept: the typed word is replaced by the selected name
         std::string name = v->items[v->selected].name;
         close_completion(p, *v);
@@ -277,6 +295,7 @@ struct editor_server {
       if(m.key == "Escape") return close_completion(p, *v);
     }
     if(m.key == " " && (m.mods & mod_ctrl)) return complete(p, *v, true);
+    if(m.key == "F12") return goto_call(p, *v);
     if(m.key == "ArrowRight") {
       if(v->cursor + 1 < v->places.size()) ++v->cursor;
     } else if(m.key == "ArrowLeft") {
@@ -370,6 +389,7 @@ struct editor_server {
     if(!v.completing) return;
     v.completing = false;
     v.items.clear();
+    v.targets.clear();
     send_completion(p, v);
   }
 
@@ -410,7 +430,7 @@ struct editor_server {
       uint32_t k = v.layout_of(item);
       if(k != ~uint32_t{0} && a >= v.range[k].first && b <= v.range[k].second) out.push_back({item, 1, v.range[k]});
     }
-    out.push_back({session.root, 2, v.range[0]});
+    if(v.kind == "module") out.push_back({session.root, 2, v.range[0]});
     return out;
   }
 
@@ -429,9 +449,28 @@ struct editor_server {
       if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
       node_id target = u.node;
       auto range = [&](editor_view const & w) { return w.range[w.layout_of(target)]; };
-      apply(v, target, [&] { session.db.replace(target, session.db[fresh].kind); }, range, range, edited,
-          {a - u.range.first, b - u.range.first, code_points(ins)}, caret);
+      auto mutate = [&] {
+        node_kind k = session.db[fresh].kind;
+        if(target == session.root) { // Module from projection - internal elements are saved
+          auto & nm = std::get<n_module>(k);
+          for(node_id x: inner_items()) nm.items.push_back(x);
+          nm.inner = session.db.as<n_module>(session.root).inner;
+        }
+        session.db.replace(target, std::move(k));
+      };
+      apply(v, target, mutate, range, range, edited, {a - u.range.first, b - u.range.first, code_points(ins)}, caret);
       return;
+    }
+    // representation of function: text ceases to be a function-hole (the same node) until
+    // it becomes again; the module from this projection is not redefined
+    if(v.kind == "fn") {
+      auto r = v.range[0];
+      std::string_view old = v.text_of(r);
+      std::string edited = cat(old.substr(0, v.byte_at[a] - v.byte_at[r.first]), ins, old.substr(v.byte_at[b] - v.byte_at[r.first]));
+      node_id target = v.root;
+      auto range = [&](editor_view const & w) { return w.range[w.layout_of(target)]; };
+      apply(v, target, [&] { session.db.replace(target, n_hole{edited, "не функция"}); }, range, range, edited,
+          {a - r.first, b - r.first, code_points(ins)}, caret);
     }
   }
 
@@ -450,14 +489,24 @@ struct editor_server {
     return session.root;
   }
 
-  static node_list const & items_of(ast_db const & db, node_id c) {
-    return db.is<n_block>(c) ? db.as<n_block>(c).items : db.as<n_module>(c).items;
+  // Container elements in projection: the module has no internal (they are at the end of items).
+  node_list items_of(ast_db const & db, node_id c) const {
+    if(db.is<n_block>(c)) return db.as<n_block>(c).items;
+    node_list out;
+    for(node_id n: db.as<n_module>(c).items)
+      if(!is_inner(n)) out.push_back(n);
+    return out;
+  }
+  node_list inner_items() const {
+    node_list out;
+    for(uint32_t n: session.db.as<n_module>(session.root).inner) out.push_back(node_id(n));
+    return out;
   }
 
   // Places of container elements [from, from + count]: their text; count = = 0 is the
   // insert point `at`.
   std::pair<uint32_t, uint32_t> items_range(editor_view const & w, node_id c, uint32_t from, uint32_t count, uint32_t at) const {
-    auto const & items = items_of(session.db, c);
+    auto const items = items_of(session.db, c);
     if(count == 0) return {at, at};
     return {w.range[w.layout_of(items[from])].first, w.range[w.layout_of(items[from + count - 1])].second};
   }
@@ -466,6 +515,7 @@ struct editor_server {
     auto & db = session.db;
     node_id c = container_of(v, a, b);
     bool module_level = c == session.root;
+    if(module_level && v.kind != "module") return false; // header of a function in its representation - through a unit-function
     node_list const items = items_of(db, c);
     // element whose text is edited (end inclusive: set before `;`)
     uint32_t k = 0, count = 0;
@@ -511,6 +561,8 @@ struct editor_server {
     list.insert(list.end(), added.begin(), added.end());
     list.insert(list.end(), items.begin() + k + count, items.end());
     bool tail = k + count == items.size();
+    // unwritten (hole) - not yet decided whether the meaning: the flag of the block does not change
+    bool now_hole = fresh->size() == 1 && db.is<n_hole>((*fresh)[0]);
     node_id first_fresh = fresh->empty() ? node_id{} : (*fresh)[0];
     uint32_t n_new = uint32_t(added.size());
     auto mutate = [&] {
@@ -522,11 +574,12 @@ struct editor_server {
         parser::trim_blank(nb.blank);
         // element text - without `;` (it is printed by the block): editing the element
         // does not make the instruction a value; the value is removed by typed `;`
-        if(tail) nb.has_value = n_new > 0 && value && (count == 0 || nb.has_value);
+        if(tail && !now_hole) nb.has_value = n_new > 0 && value && (count == 0 || nb.has_value);
         db.replace(c, nb);
       } else {
         n_module nm = db.as<n_module>(c);
         nm.items = list;
+        for(node_id x: inner_items()) nm.items.push_back(x); // internal, at the end, as they were
         nm.blank = blank;
         parser::trim_blank(nm.blank);
         db.replace(c, nm);
@@ -535,7 +588,8 @@ struct editor_server {
     auto before = [&](editor_view const & w) { return items_range(w, c, k, count, a); };
     auto after = [&](editor_view const & w) {
       if(n_new) return items_range(w, c, k, n_new, 0);
-      uint32_t at = k > 0 ? w.range[w.layout_of(items_of(db, c)[k - 1])].second : w.range[w.layout_of(c)].first;
+      // Element removed: place - after the previous or immediately after `{` block
+      uint32_t at = k > 0 ? w.range[w.layout_of(items_of(db, c)[k - 1])].second : w.range[w.layout_of(c)].first + (db.is<n_block>(c) ? 1 : 0);
       return std::pair{at, at};
     };
     apply(v, c, mutate, before, after, edited, {count ? a - old.first : 0, count ? b - old.first : 0, code_points(ins)}, caret);
@@ -564,7 +618,7 @@ struct editor_server {
     std::vector<before> views;
     for(auto & p: peers)
       for(auto & v: p.views)
-        if(v.root && v.root == session.root && v.layout_of(target) != ~uint32_t{0}) {
+        if(v.root && v.layout_of(target) != ~uint32_t{0}) {
           auto r = range_before(v);
           views.push_back({&v, &p, r, v.text.substr(v.byte_at[r.second])});
         }
@@ -740,6 +794,228 @@ struct editor_server {
     send(p, proto::s_decor{v.id, session.db.revision, marks(v)});
   }
 
+  // --- transition and "add in place" ---
+  //
+  // 
+// 
+// 
+// 
+// F12 on call - overload selected in
+  // instance ("tracing"), all others and "add" for argument types without overload;
+  // Ctrl+P is the same for the typed signature. The internal element of the module
+  // (inner layout), opens in the second panel.
+
+  // Name overload: Program module (with internal) and prelude.
+  std::vector<node_id> overloads(std::string_view name) const {
+    std::vector<node_id> out;
+    for(node_id m: {session.root, session.db.prelude}) {
+      if(!m || !session.db.is<n_module>(m)) continue;
+      for(node_id f: session.db.as<n_module>(m).items)
+        if(session.db.is<n_fn>(f) && session.db.strings.text(session.db.as<n_fn>(f).name) == name) out.push_back(f);
+    }
+    return out;
+  }
+
+  std::string signature(node_id f) const {
+    auto const & fn = session.db.as<n_fn>(f);
+    std::string s = cat(session.db.strings.text(fn.name), "(");
+    for(uint32_t i = 0; i < fn.params.size(); ++i) {
+      auto const & p = session.db.as<n_param>(fn.params[i]);
+      if(i) s += ", ";
+      if(p.type && session.db.is<n_ident>(p.type)) s += cat(session.db.strings.text(session.db.as<n_ident>(p.type).name), " ");
+      s += session.db.strings.text(p.name);
+    }
+    return s + ")";
+  }
+
+  // overload is suitable for types (parameter without type - any).
+  bool accepts(node_id f, std::vector<std::string> const & types) const {
+    auto const & fn = session.db.as<n_fn>(f);
+    if(fn.params.size() != types.size()) return false;
+    for(uint32_t i = 0; i < types.size(); ++i) {
+      auto const & p = session.db.as<n_param>(fn.params[i]);
+      if(p.type && session.db.is<n_ident>(p.type) && session.db.strings.text(session.db.as<n_ident>(p.type).name) != types[i].substr(0, types[i].find('<'))) return false;
+    }
+    return true;
+  }
+  // Is it precisely typed for these types (all parameters with the type).
+  bool exact(node_id f, std::vector<std::string> const & types) const {
+    auto const & fn = session.db.as<n_fn>(f);
+    if(!accepts(f, types)) return false;
+    return std::ranges::all_of(fn.params, [&](node_id p) { return bool(session.db.as<n_param>(p).type); });
+  }
+
+  // Transition list: in the cursor location, items - functions and "add".
+  void show_nav(peer & p, editor_view & v, std::vector<std::pair<completion_item, editor_view::nav_target>> list) {
+    if(list.empty()) return send(p, proto::s_error{"переход: ничего не найдено"});
+    v.items.clear();
+    v.targets.clear();
+    for(auto & [item, t]: list) {
+      v.items.push_back(item);
+      v.targets.push_back(t);
+    }
+    v.selected = 0;
+    v.word_begin = v.cursor;
+    v.completing = true;
+    send_completion(p, v);
+  }
+
+  static std::string add_text(std::string_view name, std::vector<std::string> const & types) {
+    std::string s = cat(name, "(");
+    for(uint32_t i = 0; i < types.size(); ++i) s += cat(i ? ", " : "", types[i]);
+    return s + ")";
+  }
+
+  // F12: Call in the place of the cursor - its overload.
+  void goto_call(peer & p, editor_view & v) {
+    auto const & db = session.db;
+    uint32_t at = v.cursor < v.places.size() ? v.cursor : 0;
+    node_id call;
+    for(uint32_t k: {at, at > 0 ? at - 1 : at}) {
+      for(node_id n = v.places[k].node; n && !call; n = db[n].parent)
+        if(db.is<n_call>(n) && (db.is<n_ident>(db.as<n_call>(n).callee) || db.is<n_member>(db.as<n_call>(n).callee))) call = n;
+      if(call) break;
+    }
+    if(!call) return send(p, proto::s_error{"F12: курсор не на вызове функции"});
+    auto const & c = db.as<n_call>(call);
+    node_list args = c.args;
+    symbol name;
+    if(db.is<n_ident>(c.callee)) name = db.as<n_ident>(c.callee).name;
+    else { // a.f(b) ≡ f(a, b) (§4.5)
+      name = db.as<n_member>(c.callee).name;
+      args.insert(args.begin(), db.as<n_member>(c.callee).object);
+    }
+    std::string n(db.strings.text(name));
+    auto chosen = session.call_targets.contains(call.value) ? session.call_targets.at(call.value) : std::vector<uint32_t>{};
+    std::vector<std::pair<completion_item, editor_view::nav_target>> list;
+    auto fns = overloads(n);
+    std::ranges::stable_sort(fns, {}, [&](node_id f) { return !std::ranges::contains(chosen, f.value); });
+    for(node_id f: fns) {
+      std::string detail = std::ranges::contains(chosen, f.value) ? "выбрана здесь" : "";
+      if(is_inner(f)) detail += detail.empty() ? "внутренняя" : ", внутренняя";
+      if(db[f].where.source == db[db.prelude].where.source) detail += detail.empty() ? "прелюдия" : ", прелюдия";
+      list.push_back({{signature(f), "перегрузка", detail, 0}, {f, {}}});
+    }
+    // Argument types for all instances: combinations without suitable overload - "add"
+    std::vector<std::vector<std::string>> combos{{}};
+    for(node_id a: args) {
+      auto it = session.node_types.find(a.value);
+      std::vector<std::string> ts = it == session.node_types.end() ? std::vector<std::string>{} : it->second;
+      if(ts.empty()) return show_nav(p, v, std::move(list)); // Type of argument unknown - only transition
+      std::vector<std::vector<std::string>> next;
+      for(auto const & cmb: combos)
+        for(auto const & t: ts)
+          if(next.size() < 8) {
+            next.push_back(cmb);
+            next.back().push_back(t);
+          }
+      combos = std::move(next);
+    }
+    for(auto const & cmb: combos)
+      if(std::ranges::none_of(fns, [&](node_id f) { return accepts(f, cmb); }))
+        list.insert(list.begin(), {{cat("добавить ", add_text(n, cmb)), "добавить", "внутренняя перегрузка", 0}, {{}, add_text(n, cmb)}});
+    show_nav(p, v, std::move(list));
+  }
+
+  // Ctrl+P: "foo(i64, str)" or "foo" - overload and "add".
+  void handle(peer & p, proto::c_goto const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    std::string_view t = m.text;
+    while(!t.empty() && t.front() == ' ') t.remove_prefix(1);
+    while(!t.empty() && t.back() == ' ') t.remove_suffix(1);
+    auto open = t.find('(');
+    std::string name(t.substr(0, open));
+    while(!name.empty() && name.back() == ' ') name.pop_back();
+    if(name.empty()) return send(p, proto::s_error{"переход: нужна сигнатура вида foo(i64)"});
+    std::optional<std::vector<std::string>> types;
+    if(open != std::string_view::npos) {
+      types.emplace();
+      std::string_view inside = t.substr(open + 1, t.rfind(')') == std::string_view::npos ? std::string_view::npos : t.rfind(')') - open - 1);
+      for(auto part: std::views::split(inside, ',')) {
+        std::string s(part.begin(), part.end());
+        while(!s.empty() && s.front() == ' ') s.erase(0, 1);
+        while(!s.empty() && s.back() == ' ') s.pop_back();
+        if(!s.empty()) types->push_back(s);
+      }
+    }
+    std::vector<std::pair<completion_item, editor_view::nav_target>> list;
+    auto fns = overloads(name);
+    if(types) std::ranges::stable_sort(fns, {}, [&](node_id f) { return exact(f, *types) ? 0 : accepts(f, *types) ? 1 : 2; });
+    for(node_id f: fns) {
+      std::string detail = types && exact(f, *types) ? "точно" : types && accepts(f, *types) ? "подходит" : "";
+      if(is_inner(f)) detail += detail.empty() ? "внутренняя" : ", внутренняя";
+      list.push_back({{signature(f), "перегрузка", detail, 0}, {f, {}}});
+    }
+    if(types && std::ranges::none_of(fns, [&](node_id f) { return exact(f, *types); }))
+      list.insert(list.begin(), {{cat("добавить ", add_text(name, *types)), "добавить", "внутренняя перегрузка", 0}, {{}, add_text(name, *types)}});
+    show_nav(p, *v, std::move(list));
+  }
+
+  // Open the function in the second panel: The client has one representation of the function.
+  void open_fn(peer & p, node_id f) {
+    editor_view * fv = nullptr;
+    for(auto & w: p.views)
+      if(w.root && w.kind == "fn") fv = &w;
+    if(!fv) {
+      fv = &p.views.emplace_back();
+      fv->id = uint32_t(p.views.size());
+      fv->kind = "fn";
+    }
+    fv->root = f;
+    fv->cursor = 0;
+    fv->completing = false;
+    layout(*fv);
+    // cursor to the body: on an empty line, if any, otherwise after `{`
+    for(uint32_t k = 0; k + 1 < fv->lead.size(); ++k)
+      if(fv->lead[k] == '{') {
+        fv->cursor = blank_line_end(*fv, k + 2 < fv->lead.size() ? k + 2 : k + 1);
+        break;
+      }
+    show_view(p, *fv, false);
+  }
+
+  // Add the internal overload "foo(i64, str)": parameter names are like overload's of the
+  // same aricity, otherwise a, b, c...; the body is an empty string to type.
+  void add_overload(peer & p, std::string const & sig) {
+    auto & db = session.db;
+    auto open = sig.find('(');
+    std::string name = sig.substr(0, open);
+    std::vector<std::string> types;
+    for(auto part: std::views::split(std::string_view(sig).substr(open + 1, sig.size() - open - 2), ',')) {
+      std::string s(part.begin(), part.end());
+      while(!s.empty() && s.front() == ' ') s.erase(0, 1);
+      if(!s.empty()) types.push_back(s);
+    }
+    std::vector<std::string> names;
+    for(node_id f: overloads(name))
+      if(db.as<n_fn>(f).params.size() == types.size()) {
+        for(node_id pn: db.as<n_fn>(f).params) names.emplace_back(db.strings.text(db.as<n_param>(pn).name));
+        break;
+      }
+    std::string text = cat(name, "(");
+    for(uint32_t i = 0; i < types.size(); ++i)
+      text += cat(i ? ", " : "", types[i].substr(0, types[i].find('<')), " ", i < names.size() ? names[i] : std::string(1, char('a' + i)));
+    text += ") {\n\n}\n";
+    ++edits;
+    parser pr(db, text, cat("<добавить ", sig, ">"));
+    node_id mod = pr.parse_module();
+    auto const & items = db.as<n_module>(mod).items;
+    if(items.size() != 1 || !db.is<n_fn>(items[0])) return send(p, proto::s_error{cat("не удалось добавить ", sig)});
+    node_id f = items[0];
+    n_module nm = db.as<n_module>(session.root);
+    nm.items.push_back(f);
+    nm.inner.push_back(f.value);
+    db.replace(session.root, nm);
+    db.link_parents(session.root);
+    // Module representations: no internal element visible - only labels change
+    recheck();
+    for(auto & q: peers)
+      for(auto & w: q.views)
+        if(w.root && w.kind == "module") send_marks(q, w);
+    open_fn(p, f);
+  }
+
   editor_view * find(peer & p, uint32_t id) {
     for(auto & v: p.views)
       if(v.id == id && v.root) return &v;
@@ -753,9 +1029,12 @@ struct editor_server {
 
   // --- layout ---
 
+  bool is_inner(node_id n) const { return std::ranges::contains(session.db.as<n_module>(session.root).inner, n.value); }
+
   void layout(editor_view & v) {
     v.layouts.clear();
-    printer pr(session.db);
+    // The presentation of the module does not show the internal elements - "not littering"
+    printer pr(session.db, v.kind == "module" ? printer::filter([&](node_id n) { return !is_inner(n); }) : printer::filter{});
     pr.layouts = &v.layouts;
     pr.print(v.root);
     v.at.assign(session.db.size(), ~uint32_t{0});

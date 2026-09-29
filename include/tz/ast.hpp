@@ -31,6 +31,11 @@ struct n_module {
   symbol name;
   node_list items;
   std::vector<uint32_t> blank;
+  // internal elements (node numbers from items):
+// - in base and execution, but not in
+  // presentation of the editor module; access - transition. The layout is like blank; the
+  // numbers, not node_list, are not children (they are not seen twice by rounds in the fields).
+  std::vector<uint32_t> inner;
 };
 struct n_fn {
   symbol name;

@@ -46,7 +46,35 @@ body {
     'calt' 0,
     'liga' 0;
 }
-#app {
+#panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+#side {
+  border-left: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+}
+#side[hidden] {
+  display: none;
+}
+#goto {
+  padding: 6px 24px;
+  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+}
+#goto[hidden] {
+  display: none;
+}
+#goto-input {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--tz-popup);
+  border: 1px solid color-mix(in srgb, var(--tz-fg) 20%, transparent);
+  border-radius: 4px;
+  padding: 4px 8px;
+  outline: none;
+}
+.pane {
   position: relative;
   flex: 1;
   overflow: auto;

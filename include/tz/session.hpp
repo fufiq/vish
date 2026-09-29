@@ -69,6 +69,7 @@ struct vm_session {
       errors.push_back(d);
     }
     node_types = vm.node_types(); // For the Editor: Types and Errors in Place
+    call_targets = vm.resolved_calls;
     last_report = vm.report(name, db.source(db[root].where.source));
     std::string names;
     for(auto & n: cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
@@ -146,6 +147,7 @@ struct vm_session {
   std::string last_report;
   // Last check: node types in all contexts and errors (editor, §13.1).
   std::map<uint32_t, std::vector<std::string>> node_types;
+  std::map<uint32_t, std::vector<uint32_t>> call_targets; // call node → overload selected in instance
   std::vector<diagnostic> errors;
 };
 

@@ -122,7 +122,8 @@ struct report_event {
     proven,
     unproven,
     rt_check,
-    throws } kind;
+    throws,
+    resolved } kind; // resolved: the fn call selected overload b (node function number)
   std::string a, b, c; // meaning depends on the species
   span where;
   std::vector<std::string> alts;
@@ -777,6 +778,13 @@ struct interpreter {
       case report_event::unproven: unproven.insert(ev.fn); break;
       case report_event::rt_check: rt_checks[ev.a][cat(ev.where.source, ":", ev.where.begin, ":", ev.b)] = {ev.where, ev.b}; break;
       case report_event::throws: throws_of[ev.a].insert(ev.b); break;
+      case report_event::resolved: {
+        auto & ts = resolved_calls[ev.fn];
+        uint32_t t = 0;
+        std::from_chars(ev.b.data(), ev.b.data() + ev.b.size(), t);
+        if(!std::ranges::contains(ts, t)) ts.push_back(t);
+        break;
+      }
     }
   }
 
@@ -2250,7 +2258,16 @@ struct interpreter {
   static void fiber_main(void * arg) {
     auto & f = *static_cast<fiber_rec *>(arg);
     interpreter & vm = *f.vm;
-    fiber_started(&vm.root->host_bottom, &vm.root->host_size);
+    // boundary of the host stack - only from the first run (it makes the main
+    // stack); fiber running another fiber would get the boundaries of that - and
+    // going to the main stack would inform ASan of other boundary
+    void const * from_bottom = nullptr;
+    std::size_t from_size = 0;
+    fiber_started(&from_bottom, &from_size);
+    if(!vm.root->host_bottom) {
+      vm.root->host_bottom = from_bottom;
+      vm.root->host_size = from_size;
+    }
     try {
       if(f.entry) vm.process_main(f); // input
       else {
@@ -3340,6 +3357,9 @@ struct interpreter {
         if(c.score == good[0].score) d.note(cat("кандидат ", describe_fn(c.fn)), db[c.fn].where);
       throw d;
     }
+    // Which overload has chosen the challenge in this instance to move from
+    // editor
+    if(checking() && site.node) emit({report_event::resolved, {}, cat(good[0].fn.value), {}, {}, {}, site.node});
     return invoke(good[0].fn, vals, args, env, site);
   }
 
@@ -3981,6 +4001,7 @@ struct interpreter {
   std::vector<std::string> level_details;
   std::set<uint32_t> implicit_decls; // x = e, declaring x
   std::map<std::pair<uint32_t, uint64_t>, value> ct_memo; // (ct node, instance ) → value
+  std::map<uint32_t, std::vector<uint32_t>> resolved_calls; // call node → selected overload (by instance)
   std::vector<std::tuple<span, std::string, std::string>> ct_order; // policeman
   std::set<value const *> ct_cells; // ct-variable module
   std::vector<symbol> ct_names;

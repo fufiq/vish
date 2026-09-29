@@ -48,7 +48,13 @@ struct c_pointer {
   uint32_t piece;
   uint32_t offset;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer>;
+// Signature transition (Ctrl+P): VM responds with a list (s_complete) -
+// overload and “add”.
+struct c_goto {
+  uint32_t view;
+  std::string text;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto>;
 
 // --- VM customer ---
 
@@ -65,11 +71,14 @@ struct s_node {
   std::vector<piece> pieces;
   std::string note;
 };
+// kind - view: module (module without internal elements) or fn (one function is open
+// by transition, in the second panel).
 struct s_view {
   uint32_t view;
   node_id root;
   uint64_t revision;
   std::vector<s_node> nodes;
+  std::string kind;
 };
 // node node subtree replaced (id node saved, children new). It is sent to all
 // customers - one state.

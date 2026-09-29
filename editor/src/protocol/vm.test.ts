@@ -33,7 +33,14 @@ describe('живая VM', () => {
 
   it('поля типов TS — те же, что в схеме', () => {
     const fields = (t: string) => (schema.types[t] ?? []).map(([n]) => n);
-    expect(fields('s_view')).toEqual(['view', 'root', 'revision', 'nodes']);
+    expect(fields('s_view')).toEqual([
+      'view',
+      'root',
+      'revision',
+      'nodes',
+      'kind',
+    ]);
+    expect(fields('c_goto')).toEqual(['view', 'text']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
     expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);
     expect(fields('s_complete')).toEqual([
