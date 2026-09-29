@@ -34,6 +34,7 @@ struct m_type {
 };
 struct m_arr {
   std::vector<mval> items;
+  uint64_t gen = 0; // Buffer generation: growth and replacement - new (links to elements, §12.1)
 };
 struct m_agg {
   type_id type;
@@ -51,10 +52,14 @@ struct m_thunk {
   uint32_t env = m_none;
   uint32_t frame = 0;
 };
-// Parameter - alias of the caller's place (author's decision): area and slot.
+// Parameter - alias of the caller's place (author's decision): area and slot. alias
+// is a place by number: a variable (scope, slot) or an element of its array (index
+// and buffer generation when taking: reference &e = v[i], §12.1).
 struct m_alias {
   uint32_t scope = m_none;
   uint32_t slot = 0;
+  uint32_t index = m_none;
+  uint64_t gen = 0;
 };
 struct mval {
   std::variant<m_unit, bool, int64_t, double, std::string, m_type, m_arr, m_agg, m_fn, m_thunk, m_alias> v;
@@ -163,9 +168,10 @@ struct m_state {
   std::vector<uint32_t> joiners;
   std::vector<m_stream> streams;
   bool deadlock = false; // Everyone is waiting for each other: the mistake will be the main one.
+  uint64_t array_gen = 0; // array-buffering
 };
 
-enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept };
+enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept, m_elem_ref };
 enum : uint8_t { sig_none, sig_break, sig_continue, sig_return, sig_throw };
 
 struct process_machine {
@@ -220,11 +226,27 @@ struct process_machine {
   // Place cell - through alias to the present.
   mval & cell(place p) {
     mval * c = &st.scopes[p.scope].vars[p.slot].v;
-    while(c->is<m_alias>()) c = &st.scopes[c->as<m_alias>().scope].vars[c->as<m_alias>().slot].v;
+    if(c->is<m_alias>()) c = &follow(c->as<m_alias>());
     return *c;
   }
+  // Cell alias; reference element - if the support (buffer) has not changed, otherwise
+  // a "dangerous-dangerous" exception to invalidated_alias, as with the interpreter.
+  mval & follow(m_alias al) {
+    mval * c = &st.scopes[al.scope].vars[al.slot].v;
+    if(c->is<m_alias>()) c = &follow(c->as<m_alias>());
+    if(al.index == m_none) return *c;
+    if(!c->is<m_arr>() || c->as<m_arr>().gen != al.gen) {
+      diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
+      d.type = "invalidated_alias";
+      throw d;
+    }
+    auto & xs = c->as<m_arr>().items;
+    if(al.index >= xs.size()) out_of_bounds(al.index, xs.size(), here());
+    return xs[al.index];
+  }
+  span here() { return fib().tasks.empty() ? span{} : db[fib().tasks.back().node].where; }
   mval deref(mval const & x) {
-    if(x.is<m_alias>()) return cell({x.as<m_alias>().scope, x.as<m_alias>().slot});
+    if(x.is<m_alias>()) return follow(x.as<m_alias>());
     return x;
   }
   void declare(uint32_t scope, symbol name, mval v) { st.scopes[scope].vars.push_back({name, std::move(v), 0}); }
@@ -495,6 +517,7 @@ struct process_machine {
         case m_call_body: call_body_step(); break;
         case m_lambda_body: lambda_body_step(); break;
         case m_intercept: intercept_step(); break;
+        case m_elem_ref: elem_ref_step(); break;
         default: throw diagnostic("машина: неизвестная задача", {});
       }
     } catch(diagnostic const & d) {
@@ -645,6 +668,7 @@ struct process_machine {
     for(uint32_t i = 0; i < nargs; ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
       mval a = std::move(args[i]);
+      if(a.is<m_alias>() && a.as<m_alias>().index != m_none && (p.mode == param_mode::own || !helper.writes_param(chosen, i))) a = deref(a);
       if(p.mode == param_mode::own && a.is<m_alias>()) { // movement: the meaning goes away, the name of the caller is hidden (scalar - copy)
         m_alias al = a.as<m_alias>();
         a = deref(a);
@@ -974,7 +998,9 @@ struct process_machine {
         return finish(mval{m_unit{}});
       }
       mval & c = cell(p);
+      bool whole = !st.scopes[p.scope].vars[p.slot].v.is<m_alias>() || st.scopes[p.scope].vars[p.slot].v.as<m_alias>().index == m_none;
       c = op == "=" ? std::move(rhs) : primitive(prim_of(op), {c, rhs}, db[n].where);
+      if(whole && c.is<m_arr>()) c.as<m_arr>().gen = ++st.array_gen; // New buffer - old links are invalid
       return finish(mval{m_unit{}});
     }
     if(db.is<n_index>(lhs) && db.is<n_ident>(db.as<n_index>(lhs).object)) { // xs[i] = e
@@ -1140,6 +1166,13 @@ struct process_machine {
         fib().vals.push_back(mval{m_thunk{args[i], t.scope, t.frame}});
         continue;
       }
+      // array element to variable parameter - reference to element, not copy
+      bool writes = false;
+      for(node_id f: fns) {
+        auto const & ps = db.as<n_fn>(f).params;
+        writes = writes || (i < ps.size() && db.as<n_param>(ps[i]).mode != param_mode::expr && db.as<n_param>(ps[i]).mode != param_mode::own && helper.writes_param(f, i));
+      }
+      if(writes && elem_place(db, args[i])) return push_elem_ref(args[i], t.scope, t.frame);
       return push_eval(args[i], t.scope, t.frame); // the value (or alias of the place) on the stack
     }
     t.phase = 2;
@@ -1167,9 +1200,10 @@ struct process_machine {
     for(uint32_t i = 0; i < t.a; ++i) a.push_back(deref(fib().vals[t.base + i]));
     if(helper.str(name) == "append" && t.a == 2 && fib().vals[t.base].is<m_alias>()) { // push: the place of the caller grows
       m_alias al = fib().vals[t.base].as<m_alias>();
-      mval & xs = cell({al.scope, al.slot});
+      mval & xs = follow(al);
       if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
       xs.as<m_arr>().items.push_back(a[1]);
+      xs.as<m_arr>().gen = ++st.array_gen; // growth: support disabled
       return finish(mval{m_unit{}});
     }
     if(helper.str(name).starts_with("stream_")) { // Can block: the task will remain and repeat
@@ -1411,9 +1445,49 @@ struct process_machine {
     finish(mval{m_unit{}});
   }
 
+  // v[i] as location: reference to a variable array element (alias with buffer generation).
+  void push_elem_ref(node_id n, uint32_t scope, uint32_t frame) {
+    auto & f = fib();
+    f.tasks.push_back(m_task{m_elem_ref, n, 0, scope, frame, uint32_t(f.vals.size())});
+  }
+  void elem_ref_step() {
+    m_task & t = top();
+    auto const & ix = db.as<n_index>(t.node);
+    if(t.phase == 0) {
+      t.phase = 1;
+      return push_eval(ix.index, t.scope, t.frame);
+    }
+    mval i = deref(pop_val());
+    symbol name = db.as<n_ident>(ix.object).name;
+    place p = find(t.scope, name);
+    if(p.scope == m_none) throw diagnostic(cat("неизвестное имя ", helper.str(name)), db[ix.object].where);
+    not_hidden(p, name, db[t.node].where);
+    m_alias al{p.scope, p.slot};
+    if(st.scopes[p.scope].vars[p.slot].v.is<m_alias>()) al = st.scopes[p.scope].vars[p.slot].v.as<m_alias>();
+    mval & arr = follow(al);
+    if(!arr.is<m_arr>() || !i.is<int64_t>()) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where);
+    int64_t k = i.as<int64_t>();
+    auto size = arr.as<m_arr>().items.size();
+    if(k < 0 || uint64_t(k) >= size) out_of_bounds(k, size, db[t.node].where);
+    if(al.index != m_none) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where); // interpreter-like
+    finish(mval{m_alias{al.scope, al.slot, uint32_t(k), arr.as<m_arr>().gen}});
+  }
+  static bool elem_place(ast_db const & db, node_id x) { return db.is<n_index>(x) && db.is<n_ident>(db.as<n_index>(x).object); }
+
   void eval_node(node_id n, n_var const & v) {
     m_task & t = top();
-    if(v.ref) unsupported("ссылка &e = …", n);
+    if(v.ref) { // &a = b is the second name of the same cell; &e = v[i] is a reference to an element
+      if(t.phase == 0) {
+        t.phase = 1;
+        if(elem_place(db, v.init)) return push_elem_ref(v.init, t.scope, t.frame);
+        if(!db.is<n_ident>(v.init)) throw diagnostic("auto& — ссылка на переменную или элемент массива", db[v.init].where);
+        return push_eval(v.init, t.scope, t.frame);
+      }
+      mval x = pop_val();
+      if(!x.is<m_alias>()) throw diagnostic("auto& — ссылка на переменную или элемент массива", db[v.init].where);
+      declare(t.scope, v.name, std::move(x));
+      return finish(mval{m_unit{}});
+    }
     if(v.init && t.phase == 0) {
       t.phase = 1;
       return push_eval(v.init, t.scope, t.frame);
