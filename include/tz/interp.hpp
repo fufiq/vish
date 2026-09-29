@@ -134,7 +134,7 @@ struct check_cache {
     value result;
     std::map<uint32_t, uint64_t> deps; // Node of function → revision at parsing
     std::vector<report_event> events;
-    std::vector<std::tuple<uint32_t, value, bool, bool, bool>> journal; // observation
+    std::vector<std::tuple<uint32_t, value, bool, bool, bool, bool>> journal; // Observations (the latter in a folded call)
     bool effect = false;
   };
   std::map<std::string, entry> entries;
@@ -312,19 +312,19 @@ struct interpreter {
   // locations):
 // 
 // For editor: Types, members after `.`.
+  // Calls folded into compile-time are also contexts of use: their observations are included.
   std::map<uint32_t, std::vector<std::string>> node_types() const {
-    build_observed();
     std::map<uint32_t, std::vector<std::string>> out;
-    for(auto const & [key, o]: observations_ctx) {
-      if(!o.seen) continue;
-      auto & ts = out[key.first];
+    for(auto const & e: journal) {
+      if(!e.seen) continue;
+      auto & ts = out[e.node];
       auto add = [&](value const & v) {
         std::string t = types.describe(v);
         if(!std::ranges::contains(ts, t)) ts.push_back(t);
       };
-      if(o.v.is<split_v>()) // splitting - each alternative separately
-        for(auto const & a: o.v.as<split_v>().alts) add(a);
-      else add(o.v);
+      if(e.v.is<split_v>()) // splitting - each alternative separately
+        for(auto const & a: e.v.as<split_v>().alts) add(a);
+      else add(e.v);
     }
     return out;
   }
@@ -788,6 +788,9 @@ struct interpreter {
     value v;
     bool seen, diverted, effect;
     uint64_t ctx = 0; // Embedded context (node chain)
+    // inside a call folded in compile-time: runtime doesn't have it (residual program
+    // doesn't see it), but it's a context of use - types for editor
+    bool folded = false;
   };
 
   void observe(node_id n, flow const & f, bool effect) {
@@ -815,6 +818,7 @@ struct interpreter {
       }
     };
     for(auto const & e: journal) {
+      if(e.folded) continue;
       add(observations[e.node], e);
       add(observations_ctx[{e.node, e.ctx}], e);
     }
@@ -1744,6 +1748,14 @@ struct interpreter {
 
   flow index_rt(node_id n, n_index const & i, value const & obj, value const & idx, scope * env) {
     span where = db[n].where;
+    // index type - property of instance, not values: place of use instantiation error
+    // (§13.4), including when array and index is run-time
+    auto index_type = [&](value const & x) {
+      if(std::string t = types.describe(x); t != "i64") fail(cat("индекс должен быть i64, получено ", t), where);
+    };
+    if(idx.is<split_v>())
+      for(auto const & a: idx.as<split_v>().alts) index_type(a);
+    else index_type(idx);
     bool proven_here = checking() && index_holds(i, idx, env);
     return ok(lift(obj, [&](value const & o) {
       if(o.is<rt_v>() && idx.known()) { // tuple by compile-time - the exact type of element
@@ -3415,7 +3427,7 @@ struct interpreter {
       if(auto it = cache->entries.find(memo_key); it != cache->entries.end() && valid(it->second)) {
         ++cache->hits;
         for(auto const & ev: it->second.events) emit(ev);
-        for(auto const & [node, v, seen, div, eff]: it->second.journal) journal.push_back({node, v, seen, div, eff, ctx});
+        for(auto const & [node, v, seen, div, eff, folded]: it->second.journal) journal.push_back({node, v, seen, div, eff, ctx, folded});
         observations_dirty = true;
         if(it->second.effect) {
           ++effects;
@@ -3506,7 +3518,8 @@ struct interpreter {
     bool folded_now = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect;
     if(folded_now) {
       emit({report_event::folded, std::string(str(fn.name)), {}, {}, {}, {}});
-      journal.resize(journal_mark); // There is no folded call in runtime.
+      // There is no curled call in runtime - only type observations
+      for(std::size_t i = journal_mark; i < journal.size(); ++i) journal[i].folded = true;
       observations_dirty = true;
     } else {
       emit({report_event::instance, path.empty() ? key : cat(key, "   ", path), {}, {}, {}, {}});
@@ -3525,7 +3538,7 @@ struct interpreter {
         cache->recomputed_names.push_back(std::string(str(fn.name)));
         check_cache::entry e{r.v, std::move(mine), std::move(recorded), {}, last_rt_effect};
         for(std::size_t i = journal_mark; i < journal.size(); ++i)
-          e.journal.emplace_back(journal[i].node, journal[i].v, journal[i].seen, journal[i].diverted, journal[i].effect);
+          e.journal.emplace_back(journal[i].node, journal[i].v, journal[i].seen, journal[i].diverted, journal[i].effect, journal[i].folded);
         cache->entries[memo_key] = std::move(e);
       }
     }

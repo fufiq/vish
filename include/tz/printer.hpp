@@ -97,9 +97,11 @@ struct printer {
   void print_node(node_id, n_module const & m) {
     if(m.name) out += cat("module ", str(m.name), ";\n");
     bool first = !m.name;
-    for(node_id i: m.items) {
+    for(uint32_t k = 0; k < m.items.size(); ++k) {
+      node_id i = m.items[k];
       if(!kept(i)) continue;
       if(!first) out += '\n';
+      if(!first) blank_lines(m.blank, k);
       first = false;
       item(i);
       if(!db.is<n_fn>(i)) terminate(i);
@@ -201,22 +203,34 @@ struct printer {
     out += ';';
   }
 
+  // Empty lines set by a person; in the editor - with indentation (the place of the cursor
+  // on an empty line - in the code column), in the text - without tail spaces.
+  void blank_lines(std::vector<uint32_t> const & blank, std::size_t k) {
+    for(uint32_t n = k < blank.size() ? blank[k] : 0; n > 0; --n) {
+      out += '\n';
+      if(layouts) out.append(indent * 2, ' ');
+    }
+  }
+
   void print_node(node_id, n_block const & b) {
-    std::vector<node_id> items;
-    for(node_id i: b.items)
-      if(kept(i)) items.push_back(i);
-    if(items.empty()) {
+    std::vector<uint32_t> at; // Numbers of output elements in b.items
+    for(uint32_t k = 0; k < b.items.size(); ++k)
+      if(kept(b.items[k])) at.push_back(k);
+    uint32_t tail = uint32_t(b.items.size());
+    if(at.empty() && (tail >= b.blank.size() || b.blank[tail] == 0)) {
       out += "{}";
       return;
     }
     out += '{';
     ++indent;
-    for(uint32_t i = 0; i < items.size(); ++i) {
+    for(uint32_t k: at) {
+      blank_lines(b.blank, k);
       line();
-      item(items[i]);
-      bool value = b.has_value && items[i] == b.items.back();
-      if(!value) terminate(items[i]);
+      item(b.items[k]);
+      bool value = b.has_value && k + 1 == b.items.size();
+      if(!value) terminate(b.items[k]);
     }
+    blank_lines(b.blank, tail);
     --indent;
     line();
     out += '}';

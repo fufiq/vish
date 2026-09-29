@@ -1,0 +1,50 @@
+// Enter is a new line, as in all editors (author's decision, 2026-09-29). Empty
+// lines - layout in AST (blank for the block and module): the execution does not
+// see them, projection prints, journal stores.
+// program: editor_text.tz
+open_view module
+// at the end of the line - an empty line below, the cursor on it in the code column
+pointer 1 @привет 0 0
+key 1 End
+key 1 Enter
+// expect: мир";⏎  ⏎  print(s);
+// expect: курсор:   ‸⏎
+// set on an empty line - instructions, there is no empty line
+key 1 x
+key 1 =
+key 1 1
+key 1 ;
+// expect: мир";⏎  x = 1;⏎  print(s);
+// expect: курсор:   x = 1;‸
+// Backspace on an empty line - the line disappears, the cursor at the end of the previous line
+key 1 Enter
+key 1 Backspace
+// expect: x = 1;⏎  print(s);
+// expect: курсор:   x = 1;‸
+// at the beginning of the line - the empty line above, the cursor remains with the line of code
+pointer 1 @print 0 0
+key 1 Home
+key 1 Enter
+// expect: x = 1;⏎  ⏎  print(s);
+// expect: курсор: ‸  print(s);
+// Backspace in indentation - joining the previous one: an empty line leaves
+key 1 ArrowRight
+key 1 ArrowRight
+key 1 Backspace
+// expect: x = 1;⏎  print(s);
+// In an empty {} block, the line inside
+key 1 End
+key 1 ArrowRight
+key 1 End
+key 1 Enter
+key 1 Enter
+key 1 g
+key 1 (
+key 1 )
+key 1 {
+key 1 }
+key 1 ArrowLeft
+key 1 Enter
+// expect: g() {⏎  ⏎}
+// expect: курсор:   ‸⏎
+// Enter within an expression - line transfer in projection does not store

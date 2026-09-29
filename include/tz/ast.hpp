@@ -24,9 +24,13 @@ enum class param_mode : uint8_t { let, mut, own, out, expr, ct };
 
 // --- node ---
 
+// blank[k] - empty lines before the element k (over canonical), the last - before the
+// end: the layout of the text that a person put Enter (author's decision 2026-09-29).
+// The performance doesn't see her.
 struct n_module {
   symbol name;
   node_list items;
+  std::vector<uint32_t> blank;
 };
 struct n_fn {
   symbol name;
@@ -57,6 +61,7 @@ struct n_var {
 struct n_block {
   node_list items;
   bool has_value = false;
+  std::vector<uint32_t> blank; // n_module
 }; // has_value: Last expression without `;`
 struct n_ident {
   symbol name;

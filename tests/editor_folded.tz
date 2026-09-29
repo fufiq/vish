@@ -1,0 +1,9 @@
+// Программа для сценария 68_editor_folded.wire (сама по себе — обычный тест).
+// out: 4
+// out: 2.25
+twice(x) => x * x;
+
+main() {
+  print(twice(2));
+  print(twice(1.5));
+}

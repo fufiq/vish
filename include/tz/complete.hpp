@@ -130,7 +130,12 @@ std::vector<completion_item> member_completions(ast_db const & db, node_id root,
 }
 
 // Functions called through a point for these types (from root and prelude modules).
-void add_dot_functions(ast_db const & db, node_id root, std::vector<std::string> const & types, std::vector<completion_item> & out) {
+// Selection: A function is suitable if its first parameter in some instance received
+// this type (first_types(f) is the types of the first parameter for all instance) or is
+// explicitly typed by it. instance with this type is not offered.
+//
+void add_dot_functions(ast_db const & db, node_id root, std::vector<std::string> const & types, std::vector<completion_item> & out,
+    auto && first_types) {
   for(node_id module: {root, db.prelude}) {
     if(!module || !db.is<n_module>(module)) continue;
     for(node_id item: db.as<n_module>(module).items) {
@@ -141,10 +146,15 @@ void add_dot_functions(ast_db const & db, node_id root, std::vector<std::string>
       auto const & first = db.as<n_param>(f.params[0]);
       // design (expr-parameter - block or clause: for, while, try) - syntax, not a call through a point
       if(std::ranges::any_of(f.params, [&](node_id p) { return db.as<n_param>(p).mode == param_mode::expr || db.as<n_param>(p).clause; })) continue;
+      bool fits = false;
       if(first.type && db.is<n_ident>(first.type)) {
         std::string want(db.strings.text(db.as<n_ident>(first.type).name));
-        if(!std::ranges::any_of(types, [&](std::string const & t) { return t.substr(0, t.find('<')) == want; })) continue;
+        fits = std::ranges::any_of(types, [&](std::string const & t) { return t.substr(0, t.find('<')) == want; });
+      } else {
+        std::vector<std::string> seen = first_types(item);
+        fits = std::ranges::any_of(types, [&](std::string const & t) { return std::ranges::contains(seen, t); });
       }
+      if(!fits) continue;
       std::string rest = "(";
       for(uint32_t k = 1; k < f.params.size(); ++k) rest += cat(k > 1 ? ", " : "", db.strings.text(db.as<n_param>(f.params[k]).name));
       if(std::ranges::none_of(out, [&](completion_item const & x) { return x.name == name; }))

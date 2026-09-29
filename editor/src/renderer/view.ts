@@ -85,8 +85,12 @@ export class ViewElement {
     };
   }
 
+  #cursor: Cursor | undefined;
+  #completion: Complete | undefined;
+
   // Cadet VM.
   showCursor(c: Cursor): void {
+    this.#cursor = c;
     const box = this.#box(c.node, c.piece, c.offset);
     this.caret.hidden = !box;
     if (!box) return;
@@ -120,11 +124,15 @@ export class ViewElement {
       el.setMarks(e.type, e.error);
       this.#marked.add(el);
     }
+    // icons shift text - cursor and list are put again
+    if (this.#cursor) this.showCursor(this.#cursor);
+    if (this.#completion) this.showCompletion(this.#completion);
     return first;
   }
 
   // The list of additions - under the beginning of the typed word; selected - from VM.
   showCompletion(m: Complete): void {
+    this.#completion = m;
     const box = this.#box(m.node, m.piece, m.offset);
     this.popup.hidden = m.items.length === 0 || !box;
     if (this.popup.hidden || !box) return;

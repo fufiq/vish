@@ -101,7 +101,11 @@ struct parser {
       m.name = db.strings.intern(dotted_name());
       expect_op(";");
     }
-    while(!at_end()) m.items.push_back(recover_statement([&] { return item(); }));
+    while(!at_end()) {
+      m.blank.push_back(m.items.empty() ? 0 : blank_lines(2)); // Canonically between the elements is an empty line.
+      m.items.push_back(recover_statement([&] { return item(); }));
+    }
+    trim_blank(m.blank);
     auto id = db.add(std::move(m), {start, here().where.end});
     db.link_parents(id);
     return id;
@@ -476,15 +480,34 @@ struct parser {
     return db.add(n_ident{ident()}, {start, toks[pos - 1].where.end});
   }
 
+  // Translation of lines between the previous token and the current (for empty lines).
+  uint32_t newlines_before() const {
+    if(pos == 0 || pos >= toks.size()) return 0;
+    uint32_t n = 0;
+    for(uint32_t k = toks[pos - 1].where.end; k < toks[pos].where.begin && k < src.size(); ++k) n += src[k] == '\n';
+    return n;
+  }
+  // empty lines beyond canonical `canon` line translations
+  uint32_t blank_lines(uint32_t canon) const {
+    uint32_t n = newlines_before();
+    return n > canon ? n - canon : 0;
+  }
+  static void trim_blank(std::vector<uint32_t> & blank) {
+    if(std::ranges::all_of(blank, [](uint32_t x) { return x == 0; })) blank.clear();
+  }
+
   node_id block() {
     uint32_t start = here().where.begin;
     expect_open('{');
     n_block b;
     while(!is_close('}') && !at_end()) {
+      b.blank.push_back(blank_lines(1));
       node_id s = recover_statement([&] { return statement(); });
       b.items.push_back(s);
       if(is_close('}') && last_was_value) b.has_value = true;
     }
+    b.blank.push_back(blank_lines(1)); // before `}` : n empty lines printed n + 1 translations
+    trim_blank(b.blank);
     expect_close('}');
     return db.add(std::move(b), {start, toks[pos - 1].where.end});
   }

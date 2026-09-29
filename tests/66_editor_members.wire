@@ -4,7 +4,8 @@
 // entity fields from struct and all extensions
 //,
 //), размер массива, функции через точку `a.f(b) ≡ f(a, b)` (§4.5);
-// конструкции (for, while, try) — синтаксис, не члены.
+// конструкции (for, while, try) — синтаксис, не члены. Функция с нетипизированным
+// первым параметром — только если в каком-то экземпляре он получал этот тип.
 // program: editor_members.tz
 open_view module
 // expect: kind="type" text="point"
@@ -14,7 +15,8 @@ key 1 \s 2
 // expect: items=⏎  name="sum" kind="функция" detail="()"
 // expect: name="x" kind="поле" detail="f64 — point"
 // expect: name="y" kind="поле" detail="f64 — point"
-// expect: name="total" kind="функция"
+// total(xs) is not called with point - not offered
+// expect-not: name="total"
 // expect-not: name="for"
 // expect-not: name="while"
 key 1 Escape
@@ -22,6 +24,8 @@ key 1 Escape
 pointer 1 @.size 1 1
 key 1 \s 2
 // expect: items=⏎  name="size" kind="поле" detail="i64 — array<f64>"
+// total(xs) is called with array<f64>
+// expect: name="total" kind="функция" detail="()"
 // expect-not: name="x"
 key 1 Escape
 // filter

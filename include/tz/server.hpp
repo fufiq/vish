@@ -62,7 +62,27 @@ uint32_t align(std::string_view from, uint32_t at, std::string_view to) {
   uint32_t ci = 0, cj = 0;
   while(ci < at && i < from.size()) {
     std::size_t ni = cp_len(from, i), nj = j < to.size() ? cp_len(to, j) : 0;
-    if(nj && from.substr(i, ni) == to.substr(j, nj)) {
+    if(nj && space(from[i]) && space(to[j])) {
+      // space gap - completely against the gap: the cursor inside it rises after as
+      // many translations of the line (Enter at the beginning of the line leaves the
+      // cursor on the line of code, at the end - translates to a new one)
+      std::size_t ie = i, je = j;
+      uint32_t cie = ci, cje = cj, lines = 0, col = 0; // to the cursor: translations of the line and column after the last
+      while(ie < from.size() && space(from[ie])) {
+        if(cie < at) {
+          col = from[ie] == '\n' ? 0 : col + 1;
+          lines += from[ie] == '\n';
+        }
+        ++ie, ++cie;
+      }
+      while(je < to.size() && space(to[je])) ++je, ++cje;
+      if(at < cie) {
+        for(uint32_t seen = 0; j < je && seen < lines; ++j, ++cj) seen += to[j] == '\n';
+        for(; col > 0 && j < je && to[j] != '\n'; --col) ++j, ++cj;
+        return cj;
+      }
+      i = ie, ci = cie, j = je, cj = cje;
+    } else if(nj && from.substr(i, ni) == to.substr(j, nj)) {
       i += ni, j += nj, ++ci, ++cj;
     } else if(space(from[i])) {
       i += ni, ++ci;
@@ -265,14 +285,23 @@ struct editor_server {
       v->cursor = line_edge(*v, m.key == "End");
     } else if(m.key == "Escape") {
     } else if(m.key == "Backspace" && v->cursor > 0) {
-      edit(*v, v->cursor - 1, v->cursor, "");
+      // indentation (only spaces to the left) - erase the translation of the line as
+      // a whole: the empty line disappears, the line joins the previous one
+      uint32_t s = v->cursor;
+      while(s > 0 && v->lead[s - 1] == ' ') --s;
+      bool indent = s > 0 && v->lead[s - 1] == '\n';
+      edit(*v, indent ? s - 1 : v->cursor - 1, v->cursor, "");
       return complete(p, *v, false);
     } else if(m.key == "Delete" && v->cursor + 1 < v->places.size()) {
       close_completion(p, *v);
       return edit(*v, v->cursor, v->cursor + 1, "");
     } else if(m.key == "Backspace" || m.key == "Delete") { // edge of the text - nothing
     } else if(m.key == "Enter") {
-      return edit(*v, v->cursor, v->cursor, "\n");
+      // new line, as in all editors (author's decision): empty line - layout in AST
+      // (blank); in an empty block `{}` - two translations
+      bool empty_block = v->cursor > 0 && v->lead[v->cursor - 1] == '{' && v->lead[v->cursor] == '}';
+      close_completion(p, *v);
+      return edit(*v, v->cursor, v->cursor, empty_block ? "\n\n" : "\n", 1);
     } else if(code_points(m.key) == 1 && !(m.mods & (mod_ctrl | mod_alt | mod_meta))) {
       edit(*v, v->cursor, v->cursor, m.key);
       return complete(p, *v, false);
@@ -304,7 +333,10 @@ struct editor_server {
       auto types = object_types(v, b - 1);
       if(types.empty()) return close_completion(p, v);
       all = member_completions(session.db, session.root, types);
-      add_dot_functions(session.db, session.root, types, all);
+      add_dot_functions(session.db, session.root, types, all, [&](node_id f) {
+        auto const & fn = session.db.as<n_fn>(f);
+        return types_of_name(f, session.db.as<n_param>(fn.params[0]).name);
+      });
     } else all = context_identifiers(session.db, at);
     auto items = filter_completions(std::move(all), word);
     // The only option that matches the typed one is to show nothing.
@@ -382,7 +414,9 @@ struct editor_server {
     return out;
   }
 
-  void edit(editor_view & v, uint32_t a, uint32_t b, std::string const & ins) {
+  // caret - where the cursor of the author will stand inside the inserted (in code
+  // points; by default - after it).
+  void edit(editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret = ~uint32_t{0}) {
     ++edits;
     for(auto const & u: units_around(v, a, b)) {
       std::string_view old = v.text_of(u.range);
@@ -391,7 +425,7 @@ struct editor_server {
       parser pr(session.db, edited, cat("<ввод #", edits, ">"));
       node_id fresh = u.kind == 2 ? pr.parse_module() : pr.parse_unit(u.kind == 0);
       if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
-      apply(v, u.node, fresh, edited, {a - u.range.first, b - u.range.first, code_points(ins)});
+      apply(v, u.node, fresh, edited, {a - u.range.first, b - u.range.first, code_points(ins)}, std::min(caret, code_points(ins)));
       return;
     }
   }
@@ -407,7 +441,7 @@ struct editor_server {
     uint32_t map(uint32_t c) const { return c >= to ? c - (to - from) + inserted : c > from ? from : c; }
   };
 
-  void apply(editor_view & av, node_id target, node_id fresh, std::string const & edited, change ch) {
+  void apply(editor_view & av, node_id target, node_id fresh, std::string const & edited, change ch, uint32_t caret) {
     struct before {
       editor_view * v;
       peer * p;
@@ -431,7 +465,7 @@ struct editor_server {
       std::string_view now = v.text_of(r);
       // cursor of the author - immediately after entering; someone else - is moved by
       // editing; then alignment with the canonical projection (she puts gaps)
-      if(&v == &av) c = r.first + align(edited, ch.from + ch.inserted, now);
+      if(&v == &av) c = blank_line_end(v, r.first + align(edited, ch.from + caret, now));
       else if(c >= b.r.second) c = c - b.r.second + r.second;
       else if(c >= b.r.first) c = r.first + align(edited, ch.map(c - b.r.first), now);
       v.cursor = std::min<uint32_t>(c, uint32_t(v.places.size() - 1));
@@ -441,6 +475,18 @@ struct editor_server {
     }
     recheck();
     for(auto & b: views) send_marks(*b.p, *b.v);
+  }
+
+  // The cursor on a line of one space (empty line with indentation) - at the end of
+  // the indentation: the set will begin in the code column.
+  static uint32_t blank_line_end(editor_view const & v, uint32_t c) {
+    if(c >= v.lead.size()) return c;
+    uint32_t s = c, e = c;
+    while(s > 0 && v.lead[s - 1] != '\n') --s;
+    while(e + 1 < v.lead.size() && v.lead[e] != '\n') ++e;
+    for(uint32_t k = s; k < e; ++k)
+      if(v.lead[k] != ' ') return c;
+    return e;
   }
 
   std::vector<proto::s_node> subtree(editor_view const & v, node_id n) const {

@@ -1,6 +1,7 @@
 // Программа для сценария 66_editor_members.wire (сама по себе — обычный тест).
 // stdin: 1 2 3
 // out: 3
+// out: 6.0
 // out: 3.0
 struct point { f64 x; f64 y; }
 
@@ -17,6 +18,7 @@ total(xs) {
 main() {
   xs = read_floats(stdin);
   print(xs.size);
+  print(total(xs));
   p = point{1.0, 2.0};
   print(p.sum());
 }
