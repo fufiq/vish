@@ -2351,7 +2351,15 @@ struct interpreter {
     thunk_v t = thunk_arg(args[0], env, where);
     if(checking()) { // parsing: the body is in place; fiber launch - runtime effect
       rt_effect();
-      flow r = eval(t.expr, t.env, t.frame);
+      uint64_t saved = std::exchange(ctx, t.ctx); // as in performance: the body in the context where it is written
+      flow r;
+      try {
+        r = eval(t.expr, t.env, t.frame);
+      } catch(...) {
+        ctx = saved;
+        throw;
+      }
+      ctx = saved;
       (void)r;
       return ok();
     }
@@ -2774,7 +2782,13 @@ struct interpreter {
     return uint32_t(id.as<int64_t>());
   }
 
-  value stream_value(std::size_t id) { return value(agg_v{types.named("stream"), {{sym("id"), value(int64_t(id))}}}); }
+  // parsing: The value of the flow carries the type of elements, if it is known at creation
+  // - the fusion (cycle, branches) erases the number, but not the type.
+  value stream_value(std::size_t id) {
+    agg_v a{types.named("stream"), {{sym("id"), value(int64_t(id))}}};
+    if(checking() && id < root->streams.size() && root->streams[id].typed) a.fields.push_back({sym("elem"), erase(root->streams[id].shape)});
+    return value(std::move(a));
+  }
 
   // Network and file operations (net *, file *): in parsing, only types.
   value io_op_call(std::string_view n, std::vector<value> & a, span where) {
@@ -2880,6 +2894,7 @@ struct interpreter {
 
   value stream_op(std::string_view n, std::vector<value> & a, span where) {
     if(n == "stream_new") {
+      if(checking()) rt_effect(); // Flow - Execution Resource: Creation does not fold into compile-time
       auto & ss = root->streams;
       ss.emplace_back();
       if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) ss.back().cap = std::size_t(a[0].as<int64_t>());

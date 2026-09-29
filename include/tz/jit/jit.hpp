@@ -80,12 +80,15 @@ jt jt_of(value const & v, interpreter const * in = nullptr) {
   value const * x = shape_of(v);
   if(!x || v.is<split_v>()) return jt::other;
   // stream: number in the slot, element type - from parsing (the execution stream - parsing of the entire program)
-  if(in && x->is<agg_v>() && in->types.name(x->as<agg_v>().type) == "stream" && x->as<agg_v>().fields.size() == 1) {
-    value const & id = x->as<agg_v>().fields[0].second;
-    if(!id.is<int64_t>() || id.as<int64_t>() < 0 || uint64_t(id.as<int64_t>()) >= in->root->streams.size()) return jt::other;
-    auto const & s = in->root->streams[std::size_t(id.as<int64_t>())];
-    if(!s.typed) return jt::other;
-    jt e = jt_of(s.shape);
+  if(in && x->is<agg_v>() && in->types.name(x->as<agg_v>().type) == "stream" && !x->as<agg_v>().fields.empty()) {
+    auto const & fs = x->as<agg_v>().fields;
+    value const & id = fs[0].second;
+    value shape;
+    if(id.is<int64_t>() && id.as<int64_t>() >= 0 && uint64_t(id.as<int64_t>()) < in->root->streams.size() && in->root->streams[std::size_t(id.as<int64_t>())].typed)
+      shape = in->root->streams[std::size_t(id.as<int64_t>())].shape;
+    else if(fs.size() > 1) shape = fs[1].second; // number erased by fusion - type of meaning
+    else return jt::other;
+    jt e = jt_of(shape);
     return e == jt::i64_ ? jt::stream_i64 : e == jt::f64_ ? jt::stream_f64 : e == jt::bool_ ? jt::stream_bool : jt::other;
   }
   if(x->is<unit_v>()) return jt::unit;
@@ -237,6 +240,7 @@ struct jit_codegen {
 
     frames.push_back({fn, &epilogue, out.result, 0, true});
     jt body = gen_value(f.body);
+    if(!generators.empty()) throw jit_unsupported{generators.front().at, "spawn (файбер) — интерпретатор"};
     if(body != out.result && body != jt::unit)
       throw jit_unsupported{f.body, cat("тип результата ", jt_name(body), " ≠ ", jt_name(out.result))};
     to_result(body);
@@ -462,6 +466,7 @@ struct jit_codegen {
   }
 
   x64::label & fault(jit_fault_kind k, node_id n) {
+    if(fuse && !fuse->in_b) throw jit_unsupported{n, "генератор может упасть: свёртка изменила бы, где ошибка"};
     // VM error inside try with a suitable catch - go there (the object of error is the
     // aggregate, in the machine code it is not: catch should not use it)
     for(auto t = tries.rbegin(); t != tries.rend(); ++t)
@@ -897,6 +902,7 @@ struct jit_codegen {
       if(!sp || sp->thunk || is_array(sp->type)) throw jit_unsupported{target, "присваивание"};
       slot cell = *sp; // meaning: embedding on the right side can shift areas
       slot const * s = &cell;
+      shared_write(cell, n);
       jt t = gen_value(o.args[1]);
       if(t != s->type) throw jit_unsupported{n, "тип присваивания"};
       if(op != "=") { // the right part is the second operand (rcx/xmm1), the current one is the first; no stack
@@ -911,6 +917,7 @@ struct jit_codegen {
     if(db.is<n_index>(target)) {
       auto const & ix = db.as<n_index>(target);
       slot s = array_slot(ix.object);
+      shared_write(s, n);
       jt et = s.type == jt::arr_f64 ? jt::f64_ : jt::i64_;
       if(gen_value(o.args[1]) != et) throw jit_unsupported{n, "тип элемента"};
       push_result(et); // [rsp+8] - right side (after index)
@@ -987,6 +994,7 @@ struct jit_codegen {
     }
     if(name == "intercept") return gen_intercept(n, c);
     if(name.starts_with("stream_") || (name == "yield" && c.args.empty())) return gen_stream(n, c, name);
+    if(name == "fiber_start") return gen_spawn(n, c);
     // Language function (prelude or module): single candidate by name and arnost, without requiring
     // candidates by name and arnost; typed parameters are cut off by argument types from parsing, with
     // equality more precisely - with a large number of types
@@ -1027,7 +1035,10 @@ struct jit_codegen {
     // 
     // . Recursion and outline are a real challenge.
     bool recursive = std::ranges::any_of(frames, [&](frame const & f) { return f.fn == target; });
+    if(auto k = generator_of(target, c)) return gen_fused(n, c, *k);
     if(!recursive && !db.as<n_fn>(target).outline) return inline_call(n, c, target);
+    if(fuse && !fuse->in_b) throw jit_unsupported{n, "генератор: настоящий вызов"};
+    for(node_id a: c.args) stream_escapes(a);
     std::vector<jt> types;
     for(node_id a: c.args) {
       jt t = type_of(a);
@@ -1077,6 +1088,8 @@ struct jit_codegen {
     if(!tries.empty()) throw jit_unsupported{n, "операция потока внутри try"};
     uint64_t op = name == "stream_new" ? 0 : name == "stream_write" ? 1 : name == "stream_read" ? 2 : name == "stream_more" ? 3 : name == "stream_close" ? 4 : name == "yield" ? 5 : 9;
     if(op == 9) throw jit_unsupported{n, cat("вызов ", name)};
+    if(fuse && !fuse->in_b) return sink(n, c, op);
+    if(!c.args.empty()) stream_escapes(c.args[0]);
     jt result = jt::unit, carried = jt::unit;
     if(op == 0) {
       result = type_of(n);
@@ -1108,6 +1121,204 @@ struct jit_codegen {
     code.jcc(ne, epilogue); // Error/Cancel in VM: Exit, mark is worth
     if(result == jt::f64_) code.movq(xmm0, rax);
     return result;
+  }
+
+  // --- generator → cycle (O11) ---
+  //
+  // ; Pair s = stream(…) ; spawn { W } ; ... for(x : s) B - without fiber : in the place
+  // for W is executed, where write(s, v) is B with x = v. *My:* convolution only when the
+  // observed does not change - W is "pure" (from the actions of VM only the record in s
+  // and the last close(s) , without errors, return/throw and write out), s is not used
+  // anywhere else, B does not write in what W reads and does not leave the cycle; for - in
+  // the same control area that spawn. fiber would have started on the first reading. The
+  // function is an interpreter, as before.
+  //
+  //
+
+  jt gen_spawn(node_id n, n_call const & c) {
+    if(fuse) throw jit_unsupported{n, "spawn внутри генератора"};
+    slot const * s = c.args.size() == 1 && db.is<n_ident>(c.args[0]) ? find(db.as<n_ident>(c.args[0]).name) : nullptr;
+    if(!s || !s->thunk) throw jit_unsupported{n, "spawn"};
+    generator g{resolve_thunk(*s), regions.back(), {}, n};
+    std::vector<symbol> names;
+    idents(g.w.thunk, names);
+    in_context(g.w.ctx, [&] {
+      for(symbol x: names)
+        if(slot const * v = find(x)) g.captured.insert(v->off);
+      return 0;
+    });
+    generators.push_back(std::move(g));
+    return jt::unit;
+  }
+  void idents(node_id n, std::vector<symbol> & out) {
+    if(db.is<n_ident>(n)) out.push_back(db.as<n_ident>(n).name);
+    db.for_each_child(n, [&](node_id c) { idents(c, out); });
+  }
+
+  // for(stream s, expr body) on the stream that the waiting spawn sees.
+  std::optional<std::size_t> generator_of(node_id target, n_call const & c) {
+    if(generators.empty() || fuse || c.args.size() != 2 || !db.is<n_ident>(c.args[0])) return std::nullopt;
+    auto const & f = db.as<n_fn>(target);
+    if(db.strings.text(f.name) != "for" || f.params.size() != 2) return std::nullopt;
+    auto const & p = db.as<n_param>(f.params[0]);
+    if(!p.type || !db.is<n_ident>(p.type) || db.strings.text(db.as<n_ident>(p.type).name) != "stream") return std::nullopt;
+    slot const * st = resolve(db.as<n_ident>(c.args[0]).name);
+    if(!st || !is_stream(st->type)) return std::nullopt;
+    for(std::size_t k = 0; k < generators.size(); ++k)
+      if(generators[k].captured.contains(st->off)) return k;
+    return std::nullopt;
+  }
+
+  jt gen_fused(node_id n, n_call const & c, std::size_t k) {
+    slot st = *resolve(db.as<n_ident>(c.args[0]).name);
+    generator g = generators[k];
+    if(g.region != regions.back()) throw jit_unsupported{n, "for по потоку генератора — не в области spawn"};
+    for(std::size_t j = 0; j < generators.size(); ++j)
+      if(j != k && generators[j].captured.contains(st.off)) throw jit_unsupported{n, "поток видят несколько spawn"};
+    node_id body = c.args[1];
+    if(!db.is<n_lambda>(body) || !db.as<n_lambda>(body).block || db.as<n_lambda>(body).params.size() != 1) throw jit_unsupported{body, "тело for"};
+    if(!consumer_stays(db.as<n_lambda>(body).body, 0)) throw jit_unsupported{body, "тело for выходит из цикла"};
+    std::set<uint32_t> seen;
+    if(!generator_tail(g.w.thunk, seen)) throw jit_unsupported{g.at, "генератор: close(s) — не последнее действие, или return/throw"};
+    generators.erase(generators.begin() + std::ptrdiff_t(k));
+    contexts.push_back({uint32_t(scopes.size()), fn_base, uint32_t(frames.size()), ctx}); // place for - context B
+    fusion f{st.off, elem_of(st.type), body, uint32_t(contexts.size() - 1), scopes, frames, fn_base, ctx, {}, g.captured};
+    in_context(g.w.ctx, [&] {
+      for(auto const & sc: scopes)
+        for(auto const & [name, s]: sc) f.outer.insert(s.off);
+      return 0;
+    });
+    fuse = std::move(f);
+    in_context(g.w.ctx, [&] {
+      node_id e = g.w.thunk;
+      if(db.is<n_lambda>(e)) e = db.as<n_lambda>(e).body;
+      return gen_value(e);
+    });
+    if(fuse->closes != 1) throw jit_unsupported{g.at, "генератор: close(s) не один раз"};
+    fuse.reset();
+    // Flow after cycle - closed and empty, as after a real exchange
+    using namespace x64;
+    load_var(st);
+    code.mov(rsi, rax);
+    code.mov(rdi, uint64_t(4));
+    code.mov(rcx, uint64_t(n.value));
+    call_native(reinterpret_cast<void *>(&jit_stream_call));
+    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.cmp_mem_imm8(rcx, 0, 0);
+    code.jcc(ne, epilogue);
+    return jt::unit;
+  }
+
+  // Operation VM inside W: write(s, v) is the consumer's body with x = v; close(s) is the end.
+  jt sink(node_id n, n_call const & c, uint64_t op) {
+    slot const * sp = !c.args.empty() && db.is<n_ident>(c.args[0]) ? resolve(db.as<n_ident>(c.args[0]).name) : nullptr;
+    if(op == 5 || !sp || sp->off != fuse->stream_off || (op != 1 && op != 4)) throw jit_unsupported{n, "генератор: другая операция VM"};
+    if(op == 4) {
+      ++fuse->closes;
+      return jt::unit;
+    }
+    jt v = gen_value(c.args[1]);
+    if(v != fuse->elem) throw jit_unsupported{c.args[1], "тип записи ≠ типу потока"};
+    auto const & l = db.as<n_lambda>(fuse->body);
+    symbol pname = db.as<n_param>(l.params[0]).name;
+    slot p = declare(symbol{}, v, std::max<uint32_t>(weights[pname.value], 1u << 19));
+    store_var(p);
+    p.owner = false; // register
+    // B - in areas of the place for; areas W for this time
+    auto w_scopes = std::move(scopes);
+    auto w_frames = std::move(frames);
+    uint32_t w_base = fn_base;
+    uint64_t w_ctx = ctx;
+    scopes = fuse->full_scopes;
+    frames = fuse->full_frames;
+    fn_base = fuse->full_base;
+    ctx = fuse->full_ctx;
+    fuse->in_b = true;
+    in_context(fuse->body_ctx, [&] {
+      scopes.emplace_back(std::vector<std::pair<symbol, slot>>{{pname, p}});
+      gen_value(l.body);
+      pop_scopes(scopes.size() - 1);
+      return 0;
+    });
+    fuse->in_b = false;
+    scopes = std::move(w_scopes);
+    frames = std::move(w_frames);
+    fn_base = w_base;
+    ctx = w_ctx;
+    return jt::unit;
+  }
+
+  // A record that would make the order W and B observable.
+  void shared_write(slot const & s, node_id n) {
+    if(!fuse) { // after spawn: fiber could start earlier for (blocking between them) and read the old one
+      for(auto const & g: generators)
+        if(g.captured.contains(s.off)) throw jit_unsupported{n, "переменную генератора меняют после spawn"};
+      return;
+    }
+    if(!fuse->in_b && fuse->outer.contains(s.off)) throw jit_unsupported{n, "генератор пишет наружу"};
+    if(fuse->in_b && fuse->captured.contains(s.off)) throw jit_unsupported{n, "потребитель пишет то, что читает генератор"};
+  }
+
+  // The stream or array that the waiting spawn sees does not go through the for.
+  void stream_escapes(node_id a) {
+    if(!db.is<n_ident>(a) || (generators.empty() && !fuse)) return;
+    slot const * s = resolve(db.as<n_ident>(a).name);
+    if(!s || !(is_stream(s->type) || is_array(s->type))) return;
+    if(fuse && fuse->in_b && s->off == fuse->stream_off) throw jit_unsupported{a, "потребитель трогает поток генератора"};
+    for(auto const & g: generators)
+      if(g.captured.contains(s->off)) throw jit_unsupported{a, "поток генератора используется не через for"};
+  }
+
+  // B does not leave the cycle for: no return, break/continue - only its cycles.
+  bool consumer_stays(node_id n, uint32_t loops_in) {
+    if(db.is<n_return>(n)) return false;
+    if((db.is<n_break>(n) || db.is<n_continue>(n)) && loops_in == 0) return false;
+    uint32_t inner = loops_in + (db.is<n_loop>(n) || (db.is<n_lambda>(n) && db.as<n_lambda>(n).block) ? 1 : 0);
+    bool ok = true;
+    db.for_each_child(n, [&](node_id c) { ok = ok && consumer_stays(c, inner); });
+    return ok;
+  }
+
+  // Language functions by name and arnost (prelude and module).
+  std::vector<node_id> fns_named(symbol name, std::size_t arity) {
+    std::vector<node_id> out;
+    for(node_id m: {db.prelude, eng.mod})
+      for(node_id item: m ? db.as<n_module>(m).items : node_list{})
+        if(db.is<n_fn>(item) && db.as<n_fn>(item).name == name && db.as<n_fn>(item).params.size() == arity) out.push_back(item);
+    return out;
+  }
+  // W ends with close(s): the last action is close or the call that ends with it.
+  bool generator_tail(node_id n, std::set<uint32_t> & seen) {
+    if(db.is<n_lambda>(n)) return generator_tail(db.as<n_lambda>(n).body, seen);
+    if(db.is<n_block>(n)) {
+      auto const & items = db.as<n_block>(n).items;
+      if(items.empty()) return false;
+      for(std::size_t i = 0; i + 1 < items.size(); ++i)
+        if(generator_escapes(items[i], seen)) return false;
+      return generator_tail(items.back(), seen);
+    }
+    if(!db.is<n_call>(n) || !db.is<n_ident>(db.as<n_call>(n).callee)) return false;
+    auto const & c = db.as<n_call>(n);
+    symbol name = db.as<n_ident>(c.callee).name;
+    if(db.strings.text(name) == "close") return true;
+    for(node_id a: c.args)
+      if(generator_escapes(a, seen)) return false;
+    auto fs = fns_named(name, c.args.size());
+    if(fs.size() != 1 || !seen.insert(fs[0].value).second) return false;
+    return generator_tail(db.as<n_fn>(fs[0]).body, seen);
+  }
+  // return/throw/close outside the W tail (with evoked functions).
+  bool generator_escapes(node_id n, std::set<uint32_t> & seen) {
+    if(db.is<n_return>(n) || db.is<n_throw>(n)) return true;
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
+      symbol name = db.as<n_ident>(db.as<n_call>(n).callee).name;
+      if(db.strings.text(name) == "close") return true;
+      for(node_id f: fns_named(name, db.as<n_call>(n).args.size()))
+        if(seen.insert(f.value).second && generator_escapes(db.as<n_fn>(f).body, seen)) return true;
+    }
+    bool bad = false;
+    db.for_each_child(n, [&](node_id c) { bad = bad || generator_escapes(c, seen); });
+    return bad;
   }
 
   jt inline_call(node_id n, n_call const & c, node_id target) {
@@ -1173,10 +1384,10 @@ struct jit_codegen {
     if(gen_value(i.cond) != jt::bool_) throw jit_unsupported{i.cond, "условие не bool"};
     code.test(rax, rax);
     code.jcc(e, else_);
-    jt t = gen_value(i.then_);
+    jt t = in_region([&] { return gen_value(i.then_); });
     code.jmp(done);
     code.bind(else_);
-    jt u = i.else_ ? gen_value(i.else_) : jt::unit;
+    jt u = i.else_ ? in_region([&] { return gen_value(i.else_); }) : jt::unit;
     code.bind(done);
     if(t != u && t != jt::unit && u != jt::unit) throw jit_unsupported{n, "ветки разных типов (расщепление)"};
     return t == u ? t : jt::unit;
@@ -1250,11 +1461,22 @@ struct jit_codegen {
     label top, done;
     code.bind(top);
     loops.push_back({&top, &done, depth});
-    gen_value(l.body);
+    in_region([&] { return gen_value(l.body); });
     loops.pop_back();
     code.jmp(top);
     code.bind(done);
     return jt::unit;
+  }
+
+  // A branch or a body of a cycle: the spawn inside it coagulates only with for in it.
+  jt in_region(auto && f) {
+    regions.push_back(++region_counter);
+    jt r = f();
+    uint32_t id = regions.back();
+    regions.pop_back();
+    for(auto const & g: generators)
+      if(g.region == id) throw jit_unsupported{g.at, "spawn без for по его потоку в той же области"};
+    return r;
   }
 
   jt gen(node_id n, n_break const &) { return jump_loop(n, true); }
@@ -1459,6 +1681,33 @@ struct jit_codegen {
   std::vector<frame> frames;
   std::vector<context> contexts;
   std::deque<x64::label> inline_exits; // insertion
+
+  // Generator → cycle (O11): spawn waiting for its for; control areas (branches and
+  // cycles) - so that for is executed exactly as many times as spawn.
+  struct generator {
+    slot w; // Spwn body (expr) and its context
+    uint32_t region;
+    std::set<int32_t> captured; // Slots of names the body sees outside
+    node_id at;
+  };
+  std::vector<generator> generators;
+  std::vector<uint32_t> regions{0};
+  uint32_t region_counter = 0;
+  // Walking Convolution: The body of the generator W, in which write(s, v) is the body of the consumer B.
+  struct fusion {
+    int32_t stream_off;
+    jt elem;
+    node_id body; // block for: (x) { B }
+    uint32_t body_ctx;
+    std::vector<std::vector<std::pair<symbol, slot>>> full_scopes; // field
+    std::vector<frame> full_frames;
+    uint32_t full_base;
+    uint64_t full_ctx;
+    std::set<int32_t> outer, captured; // W is visible from the outside; what W reads
+    bool in_b = false;
+    uint32_t closes = 0;
+  };
+  std::optional<fusion> fuse;
 };
 
 // Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth
@@ -1487,6 +1736,14 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   return found;
 }
 
+// Does the body create threads (call stream(…), including prelude through module functions).
+bool jit_creates_streams(ast_db const & db, node_id n) {
+  if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee) && db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name) == "stream") return true;
+  bool found = false;
+  db.for_each_child(n, [&](node_id c) { found = found || jit_creates_streams(db, c); });
+  return found;
+}
+
 void jit_engine::compile(node_id fn, jit_fn & out) {
   out.deps[fn.value] = db.node_revision(fn);
   out.deps[mod.value] = db.node_revision(mod);
@@ -1496,24 +1753,45 @@ void jit_engine::compile(node_id fn, jit_fn & out) {
     return;
   }
   // Static parsing instance: Types and compile-time node (value-approach)
-  interpreter an(db, mod, {"jit"}, mode::check);
-  an.set_fuel(200000);
-  std::vector<value> shapes;
-  for(jt t: out.params) {
+  for(jt t: out.params)
     if(t == jt::other || t == jt::unit) {
       out.reason = "тип параметра";
       return;
     }
-    if(is_stream(t)) { // flow-parameter: parsing flow with element type
-      auto & ss = an.root->streams;
-      ss.emplace_back();
-      ss.back().typed = true;
-      ss.back().shape = jt_shape(elem_of(t));
-      shapes.push_back(an.stream_value(ss.size() - 1));
-      continue;
+  auto shapes_for = [&](interpreter & in) {
+    std::vector<value> shapes;
+    for(jt t: out.params) {
+      if(is_stream(t)) { // flow-parameter: parsing flow with element type
+        auto & ss = in.root->streams;
+        ss.emplace_back();
+        ss.back().typed = true;
+        ss.back().shape = jt_shape(elem_of(t));
+        shapes.push_back(in.stream_value(ss.size() - 1));
+        continue;
+      }
+      shapes.push_back(jt_shape(t));
     }
-    shapes.push_back(jt_shape(t));
+    return shapes;
+  };
+  // threads created by instance: the type of elements is known only after writing (later
+  // created) - the second pass starts with the types of the first, like the parsing program
+  std::map<std::pair<uint64_t, uint64_t>, value> seeded;
+  if(jit_creates_streams(db, db.as<n_fn>(fn).body)) {
+    interpreter first(db, mod, {"jit"}, mode::check);
+    first.set_fuel(200000);
+    auto shapes = shapes_for(first);
+    std::size_t from = first.root->streams.size();
+    try {
+      first.analyze_instance(fn, shapes);
+    } catch(diagnostic const &) {
+    }
+    for(std::size_t k = from; k < first.root->streams.size(); ++k)
+      if(auto const & s = first.root->streams[k]; s.typed && !interpreter::unknown(s.shape)) seeded.try_emplace({s.born_ctx, s.born_at}, s.shape);
   }
+  interpreter an(db, mod, {"jit"}, mode::check);
+  an.set_fuel(200000);
+  an.stream_shapes = std::move(seeded);
+  auto shapes = shapes_for(an);
   try {
     value r = an.analyze_instance(fn, shapes);
     out.result = jt_of(r);
