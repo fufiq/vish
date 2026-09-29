@@ -16,6 +16,17 @@
         <div id="side" class="pane" tabindex="0"></div>
       </div>
     </div>
+    <section id="run" hidden>
+      <div class="run-inputs">
+        <textarea
+          id="run-stdin"
+          rows="2"
+          placeholder="stdin программы"
+        ></textarea>
+        <input id="run-args" placeholder="аргументы" />
+      </div>
+      <pre id="run-output"></pre>
+    </section>
     <form id="goto" hidden>
       <input id="goto-input" placeholder="перейти или добавить: foo(i64)" />
     </form>

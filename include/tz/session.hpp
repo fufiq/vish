@@ -78,16 +78,22 @@ struct vm_session {
   }
 
   std::string run(std::vector<std::string> const & args) {
+    bool ok = true;
+    return run(args, ok);
+  }
+  std::string run(std::vector<std::string> const & args, bool & ok) {
     std::vector<std::string> a{name};
     a.insert(a.end(), args.begin(), args.end());
     interpreter vm(db, root, a, mode::run, interpreter::known_inputs{stdin_lines});
     vm.use_jit(&jit);
     std::string out;
     vm.capture_output(&out);
+    ok = true;
     try {
       vm.run_main();
     } catch(diagnostic const & d) {
       out += render(d, name, db);
+      ok = false;
     }
     return out;
   }

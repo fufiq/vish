@@ -60,7 +60,16 @@ struct c_layer {
   uint32_t view;
   std::string key;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer>;
+// Launch (F5): Main of the current base state in the same VM
+// 
+// stdin - the lines of program input.
+struct c_run {
+  std::string stdin_text;
+  std::string args;
+};
+// Save (Ctrl+S): journal base in .tzdb next to the program (author's decision).
+struct c_save {};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save>;
 
 // --- VM customer ---
 
@@ -146,7 +155,15 @@ struct s_layers {
   std::vector<s_layer> layers;
   std::string selected;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers>;
+// Startup output: Print the program and error with the track (ok - no error).
+struct s_output {
+  std::string text;
+  bool ok;
+};
+struct s_saved {
+  std::string path;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved>;
 
 // --- staff ---
 
@@ -234,8 +251,8 @@ std::string describe(auto const & msg) {
   return out + '\n';
 }
 
-// parsing text form: words in the order of fields; missing fields - zeros; in the
-// line `\s` - space (space key: `key 1 \s 2` - Ctrl + Space).
+// parsing text form: words in the order of fields; missing fields - zeros; in the line `\s` - space
+// (space key: `key 1 \s 2` - Ctrl + Space), `\n` - line translation.
 void parse_fields(auto & m, std::vector<std::string_view> const & words) {
   std::size_t at = 1;
   template for(constexpr auto f: fields_of<std::remove_cvref_t<decltype(m)>>()) {
@@ -245,6 +262,7 @@ void parse_fields(auto & m, std::vector<std::string_view> const & words) {
       if constexpr(std::is_same_v<F, std::string>) {
         std::string t(w);
         for(std::size_t k; (k = t.find("\\s")) != std::string::npos;) t.replace(k, 2, " ");
+        for(std::size_t k; (k = t.find("\\n")) != std::string::npos;) t.replace(k, 2, "\n");
         m.[:f:] = t;
       }
       else {

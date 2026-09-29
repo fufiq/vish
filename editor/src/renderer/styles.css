@@ -170,3 +170,38 @@ body {
 .tz-node[dead] {
   opacity: 0.4;
 }
+#run {
+  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) 2fr;
+  gap: 12px;
+  padding: 8px 24px;
+  max-height: 30vh;
+}
+#run[hidden] {
+  display: none;
+}
+.run-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#run textarea,
+#run input {
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background: var(--tz-popup);
+  border: 1px solid color-mix(in srgb, var(--tz-fg) 20%, transparent);
+  border-radius: 4px;
+  padding: 4px 8px;
+  resize: vertical;
+}
+#run-output {
+  margin: 0;
+  overflow: auto;
+  font-size: 13px;
+}
+#run-output[error] {
+  color: var(--tz-error);
+}

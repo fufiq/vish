@@ -36,6 +36,10 @@ const layersBar = byId('layers');
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
 const statusLine = byId('status');
+const runPanel = byId('run');
+const runStdin = byId('run-stdin') as HTMLTextAreaElement;
+const runArgs = byId('run-args') as HTMLInputElement;
+const runOutput = byId('run-output');
 const views = new Map<number, ViewElement>();
 let active: ViewElement | undefined;
 
@@ -95,6 +99,14 @@ function receive(m: ServerMsg): void {
     case 's_complete':
       views.get(m.view)?.showCompletion(m);
       return;
+    case 's_output':
+      runOutput.textContent = m.text === '' ? '(вывода нет)' : m.text;
+      runOutput.toggleAttribute('error', !m.ok);
+      statusLine.textContent = m.ok ? 'выполнено' : 'ошибка при исполнении';
+      return;
+    case 's_saved':
+      statusLine.textContent = `сохранено: ${m.path}`;
+      return;
     case 's_error':
       statusLine.textContent = `VM: ${m.text}`;
       return;
@@ -137,6 +149,23 @@ window.vm.onReady(() => {
   send({ type: 'c_hello', version: schema.version });
 });
 
+// F5 - start the current state: a panel with stdin and arguments (the window
+// remembers them - an unimportant state) and output; Ctrl + S - save the base.
+function run(): void {
+  runPanel.hidden = false;
+  runOutput.textContent = '…';
+  send({ type: 'c_run', stdin_text: runStdin.value, args: runArgs.value });
+}
+for (const field of [runStdin, runArgs] as HTMLElement[]) {
+  field.addEventListener('keydown', (e) => {
+    if (e.key === 'F5') {
+      e.preventDefault();
+      run();
+    }
+    if (e.key === 'Escape') activate(active);
+  });
+}
+
 // Ctrl+P is the signature string; it is sent by Enter, Escape is closed.
 function openGoto(): void {
   gotoForm.hidden = false;
@@ -166,6 +195,14 @@ for (const pane of [app, side]) {
     e.preventDefault();
     if (e.ctrlKey && e.key === 'p') {
       openGoto();
+      return;
+    }
+    if (e.key === 'F5') {
+      run();
+      return;
+    }
+    if (e.ctrlKey && e.key === 's') {
+      send({ type: 'c_save' });
       return;
     }
     // Escape in the second panel without an open list - close the panel

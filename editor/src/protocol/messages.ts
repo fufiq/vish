@@ -50,8 +50,18 @@ export interface LayerPick {
   view: number;
   key: string;
 }
+// Launch (F5): main() of the current base state in the same VM.
+export interface Run {
+  type: 'c_run';
+  stdin_text: string;
+  args: string;
+}
+// Save (Ctrl+S): journal base in .tzdb next to the program.
+export interface Save {
+  type: 'c_save';
+}
 export type ClientMsg =
-  Hello | OpenView | CloseView | Key | Pointer | Goto | LayerPick;
+  Hello | OpenView | CloseView | Key | Pointer | Goto | LayerPick | Run | Save;
 
 export interface ServerHello {
   type: 's_hello';
@@ -139,6 +149,15 @@ export interface Layers {
   layers: Layer[];
   selected: string;
 }
+export interface Output {
+  type: 's_output';
+  text: string;
+  ok: boolean;
+}
+export interface Saved {
+  type: 's_saved';
+  path: string;
+}
 export type ServerMsg =
   | ServerHello
   | View
@@ -147,7 +166,9 @@ export type ServerMsg =
   | Update
   | Complete
   | Decor
-  | Layers;
+  | Layers
+  | Output
+  | Saved;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

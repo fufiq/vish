@@ -2,7 +2,7 @@
 // types match it, messages through real `tz serve` give text equal to projection `tz
 // fmt`.
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,6 +42,9 @@ describe('живая VM', () => {
     ]);
     expect(fields('c_goto')).toEqual(['view', 'text']);
     expect(fields('c_layer')).toEqual(['view', 'key']);
+    expect(fields('c_run')).toEqual(['stdin_text', 'args']);
+    expect(fields('s_output')).toEqual(['text', 'ok']);
+    expect(fields('s_saved')).toEqual(['path']);
     expect(fields('s_layers')).toEqual(['view', 'layers', 'selected']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
     expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);
@@ -136,6 +139,52 @@ describe('живая VM', () => {
       // end of the first line - before translating the line in a piece "{\n" of the block
       const block = view.nodes.find((n) => n.kind === 'n_block');
       expect(end).toMatchObject({ node: block?.id, piece: 0, offset: 1 });
+    } finally {
+      vm.kill();
+    }
+  });
+
+  it('запуск и сохранение: F5 — текущее состояние, Ctrl+S — .tzdb, которую понимает tz run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tz-'));
+    const prog = join(dir, 'p.tz');
+    copyFileSync(join(root, 'tests/editor_overloads.tz'), prog);
+    const sock = join(dir, 's');
+    const vm = spawn(tz, ['serve', prog, sock], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50 && !existsSync(sock); ++i) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const got: ServerMsg[] = [];
+      const split = new FrameSplitter();
+      const c = connect(sock);
+      await new Promise<void>((ok, fail) => {
+        c.on('connect', ok).on('error', fail);
+      });
+      c.on('data', (d: Buffer) => {
+        split.push(new Uint8Array(d), (b) => {
+          got.push(decodeServer(b));
+        });
+      });
+      c.write(encodeClient({ type: 'c_hello', version: schema.version }));
+      c.write(encodeClient({ type: 'c_run', stdin_text: '1.5 2', args: '' }));
+      c.write(encodeClient({ type: 'c_save' }));
+      const wait = async (t: string) => {
+        for (let i = 0; i < 100 && !got.some((m) => m.type === t); ++i) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return got.find((m) => m.type === t);
+      };
+      expect(await wait('s_output')).toMatchObject({
+        text: '4\n2.25\n',
+        ok: true,
+      });
+      expect(await wait('s_saved')).toMatchObject({ path: `${prog}db` });
+      c.end();
+      const rerun = execFileSync(tz, ['run', `${prog}db`], {
+        input: '1.5 2',
+        encoding: 'utf8',
+      });
+      expect(rerun).toBe('4\n2.25\n');
     } finally {
       vm.kill();
     }

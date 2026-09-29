@@ -539,6 +539,20 @@ struct editor_server {
     bool value = false;
     auto fresh = pr.parse_line(module_level, value);
     if(!fresh) return false;
+    // the line has broken up into elements not separated by `;` or `}` (`f() => n n`
+    // after erasing `*`) - it is not yet written: the hole is whole, one line
+    for(std::size_t i = 0; i + 1 < fresh->size(); ++i) {
+      span w = db[(*fresh)[i]].where;
+      std::size_t e = std::min<std::size_t>(w.end, edited.size()), after = e;
+      while(e > 0 && (edited[e - 1] == ' ' || edited[e - 1] == '\n')) --e;
+      while(after < edited.size() && (edited[after] == ' ' || edited[after] == '\n')) ++after;
+      bool closed = (e > 0 && (edited[e - 1] == ';' || edited[e - 1] == '}')) || (after < edited.size() && edited[after] == ';');
+      if(!closed) {
+        fresh = node_list{db.add(n_hole{edited, "строка не дописана"}, {0, uint32_t(edited.size())})};
+        value = false;
+        break;
+      }
+    }
     // Empty space lines when inserted: above and below the new element
     std::vector<uint32_t> blank = db.is<n_block>(c) ? db.as<n_block>(c).blank : db.as<n_module>(c).blank;
     blank.resize(items.size() + 1, 0);
@@ -1090,6 +1104,27 @@ struct editor_server {
       for(auto & w: q.views)
         if(w.root && w.kind == "module") send_marks(q, w);
     open_fn(p, f);
+  }
+
+  // --- start-up ---
+
+  void handle(peer & p, proto::c_run const & m) {
+    session.stdin_lines.clear();
+    for(auto l: lines_of(m.stdin_text)) session.stdin_lines.emplace_back(l);
+    std::vector<std::string> args;
+    for(auto w: words_of(m.args)) args.emplace_back(w);
+    bool ok = true;
+    std::string out = session.run(args, ok);
+    send(p, proto::s_output{out, ok});
+  }
+
+  // .tzdb next to the program: stats.tz → stats.tzdb §3.1)
+  void handle(peer & p, proto::c_save const &) {
+    std::string path = session.name;
+    if(path.ends_with(".tz")) path += "db";
+    else if(!path.ends_with(".tzdb")) path += ".tzdb";
+    save_db(session.db, session.root, path);
+    send(p, proto::s_saved{path});
   }
 
   editor_view * find(peer & p, uint32_t id) {
