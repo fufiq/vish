@@ -7,6 +7,10 @@
 // out: t 8
 // out: 100
 // out: moved 1
+// machine
+// machine-dump: 150
+// machine-dump: 300
+// machine-dump: 500
 // Файберы и потоки (§8.3, M3a): spawn — стековая корутина со своим стеком
 //;
 // обмен — блокирующие write/read вместо каналов и future (

@@ -110,11 +110,37 @@ struct m_signal {
   uint32_t target = 0;
 };
 
+// Error fiber - data (pop up to main while waiting for fiber).
+struct m_trace {
+  std::string what;
+  span where;
+};
+struct m_error {
+  bool present = false;
+  std::string what;
+  span where;
+  std::string type;
+  std::vector<m_trace> trace;
+};
+
+enum : uint8_t { f_ready, f_blocked, f_done };
+
+// fiber - its stack of tasks and values, frames: switching - changing the number (§8.3).
 struct m_fiber {
   std::vector<m_task> tasks;
   std::vector<mval> vals;
   std::vector<m_frame> frames;
   m_signal pending;
+  uint8_t state = f_ready;
+  m_error error;
+};
+
+// Write/read between fiber (§8.3): A buffer waiting to be read and written.
+struct m_stream {
+  uint64_t cap = 16;
+  std::vector<mval> buf;
+  bool closed = false;
+  std::vector<uint32_t> readers, writers;
 };
 
 // The state of the process is everything that Dump writes.
@@ -131,6 +157,12 @@ struct m_state {
   // Input: given strings (tests, session) or stdin host when the queue is not set
   bool queued_input = false;
   std::vector<std::string> input;
+  // fiber : current, queue of ready, waiting for the end of fiber ; streams
+  uint32_t current = 0;
+  std::vector<uint32_t> ready;
+  std::vector<uint32_t> joiners;
+  std::vector<m_stream> streams;
+  bool deadlock = false; // Everyone is waiting for each other: the mistake will be the main one.
 };
 
 enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept };
@@ -303,7 +335,72 @@ struct process_machine {
 
   // --- task-stack ---
 
-  m_fiber & fib() { return st.fibers[0]; }
+  m_fiber & fib() { return st.fibers[st.current]; }
+
+  // --- fiber scheduler (like interpreter: cooperative, FIFO) ---
+
+  void wake(uint32_t i) {
+    if(st.fibers[i].state != f_blocked) return;
+    st.fibers[i].state = f_ready;
+    st.ready.push_back(i);
+  }
+  void park() {
+    fib().state = f_blocked;
+    schedule();
+  }
+  // The next one is ready; no - everyone is waiting: mutual lock, error - in the main.
+  void schedule() {
+    while(!st.ready.empty() && st.fibers[st.ready.front()].state != f_ready) st.ready.erase(st.ready.begin());
+    if(!st.ready.empty()) {
+      st.current = st.ready.front();
+      st.ready.erase(st.ready.begin());
+      return;
+    }
+    if(fib().state == f_ready) return;
+    st.current = 0;
+    st.fibers[0].state = f_ready;
+    st.deadlock = true;
+  }
+  void yield() {
+    st.ready.push_back(st.current);
+    schedule();
+  }
+  // fiber is over: main waits for the rest; fiber wakes the waiters.
+  void fiber_finished() {
+    if(st.current == 0) {
+      bool alive = false;
+      for(uint32_t i = 1; i < st.fibers.size(); ++i) alive = alive || st.fibers[i].state != f_done;
+      if(alive) {
+        st.joiners.push_back(0);
+        return park();
+      }
+      for(auto const & f: st.fibers)
+        if(f.error.present) throw restore_error(f.error);
+      st.done = true;
+      if(!fib().vals.empty() && deref(fib().vals.back()).is<int64_t>()) st.exit_code = deref(fib().vals.back()).as<int64_t>();
+      return;
+    }
+    fib().state = f_done;
+    for(uint32_t j: std::exchange(st.joiners, {})) wake(j);
+    schedule();
+  }
+  static diagnostic restore_error(m_error const & e) {
+    diagnostic d(e.what, e.where, diag_kind::runtime);
+    d.type = e.type;
+    for(auto const & t: e.trace) d.trace.push_back({t.what, t.where});
+    return d;
+  }
+  // The uncaught error fiber (not main) is its outcome; the program lives to wait in the main.
+  void fiber_error(diagnostic const & d) {
+    auto & f = fib();
+    f.error = {true, d.what(), d.where, d.type, {}};
+    for(auto const & t: d.trace) f.error.trace.push_back({t.what, t.where});
+    f.tasks.clear();
+    f.vals.clear();
+    f.state = f_done;
+    for(uint32_t j: std::exchange(st.joiners, {})) wake(j);
+    schedule();
+  }
 
   void push_eval(node_id n, uint32_t scope, uint32_t frame) {
     auto & f = fib();
@@ -365,15 +462,30 @@ struct process_machine {
 
   // Step: One phase of the upper task; false, the process is complete.
   bool step() {
+    if(st.done) return false;
     auto & f = fib();
-    if(f.pending.kind != sig_none) {
-      unwind();
-      return !st.done;
-    }
-    if(f.tasks.empty()) {
-      st.done = true;
-      if(!f.vals.empty() && deref(f.vals.back()).is<int64_t>()) st.exit_code = deref(f.vals.back()).as<int64_t>();
-      return false;
+    try {
+      if(st.deadlock && st.current == 0) { // Error of mutual blocking - in the main, at the waiting place
+        st.deadlock = false;
+        span where; // waiting place in the program, not in the wrapper prelude
+        for(auto i = f.tasks.rbegin(); i != f.tasks.rend() && !where.end; ++i)
+          if(db[i->node].where.source != db[db.prelude].where.source) where = db[i->node].where;
+        diagnostic d("все файберы ждут друг друга (взаимная блокировка)", where, diag_kind::runtime);
+        d.type = "deadlock";
+        throw d;
+      }
+      if(f.pending.kind != sig_none) {
+        unwind();
+        return !st.done;
+      }
+      if(f.tasks.empty()) {
+        fiber_finished();
+        return !st.done;
+      }
+    } catch(diagnostic const & d) {
+      if(st.current == 0) throw;
+      fiber_error(d);
+      return true;
     }
     ++st.steps;
     m_task & t = f.tasks.back();
@@ -387,7 +499,11 @@ struct process_machine {
       }
     } catch(diagnostic const & d) {
       // VM Error: Eliminating the language if there is someone to catch it (§5.7)
-      if(d.kind != diag_kind::runtime || std::ranges::none_of(f.tasks, [](m_task const & x) { return x.kind == m_intercept && x.phase == 1; })) throw;
+      if(d.kind != diag_kind::runtime || std::ranges::none_of(fib().tasks, [](m_task const & x) { return x.kind == m_intercept && x.phase == 1; })) {
+        if(st.current == 0) throw;
+        fiber_error(d);
+        return true;
+      }
       m_agg e{helper.types.named(d.type.empty() ? "vm_error" : d.type), {}};
       e.fields.push_back({helper.sym("message"), mval{std::string(d.what())}});
       raise({sig_throw, mval{std::move(e)}, 0});
@@ -967,6 +1083,12 @@ struct process_machine {
       }
       auto it = helper.functions.find(name);
       if(it == helper.functions.end() && helper.str(name) == "intercept") return begin_intercept(n, c.args);
+      if(it == helper.functions.end() && helper.str(name) == "fiber_start") return begin_spawn(n, c.args);
+      if(it == helper.functions.end() && helper.str(name) == "yield" && c.args.empty()) {
+        finish(mval{m_unit{}});
+        yield();
+        return;
+      }
       if(it == helper.functions.end()) return builtin_call(n, name, c.args);
       return eval_call_args(n, it->second, c.args, false);
     }
@@ -1050,6 +1172,13 @@ struct process_machine {
       xs.as<m_arr>().items.push_back(a[1]);
       return finish(mval{m_unit{}});
     }
+    if(helper.str(name).starts_with("stream_")) { // Can block: the task will remain and repeat
+      mval out;
+      if(!stream_op(helper.str(name), a, db[n].where, out)) return park();
+      return finish(std::move(out));
+    }
+    if(helper.str(name).starts_with("net_") || helper.str(name).starts_with("file_") || helper.str(name) == "process")
+      unsupported("сеть, файлы и процессы ОС (ресурсы хоста в дамп не входят)", n);
     finish(primitive(helper.str(name), a, db[n].where));
   }
 
@@ -1164,6 +1293,102 @@ struct process_machine {
       return true;
     }
     return false;
+  }
+
+  // spawn { … } prelude → fiber_start(тело): the new fiber at the end of the queue;
+  // the body is closed (its area lives beyond the call).
+  void begin_spawn(node_id n, node_list const & args) {
+    if(args.size() != 1) throw diagnostic("spawn(тело)", db[n].where);
+    m_thunk th = thunk_named(args[0], top().scope);
+    capture(th.env);
+    uint32_t id = uint32_t(st.fibers.size());
+    st.fibers.emplace_back();
+    st.fibers.back().tasks.push_back(m_task{m_lambda_body, th.expr, 0, th.env, th.frame, 0, m_none, 0, 0, th.expr});
+    st.ready.push_back(id);
+    finish(mval{m_unit{}});
+  }
+
+  mval stream_value(uint64_t id) { return mval{m_agg{helper.types.named("stream"), {{helper.sym("id"), mval{int64_t(id)}}}}}; }
+  uint64_t stream_id(mval const & v, span where) {
+    mval x = deref(v);
+    if(x.is<m_agg>())
+      for(auto const & f: x.as<m_agg>().fields)
+        if(helper.str(f.name) == "id" && f.v.is<int64_t>() && uint64_t(f.v.as<int64_t>()) < st.streams.size()) return uint64_t(f.v.as<int64_t>());
+    throw diagnostic(cat("ожидался поток, получено ", describe(x)), where);
+  }
+  static bool transferable(mval const & v) {
+    if(v.is<m_thunk>() || v.is<m_alias>()) return false;
+    if(v.is<m_fn>()) return !v.as<m_fn>().lambda; // entity - function - yes, closure - no
+    if(v.is<m_arr>())
+      for(auto const & e: v.as<m_arr>().items)
+        if(!transferable(e)) return false;
+    if(v.is<m_agg>())
+      for(auto const & f: v.as<m_agg>().fields)
+        if(!transferable(f.v)) return false;
+    return true;
+  }
+
+  // False - fiber is blocked (the task will be repeated when awakened).
+  bool stream_op(std::string_view n, std::vector<mval> & a, span where, mval & out) {
+    if(n == "stream_new") {
+      st.streams.emplace_back();
+      if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) st.streams.back().cap = uint64_t(a[0].as<int64_t>());
+      out = stream_value(st.streams.size() - 1);
+      return true;
+    }
+    uint64_t sid = stream_id(a[0], where);
+    m_stream & s = st.streams[sid];
+    uint32_t me = st.current;
+    out = mval{m_unit{}};
+    if(n == "stream_write") {
+      if(!transferable(a[1])) throw diagnostic(cat("в поток — только данные: ", describe(a[1])), where);
+      if(s.buf.size() >= s.cap && !s.closed) {
+        s.writers.push_back(me);
+        return false;
+      }
+      if(s.closed) {
+        diagnostic d("запись в закрытый поток", where, diag_kind::runtime);
+        d.type = "closed_stream";
+        throw d;
+      }
+      s.buf.push_back(std::move(a[1]));
+      if(!s.readers.empty()) {
+        uint32_t r = s.readers.front();
+        s.readers.erase(s.readers.begin());
+        wake(r);
+      }
+      return true;
+    }
+    if(n == "stream_read" || n == "stream_more") {
+      if(s.buf.empty() && !s.closed) {
+        s.readers.push_back(me);
+        return false;
+      }
+      if(n == "stream_more") {
+        out = mval{!s.buf.empty()};
+        return true;
+      }
+      if(s.buf.empty()) {
+        diagnostic d("чтение из закрытого пустого потока", where, diag_kind::runtime);
+        d.type = "closed_stream";
+        throw d;
+      }
+      out = std::move(s.buf.front());
+      s.buf.erase(s.buf.begin());
+      if(!s.writers.empty()) {
+        uint32_t w = s.writers.front();
+        s.writers.erase(s.writers.begin());
+        wake(w);
+      }
+      return true;
+    }
+    if(n == "stream_close") {
+      s.closed = true;
+      for(uint32_t r: std::exchange(s.readers, {})) wake(r);
+      for(uint32_t w: std::exchange(s.writers, {})) wake(w);
+      return true;
+    }
+    throw diagnostic(cat("неизвестная операция потока ", n), where);
   }
 
   // Hide x: Name no longer available (§5.6).
