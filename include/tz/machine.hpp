@@ -154,6 +154,7 @@ struct m_fiber {
   m_signal pending;
   std::vector<m_override> overrides;
   uint8_t state = f_ready;
+  bool direct = false; // In the queue first: awakened by exchange (direct transmission)
   m_error error;
 };
 
@@ -185,6 +186,7 @@ struct m_state {
   std::vector<uint32_t> joiners;
   std::vector<m_stream> streams;
   bool deadlock = false; // Everyone is waiting for each other: the mistake will be the main one.
+  uint32_t handoff_run = 0; // direct
   uint64_t array_gen = 0; // array-buffering
   std::vector<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
   std::vector<symbol> ct_vars; // ct-variable module (change - only ct-code)
@@ -396,6 +398,15 @@ struct process_machine {
     st.fibers[i].state = f_ready;
     st.ready.push_back(i);
   }
+  // Direct transmission, as in the interpreter: awakened by the exchange - the next,
+  // in a row no more than interpreter::handoff_limit.
+  void wake_direct(uint32_t i) {
+    if(st.fibers[i].state != f_blocked) return;
+    st.fibers[i].state = f_ready;
+    if(st.handoff_run >= interpreter::handoff_limit) return st.ready.push_back(i);
+    st.fibers[i].direct = true;
+    st.ready.insert(st.ready.begin(), i);
+  }
   void park() {
     fib().state = f_blocked;
     schedule();
@@ -406,6 +417,8 @@ struct process_machine {
     if(!st.ready.empty()) {
       st.current = st.ready.front();
       st.ready.erase(st.ready.begin());
+      st.handoff_run = st.fibers[st.current].direct ? st.handoff_run + 1 : 0;
+      st.fibers[st.current].direct = false;
       return;
     }
     if(fib().state == f_ready) return;
@@ -1472,7 +1485,7 @@ struct process_machine {
       if(!s.readers.empty()) {
         uint32_t r = s.readers.front();
         s.readers.erase(s.readers.begin());
-        wake(r);
+        wake_direct(r);
       }
       return true;
     }
@@ -1495,7 +1508,7 @@ struct process_machine {
       if(!s.writers.empty()) {
         uint32_t w = s.writers.front();
         s.writers.erase(s.writers.begin());
-        wake(w);
+        wake_direct(w);
       }
       return true;
     }

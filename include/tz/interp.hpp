@@ -668,6 +668,7 @@ struct interpreter {
     std::optional<diagnostic> error;
     std::optional<diagnostic> pending; // Error that fiber will get when it wakes up (mutual lock)
     bool cancel = false; // end of the program: spin the fiber stack
+    bool direct = false; // In the queue first: awakened by exchange (direct transmission)
     symbol entry; // Process input: function and arguments (M3c)
     std::vector<value> entry_args;
     uint32_t proc = 0;
@@ -2401,6 +2402,19 @@ struct interpreter {
     root->ready.push_back(f);
   }
 
+  // Direct transmission: awakened by exchange through the stream is executed as
+  // follows - its stack and data are still hot
+// * My: * no more handoff_limit in a row
+  // Otherwise, the fiber pair will take away the core from the rest forever. The car, too.
+  static constexpr uint32_t handoff_limit = 128;
+  void wake_direct(fiber_rec * f) {
+    if(f->state != fiber_rec::blocked) return;
+    f->state = fiber_rec::ready;
+    if(root->handoff_run >= handoff_limit) return root->ready.push_back(f);
+    f->direct = true;
+    root->ready.push_front(f);
+  }
+
   // Give the kernel to the next finished fiber. "" There are no ready ones, the current
   // one is locked, no one will wake it up: mutual lock.
   void schedule() {
@@ -2428,6 +2442,8 @@ struct interpreter {
     }
     fiber_rec & next = *r.ready.front();
     r.ready.pop_front();
+    r.handoff_run = next.direct ? r.handoff_run + 1 : 0;
+    next.direct = false;
     if(&next == &me) return;
     me.vm->swap_exec(me.exec);
     next.vm->swap_exec(next.exec);
@@ -2912,7 +2928,7 @@ struct interpreter {
       if(s.closed) fail_rt("closed_stream", "запись в закрытый поток", where);
       s.buf.push_back(std::move(a[1]));
       if(!s.readers.empty()) {
-        wake(s.readers.front());
+        wake_direct(s.readers.front());
         s.readers.pop_front();
       }
       return value();
@@ -2933,7 +2949,7 @@ struct interpreter {
       value v = std::move(s.buf.front());
       s.buf.pop_front();
       if(!s.writers.empty()) {
-        wake(s.writers.front());
+        wake_direct(s.writers.front());
         s.writers.pop_front();
       }
       return v;
@@ -4111,6 +4127,7 @@ struct interpreter {
   interpreter * root = this;
   fiber_rec * running_fiber = nullptr;
   std::deque<fiber_rec *> ready;
+  uint32_t handoff_run = 0; // direct
   std::vector<fiber_rec *> joiners;
   std::deque<stream_rec> streams;
   std::optional<os::uring> ring; // io_uring host (as required)

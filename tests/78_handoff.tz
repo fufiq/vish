@@ -1,0 +1,17 @@
+// out: a start
+// out: a got 1
+// out: main after writes
+// out: b runs
+// machine
+// Прямая передача (шаг 3 плана): файбер,
+// разбуженный обменом через поток, исполняется следующим — раньше тех, кто уже
+// стоит в очереди (b): 
+// При очереди FIFO «b runs» шло бы перед «main after writes».
+main() {
+  s = stream(1);
+  spawn { print("a start"); print("a got", read(s)); }
+  spawn { print("b runs"); }
+  write(s, 1);
+  write(s, 2);
+  print("main after writes");
+}
