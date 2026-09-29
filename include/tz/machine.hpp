@@ -74,6 +74,7 @@ struct m_field {
 struct m_var {
   symbol name;
   mval v;
+  uint32_t hidden = 0; // Node hide/own +1: name hidden (moved)
 };
 struct m_scope {
   uint32_t parent = m_none;
@@ -132,7 +133,7 @@ struct m_state {
   std::vector<std::string> input;
 };
 
-enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval };
+enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept };
 enum : uint8_t { sig_none, sig_break, sig_continue, sig_return, sig_throw };
 
 struct process_machine {
@@ -194,7 +195,21 @@ struct process_machine {
     if(x.is<m_alias>()) return cell({x.as<m_alias>().scope, x.as<m_alias>().slot});
     return x;
   }
-  void declare(uint32_t scope, symbol name, mval v) { st.scopes[scope].vars.push_back({name, std::move(v)}); }
+  void declare(uint32_t scope, symbol name, mval v) { st.scopes[scope].vars.push_back({name, std::move(v), 0}); }
+
+  // The place through alias is the variable itself (for “hidden”).
+  m_var & var_of(place p) {
+    m_var * v = &st.scopes[p.scope].vars[p.slot];
+    while(v->v.is<m_alias>()) v = &st.scopes[v->v.as<m_alias>().scope].vars[v->v.as<m_alias>().slot];
+    return *v;
+  }
+  void not_hidden(place p, symbol name, span where) {
+    if(uint32_t h = var_of(p).hidden) {
+      diagnostic d(cat("имя ", helper.str(name), " скрыто (hide/own)"), where);
+      d.note("скрыто здесь", db[node_id(h - 1)].where);
+      throw d;
+    }
+  }
 
   // --- The value of the interpreter (for primary operations and printing) ---
 
@@ -315,6 +330,12 @@ struct process_machine {
     f.pending = std::move(s);
   }
 
+  [[noreturn]] void out_of_bounds(int64_t k, std::size_t size, span where) {
+    diagnostic d(cat("индекс ", k, " вне границ массива размера ", size), where, diag_kind::runtime);
+    d.type = "out_of_bounds";
+    throw d;
+  }
+
   [[noreturn]] void unsupported(std::string_view what, node_id n) {
     throw diagnostic(cat("машина процессов: пока не поддержано — ", what), db[n].where);
   }
@@ -356,14 +377,26 @@ struct process_machine {
     }
     ++st.steps;
     m_task & t = f.tasks.back();
-    switch(t.kind) {
-      case m_eval: eval_step(); break;
-      case m_call_body: call_body_step(); break;
-      case m_lambda_body: lambda_body_step(); break;
-      default: throw diagnostic("машина: неизвестная задача", {});
+    try {
+      switch(t.kind) {
+        case m_eval: eval_step(); break;
+        case m_call_body: call_body_step(); break;
+        case m_lambda_body: lambda_body_step(); break;
+        case m_intercept: intercept_step(); break;
+        default: throw diagnostic("машина: неизвестная задача", {});
+      }
+    } catch(diagnostic const & d) {
+      // VM Error: Eliminating the language if there is someone to catch it (§5.7)
+      if(d.kind != diag_kind::runtime || std::ranges::none_of(f.tasks, [](m_task const & x) { return x.kind == m_intercept && x.phase == 1; })) throw;
+      m_agg e{helper.types.named(d.type.empty() ? "vm_error" : d.type), {}};
+      e.fields.push_back({helper.sym("message"), mval{std::string(d.what())}});
+      raise({sig_throw, mval{std::move(e)}, 0});
+      pending_error = d;
     }
     return true;
   }
+
+  std::optional<diagnostic> pending_error; // Original error VM flying exception (not process state)
 
   void run(uint64_t max_steps = ~uint64_t{0}) {
     while(max_steps-- > 0 && step()) {}
@@ -387,6 +420,9 @@ struct process_machine {
         t.phase = 0; // Continue - the next iteration
         return;
       }
+      if(t.kind == m_intercept && t.phase == 1 && s.kind == sig_throw) {
+        if(catch_into(t)) return; // caught: next - catch block
+      }
       if(t.kind == m_call_body && s.kind == sig_return && s.target == t.a) {
         mval v = std::move(s.v);
         s.kind = sig_none;
@@ -399,7 +435,11 @@ struct process_machine {
       f.vals.resize(t.base);
       f.tasks.pop_back();
     }
-    if(s.kind == sig_throw) throw diagnostic(cat("непойманное исключение: ", helper.show_v(to_value(s.v))), {});
+    if(s.kind == sig_throw) {
+      if(pending_error) throw *pending_error; // Error VM - like the interpreter, with its place
+      throw diagnostic(cat("непойманное исключение ", exception_type(s.v), ": ", helper.show_v(to_value(s.v))), s.target ? db[node_id(s.target)].where : span{},
+          diag_kind::runtime);
+    }
     throw diagnostic(s.kind == sig_return ? "return вне функции" : "break/continue вне цикла", {});
   }
 
@@ -434,6 +474,7 @@ struct process_machine {
 
   // Calling overloads fns with already calculated arguments (top of the value
   // stack: nargs pieces). The choice is by arrogance and types of parameters.
+  node_id site_node; // Call Node - to mark "hidden here"
   void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where) {
     auto & f = fib();
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
@@ -488,7 +529,11 @@ struct process_machine {
     for(uint32_t i = 0; i < nargs; ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
       mval a = std::move(args[i]);
-      if(p.mode == param_mode::own && a.is<m_alias>()) a = deref(a); // displacement
+      if(p.mode == param_mode::own && a.is<m_alias>()) { // movement: the meaning goes away, the name of the caller is hidden (scalar - copy)
+        m_alias al = a.as<m_alias>();
+        a = deref(a);
+        if(!a.is<bool>() && !a.is<int64_t>() && !a.is<double>()) var_of({al.scope, al.slot}).hidden = site_node.value + 1;
+      }
       declare(sc, p.name, std::move(a));
     }
     f.vals.resize(f.vals.size() - nargs);
@@ -530,10 +575,10 @@ struct process_machine {
   void call_body_step() {
     auto & f = fib();
     m_task & t = f.tasks.back();
-    auto const & fn = db.as<n_fn>(t.node);
+    node_id body = db.is<n_fn>(t.node) ? db.as<n_fn>(t.node).body : db.as<n_lambda>(t.node).body;
     if(t.phase == 0) {
       t.phase = 1;
-      push_eval(fn.body, t.scope, t.a);
+      push_eval(body, t.scope, t.a);
       return;
     }
     mval r = deref(pop_val()); // a value, not a alias, on an area that is now freed up
@@ -619,9 +664,19 @@ struct process_machine {
     m_task & t = top();
     place p = find(t.scope, x.name);
     if(p.scope == m_none) {
-      if(helper.functions.contains(x.name)) return finish(mval{m_fn{x.name, {}, m_none}});
-      throw diagnostic(cat("неизвестное имя ", helper.str(x.name)), db[n].where);
+      std::string_view s = helper.str(x.name);
+      if(s == "true" || s == "false") return finish(mval{s == "true"});
+      if(auto ty = helper.types.builtin(s)) return finish(mval{m_type{ty}});
+      if(helper.structs.contains(x.name)) return finish(mval{m_type{helper.types.named(s)}}); // entity struct - value
+      if(auto it = helper.functions.find(x.name); it != helper.functions.end()) {
+        for(node_id f: it->second)
+          if(helper.inline_required(f))
+            throw diagnostic(cat("функция ", s, " использует семантику инлайна (expr-параметр или return(…)) и не может быть значением; вызывайте её напрямую"), db[n].where);
+        return finish(mval{m_fn{x.name, {}, m_none}});
+      }
+      throw diagnostic(cat("неизвестное имя ", s), db[n].where);
     }
+    not_hidden(p, x.name, db[n].where);
     mval & c = cell(p);
     if(c.is<m_thunk>()) { // expr-parameter - the expression of the caller in its area and frame
       m_thunk th = c.as<m_thunk>();
@@ -715,6 +770,33 @@ struct process_machine {
     throw diagnostic(cat("у значения типа ", describe(o), " нет поля ", helper.str(m.name)), db[n].where);
   }
 
+  // v.[f] is a field by descriptor (from fields(T)) or by line name (§7.4).
+  void eval_node(node_id n, n_field const & fl) {
+    m_task & t = top();
+    if(t.phase < 2) {
+      node_id next = t.phase == 0 ? fl.key : fl.object;
+      ++t.phase;
+      return push_eval(next, t.scope, t.frame);
+    }
+    mval o = deref(pop_val()), key = deref(pop_val());
+    std::string name;
+    if(key.is<std::string>()) name = key.as<std::string>();
+    else if(key.is<m_agg>() && !key.as<m_agg>().fields.empty() && key.as<m_agg>().fields[0].v.is<std::string>()) name = key.as<m_agg>().fields[0].v.as<std::string>();
+    else throw diagnostic(cat("v.[f]: дескриптор поля должен быть известен при компиляции, получено ", describe(key)), db[n].where);
+    if(o.is<m_agg>())
+      for(auto const & f: o.as<m_agg>().fields)
+        if(helper.str(f.name) == name) return finish(f.v);
+    throw diagnostic(cat("у значения типа ", describe(o), " нет поля ", name), db[n].where);
+  }
+
+  // Lambda value: The circuit holds the number of its area (it survives the block).
+  void eval_node(node_id n, n_lambda const & l) {
+    if(l.block) unsupported("блок конструкции как значение", n);
+    uint32_t env = top().scope;
+    capture(env);
+    finish(mval{m_fn{symbol{}, n, env}});
+  }
+
   void eval_node(node_id n, n_index const & ix) {
     m_task & t = top();
     if(t.phase < 2) {
@@ -728,7 +810,7 @@ struct process_machine {
     if(!o.is<m_arr>()) throw diagnostic(cat("индексация значения типа ", describe(o)), db[n].where);
     auto const & xs = o.as<m_arr>().items;
     int64_t k = i.as<int64_t>();
-    if(k < 0 || uint64_t(k) >= xs.size()) throw diagnostic(cat("индекс ", k, " вне границ массива размера ", xs.size()), db[n].where);
+    if(k < 0 || uint64_t(k) >= xs.size()) out_of_bounds(k, xs.size(), db[n].where);
     finish(xs[uint64_t(k)]);
   }
 
@@ -793,9 +875,35 @@ struct process_machine {
       if(!arr.is<m_arr>() || !i.is<int64_t>()) throw diagnostic("запись в элемент не массива", db[lhs].where);
       auto & xs = arr.as<m_arr>().items;
       int64_t k = i.as<int64_t>();
-      if(k < 0 || uint64_t(k) >= xs.size()) throw diagnostic(cat("индекс ", k, " вне границ массива размера ", xs.size()), db[lhs].where);
+      if(k < 0 || uint64_t(k) >= xs.size()) out_of_bounds(k, xs.size(), db[lhs].where);
       xs[uint64_t(k)] = op == "=" ? std::move(rhs) : primitive(prim_of(op), {xs[uint64_t(k)], rhs}, db[n].where);
       return finish(mval{m_unit{}});
+    }
+    // a.b.c = e is the aggregate field in the variable (chain of fields on behalf)
+    if(db.is<n_member>(lhs)) {
+      std::vector<symbol> path;
+      node_id x = lhs;
+      while(db.is<n_member>(x)) {
+        path.push_back(db.as<n_member>(x).name);
+        x = db.as<n_member>(x).object;
+      }
+      if(db.is<n_ident>(x)) {
+        mval rhs = deref(pop_val());
+        place p = find(t.scope, db.as<n_ident>(x).name);
+        if(p.scope == m_none) throw diagnostic("присваивание не в переменную", db[lhs].where);
+        not_hidden(p, db.as<n_ident>(x).name, db[lhs].where);
+        mval * target = &cell(p);
+        for(auto it = path.rbegin(); it != path.rend(); ++it) {
+          if(!target->is<m_agg>()) throw diagnostic(cat("у значения типа ", describe(*target), " нет поля ", helper.str(*it)), db[lhs].where);
+          mval * next = nullptr;
+          for(auto & f: target->as<m_agg>().fields)
+            if(f.name == *it) next = &f.v;
+          if(!next) throw diagnostic(cat("у значения типа ", describe(*target), " нет поля ", helper.str(*it)), db[lhs].where);
+          target = next;
+        }
+        *target = op == "=" ? std::move(rhs) : primitive(prim_of(op), {*target, rhs}, db[n].where);
+        return finish(mval{m_unit{}});
+      }
     }
     unsupported("присваивание в это место", lhs);
   }
@@ -850,7 +958,7 @@ struct process_machine {
         mval & cv = cell(p);
         if(cv.is<m_thunk>() && db.is<n_lambda>(cv.as<m_thunk>().expr) && db.as<n_lambda>(cv.as<m_thunk>().expr).block)
           return call_block(n, cv.as<m_thunk>(), c.args);
-        if(cv.is<m_fn>() && cv.as<m_fn>().lambda) unsupported("вызов лямбды", n);
+        if(cv.is<m_fn>() && cv.as<m_fn>().lambda) return call_closure(n, cv.as<m_fn>(), c.args);
         if(cv.is<m_fn>()) {
           auto it = helper.functions.find(cv.as<m_fn>().name);
           if(it != helper.functions.end()) return eval_call_args(n, it->second, c.args, false);
@@ -858,6 +966,7 @@ struct process_machine {
         unsupported("вызов значения", n);
       }
       auto it = helper.functions.find(name);
+      if(it == helper.functions.end() && helper.str(name) == "intercept") return begin_intercept(n, c.args);
       if(it == helper.functions.end()) return builtin_call(n, name, c.args);
       return eval_call_args(n, it->second, c.args, false);
     }
@@ -913,6 +1022,7 @@ struct process_machine {
     }
     t.phase = 2;
     uint32_t frame = t.frame;
+    site_node = n;
     invoke(fns, t.a, frame, db[n].where);
   }
 
@@ -973,6 +1083,98 @@ struct process_machine {
     fib().tasks.push_back(m_task{m_lambda_body, t.extra, 0, sc, t.b, uint32_t(fib().vals.size()), m_none, 0, 0, l.body});
   }
 
+  // throw e is an expression: the exception goes the second way before the interception (§5.7).
+  void eval_node(node_id n, n_throw const & th) {
+    m_task & t = top();
+    if(t.phase == 0) {
+      t.phase = 1;
+      return push_eval(th.value, t.scope, t.frame);
+    }
+    mval v = deref(pop_val());
+    pending_error.reset();
+    raise({sig_throw, std::move(v), n.value});
+  }
+
+  std::string exception_type(mval const & v) {
+    mval x = deref(v);
+    if(x.is<m_agg>()) return std::string(helper.types.name(x.as<m_agg>().type));
+    return describe(x);
+  }
+
+  // intercept(тело, блоки): try { … } catch(E e) { … } prelude. The body is in the frame of its
+  // author; the throw is the first block whose parameter takes the type. t.extra is the expression
+  // of the body, t.a is the area, t.b is the frame; blocks are m_thunk in the value stack.
+  m_thunk thunk_named(node_id arg, uint32_t scope) {
+    if(!db.is<n_ident>(arg)) throw diagnostic("ожидался expr-параметр", db[arg].where);
+    place p = find(scope, db.as<n_ident>(arg).name);
+    if(p.scope == m_none || !cell(p).is<m_thunk>()) throw diagnostic("ожидался expr-параметр", db[arg].where);
+    m_thunk th = cell(p).as<m_thunk>();
+    while(db.is<n_ident>(th.expr)) { // A block passed on to another structure, too.
+      place q = find(th.env, db.as<n_ident>(th.expr).name);
+      if(q.scope == m_none || !cell(q).is<m_thunk>()) break;
+      th = cell(q).as<m_thunk>();
+    }
+    return th;
+  }
+
+  void begin_intercept(node_id n, node_list const & args) {
+    m_task & t = top();
+    if(args.size() != 2) throw diagnostic("intercept(тело, блоки)", db[n].where);
+    m_thunk body = thunk_named(args[0], t.scope), hs = thunk_named(args[1], t.scope);
+    t.kind = m_intercept;
+    t.phase = 0;
+    fib().vals.resize(t.base);
+    fib().vals.push_back(mval{hs});
+    t.extra = body.expr;
+    t.a = body.env;
+    t.b = body.frame;
+  }
+
+  void intercept_step() {
+    m_task & t = top();
+    if(t.phase == 0) { // body
+      t.phase = 1;
+      auto & f = fib();
+      f.tasks.push_back(m_task{m_lambda_body, t.extra, 0, t.a, t.b, uint32_t(f.vals.size()), m_none, 0, 0, t.extra});
+      return;
+    }
+    mval r = deref(pop_val()); // body or catch completed
+    finish(std::move(r));
+  }
+
+  // The throw went to intercept: the appropriate catch block is a task, otherwise bootstrapping is further away.
+  bool catch_into(m_task & t) {
+    auto & f = fib();
+    m_thunk hs = f.vals[t.base].as<m_thunk>();
+    node_list handlers = db.is<n_pack>(hs.expr) ? db.as<n_pack>(hs.expr).items : node_list{hs.expr};
+    std::string type = exception_type(f.pending.v);
+    for(node_id h: handlers) {
+      if(!db.is<n_lambda>(h) || db.as<n_lambda>(h).params.size() != 1) throw diagnostic("catch: блок с одним параметром — catch(E e) { … }", db[h].where);
+      auto const & l = db.as<n_lambda>(h);
+      auto const & p = db.as<n_param>(l.params[0]);
+      if(p.type && db.is<n_ident>(p.type) && helper.str(db.as<n_ident>(p.type).name) != type) continue;
+      uint32_t sc = new_scope(hs.env);
+      if(helper.str(p.name) != "_") declare(sc, p.name, std::move(f.pending.v));
+      f.pending = {};
+      pending_error.reset();
+      f.vals.resize(t.base + 1);
+      t.phase = 2;
+      t.owned = sc;
+      f.tasks.push_back(m_task{m_lambda_body, h, 0, sc, hs.frame, uint32_t(f.vals.size()), m_none, 0, 0, l.body});
+      return true;
+    }
+    return false;
+  }
+
+  // Hide x: Name no longer available (§5.6).
+  void eval_node(node_id n, n_hide const & h) {
+    place p = find(top().scope, h.name);
+    if(p.scope == m_none || cell(p).is<m_thunk>()) throw diagnostic(cat("hide: нет переменной ", helper.str(h.name)), db[n].where);
+    not_hidden(p, h.name, db[n].where);
+    var_of(p).hidden = n.value + 1;
+    finish(mval{m_unit{}});
+  }
+
   // require in the body - check in runtime (§5.4): violated - program error.
   void eval_node(node_id n, n_require const & r) {
     m_task & t = top();
@@ -1027,10 +1229,41 @@ struct process_machine {
 
   void eval_node(node_id n, auto const &) { unsupported(kind_name(db[n]), n); }
 
-  // Call phases with numbers: 1 - 2 - overload, 3 - built-in, 4 - 5 - construction block.
+  // Call phases with numbers: 1 - 2 - overload, 3 - built-in, 4 - 5 - construction block. Call
+  // of closure: your frame (return - from the lambda), the area above the environment.
+  void call_closure(node_id n, m_fn fv, node_list const & args) {
+    m_task & t = top();
+    auto const & l = db.as<n_lambda>(fv.lambda);
+    if(l.params.size() != args.size()) throw diagnostic(cat("лямбда ждёт ", l.params.size(), " аргументов, передано ", args.size()), db[n].where);
+    t.extra = fv.lambda;
+    t.a = fv.env;
+    t.phase = 6;
+    closure_args_step(n);
+  }
+  void closure_args_step(node_id n) {
+    m_task & t = top();
+    auto & f = fib();
+    auto const & args = db.as<n_call>(n).args;
+    if(t.phase == 7) {
+      mval r = deref(pop_val());
+      return finish(std::move(r));
+    }
+    uint32_t have = uint32_t(f.vals.size() - t.base);
+    if(have < args.size()) return push_eval(args[have], t.scope, t.frame);
+    auto const & l = db.as<n_lambda>(t.extra);
+    uint32_t sc = new_scope(t.a);
+    for(uint32_t i = 0; i < args.size(); ++i) declare(sc, db.as<n_param>(l.params[i]).name, deref(f.vals[t.base + i]));
+    f.vals.resize(t.base);
+    uint32_t id = ++st.frame_counter;
+    f.frames.push_back({id, symbol{}, false, t.frame});
+    t.phase = 7;
+    f.tasks.push_back(m_task{m_call_body, t.extra, 0, sc, id, uint32_t(f.vals.size()), sc, id});
+  }
+
   void resume_call(node_id n) {
     m_task & t = top();
     if(t.phase == 3) return builtin_args_step(n);
+    if(t.phase >= 6) return closure_args_step(n);
     if(t.phase >= 4) return block_args_step(n);
     call_args_step(n);
   }
