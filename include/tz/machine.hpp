@@ -249,7 +249,17 @@ struct process_machine {
       else if constexpr(std::is_same_v<T, std::string>) return "str";
       else if constexpr(std::is_same_v<T, m_unit>) return "unit";
       else if constexpr(std::is_same_v<T, m_type>) return "type";
-      else if constexpr(std::is_same_v<T, m_arr>) return cat("array<", a.items.empty() ? std::string("?") : describe(a.items[0]), ">");
+      else if constexpr(std::is_same_v<T, m_arr>) {
+        if(a.items.empty()) return "array<?>";
+        std::string first = describe(a.items[0]), all;
+        bool same = true;
+        for(auto const & e: a.items) {
+          std::string d = describe(e);
+          same = same && d == first;
+          all += (all.empty() ? "" : ", ") + d;
+        }
+        return same ? cat("array<", first, ">") : cat("tuple<", all, ">"); // literate
+      }
       else if constexpr(std::is_same_v<T, m_agg>) return std::string(helper.types.name(a.type));
       else if constexpr(std::is_same_v<T, m_fn>) return "fn";
       else return describe(deref(x));
@@ -444,8 +454,12 @@ struct process_machine {
           else ++score;
         }
       }
-      if(fits && has_leading_require(fn)) unsupported("перегрузка с require", fnode);
       if(!fits) continue;
+      if(has_leading_require(fn)) { // require at the beginning of the body - Candidate restriction (§5.2)
+        int n = requires_hold(fnode, args, where);
+        if(n < 0) continue;
+        score += n;
+      }
       if(score > best) {
         best = score;
         chosen = fnode;
@@ -455,6 +469,11 @@ struct process_machine {
     if(!chosen) throw diagnostic(cat("нет подходящей перегрузки ", helper.str(db.as<n_fn>(fns.front()).name)), where);
     if(tie) throw diagnostic("неоднозначный вызов", where);
     auto const & fn = db.as<n_fn>(chosen);
+    if(fn.outline && helper.inline_required(chosen))
+      throw diagnostic(cat(helper.str(fn.name), " помечена outline, но использует семантику инлайна"), db[chosen].where);
+    for(node_id at: fn.attrs) // [[inside(g)]] - call location check (§7.4): not yet
+      if(db.is<n_call>(at) && db.is<n_ident>(db.as<n_call>(at).callee) && helper.str(db.as<n_ident>(db.as<n_call>(at).callee).name) == "inside")
+        unsupported("атрибут inside", chosen);
     // function-operator from one primitive - VM operation
     if(helper.intrinsic_operator(chosen)) {
       std::string prim(helper.str(db.as<n_ident>(db.as<n_call>(fn.body).callee).name));
@@ -474,6 +493,32 @@ struct process_machine {
     }
     f.vals.resize(f.vals.size() - nargs);
     f.tasks.push_back(m_task{m_call_body, chosen, 0, sc, id, uint32_t(f.vals.size()), sc, id});
+  }
+
+  // Leads require the candidate on the values of the arguments: the number performed
+  // (specificity), -1 - not fulfilled. Conditions are calculated by the transferred
+  // values assistant - this is a calculation without a state of the process.
+  int requires_hold(node_id f, std::vector<mval> const & args, span where) {
+    auto const & fn = db.as<n_fn>(f);
+    scope * probe = helper.new_scope(helper.globals);
+    struct drop {
+      interpreter & h;
+      scope * s;
+      ~drop() { h.drop_scope(s); }
+    } hold{helper, probe};
+    for(uint32_t i = 0; i < fn.params.size(); ++i) {
+      if(args[i].is<m_thunk>()) unsupported("require с expr-параметром", f);
+      probe->declare(db.as<n_param>(fn.params[i]).name, to_value(args[i]));
+    }
+    int n = 0;
+    for(node_id s: db.as<n_block>(fn.body).items) {
+      if(!db.is<n_require>(s)) break;
+      ++n;
+      auto c = helper.eval(db.as<n_require>(s).cond, probe, 0);
+      if(!c.v.is<bool>()) throw diagnostic("require не bool", where);
+      if(!c.v.as<bool>()) return -1;
+    }
+    return n;
   }
 
   bool has_leading_require(n_fn const & fn) const {
@@ -928,6 +973,17 @@ struct process_machine {
     fib().tasks.push_back(m_task{m_lambda_body, t.extra, 0, sc, t.b, uint32_t(fib().vals.size()), m_none, 0, 0, l.body});
   }
 
+  // require in the body - check in runtime (§5.4): violated - program error.
+  void eval_node(node_id n, n_require const & r) {
+    m_task & t = top();
+    if(t.phase == 0) {
+      t.phase = 1;
+      return push_eval(r.cond, t.scope, t.frame);
+    }
+    if(!truthy(pop_val(), db[r.cond].where)) throw diagnostic("нарушено требование require", db[n].where);
+    finish(mval{m_unit{}});
+  }
+
   void eval_node(node_id n, n_var const & v) {
     m_task & t = top();
     if(v.ref) unsupported("ссылка &e = …", n);
@@ -940,11 +996,33 @@ struct process_machine {
     finish(mval{m_unit{}});
   }
 
+  // The name {a, b} is an aggregate by field positions (missing - default values
+  // calculated in the global domain); array {…} / [...] - array (different type -
+  // tuple, author's decision).
   void eval_node(node_id n, n_construct const & c) {
     m_task & t = top();
-    (void)c;
-    (void)t;
-    unsupported("конструирование агрегата", n);
+    symbol tname = db.as<n_ident>(c.type).name;
+    auto st_it = helper.structs.find(tname);
+    node_list all;
+    if(st_it != helper.structs.end()) all = helper.fields_of_struct(st_it->first);
+    if(t.phase < c.items.size()) return push_eval(c.items[t.phase++], t.scope, t.frame);
+    if(st_it != helper.structs.end()) {
+      if(c.items.size() > all.size()) throw diagnostic(cat(helper.str(tname), ": полей ", all.size(), ", значений ", c.items.size()), db[n].where);
+      uint32_t k = t.phase; // the next field without a value - the default value
+      if(k < all.size()) {
+        auto const & f = db.as<n_var>(all[k]);
+        if(!f.init) throw diagnostic(cat(helper.str(tname), ": не задано поле ", helper.str(f.name)), db[n].where);
+        ++t.phase;
+        return push_eval(f.init, st.globals, t.frame);
+      }
+      m_agg g{helper.types.named(helper.str(tname)), {}};
+      for(uint32_t i = 0; i < all.size(); ++i) g.fields.push_back({db.as<n_var>(all[i]).name, deref(fib().vals[t.base + i])});
+      return finish(mval{std::move(g)});
+    }
+    if(helper.str(tname) != "array") throw diagnostic(cat("конструктор ", helper.str(tname), "{} пока не поддержан"), db[n].where);
+    m_arr a;
+    for(uint32_t i = 0; i < c.items.size(); ++i) a.items.push_back(deref(fib().vals[t.base + i]));
+    finish(mval{std::move(a)});
   }
 
   void eval_node(node_id n, auto const &) { unsupported(kind_name(db[n]), n); }

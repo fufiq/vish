@@ -463,7 +463,7 @@ struct test_runner {
       }
       if(out2 != out) why += cat("    вывод из базы отличается: ", in_quotes(out2), " против ", in_quotes(out), "\n");
     }
-    if(e.machine) why += machine_check(db, root, path, e, out);
+    if(e.machine && p.errors().empty()) why += machine_check(db, root, path, e, out, errors);
     uint32_t i = 0;
     for(std::string_view line: lines_of(out)) {
       if(i >= e.out.size()) {
@@ -484,18 +484,28 @@ struct test_runner {
 
   // Process machine (M5): the same conclusion as the interpreter; with dump - dump after
   // N steps, recovery in a new database from journal dump ("in another VM") and counting:
-  // output to dump + after recovery = complete.
-  static std::string machine_check(ast_db & db, node_id root, std::filesystem::path const & path, expect const & e, std::string const & out) {
-    std::string why, mout;
+  // output to dump + after recovery = complete. Error text without space: "...: Error:
+  // <text>" of the first line.
+  static std::string error_text(std::string const & rendered) {
+    auto at = rendered.find("ошибка: ");
+    if(at == std::string::npos) return {};
+    auto end = rendered.find('\n', at);
+    return rendered.substr(at + 14, end == std::string::npos ? std::string::npos : end - at - 14);
+  }
+
+  static std::string machine_check(ast_db & db, node_id root, std::filesystem::path const & path, expect const & e, std::string const & out,
+      std::string const & errors) {
+    std::string why, mout, merr;
     try {
       process_machine m(db, root, path.filename().string());
       m.captured = &mout;
       m.start(e.args, e.stdin_lines);
       m.run();
     } catch(diagnostic const & d) {
-      mout += render(d, path.filename().string(), db);
+      merr = render(d, path.filename().string(), db);
     }
     if(mout != out) why += cat("    машина процессов: вывод ", in_quotes(mout), " против ", in_quotes(out), "\n");
+    if(error_text(merr) != error_text(errors)) why += cat("    машина процессов: ошибка ", in_quotes(error_text(merr)), " против ", in_quotes(error_text(errors)), "\n");
     for(auto const & at: e.machine_dump) { // each directive - its launch with a dump at this step
       uint64_t n = 0;
       std::from_chars(at.data(), at.data() + at.size(), n);
@@ -511,7 +521,6 @@ struct test_runner {
         r.m->captured = &dout;
         r.m->run();
       } catch(diagnostic const & d) {
-        dout += render(d, path.filename().string(), db);
       }
       if(dout != out) why += cat("    дамп на шаге ", n, ": вывод ", in_quotes(dout), " против ", in_quotes(out), "\n");
     }
