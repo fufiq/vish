@@ -119,8 +119,11 @@ value jt_shape(jt t) {
 // Compiled instance. entry - Cell: Calls from another code go through it, so recursion
 // and recompilation do not require editing callers.
 struct jit_fn {
-  x64::code_block code;
+  x64::code_block code; // Objective - host: Executable pages
   void * entry = nullptr;
+  // Aarch64 - qemu check: bytes and places of absolute addresses host
+  std::vector<uint8_t> image;
+  std::vector<std::pair<uint32_t, void const *>> relocs;
   std::vector<jt> params;
   jt result = jt::unit;
   bool ok = false;
@@ -136,8 +139,12 @@ struct jit_unsupported {
   std::string why;
 };
 
-struct jit_engine {
-  jit_engine(ast_db & db, node_id module) : db(db), mod(module) {}
+// The instance engine for purpose A is an assembler with a common set of operations:
+// code generation is one, the goal is the context that
+// redefines operations.
+template<typename A>
+struct jit_machine {
+  jit_machine(ast_db & db, node_id module) : db(db), mod(module) {}
 
   // A compiled instance or nullptr (then an interpreter).
   jit_fn * get(node_id fn, std::vector<jt> const & types) {
@@ -184,10 +191,22 @@ struct jit_engine {
   std::map<std::string, uint32_t> cache; // key instance → number in fns
 };
 
+// JIT host (x86-64): its code is executed by an interpreter.
+struct jit_engine : jit_machine<x64::assembler> {
+  using jit_machine::jit_machine;
+};
+
+// Finished code in instance: host are executable pages.
+void finish(jit_fn & out, x64::assembler & a) {
+  out.code = a.finalize();
+  out.entry = out.code.entry;
+}
+
 // --- code generation one instance ---
 
+template<typename A>
 struct jit_codegen {
-  jit_codegen(jit_engine & eng, node_id fn, jit_fn & out, interpreter & analysis)
+  jit_codegen(jit_machine<A> & eng, node_id fn, jit_fn & out, interpreter & analysis)
       : eng(eng), db(eng.db), fn(fn), out(out), an(analysis) {}
 
   void run() {
@@ -195,8 +214,7 @@ struct jit_codegen {
     auto const & f = db.as<n_fn>(fn);
     code.push(rbp);
     code.mov(rbp, rsp);
-    code.sub_rsp(0);
-    frame_patch = code.here() - 4;
+    frame_patch = code.frame_alloc();
     // registers of variables that the caller is obliged to save - in the frame slots
     for(auto r: gpr_pool) {
       int32_t off = alloc();
@@ -252,12 +270,11 @@ struct jit_codegen {
     code.ret();
     for(auto & st: stubs) emit_stub(st);
 
-    code.patch32(frame_patch, int32_t((uint32_t(slots) * 8 + 15) & ~15u));
+    code.set_frame(frame_patch, (uint32_t(slots) * 8 + 15) & ~15u);
     out.bytes = code.size();
     out.unchecked = bce;
     out.jumps = throw_jumps;
-    out.code = code.finalize();
-    out.entry = out.code.entry;
+    finish(out, code);
     out.ok = true;
   }
   struct slot {
@@ -488,9 +505,9 @@ struct jit_codegen {
       code.jmp(*st.to);
       return;
     }
-    code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault));
+    code.mov_addr(rax, &jit_fault);
     code.store_imm32(rax, 0, int32_t(st.kind));
-    code.mov(rax, reinterpret_cast<uint64_t>(&jit_fault_node));
+    code.mov_addr(rax, &jit_fault_node);
     code.store_imm32(rax, 0, int32_t(st.node.value));
     code.mov(rax, uint64_t(0));
     code.jmp(epilogue);
@@ -502,7 +519,7 @@ struct jit_codegen {
     spill_xmm();
     bool pad = depth % 2 != 0;
     if(pad) code.sub_rsp(8);
-    code.mov(rax, reinterpret_cast<uint64_t>(fn));
+    code.mov_addr(rax, fn);
     code.call(rax);
     if(pad) code.add_rsp(8);
     reload_xmm();
@@ -536,7 +553,7 @@ struct jit_codegen {
   interpreter::observation const * obs(node_id n) const { return an.observed(n, ctx); }
 
   jt type_of(node_id n) const {
-    auto const * o = obs(n);
+    interpreter::observation const * o = obs(n);
     return o && o->seen ? jt_of(o->v, &an) : jt::other;
   }
 
@@ -548,7 +565,7 @@ struct jit_codegen {
       auto op = db.strings.text(db.as<n_op>(n).op);
       if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") return false;
     }
-    auto const * o = obs(n);
+    interpreter::observation const * o = obs(n);
     if(!o || !o->seen || o->effect || o->diverted || !o->v.known()) return false;
     if(o->v.is<int64_t>()) {
       code.mov(rax, uint64_t(o->v.as<int64_t>()));
@@ -723,7 +740,7 @@ struct jit_codegen {
   // node constant from observations parsing (pure, known).
   interpreter::observation const * constant_obs(node_id n) const {
     if(db.is<n_var>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n) || db.is<n_op>(n) && is_assign(db.strings.text(db.as<n_op>(n).op))) return nullptr;
-    auto const * o = obs(n);
+    interpreter::observation const * o = obs(n);
     if(!o || !o->seen || o->effect || o->diverted || !o->v.known()) return nullptr;
     if(!o->v.is<int64_t>() && !o->v.is<double>() && !o->v.is<bool>()) return nullptr;
     return o;
@@ -1012,7 +1029,7 @@ struct jit_codegen {
       for(std::size_t k = 0; k < ps.size() && fits; ++k) {
         auto const & p = db.as<n_param>(ps[k]);
         if(!p.type || !db.is<n_ident>(p.type)) continue;
-        auto const * o = obs(c.args[k]);
+        interpreter::observation const * o = obs(c.args[k]);
         if(p.mode == param_mode::expr || !o || !o->seen) {
           fits = false;
           continue;
@@ -1070,12 +1087,12 @@ struct jit_codegen {
     spill_xmm();
     bool pad = depth % 2 != 0;
     if(pad) code.sub_rsp(8);
-    code.mov(rax, reinterpret_cast<uint64_t>(&callee->entry));
+    code.mov_addr(rax, &callee->entry);
     code.call_mem(rax, 0);
     if(pad) code.add_rsp(8);
     reload_xmm();
     // Error in the code called - come out, the mark is already
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.mov_addr(rcx, &jit_fault);
     code.cmp_mem_imm8(rcx, 0, 0);
     code.jcc(ne, epilogue);
     if(callee->result == jt::f64_) code.movq(xmm0, rax);
@@ -1118,7 +1135,7 @@ struct jit_codegen {
     code.mov(rdi, op);
     code.mov(rcx, (uint64_t(carried) << 32) | n.value);
     call_native(reinterpret_cast<void *>(&jit_stream_call));
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.mov_addr(rcx, &jit_fault);
     code.cmp_mem_imm8(rcx, 0, 0);
     code.jcc(ne, epilogue); // Error/Cancel in VM: Exit, mark is worth
     if(result == jt::f64_) code.movq(xmm0, rax);
@@ -1205,7 +1222,7 @@ struct jit_codegen {
     code.mov(rdi, uint64_t(4));
     code.mov(rcx, uint64_t(n.value));
     call_native(reinterpret_cast<void *>(&jit_stream_call));
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.mov_addr(rcx, &jit_fault);
     code.cmp_mem_imm8(rcx, 0, 0);
     code.jcc(ne, epilogue);
     return jt::unit;
@@ -1359,7 +1376,7 @@ struct jit_codegen {
       else code.store(rbp, s.off, rax);
       params.push_back({p.name, s});
     }
-    auto const * o = obs(n);
+    interpreter::observation const * o = obs(n);
     jt result = o && o->seen ? jt_of(o->v, &an) : jt::unit;
     if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип результата встроенной функции"};
     out.deps[target.value] = db.node_revision(target);
@@ -1560,13 +1577,13 @@ struct jit_codegen {
           return jt::unit;
         }
     to_result(ty); // Not caught here: second way out
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_thrown));
+    code.mov_addr(rcx, &jit_thrown);
     code.store(rcx, 0, rax);
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_thrown_type));
+    code.mov_addr(rcx, &jit_thrown_type);
     code.store_imm32(rcx, 0, int32_t(ty));
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault_node));
+    code.mov_addr(rcx, &jit_fault_node);
     code.store_imm32(rcx, 0, int32_t(n.value));
-    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.mov_addr(rcx, &jit_fault);
     code.store_imm32(rcx, 0, int32_t(jit_fault_kind::thrown));
     code.jmp(epilogue);
     return jt::unit;
@@ -1581,7 +1598,7 @@ struct jit_codegen {
     if(!hs0 || !hs0->thunk) throw jit_unsupported{n, "intercept: блоки не expr-параметр"};
     slot hs = resolve_thunk(*hs0);
     node_list handlers = db.is<n_pack>(hs.thunk) ? db.as<n_pack>(hs.thunk).items : node_list{hs.thunk};
-    auto const * o = obs(n);
+    interpreter::observation const * o = obs(n);
     jt result = o && o->seen ? jt_of(o->v, &an) : jt::unit;
     if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип try"};
     try_frame tf{{}, depth};
@@ -1653,12 +1670,12 @@ struct jit_codegen {
     throw jit_unsupported{n, cat("узел ", kind_name(db[n]))};
   }
 
-  jit_engine & eng;
+  jit_machine<A> & eng;
   ast_db & db;
   node_id fn;
   jit_fn & out;
   interpreter & an;
-  x64::assembler code;
+  A code;
   x64::label epilogue;
   std::deque<stub> stubs; // tag addresses stable
   std::vector<std::vector<std::pair<symbol, slot>>> scopes;
@@ -1746,7 +1763,8 @@ bool jit_creates_streams(ast_db const & db, node_id n) {
   return found;
 }
 
-void jit_engine::compile(node_id fn, jit_fn & out) {
+template<typename A>
+void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   out.deps[fn.value] = db.node_revision(fn);
   out.deps[mod.value] = db.node_revision(mod);
   if(auto bad = jit_prefilter(db, mod, db.as<n_fn>(fn).body)) {
@@ -1805,7 +1823,7 @@ void jit_engine::compile(node_id fn, jit_fn & out) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
     }
-    jit_codegen(*this, fn, out, an).run();
+    jit_codegen<A>(*this, fn, out, an).run();
   } catch(jit_unsupported const & u) {
     auto lc = locate(db.source(db[u.node].where.source), db[u.node].where.begin);
     out.reason = cat(u.why, " (строка ", lc.line, ")");

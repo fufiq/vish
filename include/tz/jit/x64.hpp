@@ -209,6 +209,16 @@ struct assembler {
 
   uint32_t here() const { return uint32_t(buf.size()); }
   void patch32(uint32_t at, int32_t v) { std::memcpy(buf.data() + at, &v, 4); }
+
+  // --- Object operations shared with other assemblers (code generator one) --------- address
+  // host as is (goal executed here)
+  void mov_addr(reg dst, void const * p) { mov(dst, reinterpret_cast<uint64_t>(p)); }
+  // The size is known at the end - the place under it
+  uint32_t frame_alloc() {
+    sub_rsp(0);
+    return here() - 4;
+  }
+  void set_frame(uint32_t at, uint32_t bytes) { patch32(at, int32_t(bytes)); }
   void i32le(int32_t v) {
     for(int k = 0; k < 4; ++k) byte(uint8_t(uint32_t(v) >> (8 * k)));
   }
