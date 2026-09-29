@@ -85,6 +85,74 @@ std::vector<completion_item> context_identifiers(ast_db const & db, node_id at) 
   return out;
 }
 
+// The terms of the value after `.` for its aggregate field types, the size of the array
+// and string, the functions called through the point are `a.f(b) ≡ f(a, b)` (§4.5): the
+// first parameter without the type (polymorphic) or with the same type name.
+//
+std::vector<completion_item> member_completions(ast_db const & db, node_id root, std::vector<std::string> const & types) {
+  std::vector<completion_item> out;
+  auto add = [&](std::string name, std::string kind, std::string detail, uint32_t depth) {
+    for(auto const & x: out)
+      if(x.name == name) return;
+    out.push_back({std::move(name), std::move(kind), std::move(detail), depth});
+  };
+  auto type_text = [&](node_id t) -> std::string {
+    return t && db.is<n_ident>(t) ? std::string(db.strings.text(db.as<n_ident>(t).name)) : std::string();
+  };
+  for(auto const & t: types) {
+    std::string base = t.substr(0, t.find('<'));
+    if(base == "array" || base == "str") add("size", "поле", cat("i64 — ", t), 0);
+    // entity is a struct ad and all of its `Имя { … }` extensions:
+// 
+    // Fields and functions of all
+    auto field = [&](node_id f) {
+      if(db.is<n_var>(f)) add(std::string(db.strings.text(db.as<n_var>(f).name)), "поле", cat(type_text(db.as<n_var>(f).type), " — ", t), 0);
+    };
+    for(node_id module: {root, db.prelude}) {
+      if(!module || !db.is<n_module>(module)) continue;
+      for(node_id n: db.as<n_module>(module).items) {
+        if(db.is<n_struct>(n) && db.strings.text(db.as<n_struct>(n).name) == base)
+          for(node_id f: db.as<n_struct>(n).fields) field(f);
+        if(db.is<n_extend>(n) && db.strings.text(db.as<n_extend>(n).name) == base)
+          for(node_id x: db.as<n_extend>(n).items) {
+            field(x);
+            if(db.is<n_fn>(x) && !db.as<n_fn>(x).params.empty()) {
+              std::string rest = "(";
+              auto const & ps = db.as<n_fn>(x).params;
+              for(uint32_t k = 1; k < ps.size(); ++k) rest += cat(k > 1 ? ", " : "", db.strings.text(db.as<n_param>(ps[k]).name));
+              add(std::string(db.strings.text(db.as<n_fn>(x).name)), "функция", rest + ")", 0);
+            }
+          }
+      }
+    }
+  }
+  return out;
+}
+
+// Functions called through a point for these types (from root and prelude modules).
+void add_dot_functions(ast_db const & db, node_id root, std::vector<std::string> const & types, std::vector<completion_item> & out) {
+  for(node_id module: {root, db.prelude}) {
+    if(!module || !db.is<n_module>(module)) continue;
+    for(node_id item: db.as<n_module>(module).items) {
+      if(!db.is<n_fn>(item)) continue;
+      auto const & f = db.as<n_fn>(item);
+      std::string name(db.strings.text(f.name));
+      if(f.params.empty() || name.starts_with("infix") || name.starts_with("prefix") || name.starts_with("postfix")) continue;
+      auto const & first = db.as<n_param>(f.params[0]);
+      // design (expr-parameter - block or clause: for, while, try) - syntax, not a call through a point
+      if(std::ranges::any_of(f.params, [&](node_id p) { return db.as<n_param>(p).mode == param_mode::expr || db.as<n_param>(p).clause; })) continue;
+      if(first.type && db.is<n_ident>(first.type)) {
+        std::string want(db.strings.text(db.as<n_ident>(first.type).name));
+        if(!std::ranges::any_of(types, [&](std::string const & t) { return t.substr(0, t.find('<')) == want; })) continue;
+      }
+      std::string rest = "(";
+      for(uint32_t k = 1; k < f.params.size(); ++k) rest += cat(k > 1 ? ", " : "", db.strings.text(db.as<n_param>(f.params[k]).name));
+      if(std::ranges::none_of(out, [&](completion_item const & x) { return x.name == name; }))
+        out.push_back({name, "функция", rest + ")", module == root ? 1u : 2u});
+    }
+  }
+}
+
 // Live filter: prefix, then substring, then subsequence (without taking into account the
 // register); with equality - near, then by name. That's all.
 std::vector<completion_item> filter_completions(std::vector<completion_item> items, std::string_view word, std::size_t limit = 50) {

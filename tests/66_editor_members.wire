@@ -1,0 +1,43 @@
+// Members after `.` (M5, §13.1): the value types on the left are for all instance:
+// 
+//  
+// entity fields from struct and all extensions
+//,
+//), размер массива, функции через точку `a.f(b) ≡ f(a, b)` (§4.5);
+// конструкции (for, while, try) — синтаксис, не члены.
+// program: editor_members.tz
+open_view module
+// expect: kind="type" text="point"
+// aggregate: struct fields and expansion function, then functions through a point
+pointer 1 @.sum 1 1
+key 1 \s 2
+// expect: items=⏎  name="sum" kind="функция" detail="()"
+// expect: name="x" kind="поле" detail="f64 — point"
+// expect: name="y" kind="поле" detail="f64 — point"
+// expect: name="total" kind="функция"
+// expect-not: name="for"
+// expect-not: name="while"
+key 1 Escape
+// Array: size, function through point; no field
+pointer 1 @.size 1 1
+key 1 \s 2
+// expect: items=⏎  name="size" kind="поле" detail="i64 — array<f64>"
+// expect-not: name="x"
+key 1 Escape
+// filter
+pointer 1 @.size 1 5
+key 1 Backspace
+key 1 Backspace
+key 1 Backspace
+// expect: курсор:   print(xs.s‸);
+// expect: items=⏎  name="size"
+// text - hole (`xs.`): type is taken by name on the left, list opens at the point
+key 1 Backspace
+// expect: курсор:   print(xs.‸);
+// expect: kind="n_hole"
+// expect: items=⏎  name="size"
+// Take - again member, no hole, no mistakes
+key 1 Enter
+// expect: курсор:   print(xs.size‸);
+// expect-not: n_hole
+// expect-not: kind="error"

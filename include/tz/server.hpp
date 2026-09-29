@@ -294,8 +294,19 @@ struct editor_server {
     bool number = !word.empty() && word[0] >= '0' && word[0] <= '9';
     uint32_t place = b < v.cursor ? b : (v.cursor > 0 ? v.cursor - 1 : v.cursor);
     node_id at = v.places.empty() ? node_id{} : v.places[place].node;
-    if(number || (!forced && word.empty()) || session.db.is<n_str>(at)) return close_completion(p, v);
-    auto items = filter_completions(context_identifiers(session.db, at), word);
+    if(number || session.db.is<n_str>(at)) return close_completion(p, v);
+    // after `.` - members of the value on the left (by its types in all instance);
+    // the list opens immediately at the point
+    bool dot = b > 0 && v.lead[b - 1] == '.';
+    if(!dot && !forced && word.empty()) return close_completion(p, v);
+    std::vector<completion_item> all;
+    if(dot) {
+      auto types = object_types(v, b - 1);
+      if(types.empty()) return close_completion(p, v);
+      all = member_completions(session.db, session.root, types);
+      add_dot_functions(session.db, session.root, types, all);
+    } else all = context_identifiers(session.db, at);
+    auto items = filter_completions(std::move(all), word);
     // The only option that matches the typed one is to show nothing.
     if(items.empty() || (items.size() == 1 && items[0].name == word)) return close_completion(p, v);
     v.items = std::move(items);
@@ -303,6 +314,24 @@ struct editor_server {
     v.word_begin = b;
     v.completing = true;
     send_completion(p, v);
+  }
+
+  // Types of value to the left of the point at the place `dot`: node `a.b` is its object;
+  // otherwise (text still hole: `xs.`) is the name before the point, its types in the region.
+  std::vector<std::string> object_types(editor_view const & v, uint32_t dot) {
+    auto const & db = session.db;
+    for(node_id n = v.places[dot].node; n; n = db[n].parent)
+      if(db.is<n_member>(n)) {
+        auto it = session.node_types.find(db.as<n_member>(n).object.value);
+        return it == session.node_types.end() ? std::vector<std::string>{} : it->second;
+      }
+    uint32_t k = dot;
+    while(k > 0 && ident_char(v.lead[k - 1])) --k;
+    std::string name;
+    for(uint32_t i = k; i < dot; ++i) name += v.lead[i];
+    auto it = db.strings.index.find(name);
+    if(name.empty() || it == db.strings.index.end()) return {};
+    return types_of_name(scope_of(v.places[dot].node), it->second);
   }
 
   void close_completion(peer & p, editor_view & v) {
