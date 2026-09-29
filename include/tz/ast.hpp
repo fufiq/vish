@@ -161,6 +161,11 @@ struct n_extend {
   symbol name;
   node_list items;
   node_list attrs;
+  // Extension of a specific function by reference to its node (number, not child):
+  // 
+// 
+  // Items is its overload; name is the current name of the target.
+  uint32_t target = 0;
 };
 // Code as value (§7.4): quote { объявления } and insert #x.
 //

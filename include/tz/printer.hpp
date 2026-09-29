@@ -148,7 +148,8 @@ struct printer {
         }
         return;
       }
-    out += str(f.name);
+    out += str(fn_name ? fn_name : f.name); // overload from & f(…) { … } under the target name
+    fn_name = symbol{};
     // head and clauses: try(expr body) catch(expr... handlers)
     for(uint32_t i = 0; i < f.params.size() || i == 0;) {
       symbol word = f.params.empty() ? symbol{} : db.as<n_param>(f.params[i]).clause;
@@ -290,6 +291,24 @@ struct printer {
   }
 
   void print_node(node_id, n_extend const & e) {
+    if(e.target) { // &f(types) {overload } - name and signature - current at the target
+      auto const & f = db.as<n_fn>(node_id(e.target));
+      out += cat("&", str(f.name), "(");
+      for(std::size_t i = 0; i < f.params.size(); ++i) {
+        node_id t = db.as<n_param>(f.params[i]).type;
+        out += i ? ", " : "";
+        if(!t || db.is<n_auto>(t)) out += "auto";
+        else item(t);
+      }
+      out += ") {";
+      for(node_id i: e.items) {
+        out += ' ';
+        fn_name = f.name; // Takes the head of this overload
+        item(i);
+      }
+      out += " }";
+      return;
+    }
     out += cat(str(e.name), " {");
     if(!e.attrs.empty()) {
       out += ' ';
@@ -576,6 +595,7 @@ struct printer {
   void print_node(node_id, n_hole const & h) { out += layouts ? h.text : cat("/* дыра: ", h.reason, " */ ", h.text); }
 
   ast_db const & db;
+  symbol fn_name; // name for the head of the following function (overload)
   filter keep;
   substitution subst;
   std::string out;

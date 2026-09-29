@@ -1,0 +1,13 @@
+// Extension to the link in the editor (M5): the link is to the node of the function, not to the name:
+//.
+// Переименовали цель — расширение следует за ней, его проекция обновляется.
+// program: editor_extend.tz
+open_view module
+pointer 1 @measure( 0 0
+key 1 b
+key 1 i
+key 1 g
+key 1 _
+// expect: курсор: big_‸measure(x) => 1;
+// expect: &big_measure(auto) {
+// expect: big_measure(point p) => p.x * p.y;

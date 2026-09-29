@@ -452,6 +452,10 @@ struct editor_server {
       parser pr(session.db, edited, cat("<ввод #", edits, ">"));
       node_id fresh = u.kind == 2 ? pr.parse_module() : pr.parse_unit(u.kind == 0);
       if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
+      if(u.kind != 2) { // f(…) is a reference to the module function
+        node_list items = session.db.as<n_module>(session.root).items;
+        pr.resolve_refs(items);
+      }
       node_id target = u.node;
       auto range = [&](editor_view const & w) { return w.range[w.layout_of(target)]; };
       auto mutate = [&] {
@@ -543,6 +547,11 @@ struct editor_server {
     bool value = false;
     auto fresh = pr.parse_line(module_level, value);
     if(!fresh) return false;
+    if(module_level) { // & f(…) - a reference to the module function (and the one just typed)
+      node_list items = db.as<n_module>(session.root).items;
+      items.insert(items.end(), fresh->begin(), fresh->end());
+      pr.resolve_refs(items);
+    }
     // the line has broken up into elements not separated by `;` or `}` (`f() => n n`
     // after erasing `*`) - it is not yet written: the hole is whole, one line
     for(std::size_t i = 0; i + 1 < fresh->size(); ++i) {
@@ -663,11 +672,28 @@ struct editor_server {
       else if(c >= b.r.first) c = r.first + align(was, ch.map(c - b.r.first), now);
       v.cursor = std::min<uint32_t>(c, uint32_t(v.places.size() - 1));
       send(*b.p, proto::s_update{v.id, session.db.revision, target, subtree(v, target)});
+      // f(…) { … } prints the name and signature of the target: editing the target changes its projection
+      for(node_id e: fn_extensions())
+        if(v.layout_of(e) != ~uint32_t{0} && within(node_id(session.db.as<n_extend>(e).target), target) && !within(e, target))
+          send(*b.p, proto::s_update{v.id, session.db.revision, e, subtree(v, e)});
       if(&v != &av) close_completion(*b.p, v); // crossword
       send_cursor(*b.p, v);
     }
     recheck();
     for(auto & b: views) send_marks(*b.p, *b.v);
+  }
+
+  // Extensions of functions by reference in the module.
+  std::vector<node_id> fn_extensions() const {
+    std::vector<node_id> out;
+    for(node_id x: session.db.as<n_module>(session.root).items)
+      if(session.db.is<n_extend>(x) && session.db.as<n_extend>(x).target) out.push_back(x);
+    return out;
+  }
+  bool within(node_id x, node_id top) const {
+    for(; x; x = session.db[x].parent)
+      if(x == top) return true;
+    return false;
   }
 
   // The cursor on a line of one space (empty line with indentation) - at the end of

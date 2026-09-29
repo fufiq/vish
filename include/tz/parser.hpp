@@ -105,6 +105,9 @@ struct parser {
       m.blank.push_back(m.items.empty() ? 0 : blank_lines(2)); // Canonically between the elements is an empty line.
       m.items.push_back(recover_statement([&] { return item(); }));
     }
+    node_list scope = m.items;
+    scope.insert(scope.end(), outer_items.begin(), outer_items.end());
+    resolve_refs(scope);
     trim_blank(m.blank);
     auto id = db.add(std::move(m), {start, here().where.end});
     db.link_parents(id);
@@ -308,6 +311,7 @@ struct parser {
     if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
     // Name { … } - extension of entity
     if(ahead(0).kind == tok::ident && !is_keyword(ahead(0).text) && is_open('{', 1)) return extension(start);
+    if(is_op("&") && ahead(1).kind == tok::ident && is_open('(', 2)) return fn_extension(start);
     node_id s = statement();
     // There are no global process variables outside the functions - only ct (author's decision 2026-09-30)
     bool var = db.is<n_var>(s) && !db.as<n_var>(s).ct;
@@ -334,6 +338,80 @@ struct parser {
       expect_close(']');
     }
     return out;
+  }
+
+  // f(auto, point) {f(auto out, point p) { … } } - overload of a specific function: a
+  // reference to its node by signature (parameter types, auto - without type); is allowed
+  // when the entire module (resolve_refs) is known.
+  struct fn_ref {
+    node_id ext;
+    symbol name;
+    std::vector<symbol> sig; // empty
+  };
+  std::vector<fn_ref> refs;
+  node_list outer_items; // Where else do the links of the piece look (an element transferred to another module)
+
+  node_id fn_extension(uint32_t start) {
+    eat_op("&");
+    n_extend e;
+    e.name = ident();
+    std::vector<symbol> sig;
+    expect_open('(');
+    while(!is_close(')') && !at_end()) {
+      if(is_word("auto")) {
+        advance();
+        sig.push_back(symbol{});
+      } else sig.push_back(ident());
+      if(is_op(",")) eat_op(",");
+      else break;
+    }
+    expect_close(')');
+    expect_open('{');
+    while(!is_close('}') && !at_end()) {
+      node_list attrs = attributes();
+      auto f = try_fn_decl(false, attrs);
+      if(!f) throw diagnostic("в расширении функции — только её перегрузки", here().where);
+      e.items.push_back(*f);
+    }
+    expect_close('}');
+    symbol name = e.name;
+    node_id id = db.add(std::move(e), {start, toks[pos - 1].where.end});
+    refs.push_back({id, name, std::move(sig)});
+    return id;
+  }
+
+  // References & f(…) to node module functions (and prelude). Not found or
+  // ambiguous - the element becomes a hole with a cause.
+  void resolve_refs(node_list const & items) {
+    for(auto const & r: std::exchange(refs, {})) {
+      std::vector<node_id> found;
+      auto fits = [&](node_id f) {
+        if(!db.is<n_fn>(f) || db.as<n_fn>(f).name != r.name || db.as<n_fn>(f).params.size() != r.sig.size()) return false;
+        for(std::size_t i = 0; i < r.sig.size(); ++i) {
+          node_id t = db.as<n_param>(db.as<n_fn>(f).params[i]).type;
+          bool untyped = !t || db.is<n_auto>(t);
+          if(r.sig[i] ? untyped || !db.is<n_ident>(t) || db.as<n_ident>(t).name != r.sig[i] : !untyped) return false;
+        }
+        return true;
+      };
+      for(node_id f: items)
+        if(fits(f)) found.push_back(f);
+      if(db.prelude)
+        for(node_id f: db.as<n_module>(db.prelude).items)
+          if(fits(f)) found.push_back(f);
+      if(found.size() == 1) {
+        n_extend e = db.as<n_extend>(r.ext);
+        e.target = found[0].value;
+        db.replace(r.ext, std::move(e));
+        continue;
+      }
+      std::string sig;
+      for(symbol s: r.sig) sig += cat(sig.empty() ? "" : ", ", s ? db.strings.text(s) : "auto");
+      diagnostic d(cat(found.empty() ? "нет функции " : "неоднозначно: несколько функций ", db.strings.text(r.name), "(", sig, ")"), db[r.ext].where);
+      diags.push_back(d);
+      span w = db[r.ext].where;
+      db.replace(r.ext, n_hole{std::string(src.substr(w.begin, w.end - w.begin)), d.what()});
+    }
   }
 
   node_id extension(uint32_t start) {

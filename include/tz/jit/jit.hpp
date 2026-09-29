@@ -1001,31 +1001,33 @@ struct jit_codegen {
     node_id target;
     int best = -1;
     bool tie = false;
-    for(node_id m: {db.prelude, eng.mod})
-      for(node_id item: m ? db.as<n_module>(m).items : node_list{}) {
-        if(!db.is<n_fn>(item) || db.strings.text(db.as<n_fn>(item).name) != name || db.as<n_fn>(item).params.size() != c.args.size()) continue;
-        int score = 0;
-        bool fits = true;
-        auto const & ps = db.as<n_fn>(item).params;
-        for(std::size_t k = 0; k < ps.size() && fits; ++k) {
-          auto const & p = db.as<n_param>(ps[k]);
-          if(!p.type || !db.is<n_ident>(p.type)) continue;
-          auto const * o = obs(c.args[k]);
-          if(p.mode == param_mode::expr || !o || !o->seen) {
-            fits = false;
-            continue;
-          }
-          auto want = db.strings.text(db.as<n_ident>(p.type).name);
-          if(an.types.describe(o->v) != want && an.types.name(an.types.of(o->v)) != want) fits = false;
-          else ++score;
+    // overload - Table parsing : and from extensions (by name and link)
+    node_list candidates;
+    if(auto it = an.functions.find(db.as<n_ident>(c.callee).name); it != an.functions.end()) candidates.assign(it->second.begin(), it->second.end());
+    for(node_id item: candidates) {
+      if(!db.is<n_fn>(item) || db.as<n_fn>(item).params.size() != c.args.size()) continue;
+      int score = 0;
+      bool fits = true;
+      auto const & ps = db.as<n_fn>(item).params;
+      for(std::size_t k = 0; k < ps.size() && fits; ++k) {
+        auto const & p = db.as<n_param>(ps[k]);
+        if(!p.type || !db.is<n_ident>(p.type)) continue;
+        auto const * o = obs(c.args[k]);
+        if(p.mode == param_mode::expr || !o || !o->seen) {
+          fits = false;
+          continue;
         }
-        if(!fits) continue;
-        if(score > best) {
-          best = score;
-          target = item;
-          tie = false;
-        } else if(score == best) tie = true;
+        auto want = db.strings.text(db.as<n_ident>(p.type).name);
+        if(an.types.describe(o->v) != want && an.types.name(an.types.of(o->v)) != want) fits = false;
+        else ++score;
       }
+      if(!fits) continue;
+      if(score > best) {
+        best = score;
+        target = item;
+        tie = false;
+      } else if(score == best) tie = true;
+    }
     if(tie) throw jit_unsupported{n, cat("перегрузка ", name, " (неоднозначно для машинного кода)")};
     if(!target) throw jit_unsupported{n, cat("вызов ", name)};
     // Default semantic inlining (D10): the body is embedded in the context of the

@@ -43,6 +43,7 @@ std::string item_key(ast_db const & db, node_id n) {
     return k + ")";
   }
   if(db.is<n_struct>(n)) return "struct " + str(db.as<n_struct>(n).name);
+  if(db.is<n_extend>(n) && db.as<n_extend>(n).target) return "&" + item_key(db, node_id(db.as<n_extend>(n).target)) + " { … }";
   if(db.is<n_extend>(n)) return str(db.as<n_extend>(n).name) + " { … }";
   if(db.is<n_var>(n)) return str(db.as<n_var>(n).name);
   return printer(db).print(n); // more
@@ -112,6 +113,7 @@ void take_theirs(ast_db & db, node_id root, std::vector<uint32_t> const & base_i
     return;
   }
   parser pr(db, *text, cat("<слияние ", key, ">"));
+  pr.outer_items = m.items; // f(…) - on the function of this module
   node_id snippet = pr.parse_module();
   auto const & items = db.as<n_module>(snippet).items;
   if(items.empty()) return;

@@ -216,6 +216,11 @@ struct interpreter {
     else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
     else if(db.is<n_extend>(item)) { // fields and attributes to entity, functions to overload
       auto const & e = db.as<n_extend>(item);
+      if(e.target) { // overload of a specific function: under its current name
+        symbol name = db.as<n_fn>(node_id(e.target)).name;
+        for(node_id i: e.items) functions[name].push_back(i);
+        return;
+      }
       for(node_id a: e.attrs) ext_attrs[e.name].push_back(a);
       for(node_id i: e.items) {
         if(db.is<n_fn>(i)) functions[db.as<n_fn>(i).name].push_back(i);

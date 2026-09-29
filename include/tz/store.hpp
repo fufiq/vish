@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0005"; // 0005: internal module elements; 0004: empty lines
+constexpr std::string_view tzdb_magic = "TZDB0006"; // 0006: extension of the function by reference (target); 0005: internal elements of the module (inner); 0004: empty lines
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;
