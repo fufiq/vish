@@ -2,14 +2,14 @@
 // args[1]: 1 — пинг-понг через два потока
 // ёмкости 1 (каждый обмен — два переключения), 2 — производитель → потребитель
 // через поток ёмкости 16 (генератор: VM может свернуть в цикл, O11),
-// 3 — то же без файберов (эталон для свёртки).
-ping(n) {
-  a = stream(1);
-  b = stream(1);
-  spawn {
-    for(x : a) write(b, x + 1);
-    close(b);
-  }
+// 3 — то же без файберов (эталон для свёртки). Циклы — в своих функциях:
+// их берёт JIT, spawn с замыканием остаётся интерпретатору.
+echo(a, b) {
+  for(x : a) write(b, x + 1);
+  close(b);
+}
+
+drive(a, b, n) {
   s = 0;
   for(i : range(n)) {
     write(a, i);
@@ -19,15 +19,28 @@ ping(n) {
   s
 }
 
-produce(n) {
-  s = stream(16);
-  spawn {
-    for(i : range(n)) write(s, i * 2);
-    close(s);
-  }
+ping(n) {
+  a = stream(1);
+  b = stream(1);
+  spawn { echo(a, b); }
+  drive(a, b, n)
+}
+
+fill(s, n) {
+  for(i : range(n)) write(s, i * 2);
+  close(s);
+}
+
+total(s) {
   t = 0;
   for(x : s) t += x;
   t
+}
+
+produce(n) {
+  s = stream(16);
+  spawn { fill(s, n); }
+  total(s)
 }
 
 direct(n) {

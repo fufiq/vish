@@ -265,7 +265,9 @@ struct interpreter {
     auto it = functions.find(sym("main"));
     if(it == functions.end()) throw diagnostic("нет функции main", {});
     elaborate();
-    if(!checking() && !ct_names.empty()) canonical_ct(); // ct-state - in canonical order, not on the branches of execution
+    // ct-state - in canonical order, not along the execution branches; for JIT - also the types of
+    // thread elements at the place of creation (types - from parsing, not from statistics)
+    if(!checking() && (!ct_names.empty() || (jit && calls(mod, sym("stream"))))) canonical_ct();
     it = functions.find(sym("main"));
     call_site site{db[it->second.front()].where, "main"};
     flow r;
@@ -425,11 +427,54 @@ struct interpreter {
 
   // Canonical order ct (§7.3 p. 4): the result does not depend on which branches are
   // executed - the ct-code of the program executes parsing of the entire program, and
-  // the execution takes its results at the call places and the final ct-variables.
+  // the execution takes its results at the call places and the final ct-variables. Is
+  // there a name(…) call in the subtree?
+  bool calls(node_id n, symbol name) const {
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee) && db.as<n_ident>(db.as<n_call>(n).callee).name == name) return true;
+    bool found = false;
+    db.for_each_child(n, [&](node_id c) { found = found || calls(c, name); });
+    return found;
+  }
+
   void canonical_ct() {
-    interpreter & a = level_runs.emplace_back(db, mod, std::vector<std::string>{"ct"}, mode::check, std::nullopt, nullptr, this);
-    a.fuel = 2000000;
-    a.run_main();
+    // parsing is in the order of the text: the spawn body reads the stream before the
+    // sequel - read "" run-time. The next pass starts with the types of streams of the
+    // previous one while they are refined (usually two passes).
+    interpreter * last = nullptr;
+    for(int pass = 0; pass < 4; ++pass) {
+      interpreter & a = level_runs.emplace_back(db, mod, std::vector<std::string>{"ct"}, mode::check, std::nullopt, nullptr, this);
+      a.fuel = 2000000;
+      a.stream_shapes = stream_shapes;
+      std::size_t first = root->streams.size();
+      try {
+        a.run_main();
+      } catch(diagnostic const &) {
+        if(!ct_names.empty()) throw; // ct is part of the program; thread types are just a JIT hint
+        stream_shapes.clear();
+        return;
+      }
+      last = &a;
+      // parsing threads (root common): type of elements at the place of creation; different - not type
+      std::map<std::pair<uint64_t, uint64_t>, value> found;
+      std::set<std::pair<uint64_t, uint64_t>> mixed;
+      for(std::size_t k = first; k < root->streams.size(); ++k) {
+        auto const & s = root->streams[k];
+        if(!s.typed || unknown(s.shape) || s.net || s.file_fd >= 0) continue;
+        std::pair key{s.born_ctx, s.born_at};
+        auto [it, fresh] = found.try_emplace(key, s.shape);
+        if(!fresh && types.describe(it->second) != types.describe(s.shape)) mixed.insert(key);
+      }
+      for(auto const & key: mixed) found.erase(key);
+      auto shown = [&](auto const & m) {
+        std::string out;
+        for(auto const & [k, v]: m) out += cat(k.first, ":", k.second, "=", types.describe(v), ";");
+        return out;
+      };
+      bool same = shown(found) == shown(stream_shapes);
+      stream_shapes = std::move(found);
+      if(same || !jit) break;
+    }
+    interpreter & a = *last;
     for(auto const & [k, v]: a.ct_memo) ct_memo.try_emplace(k, v);
     for(symbol n: a.ct_names)
       if(value * mine = globals->find(n); mine && ct_cells.contains(mine))
@@ -636,8 +681,9 @@ struct interpreter {
     std::size_t cap = 16;
     bool closed = false;
     std::deque<fiber_rec *> readers, writers;
-    value shape; // parsing: type of elements
+    value shape; // Element type: parsing - from records; execution - from parsing of the entire program (JIT)
     bool typed = false;
+    uint64_t born_ctx = 0, born_at = 0; // Place of creation: context of embedding and place in the text
     // host (M3b): network - event stream, connections - peers; file - stream of pieces
     struct peer {
       int fd = -1;
@@ -2821,6 +2867,13 @@ struct interpreter {
       auto & ss = root->streams;
       ss.emplace_back();
       if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) ss.back().cap = std::size_t(a[0].as<int64_t>());
+      ss.back().born_ctx = ctx;
+      ss.back().born_at = (uint64_t(where.source) << 32) | where.begin;
+      // Element type - from parsing of the entire program: machine code reads a stream of its type
+      if(auto it = stream_shapes.find({ctx, ss.back().born_at}); it != stream_shapes.end()) {
+        ss.back().shape = it->second;
+        ss.back().typed = true;
+      }
       return stream_value(ss.size() - 1);
     }
     std::size_t sid = stream_id(a[0], where);
@@ -2829,7 +2882,7 @@ struct interpreter {
       rt_effect();
       if(n == "stream_write") {
         value e = erase(a[1]);
-        if(s.typed && types.describe(s.shape) != types.describe(e)) fail(cat("поток значений ", types.describe(s.shape), ": запись ", types.describe(e)), where);
+        if(s.typed && !unknown(s.shape) && types.describe(s.shape) != types.describe(e)) fail(cat("поток значений ", types.describe(s.shape), ": запись ", types.describe(e)), where);
         s.shape = e;
         s.typed = true;
         return value();
@@ -4070,6 +4123,7 @@ struct interpreter {
   std::vector<std::string> level_details;
   std::set<uint32_t> implicit_decls; // x = e, declaring x
   std::map<std::pair<uint32_t, uint64_t>, value> ct_memo; // (ct node, instance ) → value
+  std::map<std::pair<uint64_t, uint64_t>, value> stream_shapes; // Place of creation of flow → type of elements (parsing program)
   std::map<uint32_t, std::vector<uint32_t>> resolved_calls; // call node → selected overload (by instance)
   std::vector<std::tuple<span, std::string, std::string>> ct_order; // policeman
   std::set<value const *> ct_cells; // ct-variable module

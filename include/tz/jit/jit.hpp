@@ -26,7 +26,7 @@ namespace tz {
 // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 // clang-format off
-enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4, thrown = 5 };
+enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4, thrown = 5, vm_error = 6 };
 // clang-format on
 uint64_t jit_fault = 0;
 uint64_t jit_fault_node = 0;
@@ -34,6 +34,9 @@ uint64_t jit_fault_node = 0;
 // value and its type.
 uint64_t jit_thrown = 0;
 uint64_t jit_thrown_type = 0; // jt
+// Error or cancellation of fiber within the VM operation: The C++ exception does not go
+// through the machine code - it waits here, the code comes out with the vm_error label.
+std::exception_ptr jit_pending;
 
 // Pointer to a dense array buffer of the desired layout; nullptr - layout is not the
 // same (deoptimization: the interpreter will perform).
@@ -46,8 +49,12 @@ void * jit_array_data(array_v * a, uint64_t want) {
 }
 uint64_t jit_array_size(array_v * a) { return a->size(); }
 
+// An interpreter executing machine code (VM operations from code through it).
+interpreter * jit_vm = nullptr;
+uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node);
+
 // clang-format off
-enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, other }; // range - range(n) : in the slot only n
+enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, other }; // range - range(n) : in the slot only n; stream is its number
 // clang-format on
 
 std::string_view jt_name(jt t) {
@@ -59,13 +66,28 @@ std::string_view jt_name(jt t) {
     case jt::arr_i64: return "array<i64>";
     case jt::arr_f64: return "array<f64>";
     case jt::range_: return "range";
+    case jt::stream_i64: return "stream<i64>";
+    case jt::stream_f64: return "stream<f64>";
+    case jt::stream_bool: return "stream<bool>";
     default: return "?";
   }
 }
 
-jt jt_of(value const & v) {
+bool is_stream(jt t) { return t == jt::stream_i64 || t == jt::stream_f64 || t == jt::stream_bool; }
+jt elem_of(jt t) { return t == jt::stream_i64 ? jt::i64_ : t == jt::stream_f64 ? jt::f64_ : jt::bool_; }
+
+jt jt_of(value const & v, interpreter const * in = nullptr) {
   value const * x = shape_of(v);
   if(!x || v.is<split_v>()) return jt::other;
+  // stream: number in the slot, element type - from parsing (the execution stream - parsing of the entire program)
+  if(in && x->is<agg_v>() && in->types.name(x->as<agg_v>().type) == "stream" && x->as<agg_v>().fields.size() == 1) {
+    value const & id = x->as<agg_v>().fields[0].second;
+    if(!id.is<int64_t>() || id.as<int64_t>() < 0 || uint64_t(id.as<int64_t>()) >= in->root->streams.size()) return jt::other;
+    auto const & s = in->root->streams[std::size_t(id.as<int64_t>())];
+    if(!s.typed) return jt::other;
+    jt e = jt_of(s.shape);
+    return e == jt::i64_ ? jt::stream_i64 : e == jt::f64_ ? jt::stream_f64 : e == jt::bool_ ? jt::stream_bool : jt::other;
+  }
   if(x->is<unit_v>()) return jt::unit;
   if(x->is<int64_t>()) return jt::i64_;
   if(x->is<double>()) return jt::f64_;
@@ -336,7 +358,7 @@ struct jit_codegen {
     }
     if(!weight && name) weight = weights[name.value];
     if(weight >= 2) {
-      if(t == jt::i64_ || t == jt::bool_ || t == jt::range_) s.reg = take_gpr(false);
+      if(t == jt::i64_ || t == jt::bool_ || t == jt::range_ || is_stream(t)) s.reg = take_gpr(false);
       else if(t == jt::f64_) {
         s.xreg = take_xmm();
         if(s.xreg >= 0) live_xmm.push_back({s.xreg, s.off});
@@ -510,7 +532,7 @@ struct jit_codegen {
 
   jt type_of(node_id n) const {
     auto const * o = obs(n);
-    return o && o->seen ? jt_of(o->v) : jt::other;
+    return o && o->seen ? jt_of(o->v, &an) : jt::other;
   }
 
   // A constant if the value of node at parsing is known and pure ("top").
@@ -964,6 +986,7 @@ struct jit_codegen {
       return jt::bool_;
     }
     if(name == "intercept") return gen_intercept(n, c);
+    if(name.starts_with("stream_") || (name == "yield" && c.args.empty())) return gen_stream(n, c, name);
     // Language function (prelude or module): single candidate by name and arnost, without requiring
     // candidates by name and arnost; typed parameters are cut off by argument types from parsing, with
     // equality more precisely - with a large number of types
@@ -1046,6 +1069,47 @@ struct jit_codegen {
     return callee->result;
   }
 
+  // Flow operation / yield - call VM. fiber can be locked inside: switching "bottom", on
+  // the fiber stack - the code around remains optimized.
+  //
+  jt gen_stream(node_id n, n_call const & c, std::string_view name) {
+    using namespace x64;
+    if(!tries.empty()) throw jit_unsupported{n, "операция потока внутри try"};
+    uint64_t op = name == "stream_new" ? 0 : name == "stream_write" ? 1 : name == "stream_read" ? 2 : name == "stream_more" ? 3 : name == "stream_close" ? 4 : name == "yield" ? 5 : 9;
+    if(op == 9) throw jit_unsupported{n, cat("вызов ", name)};
+    jt result = jt::unit, carried = jt::unit;
+    if(op == 0) {
+      result = type_of(n);
+      if(!is_stream(result)) throw jit_unsupported{n, "поток без типа элементов"};
+      if(c.args.size() != 1 || gen_value(c.args[0]) != jt::i64_) throw jit_unsupported{n, "stream_new(ёмкость i64)"};
+      code.mov(rdx, rax);
+      code.mov(rsi, uint64_t(0));
+    } else if(op != 5) {
+      if(c.args.size() != (op == 1 ? 2u : 1u)) throw jit_unsupported{n, cat(name, ": аргументы")};
+      jt st = gen_value(c.args[0]);
+      if(!is_stream(st)) throw jit_unsupported{c.args[0], "не поток известного типа"};
+      if(op == 1) {
+        push_result(st);
+        carried = gen_value(c.args[1]);
+        if(carried != elem_of(st)) throw jit_unsupported{c.args[1], "тип записи ≠ типу потока"};
+        to_result(carried);
+        code.mov(rdx, rax);
+        code.pop(rsi);
+        --depth;
+      } else code.mov(rsi, rax);
+      if(op == 2) result = carried = elem_of(st);
+      if(op == 3) result = jt::bool_;
+    }
+    code.mov(rdi, op);
+    code.mov(rcx, (uint64_t(carried) << 32) | n.value);
+    call_native(reinterpret_cast<void *>(&jit_stream_call));
+    code.mov(rcx, reinterpret_cast<uint64_t>(&jit_fault));
+    code.cmp_mem_imm8(rcx, 0, 0);
+    code.jcc(ne, epilogue); // Error/Cancel in VM: Exit, mark is worth
+    if(result == jt::f64_) code.movq(xmm0, rax);
+    return result;
+  }
+
   jt inline_call(node_id n, n_call const & c, node_id target) {
     using namespace x64;
     auto const & g = db.as<n_fn>(target);
@@ -1072,7 +1136,7 @@ struct jit_codegen {
           continue;
         }
       }
-      if(p.mode == param_mode::out || p.mode == param_mode::mut || an.param_written(target, i)) throw jit_unsupported{arg, "изменяемый параметр не на переменную (ссылка на элемент — интерпретатор)"};
+      if(p.mode == param_mode::out || p.mode == param_mode::mut || (p.mode != param_mode::own && an.param_written(target, i))) throw jit_unsupported{arg, "изменяемый параметр не на переменную (ссылка на элемент — интерпретатор)"};
       jt t = gen_value(arg);
       if(t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{arg, cat("аргумент типа ", jt_name(t))};
       slot s;
@@ -1083,7 +1147,7 @@ struct jit_codegen {
       params.push_back({p.name, s});
     }
     auto const * o = obs(n);
-    jt result = o && o->seen ? jt_of(o->v) : jt::unit;
+    jt result = o && o->seen ? jt_of(o->v, &an) : jt::unit;
     if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип результата встроенной функции"};
     out.deps[target.value] = db.node_revision(target);
 
@@ -1294,7 +1358,7 @@ struct jit_codegen {
     slot hs = resolve_thunk(*hs0);
     node_list handlers = db.is<n_pack>(hs.thunk) ? db.as<n_pack>(hs.thunk).items : node_list{hs.thunk};
     auto const * o = obs(n);
-    jt result = o && o->seen ? jt_of(o->v) : jt::unit;
+    jt result = o && o->seen ? jt_of(o->v, &an) : jt::unit;
     if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип try"};
     try_frame tf{{}, depth};
     for(node_id h: handlers) {
@@ -1407,7 +1471,8 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
-    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept"; // pure: convolution or code generator
+    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept" // pure: convolution or code generator
+        || name.starts_with("stream_") || name == "yield"; // Flow operations - VM call
     for(node_id m: {db.prelude, module})
       for(node_id item: m ? db.as<n_module>(m).items : node_list{})
         known = known || (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name);
@@ -1439,6 +1504,14 @@ void jit_engine::compile(node_id fn, jit_fn & out) {
       out.reason = "тип параметра";
       return;
     }
+    if(is_stream(t)) { // flow-parameter: parsing flow with element type
+      auto & ss = an.root->streams;
+      ss.emplace_back();
+      ss.back().typed = true;
+      ss.back().shape = jt_shape(elem_of(t));
+      shapes.push_back(an.stream_value(ss.size() - 1));
+      continue;
+    }
     shapes.push_back(jt_shape(t));
   }
   try {
@@ -1461,6 +1534,44 @@ void jit_engine::compile(node_id fn, jit_fn & out) {
   }
 }
 
+// Machine code flow operation: op 0 - new(cap = bits), 1 - write(id, bits), 2 - read, 3 -
+// more, 4 - close, 5 - yield; t_node - value type (jt) and node. The lock parks fiber right
+// here on its stack; the error and cancellation of fiber is in jit_pending.
+//
+uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node) {
+  interpreter & vm = *jit_vm; // before switching: after it jit_vm can be alien
+  jt t = jt(t_node >> 32);
+  node_id at{uint32_t(t_node)};
+  try {
+    span where = vm.db[at].where;
+    if(op == 5) {
+      vm.yield();
+      return 0;
+    }
+    static constexpr std::string_view names[] = {"stream_new", "stream_write", "stream_read", "stream_more", "stream_close"};
+    std::vector<value> a;
+    if(op == 0) a.push_back(value(int64_t(bits)));
+    else a.push_back(vm.stream_value(id));
+    if(op == 1) a.push_back(t == jt::f64_ ? value(std::bit_cast<double>(bits)) : t == jt::bool_ ? value(bits != 0) : value(int64_t(bits)));
+    value r = vm.stream_op(names[op], a, where);
+    if(op == 0) return vm.stream_id(r, where);
+    if(op == 3) return r.is<bool>() && r.as<bool>();
+    if(op == 2) {
+      if(t == jt::i64_ && r.is<int64_t>()) return uint64_t(r.as<int64_t>());
+      if(t == jt::f64_ && r.is<double>()) return std::bit_cast<uint64_t>(r.as<double>());
+      if(t == jt::bool_ && r.is<bool>()) return r.as<bool>();
+      jit_fault = uint64_t(jit_fault_kind::layout); // type guaranteed by parsing
+      jit_fault_node = at.value;
+    }
+    return 0;
+  } catch(...) {
+    jit_pending = std::current_exception();
+    jit_fault = uint64_t(jit_fault_kind::vm_error);
+    jit_fault_node = at.value;
+    return 0;
+  }
+}
+
 // Call instance by machine code from the interpreter (run mode).
 std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value> & vals, node_list const & args,
     scope * env, std::string const & key) {
@@ -1477,7 +1588,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   }
   std::vector<jt> param_types;
   for(auto const & v: vals) {
-    jt t = jt_of(v);
+    jt t = jt_of(v, this);
     if(t == jt::other || t == jt::unit) return std::nullopt;
     param_types.push_back(t);
   }
@@ -1490,15 +1601,21 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     if(v.is<int64_t>()) raw[i] = uint64_t(v.as<int64_t>());
     else if(v.is<bool>()) raw[i] = v.as<bool>();
     else if(v.is<double>()) std::memcpy(&raw[i], &v.as<double>(), 8);
+    else if(is_stream(param_types[i])) raw[i] = stream_id(v, {});
     else { // array: pointer to array_v caller (alias) or to a copy
       value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
       raw[i] = reinterpret_cast<uint64_t>(cell && cell->is<array_v>() ? &cell->as<array_v>() : &vals[i].as<array_v>());
     }
   }
   jit_fault = 0;
+  jit_vm = this;
   auto entry = reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
   uint64_t bits = entry(raw.data());
   auto fault = jit_fault_kind(jit_fault);
+  if(fault == jit_fault_kind::vm_error) { // Error/Cancellation within the VM operation
+    jit_fault = 0;
+    std::rethrow_exception(std::exchange(jit_pending, nullptr));
+  }
   // No Deoptimizations: Type - Contract for the entire program
 // The mismatch is a VM error.
   if(fault == jit_fault_kind::thrown) { // Exception by the second way - catches the interpreter
