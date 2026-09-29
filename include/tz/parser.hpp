@@ -308,7 +308,15 @@ struct parser {
     if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
     // Name { … } - extension of entity
     if(ahead(0).kind == tok::ident && !is_keyword(ahead(0).text) && is_open('{', 1)) return extension(start);
-    return statement();
+    node_id s = statement();
+    // There are no global process variables outside the functions - only ct (author's decision 2026-09-30)
+    bool var = db.is<n_var>(s) && !db.as<n_var>(s).ct;
+    bool assign = db.is<n_op>(s) && db.strings.text(db.as<n_op>(s).op) == "=" && db.is<n_ident>(db.as<n_op>(s).args[0]);
+    if(var || assign) {
+      symbol name = var ? db.as<n_var>(s).name : db.as<n_ident>(db.as<n_op>(s).args[0]).name;
+      throw diagnostic(cat("вне функций — только ct-переменные: ct ", db.strings.text(name), " = …"), db[s].where);
+    }
+    return s;
   }
 
   // [[a, b]] [[c]] - Attributes: Common expressions, computed in compilation

@@ -529,7 +529,7 @@ struct process_machine {
     for(node_id item: db.as<n_module>(root).items)
       if(db.is<n_var>(item)) {
         auto const & v = db.as<n_var>(item);
-        if(!v.ct) continue; // As an interpreter, global variables are only ct variables.
+        if(!v.ct) continue; // Outside of non-ct functions is parsing error; it doesn't get there
         value * x = helper.globals->find(v.name);
         if(!x) throw diagnostic(cat("ct ", helper.str(v.name), ": нет значения"), db[item].where);
         st.ct_vars.push_back(v.name);
