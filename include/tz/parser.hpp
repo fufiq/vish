@@ -341,7 +341,8 @@ struct parser {
       }
       if(ahead(0).kind == tok::ident && ahead(1).kind == tok::ident) { // field: T name [= v];
         n_var v;
-        v.type = db.add(n_ident{ident()}, {i0, toks[pos - 1].where.end});
+        symbol tn = ident(); // name - before span: no order of arguments
+        v.type = db.add(n_ident{tn}, {i0, toks[pos - 1].where.end});
         v.name = ident();
         if(is_op("=")) {
           eat_op("=");
@@ -376,7 +377,8 @@ struct parser {
         f.ct = true;
         advance();
       }
-      f.type = db.add(n_ident{ident()}, {f0, toks[pos - 1].where.end});
+      symbol tn = ident();
+      f.type = db.add(n_ident{tn}, {f0, toks[pos - 1].where.end});
       f.name = ident();
       if(is_op("=")) {
         eat_op("=");
@@ -500,7 +502,8 @@ struct parser {
       advance();
       return db.add(n_auto{}, {start, toks[pos - 1].where.end});
     }
-    return db.add(n_ident{ident()}, {start, toks[pos - 1].where.end});
+    symbol name = ident(); // to span: the order of calculation of arguments is not specified
+    return db.add(n_ident{name}, {start, toks[pos - 1].where.end});
   }
 
   // Translation of lines between the previous token and the current (for empty lines).
@@ -549,7 +552,8 @@ struct parser {
       if(is_open('(') && here().glued) {
         advance();
         uint32_t t0 = here().where.begin;
-        target = db.add(n_ident{ident()}, {t0, toks[pos - 1].where.end});
+        symbol tn = ident();
+        target = db.add(n_ident{tn}, {t0, toks[pos - 1].where.end});
         expect_close(')');
       }
       node_id v;
@@ -567,7 +571,8 @@ struct parser {
     }
     if(is_word("try_compile") && is_open('{', 1)) {
       advance();
-      return db.add(n_try_compile{block()}, {start, toks[pos - 1].where.end});
+      node_id body = block();
+      return db.add(n_try_compile{body}, {start, toks[pos - 1].where.end});
     }
     if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
       advance();
@@ -907,7 +912,8 @@ struct parser {
         expect_close(']');
         e = db.add(n_index{e, i}, {start, toks[pos - 1].where.end});
       } else if(is_open('{') && here().glued && db.is<n_ident>(e)) {
-        e = db.add(n_construct{e, brace_items()}, {start, toks[pos - 1].where.end});
+        node_list items = brace_items();
+        e = db.add(n_construct{e, std::move(items)}, {start, toks[pos - 1].where.end});
       } else if(is_op(".") && is_open('[', 1)) { // v.[f] - descriptor field
         advance();
         advance();
