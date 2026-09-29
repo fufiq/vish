@@ -69,12 +69,21 @@ struct c_run {
 };
 // Save (Ctrl+S): journal base in .tzdb next to the program (author's decision).
 struct c_save {};
+// Merger with another copy of the database (§9.4): the path to .tzdb (relative to the program).
+struct c_merge {
+  std::string path;
+};
+// Solve the conflict: take their version of the element or leave mine.
+struct c_take {
+  std::string key;
+  bool theirs;
+};
 // Launch with track (F6): steps on it - keys (F10, F11, F4, Escape), they are interpreted by VM.
 struct c_trace {
   std::string stdin_text;
   std::string args;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace>;
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take>;
 
 // --- VM customer ---
 
@@ -168,6 +177,19 @@ struct s_output {
 struct s_saved {
   std::string path;
 };
+// Merger: taken alone (changed only in them) and conflicts are both options for a
+// person: Empty text - there is no element in this version.
+//
+struct s_conflict {
+  std::string key;
+  std::string base;
+  std::string mine;
+  std::string theirs;
+};
+struct s_merge {
+  std::vector<std::string> taken;
+  std::vector<s_conflict> conflicts;
+};
 // Route step: number of all, current instruction, call stack (from inside out), program
 // output to this step, start error; active - track open.
 struct s_trace {
@@ -179,7 +201,7 @@ struct s_trace {
   std::string output;
   std::string error;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace>;
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge>;
 
 // --- staff ---
 

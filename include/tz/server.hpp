@@ -9,6 +9,7 @@
 
 #include "proto.hpp"
 #include "complete.hpp"
+#include "merge.hpp"
 #include "parser.hpp"
 #include "session.hpp"
 
@@ -1246,6 +1247,50 @@ struct editor_server {
       if(w.layout_of(node_id(e.node)) != ~uint32_t{0}) marks.push_back({node_id(e.node), "current", ""});
       send(p, proto::s_decor{w.id, session.db.revision, marks});
     }
+  }
+
+  // --- Version: Merge with another copy of the database (§9.4) ---
+
+  merge_result pending; // conflicts of the last merger before the decision of the person
+
+  void refresh_all() {
+    recheck();
+    for(auto & q: peers)
+      for(auto & w: q.views)
+        if(w.root) show_view(q, w);
+  }
+
+  void send_merge(peer & p, std::vector<std::string> const & taken) {
+    proto::s_merge out{taken, {}};
+    for(auto const & c: pending.conflicts) out.conflicts.push_back({c.key, c.base, c.mine, c.theirs});
+    send(p, out);
+  }
+
+  void handle(peer & p, proto::c_merge const & m) {
+    std::string path = m.path;
+    if(!path.starts_with('/')) // programme
+      if(auto slash = session.name.rfind('/'); slash != std::string::npos) path = session.name.substr(0, slash + 1) + path;
+    node_id theirs_root;
+    std::vector<journal_entry> theirs;
+    try {
+      theirs = read_journal(path, theirs_root);
+    } catch(diagnostic const & d) {
+      return send(p, proto::s_error{cat("слияние: ", d.what())});
+    }
+    pending = merge_into(session.db, session.root, session.db.journal(), theirs, theirs_root);
+    refresh_all();
+    send_merge(p, pending.taken);
+  }
+
+  void handle(peer & p, proto::c_take const & m) {
+    auto it = std::ranges::find(pending.conflicts, m.key, &merge_conflict::key);
+    if(it == pending.conflicts.end()) return send(p, proto::s_error{cat("нет конфликта ", m.key)});
+    if(m.theirs) {
+      take_theirs(session.db, session.root, pending.base_items, it->id, it->theirs_exists ? std::optional<std::string>(it->theirs) : std::nullopt);
+      refresh_all();
+    }
+    pending.conflicts.erase(it);
+    send_merge(p, {});
   }
 
   editor_view * find(peer & p, uint32_t id) {

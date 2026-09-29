@@ -209,3 +209,40 @@ body {
   background: color-mix(in srgb, var(--tz-caret) 18%, transparent);
   border-radius: 3px;
 }
+#merge {
+  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  padding: 8px 24px;
+  max-height: 40vh;
+  overflow: auto;
+}
+#merge[hidden] {
+  display: none;
+}
+.conflict {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+.conflict .title {
+  grid-column: 1 / -1;
+  color: var(--tz-error);
+}
+.conflict pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: var(--tz-popup);
+  border-radius: 4px;
+  font-size: 13px;
+  overflow: auto;
+}
+.conflict button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--tz-fg);
+  background: var(--tz-selected);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+}

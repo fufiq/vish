@@ -66,6 +66,16 @@ export interface Trace {
   stdin_text: string;
   args: string;
 }
+// Merge with another copy of the database (the path to .tzdb) and resolve the conflict.
+export interface Merge {
+  type: 'c_merge';
+  path: string;
+}
+export interface Take {
+  type: 'c_take';
+  key: string;
+  theirs: boolean;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -76,7 +86,9 @@ export type ClientMsg =
   | LayerPick
   | Run
   | Save
-  | Trace;
+  | Trace
+  | Merge
+  | Take;
 
 export interface ServerHello {
   type: 's_hello';
@@ -185,6 +197,19 @@ export interface TraceStep {
   output: string;
   error: string;
 }
+// Merger: Taken by itself and conflicts (both options are to drain with your hands).
+export interface Conflict {
+  type: 's_conflict';
+  key: string;
+  base: string;
+  mine: string;
+  theirs: string;
+}
+export interface MergeResult {
+  type: 's_merge';
+  taken: string[];
+  conflicts: Conflict[];
+}
 export type ServerMsg =
   | ServerHello
   | View
@@ -196,7 +221,8 @@ export type ServerMsg =
   | Layers
   | Output
   | Saved
-  | TraceStep;
+  | TraceStep
+  | MergeResult;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

@@ -199,4 +199,86 @@ describe('живая VM', () => {
       vm.kill();
     }
   });
+
+  it('версии: трёхстороннее слияние копий базы — CLI и редактор', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tz-'));
+    const prog = join(dir, 'p.tz');
+    copyFileSync(join(root, 'tests/editor_overloads.tz'), prog);
+    // Two copies diverge: “me” - area(i64) and main, “them” - area(f64) and main.
+    const vmEdit = (script: string) =>
+      execFileSync(tz, ['vm', prog], {
+        input: script,
+        encoding: 'utf8',
+        cwd: dir,
+      });
+    vmEdit(
+      'edit main\nmain() {\n  xs = read_floats(stdin);\n  print(area(xs.size));\n}\n.\nsave mine.tzdb\n',
+    );
+    vmEdit(
+      'edit main\nmain() {\n  xs = read_floats(stdin);\n  print(area(xs[0]));\n}\n.\nsave theirs.tzdb\n',
+    );
+    // CLI: conflict in main - code 1, my version
+    let cli = '';
+    try {
+      execFileSync(
+        tz,
+        [
+          'merge',
+          join(dir, 'mine.tzdb'),
+          join(dir, 'theirs.tzdb'),
+          join(dir, 'out.tzdb'),
+        ],
+        { encoding: 'utf8' },
+      );
+    } catch (e) {
+      cli = (e as { stdout: string }).stdout;
+    }
+    expect(cli).toContain('конфликт: main()');
+    // Editor: VM merger, conflict - both options; "take them"
+    const sock = join(dir, 's');
+    const vm = spawn(tz, ['serve', join(dir, 'mine.tzdb'), sock], {
+      stdio: 'ignore',
+    });
+    try {
+      for (let i = 0; i < 50 && !existsSync(sock); ++i) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const got: ServerMsg[] = [];
+      const split = new FrameSplitter();
+      const c = connect(sock);
+      await new Promise<void>((ok, fail) => {
+        c.on('connect', ok).on('error', fail);
+      });
+      c.on('data', (d: Buffer) => {
+        split.push(new Uint8Array(d), (b) => {
+          got.push(decodeServer(b));
+        });
+      });
+      const wait = async (pred: (m: ServerMsg) => boolean) => {
+        for (let i = 0; i < 200 && !got.some(pred); ++i) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return got.find(pred);
+      };
+      c.write(encodeClient({ type: 'c_hello', version: schema.version }));
+      c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
+      c.write(
+        encodeClient({ type: 'c_merge', path: join(dir, 'theirs.tzdb') }),
+      );
+      const merge = await wait((m) => m.type === 's_merge');
+      expect(merge).toMatchObject({ conflicts: [{ key: 'main()' }] });
+      got.length = 0;
+      c.write(encodeClient({ type: 'c_take', key: 'main()', theirs: true }));
+      const view = await wait((m) => m.type === 's_view');
+      if (view?.type !== 's_view') throw new Error('нет представления');
+      expect(projectionText(view)).toContain('print(area(xs[0]));');
+      expect(projectionText(view)).not.toContain('print(area(xs.size));');
+      expect(await wait((m) => m.type === 's_merge')).toMatchObject({
+        conflicts: [],
+      });
+      c.end();
+    } finally {
+      vm.kill();
+    }
+  });
 });

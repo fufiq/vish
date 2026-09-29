@@ -35,6 +35,8 @@ const sideWrap = byId('side-wrap');
 const layersBar = byId('layers');
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
+const mergePanel = byId('merge');
+let gotoMode: 'goto' | 'merge' = 'goto';
 const statusLine = byId('status');
 const runPanel = byId('run');
 const runStdin = byId('run-stdin') as HTMLTextAreaElement;
@@ -116,6 +118,9 @@ function receive(m: ServerMsg): void {
       runOutput.toggleAttribute('error', m.error !== '');
       statusLine.textContent = `шаг ${String(m.step + 1)} из ${String(m.total)} · ${m.stack.join(' ← ')} · F10 дальше, Shift+F10 назад, F11 внутрь, Shift+F11 наружу, F4 до курсора, Escape — выйти`;
       return;
+    case 's_merge':
+      showMerge(m.taken, m.conflicts);
+      return;
     case 's_saved':
       statusLine.textContent = `сохранено: ${m.path}`;
       return;
@@ -184,8 +189,55 @@ for (const field of [runStdin, runArgs] as HTMLElement[]) {
   });
 }
 
+// Merger (Ctrl+M): Conflicts are both options nearby; take them or leave mine.
+//
+//
+function showMerge(
+  taken: readonly string[],
+  conflicts: readonly { key: string; mine: string; theirs: string }[],
+): void {
+  if (taken.length > 0)
+    statusLine.textContent = `взято у них: ${taken.join(', ')}`;
+  mergePanel.hidden = conflicts.length === 0;
+  if (conflicts.length === 0 && taken.length === 0)
+    statusLine.textContent = 'слито';
+  mergePanel.replaceChildren(
+    ...conflicts.map((c) => {
+      const box = document.createElement('div');
+      box.className = 'conflict';
+      const title = document.createElement('div');
+      title.className = 'title';
+      title.textContent = `конфликт: ${c.key}`;
+      const side = (label: string, text: string, theirs: boolean) => {
+        const col = document.createElement('div');
+        const head = document.createElement('button');
+        head.textContent = label;
+        head.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          send({ type: 'c_take', key: c.key, theirs });
+        });
+        const pre = document.createElement('pre');
+        pre.textContent = text === '' ? '— нет —' : text;
+        col.append(head, pre);
+        return col;
+      };
+      box.append(
+        title,
+        side('оставить мой', c.mine, false),
+        side('взять их', c.theirs, true),
+      );
+      return box;
+    }),
+  );
+}
+
 // Ctrl+P is the signature string; it is sent by Enter, Escape is closed.
-function openGoto(): void {
+function openGoto(mode: 'goto' | 'merge' = 'goto'): void {
+  gotoMode = mode;
+  gotoInput.placeholder =
+    mode === 'goto'
+      ? 'перейти или добавить: foo(i64)'
+      : 'слить с базой: путь.tzdb';
   gotoForm.hidden = false;
   gotoInput.value = '';
   gotoInput.focus();
@@ -193,7 +245,9 @@ function openGoto(): void {
 gotoForm.addEventListener('submit', (e) => {
   e.preventDefault();
   gotoForm.hidden = true;
-  if (active && gotoInput.value.trim() !== '') {
+  if (gotoMode === 'merge' && gotoInput.value.trim() !== '') {
+    send({ type: 'c_merge', path: gotoInput.value.trim() });
+  } else if (active && gotoInput.value.trim() !== '') {
     send({ type: 'c_goto', view: active.data.view, text: gotoInput.value });
   }
   activate(active);
@@ -221,6 +275,10 @@ for (const pane of [app, side]) {
     }
     if (e.key === 'F6') {
       trace();
+      return;
+    }
+    if (e.ctrlKey && e.key === 'm') {
+      openGoto('merge');
       return;
     }
     if (e.ctrlKey && e.key === 's') {

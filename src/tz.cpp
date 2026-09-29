@@ -16,6 +16,7 @@
 #include "tz/store.hpp"
 #include "tz/session.hpp"
 #include "tz/server.hpp"
+#include "tz/merge.hpp"
 #include "tz/jit/jit.hpp"
 
 namespace {
@@ -24,7 +25,7 @@ using tz::cat;
 using tz::put;
 
 int usage() {
-  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz test <каталог>          прогнать эталонные тесты\n"));
+  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
   return 2;
 }
 
@@ -66,6 +67,30 @@ int main(int argc, char ** argv) {
   std::string cmd = argv[1];
   try {
     if(cmd == "test") return tz::test_runner().run(argv[2]);
+    // Versions (§9.4): Semantic diff and triangular .tzdb fusion.
+    if(cmd == "diff" && argc == 4) {
+      tz::db_copy a, b;
+      tz::node_id ra, rb;
+      auto ea = tz::read_journal(argv[2], ra), eb = tz::read_journal(argv[3], rb);
+      tz::load_journal(a, ea, ra);
+      tz::load_journal(b, eb, rb);
+      put(stdout, tz::describe_diff(a.db, a.root, b.db, b.root));
+      return 0;
+    }
+    if(cmd == "merge" && argc >= 4) {
+      tz::db_copy mine;
+      tz::node_id rm, rt;
+      auto em = tz::read_journal(argv[2], rm), et = tz::read_journal(argv[3], rt);
+      tz::load_journal(mine, em, rm);
+      auto r = tz::merge_into(mine.db, mine.root, em, et, rt);
+      for(auto const & k: r.taken) put(stdout, cat("взято у них: ", k, "\n"));
+      for(auto const & c: r.conflicts)
+        put(stdout, cat("конфликт: ", c.key, "\n  база: ", c.base.empty() ? "—" : c.base, "\n  мой:  ", c.mine.empty() ? "—" : c.mine, "\n  их:   ", c.theirs.empty() ? "—" : c.theirs, "\n"));
+      std::string out = argc >= 5 ? argv[4] : argv[2];
+      tz::save_db(mine.db, mine.root, out);
+      put(stdout, cat("записано: ", out, r.conflicts.empty() ? "" : " (конфликты — мой вариант; слить руками)", "\n"));
+      return r.conflicts.empty() ? 0 : 1;
+    }
     if(cmd == "log") {
       tz::node_id root;
       put(stdout, tz::describe_journal(tz::read_journal(argv[2], root)));
