@@ -21,11 +21,13 @@ key 1 Backspace
 key 1 1
 // expect: kind="type" text="f64 | i64"
 // expect-not: kind="error"
-// unclosed line - text does not disappear: the module is a hole until there is no pair
+// unclosed line - the text does not disappear: only its own line is a hole (the line
+// of the set is like a new block, not yet disassembled), while there is no pair
 pointer 1 @1 0 0
 key 1 Delete
 key 1 "
-// expect: kind="n_hole" pieces=["twice(x) => x * x;
+// expect: kind="n_hole" pieces=["print(twice(xs[\"]))"] note="незакрытая строка"
+// expect: kind="type" text="array<f64>"
 // expect: print(twice(xs["]));
 key 1 "
 // expect-not: n_hole

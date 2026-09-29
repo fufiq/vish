@@ -47,4 +47,22 @@ key 1 ArrowLeft
 key 1 Enter
 // expect: g() {⏎  ⏎}
 // expect: курсор:   ‸⏎
-// Enter within an expression - line transfer in projection does not store
+// Enter inside the expression - line transfer in projection does not store the string
+// - as a new block, not yet disassembled (author's decision): unwritten - a hole only
+// of his line, the next instruction is not captured
+pointer 1 @x 0 0
+key 1 End
+key 1 Enter
+key 1 y
+key 1 =
+// expect: x = 1;⏎  y=;⏎  print(s);
+// expect: kind="n_hole" pieces=["y="]
+// expect: курсор:   y=‸;
+key 1 2
+// expect: x = 1;⏎  y = 2;⏎  print(s);
+// expect-not: n_hole
+// set immediately after `;` - a new instruction on its line
+key 1 End
+key 1 z
+// expect: y = 2;⏎  z;⏎  print(s);
+// expect: курсор:   z‸;

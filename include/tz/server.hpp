@@ -418,6 +418,8 @@ struct editor_server {
   // points; by default - after it).
   void edit(editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret = ~uint32_t{0}) {
     ++edits;
+    caret = std::min(caret, code_points(ins));
+    if(edit_line(v, a, b, ins, caret)) return;
     for(auto const & u: units_around(v, a, b)) {
       std::string_view old = v.text_of(u.range);
       uint32_t base = v.byte_at[u.range.first];
@@ -425,49 +427,161 @@ struct editor_server {
       parser pr(session.db, edited, cat("<ввод #", edits, ">"));
       node_id fresh = u.kind == 2 ? pr.parse_module() : pr.parse_unit(u.kind == 0);
       if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
-      apply(v, u.node, fresh, edited, {a - u.range.first, b - u.range.first, code_points(ins)}, std::min(caret, code_points(ins)));
+      node_id target = u.node;
+      auto range = [&](editor_view const & w) { return w.range[w.layout_of(target)]; };
+      apply(v, target, [&] { session.db.replace(target, session.db[fresh].kind); }, range, range, edited,
+          {a - u.range.first, b - u.range.first, code_points(ins)}, caret);
       return;
     }
   }
 
-  // Replace the contents of the node unit and send the new projection to all
-  // representations of all clients; each cursor is carried over through unit
-  // alignment (before and after parsing). Editing within the unit (in places from
-  // its beginning): [from, to] replaced by inserted code points.
+  // --- line of set: instruction - its unit ---
   //
+  // Author's decision (2026-09-29): a string is like a new block, not yet
+  // disassembled. Editing within a block instruction (or module element) only
+  // re-examines its text; typing on an empty line or after `;` creates a new
+  // element in that place. The unwritten is only the hole of this line. Broken
+  // line brackets - to outer brackets.
+
+  // Place container: the smallest block, inside the brackets of which is edited, otherwise the module.
+  node_id container_of(editor_view const & v, uint32_t a, uint32_t b) const {
+    for(auto const & u: units_around(v, a, b))
+      if(u.kind == 0) return u.node;
+    return session.root;
+  }
+
+  static node_list const & items_of(ast_db const & db, node_id c) {
+    return db.is<n_block>(c) ? db.as<n_block>(c).items : db.as<n_module>(c).items;
+  }
+
+  // Places of container elements [from, from + count]: their text; count = = 0 is the
+  // insert point `at`.
+  std::pair<uint32_t, uint32_t> items_range(editor_view const & w, node_id c, uint32_t from, uint32_t count, uint32_t at) const {
+    auto const & items = items_of(session.db, c);
+    if(count == 0) return {at, at};
+    return {w.range[w.layout_of(items[from])].first, w.range[w.layout_of(items[from + count - 1])].second};
+  }
+
+  bool edit_line(editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret) {
+    auto & db = session.db;
+    node_id c = container_of(v, a, b);
+    bool module_level = c == session.root;
+    node_list const items = items_of(db, c);
+    // element whose text is edited (end inclusive: set before `;`)
+    uint32_t k = 0, count = 0;
+    for(; k < items.size(); ++k) {
+      uint32_t l = v.layout_of(items[k]);
+      if(l == ~uint32_t{0}) continue;
+      if(a >= v.range[l].first && b <= v.range[l].second) {
+        count = 1;
+        break;
+      }
+      if(v.range[l].first >= b) break; // In the interval before the element k
+    }
+    bool blank_text = std::ranges::all_of(ins, [](char ch) { return ch == ' ' || ch == '\n' || ch == '\t'; });
+    if(count == 0 && (a != b || blank_text)) return false; // erasure and gaps in the gap - through brackets
+    auto old = items_range(v, c, k, count, a);
+    std::string_view was = v.text_of(old);
+    uint32_t base = v.byte_at[old.first];
+    std::string edited = count ? cat(was.substr(0, v.byte_at[a] - base), ins, was.substr(v.byte_at[b] - base)) : ins;
+    parser pr(db, edited, cat("<ввод #", edits, ">"));
+    bool value = false;
+    auto fresh = pr.parse_line(module_level, value);
+    if(!fresh) return false;
+    // Empty space lines when inserted: above and below the new element
+    std::vector<uint32_t> blank = db.is<n_block>(c) ? db.as<n_block>(c).blank : db.as<n_module>(c).blank;
+    blank.resize(items.size() + 1, 0);
+    uint32_t canon = module_level ? 2 : 1;
+    if(!count && !fresh->empty()) {
+      uint32_t prev_end = k > 0 ? v.range[v.layout_of(items[k - 1])].second : (module_level ? 0 : v.range[v.layout_of(c)].first + 1);
+      uint32_t next_start = k < items.size() ? v.range[v.layout_of(items[k])].first : (module_level ? uint32_t(v.places.size() - 1) : v.range[v.layout_of(c)].second - 1);
+      uint32_t above = 0, below = 0;
+      for(uint32_t x = prev_end; x < a; ++x) above += v.lead[x] == '\n';
+      for(uint32_t x = a; x < next_start; ++x) below += v.lead[x] == '\n';
+      blank[k] = above > canon ? above - canon : 0;
+      blank.insert(blank.begin() + k + 1, below > canon ? below - canon : 0);
+      for(uint32_t n = 1; n < fresh->size(); ++n) blank.insert(blank.begin() + k + 1, 0);
+    } else if(count) {
+      for(uint32_t n = 1; n < fresh->size(); ++n) blank.insert(blank.begin() + k + 1, 0);
+      if(fresh->empty()) blank.erase(blank.begin() + k + 1);
+    }
+    node_list list(items.begin(), items.begin() + k);
+    node_list added = *fresh;
+    if(count && !added.empty()) added[0] = items[k]; // id of the control element is retained
+    list.insert(list.end(), added.begin(), added.end());
+    list.insert(list.end(), items.begin() + k + count, items.end());
+    bool tail = k + count == items.size();
+    node_id first_fresh = fresh->empty() ? node_id{} : (*fresh)[0];
+    uint32_t n_new = uint32_t(added.size());
+    auto mutate = [&] {
+      if(count && first_fresh) db.replace(items[k], db[first_fresh].kind);
+      if(db.is<n_block>(c)) {
+        n_block nb = db.as<n_block>(c);
+        nb.items = list;
+        nb.blank = blank;
+        parser::trim_blank(nb.blank);
+        // element text - without `;` (it is printed by the block): editing the element
+        // does not make the instruction a value; the value is removed by typed `;`
+        if(tail) nb.has_value = n_new > 0 && value && (count == 0 || nb.has_value);
+        db.replace(c, nb);
+      } else {
+        n_module nm = db.as<n_module>(c);
+        nm.items = list;
+        nm.blank = blank;
+        parser::trim_blank(nm.blank);
+        db.replace(c, nm);
+      }
+    };
+    auto before = [&](editor_view const & w) { return items_range(w, c, k, count, a); };
+    auto after = [&](editor_view const & w) {
+      if(n_new) return items_range(w, c, k, n_new, 0);
+      uint32_t at = k > 0 ? w.range[w.layout_of(items_of(db, c)[k - 1])].second : w.range[w.layout_of(c)].first;
+      return std::pair{at, at};
+    };
+    apply(v, c, mutate, before, after, edited, {count ? a - old.first : 0, count ? b - old.first : 0, code_points(ins)}, caret);
+    return true;
+  }
+
+  // Editing within the unit (in places from its beginning): [from, to] replaced by
+  // inserted code points.
   struct change {
     uint32_t from, to, inserted;
     // place before editing → place in the text after editing (up to parsing)
     uint32_t map(uint32_t c) const { return c >= to ? c - (to - from) + inserted : c > from ? from : c; }
   };
 
-  void apply(editor_view & av, node_id target, node_id fresh, std::string const & edited, change ch, uint32_t caret) {
+  // Change the base (mutate) and send the new projection node target to all
+  // submissions of all clients; each cursor is transferred through the alignment
+  // of the texts of the changed place (range_before / range_after).
+  void apply(editor_view & av, node_id target, auto && mutate, auto && range_before, auto && range_after,
+      std::string const & edited, change ch, uint32_t caret) {
     struct before {
       editor_view * v;
       peer * p;
       std::pair<uint32_t, uint32_t> r;
+      std::string tail; // text after the changed place - alignment goes through it
     };
     std::vector<before> views;
     for(auto & p: peers)
       for(auto & v: p.views)
-        if(v.root && v.root == session.root) {
-          uint32_t k = v.layout_of(target);
-          if(k == ~uint32_t{0}) continue;
-          views.push_back({&v, &p, v.range[k]});
+        if(v.root && v.root == session.root && v.layout_of(target) != ~uint32_t{0}) {
+          auto r = range_before(v);
+          views.push_back({&v, &p, r, v.text.substr(v.byte_at[r.second])});
         }
-    session.db.replace(target, session.db[fresh].kind);
+    mutate();
     session.db.link_parents(session.root);
     for(auto & b: views) {
       editor_view & v = *b.v;
       uint32_t c = v.cursor;
       layout(v);
-      auto r = v.range[v.layout_of(target)];
-      std::string_view now = v.text_of(r);
+      auto r = range_after(v);
+      // was: correct place text + everything after it; became: projection from the beginning of the place
+      std::string was = edited + b.tail;
+      std::string_view now = std::string_view(v.text).substr(v.byte_at[r.first]);
       // cursor of the author - immediately after entering; someone else - is moved by
       // editing; then alignment with the canonical projection (she puts gaps)
-      if(&v == &av) c = blank_line_end(v, r.first + align(edited, ch.from + caret, now));
-      else if(c >= b.r.second) c = c - b.r.second + r.second;
-      else if(c >= b.r.first) c = r.first + align(edited, ch.map(c - b.r.first), now);
+      if(&v == &av) c = blank_line_end(v, r.first + align(was, ch.from + caret, now));
+      else if(c >= b.r.first) c = r.first + align(was, ch.map(c - b.r.first), now);
       v.cursor = std::min<uint32_t>(c, uint32_t(v.places.size() - 1));
       send(*b.p, proto::s_update{v.id, session.db.revision, target, subtree(v, target)});
       if(&v != &av) close_completion(*b.p, v); // crossword

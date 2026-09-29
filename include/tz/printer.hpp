@@ -239,7 +239,12 @@ struct printer {
   // `;` after the instruction, unless it ends in a block and puts it itself.
   void terminate(node_id s) {
     if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
-    if(db.is<n_hole>(s)) return; // The hole prints the source code as it is.
+    if(db.is<n_hole>(s)) { // the hole prints the source code as is; the string of the set in the block - without `;`
+      if(!db[s].parent || !db.is<n_block>(db[s].parent)) return;
+      std::string_view t = db.as<n_hole>(s).text;
+      while(!t.empty() && (t.back() == ' ' || t.back() == '\n' || t.back() == '\t')) t.remove_suffix(1);
+      if(t.empty() || t.back() == ';' || t.back() == '}') return;
+    }
     if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_break>(s) || db.is<n_continue>(s) || db.is<n_hide>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;

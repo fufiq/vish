@@ -128,6 +128,26 @@ struct parser {
     }
   }
 
+  // The typing line in the editor (author's decision: the line is like a new block, not
+  // yet disassembled): its instructions (or module elements) are disassembled
+  // separately from neighboring ones - the unwritten becomes a hole only for this line
+  // and does not capture the next instruction. Broken brackets - empty: editing rises
+  // to outer brackets. Value is the last instruction without `;` (block value).
+  //
+  std::optional<node_list> parse_line(bool module_level, bool & value) {
+    value = false;
+    if(!lex_error.empty()) return node_list{db.add(n_hole{std::string(src), lex_error}, {0, uint32_t(src.size())})};
+    if(bracket_error) return std::nullopt;
+    line_mode = true;
+    node_list out;
+    while(!at_end()) {
+      out.push_back(recover_statement([&] { return module_level ? item() : statement(); }));
+      value = !module_level && at_end() && last_was_value;
+    }
+    for(node_id n: out) db.link_parents(n);
+    return out;
+  }
+
   // parsing errors with import number in positions.
   std::vector<diagnostic> errors() const {
     std::vector<diagnostic> out;
@@ -147,10 +167,12 @@ struct parser {
         auto fits = [&](uint32_t o) { return pairs(toks[o].ch(), toks[i].ch()); };
         if(std::ranges::none_of(stack, fits)) {
           diags.push_back(diagnostic("непарная скобка", toks[i].where));
+          bracket_error = true;
           continue;
         }
         while(!fits(stack.back())) {
           diags.push_back(diagnostic("незакрытая скобка", toks[stack.back()].where));
+          bracket_error = true;
           stack.pop_back();
         }
         match[stack.back()] = i;
@@ -159,6 +181,7 @@ struct parser {
       }
     }
     for(uint32_t i: stack) diags.push_back(diagnostic("незакрытая скобка", toks[i].where));
+    if(!stack.empty()) bracket_error = true;
   }
 
   static bool pairs(char o, char c) { return (o == '(' && c == ')') || (o == '[' && c == ']') || (o == '{' && c == '}'); }
@@ -530,7 +553,7 @@ struct parser {
         expect_close(')');
       }
       node_id v;
-      if(!is_op(";") && !is_close('}')) v = expression();
+      if(!is_op(";") && !is_close('}') && !(line_mode && at_end())) v = expression();
       end_statement();
       return db.add(n_return{v, target}, {start, toks[pos - 1].where.end});
     }
@@ -572,7 +595,7 @@ struct parser {
       return e;
     }
     if(is_op(";")) eat_op(";");
-    else if(is_close('}')) last_was_value = true;
+    else if(is_close('}') || (line_mode && at_end())) last_was_value = true;
     else if(!ends_with_block(e)) throw diagnostic("ожидалось ';'", here().where);
     return e;
   }
@@ -1158,6 +1181,8 @@ struct parser {
   std::string_view src;
   std::vector<token> toks;
   std::string lex_error; // The lexer failed (unclosed line) - the whole text is a hole
+  bool bracket_error = false; // unpaired brackets (editor's unit - to outer brackets)
+  bool line_mode = false; // typing line: end of text - as `}` for value
   std::vector<uint32_t> match;
   uint32_t pos = 0;
   bool last_was_value = false;
