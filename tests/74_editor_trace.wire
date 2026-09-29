@@ -1,0 +1,39 @@
+// Debugger - the launch path (author’s decision): the execution path (§13.2) is
+// recorded at launch, steps - forward and backward, VM does not stop.
+// 
+// Built-in calls are normal steps. Step - instruction after execution: the meaning
+// of its subexpressions - icons.
+// program: editor_layers.tz
+open_view module
+trace 3
+// expect: trace active=true step=2 total=
+// expect: stack=["main"] output=""
+// expect: kind="value" text="[3.0]"
+// expect: kind="current"
+// F10 is the following instruction of the same depth; output to this step
+key 1 F10
+// expect: stack=["main"] output="0.0\n"
+// expect: kind="value" text="0.0"
+// F11 - inside the call: stack, values in the body function
+key 1 F11
+// expect: stack=["scale" "main"]
+// expect: kind="value" text="3.0"
+// expect: kind="value" text="true"
+// expect: kind="value" text="9.0"
+// Shift+F11 - Outward
+key 1 F11 1
+// expect: stack=["main"] output="0.0\n9.0\n"
+// Shift+F10 - back
+key 1 F10 1
+// expect: stack=["main"] output="0.0\n"
+// F4 - to instructions under cursor
+pointer 1 @read_floats 0 0
+key 1 F4
+// expect: F4: эта инструкция дальше не исполняется
+pointer 1 @print:2 0 0
+key 1 F4
+// expect: output="0.0\n9.0\n"
+// Escape - the exit: again check marks
+key 1 Escape
+// expect: trace active=false
+// expect: kind="type" text="array<f64>"

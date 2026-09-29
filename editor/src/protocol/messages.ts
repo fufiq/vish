@@ -60,8 +60,23 @@ export interface Run {
 export interface Save {
   type: 'c_save';
 }
+// Start with track (F6): steps - keys, they are interpreted by VM.
+export interface Trace {
+  type: 'c_trace';
+  stdin_text: string;
+  args: string;
+}
 export type ClientMsg =
-  Hello | OpenView | CloseView | Key | Pointer | Goto | LayerPick | Run | Save;
+  | Hello
+  | OpenView
+  | CloseView
+  | Key
+  | Pointer
+  | Goto
+  | LayerPick
+  | Run
+  | Save
+  | Trace;
 
 export interface ServerHello {
   type: 's_hello';
@@ -158,6 +173,18 @@ export interface Saved {
   type: 's_saved';
   path: string;
 }
+// Route step: number, total, current instruction, stack (inside out), step output, start
+// error; active - track open.
+export interface TraceStep {
+  type: 's_trace';
+  active: boolean;
+  step: number;
+  total: number;
+  node: NodeId | null;
+  stack: string[];
+  output: string;
+  error: string;
+}
 export type ServerMsg =
   | ServerHello
   | View
@@ -168,7 +195,8 @@ export type ServerMsg =
   | Decor
   | Layers
   | Output
-  | Saved;
+  | Saved
+  | TraceStep;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

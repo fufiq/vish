@@ -123,6 +123,7 @@ export class ViewElement {
       if (m.kind === 'type') e.type = m.text;
       if (m.kind === 'value') e.value = m.text;
       if (m.kind === 'dead') e.dead = true;
+      if (m.kind === 'current') e.current = true;
       if (m.kind === 'error') {
         e.error = m.text;
         first ??= m.text;

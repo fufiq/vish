@@ -125,6 +125,8 @@ struct editor_server {
     bool sending = false;
     bool recv_armed = false;
     uint32_t handled = 0; // cast
+    bool debugging = false; // Launch track open: step keys interpret VM
+    uint32_t trace_pos = 0;
     std::deque<editor_view> views;
   };
 
@@ -277,6 +279,7 @@ struct editor_server {
   void handle(peer & p, proto::c_key const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    if(p.debugging && debug_key(p, *v, m)) return;
     if(v->completing && !v->items.empty()) {
       if(m.key == "ArrowDown" || m.key == "ArrowUp") {
         uint32_t n = uint32_t(v->items.size());
@@ -639,6 +642,12 @@ struct editor_server {
         }
     mutate();
     session.db.link_parents(session.root);
+    // Edit - the track describes the previous version: close it all
+    for(auto & q: peers)
+      if(q.debugging) {
+        q.debugging = false;
+        send(q, proto::s_trace{false, 0, 0, {}, {}, {}, {}});
+      }
     for(auto & b: views) {
       editor_view & v = *b.v;
       uint32_t c = v.cursor;
@@ -1125,6 +1134,118 @@ struct editor_server {
     else if(!path.ends_with(".tzdb")) path += ".tzdb";
     save_db(session.db, session.root, path);
     send(p, proto::s_saved{path});
+  }
+
+  // --- debugger: launch track ---
+  //
+  // Author's decision: the execution path (§13.2) is recorded at launch, the
+  // steps are forward and backward; VM does not stop.
+// 
+// built-in calls.
+  // usual steps
+//).
+
+  std::string trace_output, trace_error;
+
+  void handle(peer & p, proto::c_trace const & m) {
+    session.stdin_lines.clear();
+    for(auto l: lines_of(m.stdin_text)) session.stdin_lines.emplace_back(l);
+    std::vector<std::string> args;
+    for(auto w: words_of(m.args)) args.emplace_back(w);
+    bool ok = true;
+    trace_output = session.trace_run(args, ok, trace_error);
+    p.debugging = true;
+    p.trace_pos = 0;
+    step_to(p, next_stmt(0, false, ~uint32_t{0}));
+  }
+
+  // Instruction: block element or expression-body function.
+  bool is_stmt(uint32_t i) const {
+    node_id n(session.trace[i].node);
+    node_id up = session.db[n].parent;
+    if(session.db.is<n_block>(n)) return false; // body block is not a step, steps are his instructions
+    return up && (session.db.is<n_block>(up) || (session.db.is<n_fn>(up) && session.db.as<n_fn>(up).body == n));
+  }
+
+  // The following (or previous) instruction is no deeper than max_depth; no, stay.
+  uint32_t next_stmt(uint32_t from, bool back, uint32_t max_depth) const {
+    auto const & t = session.trace;
+    if(t.empty()) return 0;
+    if(!back) {
+      for(uint32_t i = from; i < t.size(); ++i)
+        if(is_stmt(i) && t[i].depth <= max_depth) return i;
+    } else {
+      for(uint32_t i = from + 1; i-- > 0;)
+        if(is_stmt(i) && t[i].depth <= max_depth) return i;
+    }
+    return std::min<uint32_t>(from, uint32_t(t.size() - 1));
+  }
+
+  bool debug_key(peer & p, editor_view & v, proto::c_key const & m) {
+    auto const & t = session.trace;
+    uint32_t pos = p.trace_pos, depth = t.empty() ? 0 : t[pos].depth;
+    bool shift = m.mods & 1;
+    if(m.key == "Escape") {
+      p.debugging = false;
+      send(p, proto::s_trace{false, 0, 0, {}, {}, {}, {}});
+      for(auto & w: p.views)
+        if(w.root) send_marks(p, w);
+      return true;
+    }
+    if(m.key == "F10") step_to(p, shift ? next_stmt(pos > 0 ? pos - 1 : 0, true, depth) : next_stmt(pos + 1, false, depth));
+    else if(m.key == "F11") step_to(p, shift ? next_stmt(pos + 1, false, depth > 0 ? depth - 1 : 0) : next_stmt(pos + 1, false, ~uint32_t{0}));
+    else if(m.key == "F4") { // cursor
+      node_id at = v.places.empty() ? node_id{} : v.places[v.cursor].node;
+      for(; at && session.db[at].parent && !session.db.is<n_block>(session.db[at].parent); at = session.db[at].parent) {}
+      for(uint32_t i = pos + 1; i < t.size(); ++i)
+        if(t[i].node == at.value) return step_to(p, i), true;
+      send(p, proto::s_error{"F4: эта инструкция дальше не исполняется"});
+    } else return false;
+    return true;
+  }
+
+  // extra value icon: literal (value and so in the text), block, name of the called function
+  bool quiet_value(node_id n) const {
+    auto const & db = session.db;
+    if(db.is<n_int>(n) || db.is<n_float>(n) || db.is<n_str>(n) || db.is<n_block>(n)) return true;
+    node_id up = db[n].parent;
+    return up && db.is<n_call>(up) && db.as<n_call>(up).callee == n;
+  }
+
+  void step_to(peer & p, uint32_t pos) {
+    auto const & t = session.trace;
+    p.trace_pos = pos;
+    proto::s_trace out{true, pos, uint32_t(t.size()), {}, {}, {}, trace_error};
+    if(t.empty()) {
+      out.output = trace_output;
+      return send(p, out);
+    }
+    auto const & e = t[pos];
+    out.node = node_id(e.node);
+    out.output = trace_output.substr(0, std::min<std::size_t>(e.out, trace_output.size()));
+    // Stack: For each depth, a function of the last step of that depth
+    for(uint32_t d = e.depth; d >= 1; --d)
+      for(uint32_t i = pos + 1; i-- > 0;)
+        if(t[i].depth == d) {
+          node_id f = enclosing(node_id(t[i].node));
+          out.stack.push_back(f ? std::string(session.db.strings.text(session.db.as<n_fn>(f).name)) : std::string("?"));
+          break;
+        }
+    send(p, out);
+    // values of subexpressions of the current instruction (same depth) - icons
+    uint32_t from = pos;
+    while(from > 0 && !(is_stmt(from - 1) && t[from - 1].depth == e.depth)) --from;
+    std::map<uint32_t, std::string> values;
+    for(uint32_t i = from; i <= pos; ++i)
+      if(t[i].depth == e.depth && !t[i].value.empty() && t[i].value != "()") values[t[i].node] = t[i].value;
+    for(auto & w: p.views) {
+      if(!w.root) continue;
+      std::vector<proto::s_mark> marks;
+      for(auto const & [n, val]: values)
+        if(node_id x(n); w.layout_of(x) != ~uint32_t{0} && !quiet_value(x)) marks.push_back({x, "value", val});
+      if(w.layout_of(node_id(e.node)) != ~uint32_t{0}) marks.push_back({node_id(e.node), "current", ""});
+      send(p, proto::s_decor{w.id, session.db.revision, marks});
+    }
   }
 
   editor_view * find(peer & p, uint32_t id) {

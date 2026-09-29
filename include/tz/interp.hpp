@@ -309,6 +309,20 @@ struct interpreter {
 
   bool live(node_id fn) const { return live_fns.contains(fn.value); }
 
+  // Launch track (debugger, author's decision): execution path (§13.2) - node, value,
+  // depth of calls, how much is brought to this step. Just what VM already knows:
+  //
+// - free of symbol tables
+  // and "debugging build"; built-in calls are the same steps.
+  struct trace_rec {
+    uint32_t node;
+    uint32_t depth;
+    uint32_t out;
+    std::string value;
+  };
+  std::vector<trace_rec> * tracer = nullptr;
+  static constexpr std::size_t trace_limit = 200000;
+
   // Layers of function - contexts of its use
 // 
 // 
@@ -782,8 +796,24 @@ struct interpreter {
     book.written(cell, whole);
   }
 
+  void trace_step(node_id n, flow const & f) {
+    if(tracer->size() >= trace_limit) return;
+    std::string v = f.kind == flow_kind::normal ? show_v(f.v) : f.kind == flow_kind::thr ? "исключение" : f.kind == flow_kind::ret ? "return" : "";
+    if(v.size() > 60) { // boundary of the symbol UTF-8
+      std::size_t cut = 57;
+      while(cut > 0 && (static_cast<unsigned char>(v[cut]) & 0xC0) == 0x80) --cut;
+      v = v.substr(0, cut) + "…";
+    }
+    tracer->push_back({n.value, uint32_t(frames.size()), captured ? uint32_t(captured->size()) : 0, std::move(v)});
+  }
+
   flow eval(node_id n, scope * env, uint32_t frame) {
-    if(!checking()) return std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
+    if(!checking()) {
+      if(!tracer) return std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
+      flow f = std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
+      trace_step(n, f);
+      return f;
+    }
     if(fuel && --*fuel == 0) fail("бюджет статического разбора исчерпан", db[n].where);
     // Check mode: observation - what value the node received and whether there was a
     // runtime effect (necessary for residual program, §13.2)

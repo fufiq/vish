@@ -42,6 +42,7 @@ const runArgs = byId('run-args') as HTMLInputElement;
 const runOutput = byId('run-output');
 const views = new Map<number, ViewElement>();
 let active: ViewElement | undefined;
+let debugging = false; // Open track: Escape - VM (exit)
 
 function send(m: ClientMsg): void {
   window.vm.send(encodeClient(m));
@@ -85,7 +86,7 @@ function receive(m: ServerMsg): void {
       return;
     case 's_decor': {
       const error = views.get(m.view)?.showMarks(m);
-      if (views.get(m.view) !== active) return;
+      if (views.get(m.view) !== active || debugging) return; // track-line
       statusLine.textContent =
         error === undefined
           ? `ревизия ${String(m.revision)}`
@@ -103,6 +104,17 @@ function receive(m: ServerMsg): void {
       runOutput.textContent = m.text === '' ? '(вывода нет)' : m.text;
       runOutput.toggleAttribute('error', !m.ok);
       statusLine.textContent = m.ok ? 'выполнено' : 'ошибка при исполнении';
+      return;
+    case 's_trace':
+      debugging = m.active;
+      if (!m.active) {
+        statusLine.textContent = 'трасса закрыта';
+        return;
+      }
+      runPanel.hidden = false;
+      runOutput.textContent = m.output + (m.error === '' ? '' : `\n${m.error}`);
+      runOutput.toggleAttribute('error', m.error !== '');
+      statusLine.textContent = `шаг ${String(m.step + 1)} из ${String(m.total)} · ${m.stack.join(' ← ')} · F10 дальше, Shift+F10 назад, F11 внутрь, Shift+F11 наружу, F4 до курсора, Escape — выйти`;
       return;
     case 's_saved':
       statusLine.textContent = `сохранено: ${m.path}`;
@@ -151,6 +163,12 @@ window.vm.onReady(() => {
 
 // F5 - start the current state: a panel with stdin and arguments (the window
 // remembers them - an unimportant state) and output; Ctrl + S - save the base.
+function trace(): void {
+  runPanel.hidden = false;
+  runOutput.textContent = '…';
+  send({ type: 'c_trace', stdin_text: runStdin.value, args: runArgs.value });
+}
+
 function run(): void {
   runPanel.hidden = false;
   runOutput.textContent = '…';
@@ -201,12 +219,16 @@ for (const pane of [app, side]) {
       run();
       return;
     }
+    if (e.key === 'F6') {
+      trace();
+      return;
+    }
     if (e.ctrlKey && e.key === 's') {
       send({ type: 'c_save' });
       return;
     }
     // Escape in the second panel without an open list - close the panel
-    if (e.key === 'Escape' && pane === side && !v.listOpen) {
+    if (e.key === 'Escape' && pane === side && !v.listOpen && !debugging) {
       closeSide();
       return;
     }

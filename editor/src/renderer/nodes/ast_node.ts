@@ -13,6 +13,7 @@ export interface NodeMarks {
   value?: string;
   error?: string;
   dead?: boolean;
+  current?: boolean; // runway
 }
 
 export const badgeSheet = new CSSStyleSheet();
@@ -63,6 +64,7 @@ export abstract class ASTNode extends HTMLElement {
     this.#error = m.error ?? '';
     this.toggleAttribute('error', m.error !== undefined);
     this.toggleAttribute('dead', m.dead === true);
+    this.toggleAttribute('current', m.current === true);
     this.title =
       this.#error ||
       (m.dead ? 'не исполняется в этом контексте' : '') ||

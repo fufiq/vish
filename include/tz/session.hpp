@@ -98,6 +98,26 @@ struct vm_session {
     return out;
   }
 
+  // Run with track: interpreter (machine code does not write the track), the same main().
+  std::string trace_run(std::vector<std::string> const & args, bool & ok, std::string & error) {
+    std::vector<std::string> a{name};
+    a.insert(a.end(), args.begin(), args.end());
+    interpreter vm(db, root, a, mode::run, interpreter::known_inputs{stdin_lines});
+    trace.clear();
+    vm.tracer = &trace;
+    std::string out;
+    vm.capture_output(&out);
+    ok = true;
+    error.clear();
+    try {
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      error = render(d, name, db);
+      ok = false;
+    }
+    return out;
+  }
+
   std::string residual(std::vector<std::string> const & args) {
     std::vector<std::string> a{name};
     a.insert(a.end(), args.begin(), args.end());
@@ -155,6 +175,7 @@ struct vm_session {
   // Last check: node types in all contexts and errors (editor, §13.1).
   std::map<uint32_t, std::vector<std::string>> node_types;
   std::map<uint32_t, std::vector<uint32_t>> call_targets; // call node → overload selected in instance
+  std::vector<interpreter::trace_rec> trace; // launch-track
   std::map<uint32_t, std::map<std::string, interpreter::layer_info>> layers; // function → layers (contexts)
   std::vector<diagnostic> errors;
 };
