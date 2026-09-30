@@ -215,7 +215,7 @@ struct jit_codegen {
   void run() {
     using namespace x64;
     auto const & f = db.as<n_fn>(fn);
-    code.push(rbp);
+    psh(rbp);
     mv(rbp, rsp);
     frame_patch = code.frame_alloc();
     // registers of variables that the caller is obliged to save - in the frame slots
@@ -241,7 +241,7 @@ struct jit_codegen {
         st(rbp, s.off, rax); // array_v * - always in the frame (transmitted further)
         arrays.push_back({s, i});
       } else {
-        if(s.type == jt::f64_) code.movq(xmm0, rax);
+        if(s.type == jt::f64_) mq(xmm0, rax);
         store_var(s);
       }
     }
@@ -269,7 +269,7 @@ struct jit_codegen {
     code.bind(epilogue);
     for(auto [r, off]: saved) ld(r, rbp, off);
     mv(rsp, rbp);
-    code.pop(rbp);
+    pp(rbp);
     code.ret();
     for(auto & st: stubs) {
       emit_stub(st);
@@ -510,7 +510,7 @@ struct jit_codegen {
     using namespace x64;
     code.bind(st.at);
     if(st.to) {
-      if(st.pop) code.add_rsp(int32_t(8 * st.pop));
+      if(st.pop) stack_free(int32_t(8 * st.pop));
       code.jmp(*st.to);
       return;
     }
@@ -527,21 +527,21 @@ struct jit_codegen {
     using namespace x64;
     spill_xmm();
     bool pad = depth % 2 != 0;
-    if(pad) code.sub_rsp(8);
+    if(pad) stack_alloc(8);
     code.mov_addr(rax, fn);
     code.call(rax);
-    if(pad) code.add_rsp(8);
+    if(pad) stack_free(8);
     reload_xmm();
   }
 
   // Result: i64/bool/array - rax, f64 - xmm0. Rax for return.
   void to_result(jt t) {
-    if(t == jt::f64_) code.movq(x64::rax, x64::xmm0);
+    if(t == jt::f64_) mq(x64::rax, x64::xmm0);
   }
 
   void push_result(jt t) {
-    if(t == jt::f64_) code.movq(x64::rax, x64::xmm0);
-    code.push(x64::rax);
+    if(t == jt::f64_) mq(x64::rax, x64::xmm0);
+    psh(x64::rax);
     ++depth;
   }
 
@@ -552,9 +552,9 @@ struct jit_codegen {
       if(t == jt::f64_) mvf(xmm1, xmm0);
       else mv(rcx, rax);
     }
-    code.pop(rax);
+    pp(rax);
     --depth;
-    if(t == jt::f64_) code.movq(xmm0, rax);
+    if(t == jt::f64_) mq(xmm0, rax);
   }
 
   // Observation of node in the current embedding context: Each call site has its own
@@ -591,7 +591,7 @@ struct jit_codegen {
       double x = o->v.as<double>();
       std::memcpy(&bits, &x, 8);
       mv(rax, bits);
-      code.movq(xmm0, rax);
+      mq(xmm0, rax);
       t = jt::f64_;
       return true;
     }
@@ -615,7 +615,7 @@ struct jit_codegen {
     uint64_t bits;
     std::memcpy(&bits, &x.value, 8);
     mv(x64::rax, bits);
-    code.movq(x64::xmm0, x64::rax);
+    mq(x64::xmm0, x64::rax);
     return jt::f64_;
   }
 
@@ -708,12 +708,12 @@ struct jit_codegen {
     if(o.args.size() == 1) {
       jt t = gen_value(o.args[0]);
       if(op == "-" && t == jt::i64_) {
-        code.neg(rax);
+        ng(rax);
         return t;
       }
       if(op == "-" && t == jt::f64_) {
         mv(rax, uint64_t(0x8000000000000000ull));
-        code.movq(xmm1, rax);
+        mq(xmm1, rax);
         code.xorpd(xmm0, xmm1);
         return t;
       }
@@ -782,7 +782,7 @@ struct jit_codegen {
         double x = v.as<double>();
         std::memcpy(&bits, &x, 8);
         mv(rdx, bits);
-        code.movq(xmm1, rdx);
+        mq(xmm1, rdx);
         return jt::f64_;
       }
       mv(rcx, v.is<bool>() ? uint64_t(v.as<bool>()) : uint64_t(v.as<int64_t>()));
@@ -872,6 +872,9 @@ struct jit_codegen {
     if(auto it = bytes_cache.find({s.value, key}); it != bytes_cache.end()) return it->second;
     scope * regs = an.new_scope(an.globals);
     interpreter::scope_hold hold{an, regs};
+    // JIT register model - environment names code generator: battery and second operand register
+    regs->declare(an.sym("acc"), value(int64_t(A::code_reg(x64::rax))));
+    regs->declare(an.sym("second"), value(int64_t(A::code_reg(x64::rcx))));
     auto const & ps = db.as<n_fn>(s).params;
     for(std::size_t k = 0; k < ps.size(); ++k) regs->declare(db.as<n_param>(ps[k]).name, value(args[k]));
     if(!label_name.empty()) regs->declare(an.sym(label_name), value(off));
@@ -944,6 +947,35 @@ struct jit_codegen {
   void stxf(x64::reg base, x64::reg index, x64::xmm r) {
     if(!emit_lang_args(fn, "store_index_f64", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(base), A::code_reg(index), A::code_xreg(r)})) code.movsd_store_idx(base, index, r);
   }
+  // time stack (except for a couple of frames in the prologue), transformations, forwarding gprеxmm
+  void psh(x64::reg r) {
+    if(r == x64::rbp || !emit_lang_args(fn, "push_tmp", {jt::i64_}, {A::code_reg(r)})) code.push(r);
+  }
+  void pp(x64::reg r) {
+    if(r == x64::rbp || !emit_lang_args(fn, "pop_tmp", {jt::i64_}, {A::code_reg(r)})) code.pop(r);
+  }
+  void stack_alloc(int32_t n) {
+    if(!emit_lang_args(fn, "stack_alloc", {jt::i64_}, {n})) code.sub_rsp(n);
+  }
+  void stack_free(int32_t n) {
+    if(!emit_lang_args(fn, "stack_free", {jt::i64_}, {n})) code.add_rsp(n);
+  }
+  void cvt_f(x64::xmm d, x64::reg r) {
+    if(!emit_lang_args(fn, "to_f64", {jt::i64_, jt::i64_}, {A::code_xreg(d), A::code_reg(r)})) code.cvtsi2sd(d, r);
+  }
+  void cvt_i(x64::reg d, x64::xmm r) {
+    if(!emit_lang_args(fn, "to_i64", {jt::i64_, jt::i64_}, {A::code_reg(d), A::code_xreg(r)})) code.cvttsd2si(d, r);
+  }
+  void mq(x64::xmm d, x64::reg r) {
+    if(!emit_lang_args(fn, "move_to_f64", {jt::i64_, jt::i64_}, {A::code_xreg(d), A::code_reg(r)})) code.movq(d, r);
+  }
+  void mq(x64::reg d, x64::xmm r) {
+    if(!emit_lang_args(fn, "move_from_f64", {jt::i64_, jt::i64_}, {A::code_reg(d), A::code_xreg(r)})) code.movq(d, r);
+  }
+  void ng(x64::reg r) {
+    if(!emit_lang_args(fn, "negate", {jt::i64_}, {A::code_reg(r)})) code.neg(r);
+  }
+
   // boundary check: k < n without a sign, otherwise - trap out_of_bounds (label `fault`)
   void bounds(x64::reg k, x64::reg size, node_id n) {
     using namespace x64;
@@ -990,7 +1022,7 @@ struct jit_codegen {
       emit_lang(n, cat("infix", op), {t, t}, "fault", &fault(jit_fault_kind::div_zero, n));
       return t;
     }
-    if((t == jt::i64_ && op != "/" && op != "%") || (t == jt::f64_ && (op == "+" || op == "-" || op == "*" || op == "/")))
+    if((t == jt::i64_ && op != "/" && op != "%") || t == jt::f64_)
       if(emit_lang(n, cat("infix", op), {t, t})) {
         bool cmp = op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=";
         return cmp ? jt::bool_ : t;
@@ -1014,7 +1046,7 @@ struct jit_codegen {
         code.jcc(e, fault(jit_fault_kind::div_zero, n));
         code.cmp_imm8(rcx, -1); // INT_MIN / -1 should not fall: modular arithmetic
         code.jcc(ne, normal);
-        if(op == "/") code.neg(rax);
+        if(op == "/") ng(rax);
         else mv(rax, uint64_t(0));
         code.jmp(done);
         code.bind(normal);
@@ -1122,14 +1154,14 @@ struct jit_codegen {
       if(gen_value(o.args[1]) != et) throw jit_unsupported{n, "тип элемента"};
       push_result(et); // [rsp+8] - right side (after index)
       gen_checked_index(s, ix.index, target); // rax - index
-      code.push(rax); // [rsp] - index
+      psh(rax); // [rsp] - index
       ++depth;
       if(op != "=") {
         reg b = data_base(s, rcx);
         if(et == jt::f64_) {
           ldxf(xmm0, b, rax);
           ld(r8, rsp, 8);
-          code.movq(xmm1, r8);
+          mq(xmm1, r8);
         } else {
           ldx(rax, b, rax);
           ld(rcx, rsp, 8);
@@ -1137,12 +1169,12 @@ struct jit_codegen {
         binary(n, op.substr(0, 1), et);
       } else if(et == jt::f64_) {
         ld(rax, rsp, 8);
-        code.movq(xmm0, rax);
+        mq(xmm0, rax);
       } else {
         ld(rax, rsp, 8);
       }
-      code.pop(rdx);
-      code.add_rsp(8);
+      pp(rdx);
+      stack_free(8);
       depth -= 2;
       reg b = data_base(s, rcx);
       if(et == jt::f64_) stxf(b, rdx, xmm0);
@@ -1156,10 +1188,10 @@ struct jit_codegen {
   void pop_second(jt t) {
     using namespace x64;
     if(t == jt::f64_) {
-      code.pop(rax);
-      code.movq(xmm1, rax);
+      pp(rax);
+      mq(xmm1, rax);
     } else {
-      code.pop(rcx);
+      pp(rcx);
     }
     --depth;
   }
@@ -1170,12 +1202,12 @@ struct jit_codegen {
     auto name = db.strings.text(db.as<n_ident>(c.callee).name);
     if(name == "f64" && c.args.size() == 1) {
       if(gen_value(c.args[0]) != jt::i64_) throw jit_unsupported{n, "f64(не i64)"};
-      code.cvtsi2sd(xmm0, rax);
+      cvt_f(xmm0, rax);
       return jt::f64_;
     }
     if(name == "i64" && c.args.size() == 1) {
       if(gen_value(c.args[0]) != jt::f64_) throw jit_unsupported{n, "i64(не f64)"};
-      code.cvttsd2si(rax, xmm0);
+      cvt_i(rax, xmm0);
       return jt::i64_;
     }
     if(slot const * s = find(db.as<n_ident>(c.callee).name); s && s->thunk) return call_block(n, c, *s);
@@ -1273,16 +1305,16 @@ struct jit_codegen {
     code.lea(rdi, rbp, base);
     spill_xmm();
     bool pad = depth % 2 != 0;
-    if(pad) code.sub_rsp(8);
+    if(pad) stack_alloc(8);
     code.mov_addr(rax, &callee->entry);
     code.call_mem(rax, 0);
-    if(pad) code.add_rsp(8);
+    if(pad) stack_free(8);
     reload_xmm();
     // Error in the code called - come out, the mark is already
     code.mov_addr(rcx, &jit_fault);
     code.cmp_mem_imm8(rcx, 0, 0);
     code.jcc(ne, epilogue);
-    if(callee->result == jt::f64_) code.movq(xmm0, rax);
+    if(callee->result == jt::f64_) mq(xmm0, rax);
     return callee->result;
   }
 
@@ -1313,7 +1345,7 @@ struct jit_codegen {
         if(carried != elem_of(st)) throw jit_unsupported{c.args[1], "тип записи ≠ типу потока"};
         to_result(carried);
         mv(rdx, rax);
-        code.pop(rsi);
+        pp(rsi);
         --depth;
       } else mv(rsi, rax);
       if(op == 2) result = carried = elem_of(st);
@@ -1325,7 +1357,7 @@ struct jit_codegen {
     code.mov_addr(rcx, &jit_fault);
     code.cmp_mem_imm8(rcx, 0, 0);
     code.jcc(ne, epilogue); // Error/Cancel in VM: Exit, mark is worth
-    if(result == jt::f64_) code.movq(xmm0, rax);
+    if(result == jt::f64_) mq(xmm0, rax);
     return result;
   }
 
@@ -1623,7 +1655,7 @@ struct jit_codegen {
       auto want = db.strings.text(db.as<n_ident>(v.type).name);
       // i64 → f64: literal (parsing checked for accuracy); run-time - value for 2^53 - conceivability test, it is not in machine code
       if(want == "f64" && t == jt::i64_ && db.is<n_int>(v.init)) {
-        code.cvtsi2sd(xmm0, rax);
+        cvt_f(xmm0, rax);
         t = jt::f64_;
       } else if(want != "auto" && want != jt_name(t)) throw jit_unsupported{n, cat(want, " из ", jt_name(t))};
     }
@@ -1657,7 +1689,7 @@ struct jit_codegen {
       to_result(t);
       code.jmp(epilogue); // epilogue restores rsp
     } else {
-      if(depth > fr.depth) code.add_rsp(int32_t(8 * (depth - fr.depth))); // transient
+      if(depth > fr.depth) stack_free(int32_t(8 * (depth - fr.depth))); // transient
       code.jmp(*fr.exit);
     }
     return jt::unit;
@@ -1705,7 +1737,7 @@ struct jit_codegen {
   jt jump_loop(node_id n, bool brk) {
     if(loops.empty()) throw jit_unsupported{n, "break/continue вне цикла машинного кода"};
     loop_frame const & lf = loops.back();
-    if(depth > lf.depth) code.add_rsp(int32_t(8 * (depth - lf.depth))); // transient
+    if(depth > lf.depth) stack_free(int32_t(8 * (depth - lf.depth))); // transient
     if(!emit_lang(n, "jump", {}, "target", brk ? lf.done : lf.top)) code.jmp(brk ? *lf.done : *lf.top);
     return jt::unit;
   }
@@ -1771,7 +1803,7 @@ struct jit_codegen {
             if(c.var.type != ty) throw jit_unsupported{n, "тип catch"};
             store_var(c.var);
           }
-          if(depth > tf->depth) code.add_rsp(int32_t(8 * (depth - tf->depth)));
+          if(depth > tf->depth) stack_free(int32_t(8 * (depth - tf->depth)));
           code.jmp(*c.at);
           ++throw_jumps;
           return jt::unit;

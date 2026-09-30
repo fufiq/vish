@@ -7,6 +7,9 @@
 // out: 2 true false 4.5
 // out: 3 -3 1 -1 -9223372036854775808 0 -1
 // jit-compiled: q
+// jit-compiled: flt
+// jit-compiled: conv
+// out: false true true true false false 10 -3
 // jit-compiled: r
 // machine
 // jit-stats: sum(array<i64>) → 
@@ -65,9 +68,16 @@ r(i64 a, i64 b) => a % b;
 
 safe(i64 a, i64 b) => try { a / b } catch(div_by_zero e) { -1 };
 
+// сравнения f64 с NaN: всё, кроме !=, ложно
+flt(f64 a, f64 b) => (a == b) || ((a < b) && ((a <= b) && ((b > a) && (b >= a))));
+
+conv(i64 k, f64 x) => i64(f64(k) * x) - k;
+
 main() {
   print(sum(array{1, 2, 3, 40}), diff(2, 40), 0xFF, (bits(5) - bits(0)) + 2, 3 & 5, 3 * 4, -8 >> 2);
   print(count(array{5, 1, 7, 2}, 5), same(3, 3), same(1, 2), dot(array{1.0, 2.0}, array{3.0, 4.0}));
   m = -9223372036854775807 - 1;
   print(q(7, 2), q(-7, 2), r(7, 3), r(-7, 3), q(m, -1), r(m, -1), safe(5, 0));
+  n = 0.0 / 0.0;
+  print(flt(n, 1.0), n != n, flt(1.0, 2.0), flt(2.0, 2.0), flt(2.0, 1.0), flt(n, n), conv(7, 2.5), -(3));
 }

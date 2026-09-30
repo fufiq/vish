@@ -131,6 +131,11 @@ x64_u64(i64 v) => array{v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) &
 // disp8 = 0 (mod 01)
 x64_sib(i64 r, i64 base, i64 index) => if((base & 7) == 5) array{0x44 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7), 0x0} else array{0x4 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7)};
 
+// сравнения f64 (ucomisd): с NaN всё, кроме !=, ложно; результат — 0/1 в acc
+x64_set(i64 cc, i64 r) => array{0xF, 0x90 | cc, 0xC0 | r};
+
+x64_fcmp(i64 cc, i64 a, i64 b) => array{...x64_sse(0x66, 0x2E, a, b), ...x64_set(cc, acc), ...x64_0f(0xB6, acc, acc)};
+
 // / и % с ловушкой (fault — смещение от начала этих байтов до ловушки деления на
 // ноль): test b, b; je fault; cmp b, -1; jne обычное; (neg a | xor a, a); jmp
 // конец; обычное: cqo; idiv b; [mov a, rdx]; конец. INT_MIN / -1 — модульно, без
@@ -146,6 +151,13 @@ a64_rrr(i64 op, i64 d, i64 n, i64 m) => a64_word(op | (m << 16) | (n << 5) | d);
 a64_imm64(i64 d, i64 v) => array{...a64_word(0xD2800000 | ((v & 0xFFFF) << 5) | d), ...(if(((v >> 16) & 0xFFFF) != 0) a64_word(0xF2A00000 | (((v >> 16) & 0xFFFF) << 5) | d) else array{}), ...(if(((v >> 32) & 0xFFFF) != 0) a64_word(0xF2C00000 | (((v >> 32) & 0xFFFF) << 5) | d) else array{}), ...(if(((v >> 48) & 0xFFFF) != 0) a64_word(0xF2E00000 | (((v >> 48) & 0xFFFF) << 5) | d) else array{})};
 
 a64_mem(i64 unscaled, i64 regoff, i64 t, i64 base, i64 disp) => if((disp >= -256) && (disp <= 255)) a64_word(unscaled | ((disp & 0x1FF) << 12) | (base << 5) | t) else array{...a64_imm64(16, disp), ...a64_word(regoff | (16 << 16) | (base << 5) | t)};
+
+a64_add_imm(i64 d, i64 s, i64 v) => if((v >= 0) && (v < 4096)) a64_word(0x91000000 | (v << 10) | (s << 5) | d) else if((v < 0) && (v > -4096)) a64_word(0xD1000000 | ((0 - v) << 10) | (s << 5) | d) else array{...a64_imm64(16, v), ...a64_word(0x8B206000 | (16 << 16) | (s << 5) | d)};
+
+// fcmp a, b; cset acc (условие AArch64: gt C, ge A; вещественные флаги)
+a64_cset(i64 cc, i64 d) => a64_word(0x9A9F07E0 | ((cc ^ 1) << 12) | d);
+
+a64_fcmp(i64 cc, i64 a, i64 b) => array{...a64_word(0x1E602000 | (b << 16) | (a << 5)), ...a64_cset(cc, acc)};
 
 a64_scaled(i64 base, i64 disp) => if(base == 31) 2 * disp else disp;
 
@@ -187,6 +199,21 @@ amd64(expr body) {
   using operator (f64 a) - (f64 b) => x64_sse(0xF2, 0x5C, a, b); // subsd
   using operator (f64 a) * (f64 b) => x64_sse(0xF2, 0x59, a, b); // mulsd
   using operator (f64 a) / (f64 b) => x64_sse(0xF2, 0x5E, a, b); // divsd
+  using operator (f64 a) == (f64 b) => array{...x64_sse(0x66, 0x2E, a, b), ...x64_set(0x4, acc), ...x64_set(0xB, second), 0x20, 0xC0 | ((second & 7) << 3) | (acc & 7), ...x64_0f(0xB6, acc, acc)}; // sete; setnp; and
+  using operator (f64 a) != (f64 b) => array{...x64_sse(0x66, 0x2E, a, b), ...x64_set(0x5, acc), ...x64_set(0xA, second), 0x8, 0xC0 | ((second & 7) << 3) | (acc & 7), ...x64_0f(0xB6, acc, acc)}; // setne; setp; or
+  using operator (f64 a) < (f64 b) => x64_fcmp(0x7, b, a); // seta, операнды наоборот
+  using operator (f64 a) <= (f64 b) => x64_fcmp(0x3, b, a); // setae
+  using operator (f64 a) > (f64 b) => x64_fcmp(0x7, a, b);
+  using operator (f64 a) >= (f64 b) => x64_fcmp(0x3, a, b);
+  push_tmp(i64 r) => if(r >= 8) array{0x41, 0x50 + (r & 7)} else array{0x50 + r};
+  pop_tmp(i64 r) => if(r >= 8) array{0x41, 0x58 + (r & 7)} else array{0x58 + r};
+  stack_alloc(i64 n) => array{0x48, 0x81, 0xEC, ...x64_rel32(n)}; // sub rsp, n
+  stack_free(i64 n) => array{0x48, 0x81, 0xC4, ...x64_rel32(n)}; // add rsp, n
+  to_f64(i64 d, i64 s) => array{0xF2, ...x64_rex(1, d, 0, s), 0xF, 0x2A, 0xC0 | ((d & 7) << 3) | (s & 7)}; // cvtsi2sd
+  to_i64(i64 d, i64 s) => array{0xF2, ...x64_rex(1, d, 0, s), 0xF, 0x2C, 0xC0 | ((d & 7) << 3) | (s & 7)}; // cvttsd2si
+  move_to_f64(i64 d, i64 s) => array{0x66, ...x64_rex(1, d, 0, s), 0xF, 0x6E, 0xC0 | ((d & 7) << 3) | (s & 7)}; // movq xmm, r
+  move_from_f64(i64 d, i64 s) => array{0x66, ...x64_rex(1, s, 0, d), 0xF, 0x7E, 0xC0 | ((s & 7) << 3) | (d & 7)}; // movq r, xmm
+  negate(i64 r) => array{0x48 | (r >> 3), 0xF7, 0xD8 | (r & 7)}; // neg r
   using operator (i64 a) == (i64 b) => x64_cmp(0x4, a, b);
   using operator (i64 a) != (i64 b) => x64_cmp(0x5, a, b);
   using operator (i64 a) < (i64 b) => x64_cmp(0xC, a, b);
@@ -225,6 +252,21 @@ arm64(expr body) {
   using operator (f64 a) - (f64 b) => a64_rrr(0x1E603800, a, a, b); // fsub
   using operator (f64 a) * (f64 b) => a64_rrr(0x1E600800, a, a, b); // fmul
   using operator (f64 a) / (f64 b) => a64_rrr(0x1E601800, a, a, b); // fdiv
+  using operator (f64 a) == (f64 b) => array{...a64_word(0x1E602000 | (b << 16) | (a << 5)), ...a64_cset(0x0, acc), ...a64_cset(0x7, second), ...a64_rrr(0x8A000000, acc, acc, second)}; // eq и vc
+  using operator (f64 a) != (f64 b) => array{...a64_word(0x1E602000 | (b << 16) | (a << 5)), ...a64_cset(0x1, acc), ...a64_cset(0x6, second), ...a64_rrr(0xAA000000, acc, acc, second)}; // ne или vs
+  using operator (f64 a) < (f64 b) => a64_fcmp(0xC, b, a);
+  using operator (f64 a) <= (f64 b) => a64_fcmp(0xA, b, a);
+  using operator (f64 a) > (f64 b) => a64_fcmp(0xC, a, b);
+  using operator (f64 a) >= (f64 b) => a64_fcmp(0xA, a, b);
+  push_tmp(i64 r) => a64_word(0xF81F0FE0 | r); // str r, [sp, #-16]!
+  pop_tmp(i64 r) => a64_word(0xF84107E0 | r); // ldr r, [sp], #16
+  stack_alloc(i64 n) => a64_add_imm(31, 31, -2 * n); // слоты по 16 байт
+  stack_free(i64 n) => a64_add_imm(31, 31, 2 * n);
+  to_f64(i64 d, i64 s) => a64_word(0x9E620000 | (s << 5) | d); // scvtf
+  to_i64(i64 d, i64 s) => a64_word(0x9E780000 | (s << 5) | d); // fcvtzs
+  move_to_f64(i64 d, i64 s) => a64_word(0x9E670000 | (s << 5) | d); // fmov d, x
+  move_from_f64(i64 d, i64 s) => a64_word(0x9E660000 | (s << 5) | d); // fmov x, d
+  negate(i64 r) => a64_word(0xCB0003E0 | (r << 16) | r); // neg
   using operator (i64 a) == (i64 b) => a64_cmp(0x0, a, b);
   using operator (i64 a) != (i64 b) => a64_cmp(0x1, a, b);
   using operator (i64 a) < (i64 b) => a64_cmp(0xB, a, b);
