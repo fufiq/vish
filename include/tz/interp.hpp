@@ -3756,7 +3756,7 @@ struct interpreter {
   }
 
   flow select_and_invoke(std::vector<node_id> const & fns, std::vector<value> & vals, node_list const & args,
-      scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr) {
+      scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr, bool repacked = false) {
     scope * base = parent ? parent : globals; // local set: its environment
     struct candidate {
       node_id fn;
@@ -3835,6 +3835,29 @@ struct interpreter {
       else rejected.push_back(cat(describe_fn(f), ": ", why));
     }
 
+    // No one approached directly - the argument pack and the tuple are interchangeable:
+// 
+// 
+    // My:* This is a level below a direct coincidence - it only tries
+    // when no one comes straight.
+    if(good.empty() && !repacked) {
+      bool pack = std::ranges::any_of(fns, [&](node_id f) {
+        auto const & ps = db.as<n_fn>(f).params;
+        return ps.size() == 1 && db.as<n_param>(ps[0]).type && db.is<n_pat>(db.as<n_param>(ps[0]).type) &&
+            str(db.as<n_ident>(db.as<n_pat>(db.as<n_param>(ps[0]).type).type).name) == "array";
+      });
+      if(pack && vals.size() != 1) { // f(1, 2) → f(array{1, 2})
+        std::vector<value> packed{value(array_v::of(vals))};
+        return select_and_invoke(fns, packed, {}, env, frame, site, parent, true);
+      }
+      value const * x = vals.size() == 1 ? shape_of(vals[0]) : nullptr;
+      if(x && x->is<array_v>() && (vals[0].known() || !vals[0].is<rt_v>())) { // g(t) → g(t[0], t[1], …)
+        std::vector<value> spread;
+        for(uint32_t k = 0; k < x->as<array_v>().size(); ++k) spread.push_back(x->as<array_v>().get(k));
+        if(std::ranges::any_of(fns, [&](node_id f) { return db.as<n_fn>(f).params.size() == spread.size() || (rest_param(f) && spread.size() + 1 >= db.as<n_fn>(f).params.size()); }))
+          return select_and_invoke(fns, spread, {}, env, frame, site, parent, true);
+      }
+    }
     // all cut off values - runtime - overload found no branch: exception
     // 
     if(good.empty() && by_value && by_value == rejected.size()) {

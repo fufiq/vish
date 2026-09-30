@@ -698,7 +698,7 @@ struct process_machine {
   // stack: nargs pieces). The choice is by arrogance and types of parameters.
   node_id site_node; // Call Node - to mark "hidden here"
   uint32_t invoke_parent = m_none; // calling a local set of overloads: its environment (takes invoke)
-  void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where) {
+  void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where, bool repacked = false) {
     auto & f = fib();
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
     node_id chosen = override_for(fns, args); // Operation in context (checked) - its redefinition
@@ -773,6 +773,31 @@ struct process_machine {
         chosen_conv = std::move(conv);
         tie = false;
       } else if(score == best) tie = true;
+    }
+    // cortege, like the interpreter: no one directly approached
+    if(!chosen && !repacked) {
+      bool pack = std::ranges::any_of(fns, [&](node_id fn) {
+        auto const & ps = db.as<n_fn>(fn).params;
+        return ps.size() == 1 && db.as<n_param>(ps[0]).type && db.is<n_pat>(db.as<n_param>(ps[0]).type) &&
+            helper.str(db.as<n_ident>(db.as<n_pat>(db.as<n_param>(ps[0]).type).type).name) == "array";
+      });
+      if(pack && nargs != 1) { // f(1, 2) → f(array{1, 2})
+        m_arr packed;
+        for(auto & a: args) packed.items.push_back(deref(a));
+        f.vals.resize(f.vals.size() - nargs);
+        f.vals.push_back(mval{std::move(packed)});
+        invoke_parent = parent;
+        return invoke(fns, 1, caller_frame, where, true);
+      }
+      if(nargs == 1 && deref(args[0]).is<m_arr>()) { // g(t) → g(t[0], t[1], …)
+        auto items = deref(args[0]).as<m_arr>().items;
+        if(std::ranges::any_of(fns, [&](node_id fn) { return db.as<n_fn>(fn).params.size() == items.size() || (helper.rest_param(fn) && items.size() + 1 >= db.as<n_fn>(fn).params.size()); })) {
+          f.vals.pop_back();
+          for(auto & e: items) f.vals.push_back(std::move(e));
+          invoke_parent = parent;
+          return invoke(fns, uint32_t(items.size()), caller_frame, where, true);
+        }
+      }
     }
     if(!chosen && by_value && by_value == rejected) {
       diagnostic d(cat("нет перегрузки ", helper.str(db.as<n_fn>(fns.front()).name), " для этих значений"), where, diag_kind::runtime);
