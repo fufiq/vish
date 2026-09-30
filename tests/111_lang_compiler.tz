@@ -5,6 +5,8 @@
 // out: 10 11.0 30 4 32
 // out: 6765 1024.0 18 ()
 // out: -1 -2
+// out: 4 -1 4 -21 105 7 5 -9
+// out: 43 3
 // jit-compiled: sq
 // jit-compiled: mx
 // jit-compiled: fact
@@ -26,6 +28,12 @@
 // jit-compiled: show
 // jit-compiled: over
 // jit-compiled: dz
+// jit-compiled: sdiv
+// jit-compiled: pick
+// jit-compiled: mid
+// jit-compiled: outer
+// jit-compiled: at_or
+// jit-stats: компилятор языка, исключений переходом: 1
 // jit-stats: fact(i64) → 
 // jit-stats: компилятор языка
 // machine
@@ -42,7 +50,9 @@
 // (for/while) — семантический инлайн: тип узла и перегрузку даёт разбор
 // экземпляра (jit_type), return в блоке — из функции, написавшей блок. Рекурсия —
 // настоящий вызов себя (call на своё начало, область аргументов — в кадре),
-// ошибка вызванного переносится в свои слоты.
+// ошибка вызванного переносится в свои слоты. try/catch/throw: catch выбран при
+// компиляции по типу — переход 
+// ошибка VM в try — тоже; не пойманное — в слоты области.
 sq(i64 x) => x * (x + 1);
 
 mx(i64 a, i64 b) => if(a > b) a else b;
@@ -142,6 +152,22 @@ over(xs, i64 i) => if(i > xs.size) 0 else xs[i] + over(xs, i + 1);
 
 dz(i64 n) => if(n == 0) 1 / n else dz(n - 1) + 1;
 
+sdiv(i64 a, i64 b) => try { a / b } catch(div_by_zero e) { -1 };
+
+pick(i64 x) => try {
+  if(x < 0) throw x * 10;
+  x + 1
+} catch(i64 v) { v - 1 };
+
+mid(i64 x) => try { 100 + (if(x > 0) x else throw 7.5) } catch(f64 v) { i64(v) };
+
+outer(i64 x) => {
+  if(x == 0) throw 42;
+  x
+}
+
+at_or(xs, i64 k) => try { xs[k] } catch(out_of_bounds e) { 0 - k };
+
 main() {
   print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
   print(poly(4) + 5, avg(2.0, 3.0, 1), avg(0.5, 1.5, -1), (avg(1.0, 1.0, 1) == 1.0) && ((0.1 + 0.2) != 0.3));
@@ -158,4 +184,7 @@ main() {
   r2 = try { over(ys, 0) } catch(out_of_bounds e) { -1 };
   q2 = try { dz(5) } catch(div_by_zero e) { -2 };
   print(r2, q2);
+  print(sdiv(9, 2), sdiv(1, 0), pick(3), pick(-2), mid(5), mid(-1), at_or(array{4, 5}, 1), at_or(array{4, 5}, 9));
+  r3 = try { outer(0) } catch(i64 v) { v + 1 };
+  print(r3, outer(3));
 }

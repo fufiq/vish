@@ -14,7 +14,7 @@
 // machine
 // jit-stats: sum(array<i64>) → 
 // jit-stats: bits(i64) → 
-// jit-stats: (prelude), от C++: 0 байт
+// jit-stats: bits(i64) → 
 // fmt-stable
 // store-roundtrip
 // Кодогенераторы на языке (§10.4): цель — контекст, в нём операция — её

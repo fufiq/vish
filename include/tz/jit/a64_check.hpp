@@ -127,9 +127,9 @@ struct a64_check {
       d_args.push_back(data_word(0));
       if(lang && a.array) data_word(0);
     }
-    if(lang) {
+    if(lang) { // type of error, node, thrown value, its type
       d_lang_fault = data_word(0);
-      data_word(0);
+      for(int k = 0; k < 3; ++k) data_word(0);
     }
     std::vector<uint64_t> d_headers;
     for(auto const & a: args) {
@@ -160,10 +160,10 @@ struct a64_check {
       imm(17, at(d_result));
       c.word(0xF8000220); // stur x0, [x17]
       if(lang) // Error slots from the field of arguments - in image tags (they are compared with host)
-        for(uint64_t k = 0; k < 2; ++k) {
+        for(uint64_t k = 0; k < 4; ++k) {
           imm(16, at(d_lang_fault + 8 * k));
           c.word(0xF8400211); // ldur x17, [x16]
-          imm(16, at(k ? d_node : d_fault));
+          imm(16, at(k == 0 ? d_fault : k == 1 ? d_node : k == 2 ? d_thrown : d_thrown_type));
           c.word(0xF8000211); // stur x17, [x16]
         }
       auto write = [&](uint64_t addr, uint64_t bytes) {

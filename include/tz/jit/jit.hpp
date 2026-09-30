@@ -137,6 +137,7 @@ struct jit_fn {
   std::string lang_from; // from where code generator (modules)
   uint32_t lang_bytes = 0; // byte of code from code generator language (the rest - C++: addresses host, spare)
   bool by_lang = false; // all code - compiler in language (jit_compile)
+  std::string lang_note; // statistician
   std::string lang_error; // The compiler on the language fell - the reason (code was given by gluing C++)
 };
 
@@ -173,7 +174,7 @@ struct jit_machine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка\n");
+      if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка", f->lang_note.empty() ? "" : cat(", ", f->lang_note), "\n");
       else if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, "), от C++: ", f->bytes - f->lang_bytes, " байт") : "", f->lang_error.empty() ? "" : cat(", компилятор языка не смог: ", f->lang_error), "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
@@ -217,6 +218,11 @@ struct jit_machine {
     }
     if(r.is<std::string>()) out.lang_error = r.as<std::string>(); // Failure of the compiler in the language
     if(!r.is<array_v>() || r.as<array_v>().size() == 0) return false;
+    if(r.as<array_v>().get(0).is<array_v>()) { // {bytes, note for statistics}
+      value note = r.as<array_v>().size() > 1 ? r.as<array_v>().get(1) : value();
+      if(note.is<std::string>()) out.lang_note = note.as<std::string>();
+      r = r.as<array_v>().get(0);
+    }
     A code;
     for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) code.byte(uint8_t(r.as<array_v>().get(k).as<int64_t>()));
     out.deps[lc.value] = db.node_revision(lc);
@@ -2298,11 +2304,12 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
       } else area.push_back(raw[i]);
     }
     std::size_t fault_at = area.size();
-    area.push_back(0);
-    area.push_back(0);
+    area.insert(area.end(), 4, 0); // type of error, node, thrown value, its type
     bits = entry(area.data());
-    jit_fault = area[fault_at]; // Error - from the slot that gave VM (not the host address in the code)
+    jit_fault = area[fault_at]; // Error - from slots given by VM (not the host address in the code)
     jit_fault_node = area[fault_at + 1];
+    jit_thrown = area[fault_at + 2];
+    jit_thrown_type = area[fault_at + 3];
   } else bits = entry(raw.data());
   auto fault = jit_fault_kind(jit_fault);
   if(shadow) a64->compare(*shadow, sargs, raw, code->result, bits, cat(db.strings.text(db.as<n_fn>(f).name), "(", jit_engine::types_str(param_types), ")"));
