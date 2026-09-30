@@ -3777,6 +3777,7 @@ struct interpreter {
     if(op == "*") return w(uint64_t(x) * uint64_t(y));
     if(op == "/" || op == "%") {
       if(y == 0) fail_rt("div_by_zero", "деление на ноль", where); // certain exception, not UB
+      if(y == -1) return op == "/" ? w(0 - uint64_t(x)) : value(int64_t(0)); // INT_MIN / -1 - modular, as in machine code
       return value(op == "/" ? x / y : x % y);
     }
     // bits (for encoding instructions in the language, §10.4); shift - module 64, like the

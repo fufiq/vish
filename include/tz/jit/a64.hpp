@@ -215,6 +215,7 @@ struct assembler {
   // --- coding ---
 
   void byte(uint8_t b) { buf.push_back(b); } // byte
+  void patch(uint32_t at, uint8_t b) { buf[at] = b; }
 
   void word(uint32_t w) {
     for(int k = 0; k < 4; ++k) buf.push_back(uint8_t(w >> (8 * k)));

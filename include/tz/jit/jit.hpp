@@ -272,6 +272,7 @@ struct jit_codegen {
     code.pop(rbp);
     code.ret();
     for(auto & st: stubs) emit_stub(st);
+    apply_lang_patches();
 
     code.set_frame(frame_patch, (uint32_t(slots) * 8 + 15) & ~15u);
     out.bytes = code.size();
@@ -822,7 +823,7 @@ struct jit_codegen {
 // 
 //.
   // code generator is taken from the database: the new one is added by the program, without building VM.
-  std::optional<std::vector<uint8_t>> lang_codegen(node_id n, std::string_view entity, jt t) {
+  std::optional<std::vector<uint8_t>> lang_codegen(node_id n, std::string_view entity, jt t, node_id * which = nullptr) {
     for(uint32_t i = db.size(); i-- > 0;) { // The last announcement is the first: the program redefines prelude
       if(!db.is<n_fn>(node_id(i)) || db.strings.text(db.as<n_fn>(node_id(i)).name) != A::target) continue;
       node_id body = db.as<n_fn>(node_id(i)).body;
@@ -835,35 +836,71 @@ struct jit_codegen {
           fits = fits && ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == jt_name(t);
         }
         if(!fits) continue;
-        // Operands - numbers of target registers: the first - battery, the second - second operands
-        scope * regs = an.new_scope(an.globals);
-        interpreter::scope_hold hold{an, regs};
-        bool fp = t == jt::f64_; // f64 - xmm0/xmm1, whole - rax/rcx
-        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[0]).name, value(int64_t(fp ? A::code_xreg(x64::xmm0) : A::code_reg(x64::rax))));
-        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[1]).name, value(int64_t(fp ? A::code_xreg(x64::xmm1) : A::code_reg(x64::rcx))));
-        auto r = an.eval(db.as<n_fn>(s).body, regs, 0);
-        value const & v = r.v;
-        if(!r.normal() || !v.is<array_v>()) throw jit_unsupported{n, cat("кодогенератор ", A::target, " ", entity, ": ожидался массив байтов")};
-        std::vector<uint8_t> bytes;
-        for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) {
-          value b = v.as<array_v>().get(k);
-          if(!b.is<int64_t>() || b.as<int64_t>() < 0 || b.as<int64_t>() > 255) throw jit_unsupported{n, cat("кодогенератор ", A::target, " ", entity, ": байт вне 0..255")};
-          bytes.push_back(uint8_t(b.as<int64_t>()));
-        }
         out.deps[s.value] = db.node_revision(s); // editing code generator - recompilation
         node_id m = s;
         while(db[m].parent) m = db[m].parent;
         std::string from = db.is<n_module>(m) && db.as<n_module>(m).name ? std::string(db.strings.text(db.as<n_module>(m).name)) : std::string("программа");
         if(!std::ranges::contains(lang_from, from)) lang_from.push_back(from);
-        return bytes;
+        if(which) *which = s;
+        return run_codegen(n, s, t, 0);
       }
     }
     return std::nullopt;
   }
 
+  // The value of code generator is bytes. Operands are the register numbers of the target (the first is
+  // the battery, the second is the register of the second operand); `fault` is the displacement from the
+  // beginning of its bytes to the trap (label value: the transition is encoded by code generator itself).
+  std::vector<uint8_t> run_codegen(node_id n, node_id s, jt t, int64_t fault) {
+    scope * regs = an.new_scope(an.globals);
+    interpreter::scope_hold hold{an, regs};
+    bool fp = t == jt::f64_; // f64 - xmm0/xmm1, whole - rax/rcx
+    regs->declare(db.as<n_param>(db.as<n_fn>(s).params[0]).name, value(int64_t(fp ? A::code_xreg(x64::xmm0) : A::code_reg(x64::rax))));
+    regs->declare(db.as<n_param>(db.as<n_fn>(s).params[1]).name, value(int64_t(fp ? A::code_xreg(x64::xmm1) : A::code_reg(x64::rcx))));
+    regs->declare(an.sym("fault"), value(fault));
+    auto r = an.eval(db.as<n_fn>(s).body, regs, 0);
+    value const & v = r.v;
+    if(!r.normal() || !v.is<array_v>()) throw jit_unsupported{n, cat("кодогенератор ", A::target, ": ожидался массив байтов")};
+    std::vector<uint8_t> bytes;
+    for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) {
+      value b = v.as<array_v>().get(k);
+      if(!b.is<int64_t>() || b.as<int64_t>() < 0 || b.as<int64_t>() > 255) throw jit_unsupported{n, cat("кодогенератор ", A::target, ": байт вне 0..255")};
+      bytes.push_back(uint8_t(b.as<int64_t>()));
+    }
+    return bytes;
+  }
+
+  // Trap code generator: The trap address is known at the end of the function - a second
+  // call with a real bias, the same lengths.
+  struct lang_patch {
+    uint32_t at, size;
+    node_id n, codegen;
+    jt t;
+    x64::label * target;
+  };
+  std::vector<lang_patch> lang_patches;
+
+  void apply_lang_patches() {
+    for(auto const & p: lang_patches) {
+      auto bytes = run_codegen(p.n, p.codegen, p.t, int64_t(p.target->pos) - int64_t(p.at));
+      if(bytes.size() != p.size) throw jit_unsupported{p.n, cat("кодогенератор ", A::target, ": длина зависит от смещения перехода")};
+      for(uint32_t k = 0; k < p.size; ++k) code.patch(p.at + k, bytes[k]);
+    }
+  }
+
   // The first operand is in rax/xmm0, the second in rcx/xmm1.
   jt binary(node_id n, std::string_view op, jt t) {
     using namespace x64;
+    if(t == jt::i64_ && (op == "/" || op == "%") && tries.empty()) { // dividing by zero - mark-shift
+      node_id s;
+      uint32_t at = code.size();
+      if(auto bytes = lang_codegen(n, cat("infix", op), t, &s)) {
+        for(uint8_t b: *bytes) code.byte(b);
+        ++lang_ops;
+        lang_patches.push_back({at, uint32_t(bytes->size()), n, s, t, &fault(jit_fault_kind::div_zero, n)});
+        return t;
+      }
+    }
     if((t == jt::i64_ && op != "/" && op != "%") || (t == jt::f64_ && (op == "+" || op == "-" || op == "*" || op == "/")))
       if(auto bytes = lang_codegen(n, cat("infix", op), t)) {
         for(uint8_t b: *bytes) code.byte(b);

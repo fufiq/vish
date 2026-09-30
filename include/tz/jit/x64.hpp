@@ -242,6 +242,7 @@ struct assembler {
 
   std::size_t size() const { return buf.size(); }
   void byte(uint8_t b) { buf.push_back(b); }
+  void patch(uint32_t at, uint8_t b) { buf[at] = b; } // byte code generator of the language after tagging
   void u64le(uint64_t v) {
     for(int k = 0; k < 8; ++k) byte(uint8_t(v >> (8 * k)));
   }
