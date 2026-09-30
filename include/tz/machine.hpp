@@ -1363,6 +1363,12 @@ struct process_machine {
     mval i = deref(pop_val());
     mval o = deref(pop_val());
     if(!i.is<int64_t>()) throw diagnostic("индекс должен быть i64", db[n].where);
+    if(o.is<std::string>()) { // bytes: s[k] - i64
+      auto const & str = o.as<std::string>();
+      int64_t k = i.as<int64_t>();
+      if(k < 0 || uint64_t(k) >= str.size()) out_of_bounds(k, str.size(), db[n].where);
+      return finish(mval{int64_t(uint8_t(str[std::size_t(k)]))});
+    }
     if(!o.is<m_arr>()) throw diagnostic(cat("индексация значения типа ", describe(o)), db[n].where);
     auto const & xs = o.as<m_arr>().items;
     int64_t k = i.as<int64_t>();

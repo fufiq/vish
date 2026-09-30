@@ -2279,6 +2279,17 @@ struct interpreter {
     else index_type(idx);
     bool proven_here = checking() && index_holds(i, idx, env);
     return ok(lift(obj, [&](value const & o) {
+      if(value const * sh = shape_of(o); sh && sh->is<std::string>()) { // string - bytes (§4.0): s[k] - byte, i64
+        if(o.known() && idx.known()) {
+          auto const & str = o.as<std::string>();
+          int64_t k = idx.as<int64_t>();
+          if(k < 0 || uint64_t(k) >= str.size()) fail_rt("out_of_bounds", cat("индекс ", k, " вне строки длины ", str.size()), where);
+          return value(int64_t(uint8_t(str[std::size_t(k)])));
+        }
+        if(checking()) rt_check("out_of_bounds", where);
+        return erase(value(int64_t(1)));
+      }
+      if(!sh_array(o)) fail(cat("индексация значения типа ", types.describe(o)), where);
       if(o.is<rt_v>() && idx.known()) { // tuple by compile-time - the exact type of element
         value const * shape = shape_of(o);
         if(shape && shape->is<array_v>() && is_tuple(shape->as<array_v>()))
@@ -2297,6 +2308,11 @@ struct interpreter {
       if(checking()) e.proof = index_result(i, o, idx, env);
       return e;
     }));
+  }
+
+  bool sh_array(value const & o) const {
+    value const * sh = shape_of(o);
+    return !sh || sh->is<array_v>();
   }
 
   // An index is a safe index of this array (a fact on the value of the index).
