@@ -2,6 +2,9 @@
 // jit-compiled: sum
 // jit-compiled: diff
 // jit-compiled: bits
+// jit-compiled: count
+// jit-compiled: dot
+// out: 2 true false 4.5
 // jit-stats: sum(array<i64>) → 
 // jit-stats: кодогенераторов языка: 2 (prelude)
 // jit-stats: кодогенераторов языка: 1 (программа)
@@ -12,7 +15,7 @@
 // 
 // 
 //.
-// + - * & | ^ << >> для i64 — в прелюдии, кодирование — функции на языке над
+// + - * & | ^ << >>, сравнения для i64 и + - * / для f64 — в прелюдии, кодирование — функции на языке над
 // номерами регистров. Программа переопределяет - (другое кодирование того же
 // sub): последнее объявление — первым, без сборки VM.
 amd64(expr body) {
@@ -35,6 +38,21 @@ diff(i64 a, i64 b) => a - b;
 
 bits(i64 x) => ((x & 12) | 2) ^ ((x << 2) >> 3);
 
+count(xs, i64 lim) {
+  n = 0;
+  for(i : range(xs.size)) if(xs[i] < lim) n += 1;
+  n
+}
+
+same(i64 a, i64 b) => (a == b) && (a >= 0);
+
+dot(xs, ys) {
+  s = 0.0;
+  for(i : range(xs.size)) s = s + (xs[i] * ys[i]);
+  (s / 2.0) - 1.0
+}
+
 main() {
   print(sum(array{1, 2, 3, 40}), diff(2, 40), 0xFF, (bits(5) - bits(0)) + 2, 3 & 5, 3 * 4, -8 >> 2);
+  print(count(array{5, 1, 7, 2}, 5), same(3, 3), same(1, 2), dot(array{1.0, 2.0}, array{3.0, 4.0}));
 }

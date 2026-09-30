@@ -838,8 +838,9 @@ struct jit_codegen {
         // Operands - numbers of target registers: the first - battery, the second - second operands
         scope * regs = an.new_scope(an.globals);
         interpreter::scope_hold hold{an, regs};
-        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[0]).name, value(int64_t(A::code_reg(x64::rax))));
-        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[1]).name, value(int64_t(A::code_reg(x64::rcx))));
+        bool fp = t == jt::f64_; // f64 - xmm0/xmm1, whole - rax/rcx
+        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[0]).name, value(int64_t(fp ? A::code_xreg(x64::xmm0) : A::code_reg(x64::rax))));
+        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[1]).name, value(int64_t(fp ? A::code_xreg(x64::xmm1) : A::code_reg(x64::rcx))));
         auto r = an.eval(db.as<n_fn>(s).body, regs, 0);
         value const & v = r.v;
         if(!r.normal() || !v.is<array_v>()) throw jit_unsupported{n, cat("кодогенератор ", A::target, " ", entity, ": ожидался массив байтов")};
@@ -863,13 +864,13 @@ struct jit_codegen {
   // The first operand is in rax/xmm0, the second in rcx/xmm1.
   jt binary(node_id n, std::string_view op, jt t) {
     using namespace x64;
-    if(t == jt::i64_)
-      if(op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>")
-        if(auto bytes = lang_codegen(n, cat("infix", op), t)) {
-          for(uint8_t b: *bytes) code.byte(b);
-          ++lang_ops;
-          return t;
-        }
+    if((t == jt::i64_ && op != "/" && op != "%") || (t == jt::f64_ && (op == "+" || op == "-" || op == "*" || op == "/")))
+      if(auto bytes = lang_codegen(n, cat("infix", op), t)) {
+        for(uint8_t b: *bytes) code.byte(b);
+        ++lang_ops;
+        bool cmp = op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=";
+        return cmp ? jt::bool_ : t;
+      }
     if(t == jt::i64_) {
       if(op == "+") {
         code.add(rax, rcx);

@@ -2239,7 +2239,21 @@ struct interpreter {
 
   flow eval_node(node_id n, n_construct const & c, scope * env, uint32_t frame) {
     std::vector<value> items;
+    bool open = false; // the run-time-length array is disclosed: the result is the run-time-length array
     for(node_id item: c.items) {
+      if(db.is<n_spread>(item)) { // ...a are elements of the array
+        if(str(db.as<n_ident>(c.type).name) != "array") fail("...: раскрытие — в array{…} или аргументах вызова", db[item].where);
+        TZ_TRY(t, eval(db.as<n_spread>(item).value, env, frame));
+        value const * x = shape_of(t);
+        if(!x || !x->is<array_v>()) fail(cat("...: раскрывается массив или кортеж, получено ", types.describe(t)), db[item].where);
+        if(!t.known() && t.is<rt_v>()) {
+          open = true;
+          items.push_back(element_type(t, db[item].where));
+          continue;
+        }
+        for(uint32_t k = 0; k < x->as<array_v>().size(); ++k) items.push_back(x->as<array_v>().get(k));
+        continue;
+      }
       TZ_TRY(x, eval(item, env, frame));
       items.push_back(std::move(x));
     }
@@ -2261,7 +2275,7 @@ struct interpreter {
     }
     if(tname != "array") fail(cat("конструктор ", tname, "{} пока не поддержан"), db[n].where);
     for(auto const & x: items)
-      if(!x.known()) return ok(erase(value(array_v::of({x})))); // At least one run-time element is an array of run-time
+      if(!x.known() || open) return ok(erase(value(array_v::of({x})))); // At least one run-time element is an array of run-time
     return ok(value(array_v::of(std::move(items))));
   }
 

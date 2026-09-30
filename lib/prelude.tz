@@ -104,9 +104,18 @@ x64_0f(i64 op, i64 dst, i64 src) => array{0x48 | ((dst >> 3) << 2) | (src >> 3),
 // сдвиг на cl: второй операнд — rcx (регистровая модель JIT)
 x64_shift(i64 ext, i64 dst) => array{0x48 | (dst >> 3), 0xD3, 0xC0 | (ext << 3) | (dst & 7)};
 
+// сравнение → 0/1 в a: cmp a, b; setcc; movzx (cc — условие x86: e 4, ne 5, l C, ge D, le E, g F)
+x64_cmp(i64 cc, i64 a, i64 b) => array{...x64_rr(0x39, a, b), 0xF, 0x90 | cc, 0xC0 | a, ...x64_0f(0xB6, a, a)};
+
+// SSE «регистр, регистр» над xmm: префикс, [REX], 0F, код операции, ModRM (reg — dst)
+x64_sse(i64 prefix, i64 op, i64 dst, i64 src) => if((dst | src) > 7) array{prefix, 0x40 | ((dst >> 3) << 2) | (src >> 3), 0xF, op, 0xC0 | ((dst & 7) << 3) | (src & 7)} else array{prefix, 0xF, op, 0xC0 | ((dst & 7) << 3) | (src & 7)};
+
 a64_word(i64 w) => array{w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF};
 
 a64_rrr(i64 op, i64 d, i64 n, i64 m) => a64_word(op | (m << 16) | (n << 5) | d);
+
+// сравнение → 0/1 в a: cmp a, b; cset a (cc — условие AArch64: eq 0, ne 1, ge A, lt B, gt C, le D)
+a64_cmp(i64 cc, i64 a, i64 b) => array{...a64_word(0xEB00001F | (b << 16) | (a << 5)), ...a64_word(0x9A9F07E0 | ((cc ^ 1) << 12) | a)};
 
 amd64(expr body) {
   using operator (i64 a) + (i64 b) => x64_rr(0x1, a, b); // add
@@ -117,6 +126,16 @@ amd64(expr body) {
   using operator (i64 a) * (i64 b) => x64_0f(0xAF, a, b); // imul
   using operator (i64 a) << (i64 b) => x64_shift(4, a); // shl a, cl
   using operator (i64 a) >> (i64 b) => x64_shift(7, a); // sar a, cl
+  using operator (f64 a) + (f64 b) => x64_sse(0xF2, 0x58, a, b); // addsd
+  using operator (f64 a) - (f64 b) => x64_sse(0xF2, 0x5C, a, b); // subsd
+  using operator (f64 a) * (f64 b) => x64_sse(0xF2, 0x59, a, b); // mulsd
+  using operator (f64 a) / (f64 b) => x64_sse(0xF2, 0x5E, a, b); // divsd
+  using operator (i64 a) == (i64 b) => x64_cmp(0x4, a, b);
+  using operator (i64 a) != (i64 b) => x64_cmp(0x5, a, b);
+  using operator (i64 a) < (i64 b) => x64_cmp(0xC, a, b);
+  using operator (i64 a) >= (i64 b) => x64_cmp(0xD, a, b);
+  using operator (i64 a) <= (i64 b) => x64_cmp(0xE, a, b);
+  using operator (i64 a) > (i64 b) => x64_cmp(0xF, a, b);
   body
 }
 
@@ -129,6 +148,16 @@ arm64(expr body) {
   using operator (i64 a) * (i64 b) => a64_rrr(0x9B007C00, a, a, b); // madd a, a, b, xzr
   using operator (i64 a) << (i64 b) => a64_rrr(0x9AC02000, a, a, b); // lslv
   using operator (i64 a) >> (i64 b) => a64_rrr(0x9AC02800, a, a, b); // asrv
+  using operator (f64 a) + (f64 b) => a64_rrr(0x1E602800, a, a, b); // fadd
+  using operator (f64 a) - (f64 b) => a64_rrr(0x1E603800, a, a, b); // fsub
+  using operator (f64 a) * (f64 b) => a64_rrr(0x1E600800, a, a, b); // fmul
+  using operator (f64 a) / (f64 b) => a64_rrr(0x1E601800, a, a, b); // fdiv
+  using operator (i64 a) == (i64 b) => a64_cmp(0x0, a, b);
+  using operator (i64 a) != (i64 b) => a64_cmp(0x1, a, b);
+  using operator (i64 a) < (i64 b) => a64_cmp(0xB, a, b);
+  using operator (i64 a) >= (i64 b) => a64_cmp(0xA, a, b);
+  using operator (i64 a) <= (i64 b) => a64_cmp(0xD, a, b);
+  using operator (i64 a) > (i64 b) => a64_cmp(0xC, a, b);
   body
 }
 

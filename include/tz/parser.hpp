@@ -1357,7 +1357,12 @@ struct parser {
     expect_open('{');
     node_list items;
     while(!is_close('}')) {
-      items.push_back(expression());
+      if(is_op("...")) { // array {...a, x} - Disclosure of the array into elements
+        uint32_t s0 = here().where.begin;
+        eat_op("...");
+        node_id v = expression();
+        items.push_back(db.add(n_spread{v}, {s0, toks[pos - 1].where.end}));
+      } else items.push_back(expression());
       if(is_op(",")) eat_op(",");
       else break;
     }

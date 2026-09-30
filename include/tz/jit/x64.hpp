@@ -49,6 +49,7 @@ struct code_block {
 struct assembler {
   static constexpr std::string_view target = "amd64"; // code generation context in language (§10.4)
   static uint32_t code_reg(reg r) { return r; } // register number
+  static uint32_t code_xreg(xmm r) { return r; }
 
   // --- whole ---
 

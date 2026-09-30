@@ -2015,7 +2015,14 @@ struct process_machine {
     auto st_it = helper.structs.find(tname);
     node_list all;
     if(st_it != helper.structs.end()) all = helper.fields_of_struct(st_it->first);
-    if(t.phase < c.items.size()) return push_eval(c.items[t.phase++], t.scope, t.frame);
+    if(t.phase < c.items.size()) {
+      node_id item = c.items[t.phase++];
+      if(db.is<n_spread>(item)) { // ...a are elements of the array
+        if(st_it != helper.structs.end()) throw diagnostic("...: раскрытие — в array{…} или аргументах вызова", db[item].where);
+        item = db.as<n_spread>(item).value;
+      }
+      return push_eval(item, t.scope, t.frame);
+    }
     if(st_it != helper.structs.end()) {
       if(c.items.size() > all.size()) throw diagnostic(cat(helper.str(tname), ": полей ", all.size(), ", значений ", c.items.size()), db[n].where);
       uint32_t k = t.phase; // the next field without a value - the default value
@@ -2031,7 +2038,15 @@ struct process_machine {
     }
     if(helper.str(tname) != "array") throw diagnostic(cat("конструктор ", helper.str(tname), "{} пока не поддержан"), db[n].where);
     m_arr a;
-    for(uint32_t i = 0; i < c.items.size(); ++i) a.items.push_back(deref(fib().vals[t.base + i]));
+    for(uint32_t i = 0; i < c.items.size(); ++i) {
+      mval v = deref(fib().vals[t.base + i]);
+      if(!db.is<n_spread>(c.items[i])) {
+        a.items.push_back(std::move(v));
+        continue;
+      }
+      if(!v.is<m_arr>()) throw diagnostic(cat("...: раскрывается массив или кортеж, получено ", describe(v)), db[c.items[i]].where);
+      for(auto & e: v.as<m_arr>().items) a.items.push_back(e);
+    }
     finish(mval{std::move(a)});
   }
 
