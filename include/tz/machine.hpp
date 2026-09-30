@@ -1934,6 +1934,16 @@ struct process_machine {
       return push_eval(v.init, t.scope, t.frame);
     }
     mval x = v.init ? deref(pop_val()) : mval{m_unit{}};
+    if(v.type && db.is<n_ident>(v.type) && numeric_pair(x, helper.str(db.as<n_ident>(v.type).name))) { // T x = e is imaginable (§5.8)
+      auto want = helper.str(db.as<n_ident>(v.type).name);
+      mval got;
+      if(v.strict || !type_fit(x, want, v.strict, got)) {
+        diagnostic d(cat("значение ", describe(x), " не представимо в ", want), db[v.init].where, diag_kind::runtime);
+        d.type = "unpack_failed";
+        throw d;
+      }
+      x = std::move(got);
+    }
     declare(t.scope, v.name, std::move(x));
     finish(mval{m_unit{}});
   }

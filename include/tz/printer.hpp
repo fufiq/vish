@@ -275,6 +275,7 @@ struct printer {
     if(v.is_const) out += "const ";
     if(v.ct) out += "ct ";
     if(v.ref) out += "&";
+    if(v.strict) out += "explicit ";
     if(v.type && !db.is<n_auto>(v.type)) {
       item(v.type);
       out += ' ';

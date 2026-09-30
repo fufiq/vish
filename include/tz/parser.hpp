@@ -844,6 +844,8 @@ struct parser {
       is_const = true;
       ++k;
     }
+    bool strict = is_word("explicit", k) && ahead(k + 1).kind == tok::ident && ahead(k + 2).kind == tok::ident; // explicit T x = e - strictly (§5.8 )
+    k += strict;
     // T x = e is a statement with a restriction; const x = e is a qualifier (type is
     // derived); &e = v[i] is a reference; x = e without a sign is an announcement if
     // there is no name (interpreter parses):
@@ -863,11 +865,14 @@ struct parser {
     }
     bool ref = k == 0 && is_op("&") && ahead(1).kind == tok::ident && is_op("=", 2);
     if(!typed && !qualified && !ref) return std::nullopt;
+    if(strict && !typed) throw diagnostic("explicit — перед типом: explicit T x = e", here().where);
     if(typed && is_word("auto", k)) throw diagnostic("auto не нужен: x = … объявляет с выводом типа", ahead(k).where);
     uint32_t start = here().where.begin;
     if(is_const) advance();
+    if(strict) advance();
     n_var v;
     v.is_const = is_const;
+    v.strict = strict;
     v.ref = ref;
     if(ref) eat_op("&");
     if(typed) v.type = type_expr();

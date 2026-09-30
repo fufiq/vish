@@ -1266,7 +1266,21 @@ struct interpreter {
   bool declares(node_id n) const { return implicit_decls.contains(n.value); }
 
   void declare_var(node_id s, n_var const & v, value init, scope * env) {
-    if(v.type && db.is<n_ident>(v.type)) check_type(init, db.as<n_ident>(v.type).name, db[v.init].where);
+    if(v.type && db.is<n_ident>(v.type)) {
+      // T x = e - the value is represented in T (reduced), explicit T x = e - type exactly T
+      // (§5.8, the author's decision on parameters - the same in the announcement)
+      symbol tn = db.as<n_ident>(v.type).name;
+      span where = db[v.init].where;
+      value got;
+      fit r = init.is<split_v>() ? fit::no : type_fit(init, str(tn), v.strict, got);
+      if(r == fit::no && !v.strict && !init.is<split_v>() && numeric_pair(init, str(tn)))
+        fail_rt("unpack_failed", cat("значение ", show_v(init), " не представимо в ", str(tn)), where); // type fits, meaning not
+      if(r == fit::no) check_type(init, tn, where);
+      else {
+        if(r == fit::maybe) rt_check("unpack_failed", where);
+        init = std::move(got);
+      }
+    }
     if(checking())
       emit({report_event::stage, path, std::string(str(v.name)),
           init.known() ? cat("кт ", show_v(init)) : cat("рт ", types.describe(init)), db[s].where, {}});

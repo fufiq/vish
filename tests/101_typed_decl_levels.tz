@@ -1,0 +1,31 @@
+// out: 3.0 4 1.5 5.0
+// out: 2 -1
+// stdin: 2.0 2.5
+// check: unpack_failed
+// machine
+// fmt-stable
+// store-roundtrip
+// Уровни совпадения типа (§5.8) и в объявлении: T x = e — значение
+// представимо в T (приводится), explicit T x = e — тип ровно T. Решение
+// пользователя для параметров,
+// *моё:* то же в объявлении. Рт-значение, не представимое в T, — unpack_failed.
+scale(f64 k) => {
+  f64 r = 5;
+  r * k
+}
+
+main() {
+  f64 x = 3;
+  i64 y = 4.0;
+  explicit f64 z = 1.5;
+  print(x, y, z, scale(1));
+  t = read_floats(stdin);
+  i64 a = t[0];
+  r = try {
+    i64 b = t[1];
+    b
+  } catch(unpack_failed e) {
+    -1
+  };
+  print(a, r);
+}

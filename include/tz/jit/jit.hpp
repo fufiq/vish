@@ -1432,6 +1432,14 @@ struct jit_codegen {
     if(v.ref) throw jit_unsupported{n, "auto& (ссылка на элемент — интерпретатор)"};
     jt t = gen_value(v.init);
     if(t == jt::other || t == jt::unit || is_array(t)) throw jit_unsupported{n, cat("переменная типа ", jt_name(t))};
+    if(v.type && db.is<n_ident>(v.type)) { // T x = e is imaginable (§5.8)
+      auto want = db.strings.text(db.as<n_ident>(v.type).name);
+      // i64 → f64: literal (parsing checked for accuracy); run-time - value for 2^53 - conceivability test, it is not in machine code
+      if(want == "f64" && t == jt::i64_ && db.is<n_int>(v.init)) {
+        code.cvtsi2sd(xmm0, rax);
+        t = jt::f64_;
+      } else if(want != "auto" && want != jt_name(t)) throw jit_unsupported{n, cat(want, " из ", jt_name(t))};
+    }
     slot s = declare(v.name, t);
     store_var(s);
     return jt::unit;
