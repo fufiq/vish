@@ -293,7 +293,7 @@ struct interpreter {
   bool intrinsic_operator(node_id f) const {
     auto const & fn = db.as<n_fn>(f);
     if(!fn.expr_body || !db.is<n_call>(fn.body) || !db.is<n_ident>(db.as<n_call>(fn.body).callee)) return false;
-    static constexpr std::array prims{"add", "sub", "mul", "div", "rem", "eq", "ne", "lt", "gt", "le", "ge", "and", "or", "neg", "not"};
+    static constexpr std::array prims{"add", "sub", "mul", "div", "rem", "eq", "ne", "lt", "gt", "le", "ge", "and", "or", "neg", "not", "band", "bor", "bxor", "shl", "shr"};
     auto callee = str(db.as<n_ident>(db.as<n_call>(fn.body).callee).name);
     if(std::ranges::find(prims, callee) == prims.end()) return false;
     auto const & args = db.as<n_call>(fn.body).args;
@@ -3765,6 +3765,13 @@ struct interpreter {
       if(y == 0) fail_rt("div_by_zero", "деление на ноль", where); // certain exception, not UB
       return value(op == "/" ? x / y : x % y);
     }
+    // bits (for encoding instructions in the language, §10.4); shift - module 64, like the
+    // iron of both targets; >> - arithmetic (i64 with a sign)
+    if(op == "&") return w(uint64_t(x) & uint64_t(y));
+    if(op == "|") return w(uint64_t(x) | uint64_t(y));
+    if(op == "^") return w(uint64_t(x) ^ uint64_t(y));
+    if(op == "<<") return w(uint64_t(x) << (y & 63));
+    if(op == ">>") return value(x >> (y & 63));
     return compare(op, x, y, where);
   }
 
@@ -4736,8 +4743,8 @@ struct interpreter {
       }
     }
     // prelude (operator (a) + (b) => add(a, b))
-    static constexpr std::array<std::pair<std::string_view, std::string_view>, 11> prim2{
-        {{"add", "+"}, {"sub", "-"}, {"mul", "*"}, {"div", "/"}, {"rem", "%"}, {"eq", "=="}, {"ne", "!="}, {"lt", "<"}, {"gt", ">"}, {"le", "<="}, {"ge", ">="}}};
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 16> prim2{
+        {{"add", "+"}, {"sub", "-"}, {"mul", "*"}, {"div", "/"}, {"rem", "%"}, {"band", "&"}, {"bor", "|"}, {"bxor", "^"}, {"shl", "<<"}, {"shr", ">>"}, {"eq", "=="}, {"ne", "!="}, {"lt", "<"}, {"gt", ">"}, {"le", "<="}, {"ge", ">="}}};
     for(auto [name, op]: prim2)
       if(n == name && a.size() == 2) return binary(op, a[0], a[1], where);
     if((n == "neg" || n == "not") && a.size() == 1) return unary(n == "neg" ? "-" : "!", a[0], where);

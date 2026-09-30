@@ -28,6 +28,12 @@ operator (a) >= (b) => ge(a, b);
 [[associative]] operator (bool a) && (expr bool b) => and(a, b);
 [[associative]] operator (bool a) || (expr bool b) => or(a, b);
 operator -(a) => neg(a);
+// биты i64 — для кодирования инструкций на языке (§10.4)
+[[associative]] operator (i64 a) & (i64 b) => band(a, b);
+[[associative]] operator (i64 a) | (i64 b) => bor(a, b);
+[[associative]] operator (i64 a) ^ (i64 b) => bxor(a, b);
+operator (i64 a) << (i64 b) => shl(a, b);
+operator (i64 a) >> (i64 b) => shr(a, b);
 operator !(bool a) => not(a);
 // x? — try(x) вызывающего: «расто-макака try» без макроса;
 // кадр оператора прозрачен для return(caller) — выход из того, кто написал x?.
@@ -86,13 +92,43 @@ checked(expr body) {
 // регистровой моделью JIT: первый операнд — аккумулятор, второй — регистр
 // второго операнда, результат — в аккумуляторе. JIT берёт кодогенератор из базы;
 // нет его здесь — встроенный (C++, бутстрап).
+// Кодирование на языке. x86-64: REX.W, код операции, ModRM «регистр, регистр»
+// (reg — src, r/m — dst); с префиксом 0F — reg — dst. AArch64: слово
+// младшим байтом вперёд. Номера регистров —
+// кодировка цели; их даёт JIT (первый операнд — аккумулятор, второй — регистр
+// второго операнда). *Моё:* регистры параметрами кодогенератора.
+x64_rr(i64 op, i64 dst, i64 src) => array{0x48 | ((src >> 3) << 2) | (dst >> 3), op, 0xC0 | ((src & 7) << 3) | (dst & 7)};
+
+x64_0f(i64 op, i64 dst, i64 src) => array{0x48 | ((dst >> 3) << 2) | (src >> 3), 0xF, op, 0xC0 | ((dst & 7) << 3) | (src & 7)};
+
+// сдвиг на cl: второй операнд — rcx (регистровая модель JIT)
+x64_shift(i64 ext, i64 dst) => array{0x48 | (dst >> 3), 0xD3, 0xC0 | (ext << 3) | (dst & 7)};
+
+a64_word(i64 w) => array{w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF};
+
+a64_rrr(i64 op, i64 d, i64 n, i64 m) => a64_word(op | (m << 16) | (n << 5) | d);
+
 amd64(expr body) {
-  using operator (i64 a) + (i64 b) => array{0x48, 0x1, 0xC8}; // add rax, rcx
+  using operator (i64 a) + (i64 b) => x64_rr(0x1, a, b); // add
+  using operator (i64 a) - (i64 b) => x64_rr(0x29, a, b); // sub
+  using operator (i64 a) & (i64 b) => x64_rr(0x21, a, b); // and
+  using operator (i64 a) | (i64 b) => x64_rr(0x9, a, b); // or
+  using operator (i64 a) ^ (i64 b) => x64_rr(0x31, a, b); // xor
+  using operator (i64 a) * (i64 b) => x64_0f(0xAF, a, b); // imul
+  using operator (i64 a) << (i64 b) => x64_shift(4, a); // shl a, cl
+  using operator (i64 a) >> (i64 b) => x64_shift(7, a); // sar a, cl
   body
 }
 
 arm64(expr body) {
-  using operator (i64 a) + (i64 b) => array{0x29, 0x1, 0x3, 0x8B}; // add x9, x9, x3
+  using operator (i64 a) + (i64 b) => a64_rrr(0x8B000000, a, a, b); // add
+  using operator (i64 a) - (i64 b) => a64_rrr(0xCB000000, a, a, b); // sub
+  using operator (i64 a) & (i64 b) => a64_rrr(0x8A000000, a, a, b); // and
+  using operator (i64 a) | (i64 b) => a64_rrr(0xAA000000, a, a, b); // orr
+  using operator (i64 a) ^ (i64 b) => a64_rrr(0xCA000000, a, a, b); // eor
+  using operator (i64 a) * (i64 b) => a64_rrr(0x9B007C00, a, a, b); // madd a, a, b, xzr
+  using operator (i64 a) << (i64 b) => a64_rrr(0x9AC02000, a, a, b); // lslv
+  using operator (i64 a) >> (i64 b) => a64_rrr(0x9AC02800, a, a, b); // asrv
   body
 }
 

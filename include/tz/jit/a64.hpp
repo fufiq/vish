@@ -33,6 +33,7 @@ struct image {
 
 struct assembler {
   static constexpr std::string_view target = "arm64"; // code generation context in language (§10.4)
+  static uint32_t code_reg(x64::reg r) { return x(r); } // register number
 
   // --- registers and conditions ---
 

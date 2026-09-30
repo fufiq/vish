@@ -18,6 +18,7 @@
 #include "../interp.hpp"
 #include "x64.hpp"
 
+#include <ranges>
 #include <deque>
 #include <set>
 
@@ -133,6 +134,7 @@ struct jit_fn {
   uint32_t unchecked = 0; // indexation without border checks (proven by parsing)
   uint32_t jumps = 0; // throw that became a transition to catch (static exceptions)
   uint32_t lang_ops = 0; // operations whose code gives code generator in the language (target context)
+  std::string lang_from; // from where code generator (modules)
 };
 
 struct jit_unsupported {
@@ -168,7 +170,7 @@ struct jit_machine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops) : "", "\n");
+      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, ")") : "", "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -276,6 +278,7 @@ struct jit_codegen {
     out.unchecked = bce;
     out.jumps = throw_jumps;
     out.lang_ops = lang_ops;
+    for(auto const & m: lang_from) out.lang_from += (out.lang_from.empty() ? "" : ", ") + m;
     finish(out, code);
     out.ok = true;
   }
@@ -820,19 +823,24 @@ struct jit_codegen {
 //.
   // code generator is taken from the database: the new one is added by the program, without building VM.
   std::optional<std::vector<uint8_t>> lang_codegen(node_id n, std::string_view entity, jt t) {
-    for(uint32_t i = 0; i < db.size(); ++i) {
+    for(uint32_t i = db.size(); i-- > 0;) { // The last announcement is the first: the program redefines prelude
       if(!db.is<n_fn>(node_id(i)) || db.strings.text(db.as<n_fn>(node_id(i)).name) != A::target) continue;
       node_id body = db.as<n_fn>(node_id(i)).body;
       if(!db.is<n_block>(body)) continue;
-      for(node_id s: db.as<n_block>(body).items) {
+      for(node_id s: db.as<n_block>(body).items | std::views::reverse) {
         if(!db.is<n_fn>(s) || !db.as<n_fn>(s).scoped || db.strings.text(db.as<n_fn>(s).name) != entity) continue;
-        bool fits = true;
+        bool fits = db.as<n_fn>(s).params.size() == 2;
         for(node_id p: db.as<n_fn>(s).params) {
           node_id ty = db.as<n_param>(p).type;
           fits = fits && ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == jt_name(t);
         }
         if(!fits) continue;
-        auto r = an.eval(db.as<n_fn>(s).body, an.globals, 0);
+        // Operands - numbers of target registers: the first - battery, the second - second operands
+        scope * regs = an.new_scope(an.globals);
+        interpreter::scope_hold hold{an, regs};
+        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[0]).name, value(int64_t(A::code_reg(x64::rax))));
+        regs->declare(db.as<n_param>(db.as<n_fn>(s).params[1]).name, value(int64_t(A::code_reg(x64::rcx))));
+        auto r = an.eval(db.as<n_fn>(s).body, regs, 0);
         value const & v = r.v;
         if(!r.normal() || !v.is<array_v>()) throw jit_unsupported{n, cat("кодогенератор ", A::target, " ", entity, ": ожидался массив байтов")};
         std::vector<uint8_t> bytes;
@@ -842,6 +850,10 @@ struct jit_codegen {
           bytes.push_back(uint8_t(b.as<int64_t>()));
         }
         out.deps[s.value] = db.node_revision(s); // editing code generator - recompilation
+        node_id m = s;
+        while(db[m].parent) m = db[m].parent;
+        std::string from = db.is<n_module>(m) && db.as<n_module>(m).name ? std::string(db.strings.text(db.as<n_module>(m).name)) : std::string("программа");
+        if(!std::ranges::contains(lang_from, from)) lang_from.push_back(from);
         return bytes;
       }
     }
@@ -851,8 +863,8 @@ struct jit_codegen {
   // The first operand is in rax/xmm0, the second in rcx/xmm1.
   jt binary(node_id n, std::string_view op, jt t) {
     using namespace x64;
-    if(t == jt::i64_ || t == jt::f64_)
-      if(op == "+" || op == "-" || op == "*" || op == "/")
+    if(t == jt::i64_)
+      if(op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>")
         if(auto bytes = lang_codegen(n, cat("infix", op), t)) {
           for(uint8_t b: *bytes) code.byte(b);
           ++lang_ops;
@@ -1751,6 +1763,7 @@ struct jit_codegen {
   std::vector<loop_frame> loops; // loop-covering
   uint32_t throw_jumps = 0;
   uint32_t lang_ops = 0;
+  std::vector<std::string> lang_from; // code generator language modules
   uint32_t gpr_used = 0, xmm_used = 0; // occupied variable registers (pool bits)
   std::vector<std::pair<int8_t, int32_t>> live_xmm; // f64 in registers: (register, home slot)
   std::vector<std::pair<x64::reg, int32_t>> saved; // saved registers of caller

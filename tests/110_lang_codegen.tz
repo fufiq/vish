@@ -1,24 +1,27 @@
-// out: 46 -38 255
+// out: 46 -38 255 4 1 12 -2
 // jit-compiled: sum
 // jit-compiled: diff
-// jit-stats: кодогенераторов языка: 2
-// jit-stats: diff(i64, i64) → 
+// jit-compiled: bits
+// jit-stats: sum(array<i64>) → 
+// jit-stats: кодогенераторов языка: 2 (prelude)
+// jit-stats: кодогенераторов языка: 1 (программа)
 // fmt-stable
 // store-roundtrip
 // Кодогенераторы на языке (§10.4): цель — контекст, в нём операция — её
 // машинный код: 
 // 
 // 
-// add
-// для i64 — в прелюдии (amd64/arm64), sub — здесь, в программе: JIT берёт его
-// из базы без сборки VM.
+//.
+// + - * & | ^ << >> для i64 — в прелюдии, кодирование — функции на языке над
+// номерами регистров. Программа переопределяет - (другое кодирование того же
+// sub): последнее объявление — первым, без сборки VM.
 amd64(expr body) {
-  using operator (i64 a) - (i64 b) => array{0x48, 0x29, 0xC8}; // sub rax, rcx
+  using operator (i64 a) - (i64 b) => array{0x48 | ((a >> 3) << 2) | (b >> 3), 0x2B, 0xC0 | ((a & 7) << 3) | (b & 7)}; // sub a, b (форма 2B)
   body
 }
 
 arm64(expr body) {
-  using operator (i64 a) - (i64 b) => array{0x29, 0x1, 0x3, 0xCB}; // sub x9, x9, x3
+  using operator (i64 a) - (i64 b) => a64_rrr(0xEB000000, a, a, b); // subs
   body
 }
 
@@ -30,6 +33,8 @@ sum(xs) {
 
 diff(i64 a, i64 b) => a - b;
 
+bits(i64 x) => ((x & 12) | 2) ^ ((x << 2) >> 3);
+
 main() {
-  print(sum(array{1, 2, 3, 40}), diff(2, 40), 0xFF);
+  print(sum(array{1, 2, 3, 40}), diff(2, 40), 0xFF, (bits(5) - bits(0)) + 2, 3 & 5, 3 * 4, -8 >> 2);
 }

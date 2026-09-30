@@ -944,7 +944,7 @@ struct process_machine {
 
   mval primitive(std::string_view op, std::vector<mval> const & a, span where) {
     static constexpr std::pair<std::string_view, std::string_view> bin[] = {{"add", "+"}, {"sub", "-"}, {"mul", "*"}, {"div", "/"},
-        {"rem", "%"}, {"eq", "=="}, {"ne", "!="}, {"lt", "<"}, {"gt", ">"}, {"le", "<="}, {"ge", ">="}};
+        {"rem", "%"}, {"band", "&"}, {"bor", "|"}, {"bxor", "^"}, {"shl", "<<"}, {"shr", ">>"}, {"eq", "=="}, {"ne", "!="}, {"lt", "<"}, {"gt", ">"}, {"le", "<="}, {"ge", ">="}};
     for(auto const & [name, sym]: bin)
       if(op == name && a.size() == 2) return from_value(helper.binary(sym, to_value(a[0]), to_value(a[1]), where), where);
     if(op == "neg" && a.size() == 1) return from_value(helper.unary("-", to_value(a[0]), where), where);
