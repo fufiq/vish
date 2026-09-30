@@ -1259,6 +1259,7 @@ struct parser {
         return db.add(n_str{unescape(t.text)}, t.where);
       }
       case tok::ident: {
+        if(ahead(1).kind == tok::str_lit && ahead(1).glued) return template_string();
         if(t.text == "if" && is_open('(', 1)) return if_expression();
         if(t.text == "loop" && is_open('{', 1)) {
           advance();
@@ -1342,6 +1343,86 @@ struct parser {
     for(char c: s)
       if(c != '_') clean += c;
     return std::stod(clean);
+  }
+
+  // Tag "text {выражение} text": expressions are common expressions of the language, their lexemes
+  // are from the same source (places node indicate in the text). {{ и } } are literal brackets.
+  node_id template_string() {
+    uint32_t start = here().where.begin;
+    symbol tag = ident();
+    n_template tp;
+    tp.tag = db.add(n_ident{tag}, {start, toks[pos - 1].where.end});
+    token s = here();
+    advance();
+    std::string_view raw = s.text.substr(1, s.text.size() - 2);
+    uint32_t base = s.where.begin + 1;
+    std::string chunk; // raw text before expression (with screening)
+    auto text_part = [&] {
+      std::string lit;
+      for(std::size_t i = 0; i < chunk.size(); ++i) {
+        if((chunk[i] == '{' || chunk[i] == '}') && i + 1 < chunk.size() && chunk[i + 1] == chunk[i]) ++i;
+        lit += chunk[i];
+      }
+      tp.parts.push_back(db.add(n_str{unescape(cat("\"", lit, "\""))}, {base, base}));
+      chunk.clear();
+    };
+    for(std::size_t i = 0; i < raw.size(); ++i) {
+      char c = raw[i];
+      if(c == '\\' && i + 1 < raw.size()) {
+        chunk += c;
+        chunk += raw[++i];
+        continue;
+      }
+      if((c == '{' || c == '}') && i + 1 < raw.size() && raw[i + 1] == c) {
+        chunk += c;
+        chunk += c;
+        ++i;
+        continue;
+      }
+      if(c != '{') {
+        chunk += c;
+        continue;
+      }
+      std::size_t j = i + 1;
+      for(int depth = 1; j < raw.size(); ++j) {
+        if(raw[j] == '{') ++depth;
+        else if(raw[j] == '}' && --depth == 0) break;
+      }
+      if(j >= raw.size()) throw diagnostic("шаблон: незакрытая {", {uint32_t(base + i), uint32_t(base + i + 1), source});
+      text_part();
+      tp.parts.push_back(embedded(uint32_t(base + i + 1), uint32_t(base + j)));
+      i = j;
+    }
+    text_part();
+    return db.add(std::move(tp), {start, toks[pos - 1].where.end});
+  }
+
+  // And then there are the verses [b, e], and then there are the verses.
+  node_id embedded(uint32_t b, uint32_t e) {
+    auto saved_toks = std::move(toks);
+    auto saved_match = std::move(match);
+    uint32_t saved_pos = pos;
+    toks = lexer(src.substr(b, e - b)).run();
+    for(auto & t: toks) {
+      t.where.begin += b;
+      t.where.end += b;
+    }
+    match_brackets();
+    pos = 0;
+    node_id x;
+    try {
+      x = expression();
+      if(!at_end()) throw diagnostic("шаблон: в {…} — одно выражение", here().where);
+    } catch(...) {
+      toks = std::move(saved_toks);
+      match = std::move(saved_match);
+      pos = saved_pos;
+      throw;
+    }
+    toks = std::move(saved_toks);
+    match = std::move(saved_match);
+    pos = saved_pos;
+    return x;
   }
 
   static std::string unescape(std::string_view s) {

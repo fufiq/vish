@@ -116,3 +116,37 @@ create(str path) => file_create(path);
 // упал (остальные живут), error — его сообщение.
 wait(process p) => process_wait(p);
 error(process p) => process_error(p);
+
+// Форматирование — не строка формата: 
+//;
+// 
+// 
+//.
+// fmt"x = {x}, адрес {hex(8)}{p}" — части шаблона: текст, значение, текст, …;
+// форматтер (наследник formatter) настраивает следующее значение; свой формат —
+// своя перегрузка format_with(форматтер, значение).
+struct formatter {}
+struct plain : formatter {}
+struct hex : formatter { i64 width; }
+struct fixed : formatter { i64 digits; }
+hex(i64 w) => hex{w};
+fixed(i64 d) => fixed{d};
+format_with(plain f, x) => text(x);
+format_with(hex h, i64 x) => text_hex(x, h.width);
+format_with(fixed d, f64 x) => text_fixed(x, d.digits);
+
+fmt(...parts) {
+  out = "";
+  f = plain{};
+  i = 0;
+  for(p : parts) {
+    if((i % 2) == 0) out = out + p; // текст шаблона
+    else if(formatter{} = p) f = p; // форматтер — для следующего значения
+    else {
+      out = out + format_with(f, p);
+      f = plain{};
+    }
+    i = i + 1;
+  }
+  out
+}

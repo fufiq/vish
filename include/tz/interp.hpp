@@ -1502,6 +1502,16 @@ struct interpreter {
     return found;
   }
 
+  // Tag "text {x} text" ст tag ("text", x, "text")
+  flow eval_node(node_id n, n_template const & t, scope * env, uint32_t frame) {
+    symbol tag = db.as<n_ident>(t.tag).name;
+    if(value * cell = env->find(tag)) { // Local tag - value-function
+      TZ_TRY(fv, read(cell));
+      return call_value(fv, t.parts, env, frame, db[n].where, n.value);
+    }
+    return call_named(tag, t.parts, env, frame, db[n].where, n.value);
+  }
+
   flow eval_node(node_id n, n_spread const &, scope *, uint32_t) { fail("...раскрытие — только аргументом вызова", db[n].where); }
 
   flow eval_node(node_id n, n_subject const &, scope *, uint32_t) {
@@ -4290,7 +4300,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"parse_int", "(s)"}, {"range", "(n)"},
-      {"fill", "(n, x)"}, {"text", "(x)"}, {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"},
+      {"fill", "(n, x)"}, {"text", "(x)"}, {"text_hex", "(n, ширина)"}, {"text_fixed", "(x, знаки)"}, {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"},
       {"emit", "(quote)"}, {"static_level", "(f)"}, {"is_err", "(r)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
@@ -4406,6 +4416,20 @@ struct interpreter {
     if(n.starts_with("stream_")) return stream_op(n, a, where);
     if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
+    if(n == "text_hex" && a.size() == 2) { // hexadecimal
+      if(!a[0].known() || !a[1].known()) return erase(value(std::string("x")));
+      if(!a[0].is<int64_t>() || !a[1].is<int64_t>()) fail("text_hex(i64, ширина)", where);
+      char buf[32];
+      snprintf(buf, sizeof buf, "%0*llx", int(a[1].as<int64_t>()), static_cast<unsigned long long>(a[0].as<int64_t>()));
+      return value(std::string(buf));
+    }
+    if(n == "text_fixed" && a.size() == 2) { // decimal
+      if(!a[0].known() || !a[1].known()) return erase(value(std::string("x")));
+      if(!a[0].is<double>() || !a[1].is<int64_t>()) fail("text_fixed(f64, знаки)", where);
+      char buf[64];
+      snprintf(buf, sizeof buf, "%.*f", int(a[1].as<int64_t>()), a[0].as<double>());
+      return value(std::string(buf));
+    }
     if(n == "text" && a.size() == 1) // text of value (bytes): number - decimal record
       return a[0].known() ? value(a[0].is<std::string>() ? a[0].as<std::string>() : show_v(a[0])) : erase(value(std::string("x")));
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);

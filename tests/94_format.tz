@@ -1,0 +1,30 @@
+// stdin: 2.5
+// out: привет, мир! x = 42, x+1 = 43
+// out: адрес 0000002a, пи = 3.14, скобки { и }
+// out: [***] 2.50
+// machine
+// fmt-stable
+// store-roundtrip
+// Форматирование — шаблон с тегом, не строка формата: 
+//;
+// 
+//.
+// В {…} — выражения языка; форматтер (наследник formatter) — для следующего
+// значения; свой формат — наследник и своя перегрузка format_with.
+struct stars : formatter {}
+
+format_with(stars s, i64 n) {
+  out = "";
+  for(i : range(n)) out = out + "*";
+  "[" + out + "]"
+}
+
+main() {
+  x = 42;
+  pi = 3.14159;
+  name = "мир";
+  print(fmt"привет, {name}! x = {x}, x+1 = {x + 1}");
+  print(fmt"адрес {hex(8)}{x}, пи = {fixed(2)}{pi}, скобки {{ и }}");
+  v = read_floats(stdin)[0];
+  print(fmt"{stars{}}{3} {fixed(2)}{v}");
+}

@@ -208,6 +208,29 @@ struct printer {
 
   void print_node(node_id, n_subject const &) {} // implicit root: .size, [1].flags
 
+  void print_node(node_id, n_template const & t) {
+    item(t.tag);
+    out += '"';
+    for(node_id p: t.parts) {
+      if(!db.is<n_str>(p)) {
+        out += '{';
+        item(p);
+        out += '}';
+        continue;
+      }
+      for(char c: db.as<n_str>(p).value) {
+        if(c == '"' || c == '\\') out += '\\';
+        if(c == '\n') {
+          out += "\\n";
+          continue;
+        }
+        if(c == '{' || c == '}') out += c; // {{ }}
+        out += c;
+      }
+    }
+    out += '"';
+  }
+
   void print_node(node_id, n_spread const & s) {
     out += "...";
     item(s.value);
