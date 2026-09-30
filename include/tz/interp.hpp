@@ -23,6 +23,7 @@
 #include "os.hpp"
 #include "value.hpp"
 
+#include <cmath>
 #include <deque>
 #include <functional>
 #include <map>
@@ -1283,6 +1284,44 @@ struct interpreter {
     return a == unpacked::maybe || b == unpacked::maybe ? unpacked::maybe : unpacked::yes;
   }
 
+  // Match levels of type:
+// 
+  // explicit - only an equal type. Imagine: i64 → f64 lossless, f64 → i64 integer; out is a
+  // value in parameter type. Maybe - run-time - meaning, will decide the execution.
+  //
+  enum class fit { no, exact, representable, maybe };
+  fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
+    out = v;
+    if(want == "auto" || types.describe(v) == want || types.name(types.of(v)) == want) return fit::exact;
+    if(strict || !numeric_pair(v, want)) return fit::no;
+    value const * x = shape_of(v);
+    if(want == "f64") {
+      if(!v.known()) {
+        out = erase(value(1.0));
+        return fit::representable;
+      }
+      int64_t i = x->as<int64_t>();
+      double d = double(i);
+      if(d < -9.2e18 || d > 9.2e18 || int64_t(d) != i) return fit::no;
+      out = value(d);
+      return fit::representable;
+    }
+    if(!v.known()) {
+      out = erase(value(int64_t(1)));
+      return fit::maybe;
+    }
+    double d = x->as<double>();
+    if(!(d >= -9.2e18 && d <= 9.2e18) || std::trunc(d) != d) return fit::no;
+    out = value(int64_t(d));
+    return fit::representable;
+  }
+  // Numbers between which there is "imaginable": i64 . f64.
+  bool numeric_pair(value const & v, std::string_view want) const {
+    value const * x = shape_of(v);
+    if(!x) return false;
+    return (want == "f64" && x->is<int64_t>()) || (want == "i64" && x->is<double>());
+  }
+
   // Whether samples-arrays of candidates cover any length (elements - names, , residue:
   // without checks), in the same parameter - then there is no failure.
   bool covers_all_lengths(auto const & cands) const {
@@ -1346,12 +1385,14 @@ struct interpreter {
       if(db.is<n_pat>(item)) return unpack_into(item, e, into, env, frame, where);
       if(db.is<n_param>(item)) {
         auto const & b = db.as<n_param>(item);
+        value got = e;
+        fit r = fit::exact;
         if(b.type) {
-          auto want = str(db.as<n_ident>(b.type).name);
-          if(types.describe(e) != want && types.name(types.of(e)) != want) return unpacked::no;
+          r = type_fit(e, str(db.as<n_ident>(b.type).name), b.strict, got);
+          if(r == fit::no) return unpacked::no;
         }
-        if(str(b.name) != "_") into->declare(b.name, e);
-        return unpacked::yes;
+        if(str(b.name) != "_") into->declare(b.name, got);
+        return r == fit::maybe ? unpacked::maybe : unpacked::yes;
       }
       flow f = eval(item, env, frame); // Equality of the element
       value eq = binary("==", e, f.v, db[item].where);
@@ -3691,6 +3732,7 @@ struct interpreter {
       node_id fn;
       int score;
       bool maybe = false; // Whether it is suitable - decide the value (unpacking run-time values in parsing)
+      std::vector<std::pair<uint32_t, value>> conv; // argumentation
     };
     std::vector<candidate> good;
     std::vector<std::string> rejected;
@@ -3704,6 +3746,7 @@ struct interpreter {
       int score = 0;
       bool maybe = false;
       std::string why;
+      std::vector<std::pair<uint32_t, value>> conv; // Converted arguments of the candidate (representable)
       for(uint32_t i = 0; i < fn.params.size() && why.empty(); ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
         if(p.type && db.is<n_pat>(p.type)) { // sample: unpacking - candidate condition (as required)
@@ -3718,13 +3761,27 @@ struct interpreter {
           maybe = maybe || r == unpacked::maybe;
         } else if(p.type && db.is<n_ident>(p.type)) {
           auto want = str(db.as<n_ident>(p.type).name);
-          if(types.describe(vals[i]) != want && types.name(types.of(vals[i])) != want)
-            why = cat("параметр ", str(p.name), " ожидает ", want, ", передано ", types.describe(vals[i]));
-          else ++score;
+          value got;
+          fit r = type_fit(vals[i], want, p.strict, got);
+          if(r == fit::no) {
+            why = cat("параметр ", str(p.name), " ожидает ", p.strict ? "ровно " : "", want, ", передано ", checking() || !vals[i].known() ? types.describe(vals[i]) : cat(types.describe(vals[i]), " ", show_v(vals[i])));
+            by_value += numeric_pair(vals[i], want) && !p.strict; // type fits, doesn't fit the value
+          } else {
+            score += r == fit::exact ? 2 : 1; // "Type equals" is better than "can imagine."
+            maybe = maybe || r == fit::maybe;
+            if(r != fit::exact) conv.push_back({i, got});
+          }
         }
       }
       if(why.empty()) {
-        auto [passed, n_req, reason, unsure] = leading_requires(f, vals, args, env, base);
+        std::vector<value> * in = &vals;
+        std::vector<value> converted;
+        if(!conv.empty()) { // Demand sees values in parameter types
+          converted = vals;
+          for(auto & [k, v]: conv) converted[k] = v;
+          in = &converted;
+        }
+        auto [passed, n_req, reason, unsure] = leading_requires(f, *in, args, env, base);
         if(!passed) {
           why = reason;
           by_value += reason == "require не выполнено";
@@ -3732,14 +3789,14 @@ struct interpreter {
         score += n_req;
         maybe = maybe || unsure;
       }
-      if(why.empty()) good.push_back({f, score, maybe});
+      if(why.empty()) good.push_back({f, score, maybe, std::move(conv)});
       else rejected.push_back(cat(describe_fn(f), ": ", why));
     }
 
     // all cut off values - runtime - overload found no branch: exception
     // 
     if(good.empty() && by_value && by_value == rejected.size()) {
-      diagnostic d(cat("распаковка не удалась: ни одна перегрузка ", site.what, " не подходит"), site.where, diag_kind::runtime);
+      diagnostic d(cat("нет перегрузки ", site.what, " для этих значений"), site.where, diag_kind::runtime);
       d.type = "unpack_failed";
       for(auto & r: rejected) d.note(cat("кандидат ", r), site.where);
       for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
@@ -3768,6 +3825,7 @@ struct interpreter {
         flow out;
         for(std::size_t k = 0; k < reach.size(); ++k) {
           auto copy = vals;
+          for(auto & [i, v]: reach[k].conv) copy[i] = v;
           if(site.node) emit({report_event::resolved, {}, cat(reach[k].fn.value), {}, {}, {}, site.node});
           invoke_parent = parent;
           flow r = invoke(reach[k].fn, copy, args, env, site);
@@ -3786,6 +3844,7 @@ struct interpreter {
     // editor
     if(checking() && site.node) emit({report_event::resolved, {}, cat(good[0].fn.value), {}, {}, {}, site.node});
     invoke_parent = parent;
+    for(auto & [i, v]: good[0].conv) vals[i] = std::move(v); // Values - in the types of parameters selected
     return invoke(good[0].fn, vals, args, env, site);
   }
 

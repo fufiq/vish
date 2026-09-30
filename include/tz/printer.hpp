@@ -221,6 +221,7 @@ struct printer {
     static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct "};
     if(p.type && db.is<n_pat>(p.type)) return item(p.type); // parameter-sample: names give unpacking
     out += modes[uint32_t(p.mode)];
+    if(p.strict) out += "explicit ";
     if(p.type && !db.is<n_auto>(p.type)) {
       item(p.type);
       out += p.pack ? "... " : " ";

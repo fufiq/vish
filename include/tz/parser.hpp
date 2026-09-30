@@ -565,6 +565,10 @@ struct parser {
       p.mode = param_mode::ct;
       advance();
     }
+    if(is_word("explicit") && ahead(1).kind == tok::ident && ahead(2).kind == tok::ident) { // explicit T x - strictly
+      advance();
+      p.strict = true;
+    }
     if(p.mode != param_mode::let && is_op("...")) { // expr. hs - pack (repeated clause)
       eat_op("...");
       p.pack = true;
@@ -630,10 +634,7 @@ struct parser {
       } else if(here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) {
         p.items.push_back(pattern());
       } else {
-        n_param b;
-        if(ahead(1).kind == tok::ident) b.type = type_expr(); // T-name
-        b.name = ident();
-        p.items.push_back(db.add(std::move(b), {i0, toks[pos - 1].where.end}));
+        p.items.push_back(pattern_element());
       }
       if(is_op(",")) eat_op(",");
       else break;
@@ -648,7 +649,11 @@ struct parser {
     if(is_open('(')) return expression();
     if(here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) return pattern();
     n_param b;
-    if(ahead(1).kind == tok::ident) b.type = type_expr();
+    if(is_word("explicit") && ahead(1).kind == tok::ident && ahead(2).kind == tok::ident) { // explicit T name - strictly
+      advance();
+      b.strict = true;
+    }
+    if(ahead(1).kind == tok::ident) b.type = type_expr(); // T-name
     b.name = ident();
     return db.add(std::move(b), {i0, toks[pos - 1].where.end});
   }

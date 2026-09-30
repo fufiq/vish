@@ -53,6 +53,10 @@ struct n_param {
   param_mode mode = param_mode::let;
   bool pack = false;
   symbol clause; // the word of the clause, which belongs to the parameter: try(…) catch(…) (empty - head)
+  // explicit T x - "type equals" T x - "value is conceivable" (with transformation):
+  // 
+  // 
+  bool strict = false;
   int64_t source = -1; // block parameter entered by the design: `auto x : xs` is the xs argument number in the call
 };
 struct n_var {

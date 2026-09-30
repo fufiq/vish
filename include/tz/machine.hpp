@@ -707,6 +707,7 @@ struct process_machine {
     bool tie = false;
     uint32_t parent = std::exchange(invoke_parent, m_none); // local set: environment of the set
     uint32_t rejected = 0, by_value = 0; // All are cut off by meaning - an exception, like the interpreter.
+    std::vector<std::pair<uint32_t, mval>> chosen_conv;
     for(node_id fnode: fns) {
       auto const & fn = db.as<n_fn>(fnode);
       if(plain) continue;
@@ -716,6 +717,7 @@ struct process_machine {
       }
       int score = 0;
       bool fits = true;
+      std::vector<std::pair<uint32_t, mval>> conv; // candidate's converted arguments
       for(uint32_t i = 0; i < nargs && fits; ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
         if(p.type && db.is<n_pat>(p.type)) { // Applicant’s condition (as required)
@@ -730,9 +732,15 @@ struct process_machine {
         }
         if(p.type && db.is<n_ident>(p.type)) {
           if(args[i].is<m_thunk>()) continue;
-          std::string want(helper.str(db.as<n_ident>(p.type).name)), have = describe(args[i]);
-          if(have != want && have.substr(0, have.find('<')) != want) fits = false;
-          else ++score;
+          mval got;
+          int r = type_fit(deref(args[i]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
+          if(!r) {
+            fits = false;
+            by_value += numeric_pair(deref(args[i]), helper.str(db.as<n_ident>(p.type).name)) && !p.strict;
+          } else {
+            score += r;
+            if(r == 1) conv.push_back({i, got});
+          }
         }
       }
       if(!fits) {
@@ -751,16 +759,18 @@ struct process_machine {
       if(score > best) {
         best = score;
         chosen = fnode;
+        chosen_conv = std::move(conv);
         tie = false;
       } else if(score == best) tie = true;
     }
     if(!chosen && by_value && by_value == rejected) {
-      diagnostic d(cat("распаковка не удалась: ни одна перегрузка ", helper.str(db.as<n_fn>(fns.front()).name), " не подходит"), where, diag_kind::runtime);
+      diagnostic d(cat("нет перегрузки ", helper.str(db.as<n_fn>(fns.front()).name), " для этих значений"), where, diag_kind::runtime);
       d.type = "unpack_failed";
       throw d;
     }
     if(!chosen) throw diagnostic(cat("нет подходящей перегрузки ", helper.str(db.as<n_fn>(fns.front()).name)), where);
     if(tie) throw diagnostic("неоднозначный вызов", where);
+    for(auto & [i, v]: chosen_conv) args[i] = std::move(v); // Values - in the types of parameters selected
     auto const & fn = db.as<n_fn>(chosen);
     if(fn.outline && helper.inline_required(chosen))
       throw diagnostic(cat(helper.str(fn.name), " помечена outline, но использует семантику инлайна"), db[chosen].where);
@@ -977,6 +987,27 @@ struct process_machine {
 
   // --- unpacking (P12), as in the interpreter; value-element - literal ---
 
+  // Levels of coincidence of type, as in the interpreter: 2 - type is equal, 1 - value
+  // is imaginable (out - in the type of parameter), 0 - no.
+  int type_fit(mval const & v, std::string_view want, bool strict, mval & out) {
+    out = v;
+    std::string have = describe(v);
+    if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2;
+    if(strict || !numeric_pair(v, want)) return 0;
+    if(want == "f64") {
+      int64_t i = v.as<int64_t>();
+      double d = double(i);
+      if(d < -9.2e18 || d > 9.2e18 || int64_t(d) != i) return 0;
+      out = mval{d};
+      return 1;
+    }
+    double d = v.as<double>();
+    if(!(d >= -9.2e18 && d <= 9.2e18) || std::trunc(d) != d) return 0;
+    out = mval{int64_t(d)};
+    return 1;
+  }
+  static bool numeric_pair(mval const & v, std::string_view want) { return (want == "f64" && v.is<int64_t>()) || (want == "i64" && v.is<double>()); }
+
   // Reference to the interface from the unpackable value: .field, .size, [literal]; failed
   // (no field, border) - nullopt: not unpacked.
   std::optional<mval> access(node_id e, mval const & subject) {
@@ -1011,11 +1042,9 @@ struct process_machine {
       if(db.is<n_pat>(item)) return unpack_into(item, e, into, where);
       if(db.is<n_param>(item)) {
         auto const & b = db.as<n_param>(item);
-        if(b.type) {
-          std::string want(helper.str(db.as<n_ident>(b.type).name)), have = describe(e);
-          if(have != want && have.substr(0, have.find('<')) != want) return false;
-        }
-        if(helper.str(b.name) != "_") declare(into, b.name, e);
+        mval got = e;
+        if(b.type && !type_fit(deref(e), helper.str(db.as<n_ident>(b.type).name), b.strict, got)) return false;
+        if(helper.str(b.name) != "_") declare(into, b.name, got);
         return true;
       }
       mval lit;

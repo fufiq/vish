@@ -1,0 +1,38 @@
+// out: 3 4 3.0 целое дробное дробное
+// out: ровно f64 прочее
+// out: 2 3.0
+// out: нет
+// out: -1
+// machine
+// fmt-stable
+// store-roundtrip
+// Уровни совпадения типа: 
+// 
+// 
+// T x — значение
+// представимо (i64 ↔ f64 без потерь, с преобразованием), explicit T x — только
+// равный тип; точное совпадение лучше. Не представимо ни в одну — исключение.
+half(i64 x) => x / 2;
+
+scale(f64 x) => x * 1.5;
+
+kind(i64 x) => "целое";
+
+kind(f64 x) => "дробное";
+
+strict(explicit f64 x) => "ровно f64";
+
+strict(x) => "прочее";
+
+main() {
+  print(half(7), half(8.0), scale(2), kind(3), kind(3.0), kind(2.5));
+  print(strict(1.0), strict(1));
+  if(array{i64 a, f64 b} = array{2.0, 3}) print(a, b);
+  if(array{explicit i64 c} = array{2.0}) print("да") else print("нет");
+  r = try {
+    half(2.5)
+  } catch(unpack_failed e) {
+    -1
+  };
+  print(r);
+}
