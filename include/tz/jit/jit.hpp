@@ -2291,7 +2291,25 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   jit_fault = 0;
   jit_vm = this;
   auto entry = reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
-  uint64_t bits = entry(raw.data());
+  uint64_t bits;
+  if(code->by_lang) { // Compiler code in language: array - {данные, размер}, behind arguments - error slots
+    std::vector<uint64_t> area;
+    for(uint32_t i = 0; i < vals.size(); ++i) {
+      if(param_types[i] == jt::arr_i64 || param_types[i] == jt::arr_f64) {
+        auto * arr = reinterpret_cast<array_v *>(raw[i]);
+        void * data = jit_array_data(arr, param_types[i] == jt::arr_i64 ? 1 : 2);
+        if(!data) throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[f].where);
+        area.push_back(reinterpret_cast<uint64_t>(data));
+        area.push_back(arr->size());
+      } else area.push_back(raw[i]);
+    }
+    std::size_t fault_at = area.size();
+    area.push_back(0);
+    area.push_back(0);
+    bits = entry(area.data());
+    jit_fault = area[fault_at]; // Error - from the slot that gave VM (not the host address in the code)
+    jit_fault_node = area[fault_at + 1];
+  } else bits = entry(raw.data());
   auto fault = jit_fault_kind(jit_fault);
   if(shadow) a64->compare(*shadow, sargs, raw, code->result, bits, cat(db.strings.text(db.as<n_fn>(f).name), "(", jit_engine::types_str(param_types), ")"));
   if(fault == jit_fault_kind::vm_error) { // Error/Cancellation within the VM operation

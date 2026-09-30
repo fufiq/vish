@@ -120,7 +120,17 @@ struct a64_check {
     std::vector<uint64_t> d_cells;
     for(std::size_t i = 0; i < eng.fns.size(); ++i) d_cells.push_back(data_word(0));
     std::vector<uint64_t> d_args, d_arrays; // for array: header {данные, размер} and data
-    for(auto const & a: args) d_args.push_back(data_word(0));
+    // Compiler code in language: array in arguments - {данные, размер}, behind them - error slots
+    bool lang = main_fn.by_lang;
+    uint64_t d_lang_fault = 0;
+    for(auto const & a: args) {
+      d_args.push_back(data_word(0));
+      if(lang && a.array) data_word(0);
+    }
+    if(lang) {
+      d_lang_fault = data_word(0);
+      data_word(0);
+    }
     std::vector<uint64_t> d_headers;
     for(auto const & a: args) {
       if(!a.array || a.same_as >= 0) {
@@ -149,6 +159,13 @@ struct a64_check {
       c.word(0xD63F0200); // blr x16
       imm(17, at(d_result));
       c.word(0xF8000220); // stur x0, [x17]
+      if(lang) // Error slots from the field of arguments - in image tags (they are compared with host)
+        for(uint64_t k = 0; k < 2; ++k) {
+          imm(16, at(d_lang_fault + 8 * k));
+          c.word(0xF8400211); // ldur x17, [x16]
+          imm(16, at(k ? d_node : d_fault));
+          c.word(0xF8000211); // stur x17, [x16]
+        }
       auto write = [&](uint64_t addr, uint64_t bytes) {
         imm(0, 1);
         imm(1, addr);
@@ -217,7 +234,10 @@ struct a64_check {
         put(d_args[i], args[i].bits);
         continue;
       }
-      put(d_args[i], base + data_addr + d_headers[i]);
+      if(lang) { // {data, size}
+        put(d_args[i], base + data_addr + d_arrays[i]);
+        put(d_args[i] + 8, args[i].items.size());
+      } else put(d_args[i], base + data_addr + d_headers[i]);
       if(args[i].same_as < 0) put(d_headers[i], args[i].items.empty() ? 8 : base + data_addr + d_arrays[i]);
     }
 

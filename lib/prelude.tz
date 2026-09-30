@@ -172,7 +172,7 @@ a64_cmp(i64 cc, i64 a, i64 b) => array{...a64_word(0xEB00001F | (b << 16) | (a <
 
 amd64(expr body) {
   // регистровая модель: аккумулятор, второй операнд, их f64, база аргументов, кадр, стек
-  model() => array{0, 1, 0, 1, 7, 5, 4}; // rax, rcx, xmm0, xmm1, rdi, rbp, rsp
+  model() => array{0, 1, 0, 1, 7, 5, 4, 2}; // rax, rcx, xmm0, xmm1, rdi, rbp, rsp, rdx
   using operator (i64 a) + (i64 b) => x64_rr(0x1, a, b); // add
   using operator (i64 a) - (i64 b) => x64_rr(0x29, a, b); // sub
   using operator (i64 a) & (i64 b) => x64_rr(0x21, a, b); // and
@@ -239,7 +239,7 @@ amd64(expr body) {
 }
 
 arm64(expr body) {
-  model() => array{9, 3, 0, 1, 0, 29, 31}; // x9, x3, d0, d1, x0, x29, sp
+  model() => array{9, 3, 0, 1, 0, 29, 31, 2}; // x9, x3, d0, d1, x0, x29, sp, x2
   using operator (i64 a) + (i64 b) => a64_rrr(0x8B000000, a, a, b); // add
   using operator (i64 a) - (i64 b) => a64_rrr(0xCB000000, a, a, b); // sub
   using operator (i64 a) & (i64 b) => a64_rrr(0x8A000000, a, a, b); // and
@@ -444,9 +444,12 @@ is_err(result r) => !r.ok;
 // результата, деревья цепочек операторов (их выбрал разбор) → байты машинного кода
 // (кодогенераторы контекста цели через codegen); пустой массив — не умеет, код
 // даёт склейка на C++. *Моё:* подмножество — i64/bool/f64, операции, цепочки, if,
-// loop/break/continue, переменные, return, f64(x)/i64(x); своя раскладка: значения
-// — в слотах кадра, выражение — в аккумуляторе (f64 — в acc_f), второй операнд —
-// через стек.
+// loop/break/continue, переменные, return, f64(x)/i64(x), массивы-параметры (xs[i]
+// с проверкой границ, xs[i] = v, xs.size), деление с ловушкой, require; своя
+// раскладка: значения — в слотах кадра, выражение — в аккумуляторе (f64 — в acc_f),
+// второй операнд — через стек. Вход (решение автора: слот от VM, без адресов
+// хоста в коде): область аргументов — скаляр одним словом, массив — {данные,
+// размер}, за ними — вид ошибки и её узел; ловушка пишет их туда и выходит.
 struct jc_fix { i64 at; str entity; array types; array args; i64 label; }
 
 jit_compile(str target, f, types, str result, chains) {
@@ -459,6 +462,8 @@ jit_compile(str target, f, types, str result, chains) {
   argbase = if(ok) m[4] else 0;
   frame = if(ok) m[5] else 0;
   stack = if(ok) m[6] else 0;
+  third = if(ok) m[7] else 0;
+  faults = array{};
   out = array{};
   fixes = array{};
   labels = array{};
@@ -466,8 +471,9 @@ jit_compile(str target, f, types, str result, chains) {
   kinds = array{};
   loops = array{};
   scalar(str t) => (t == "i64") || ((t == "bool") || (t == "f64"));
+  arr(str t) => (t == "array<i64>") || (t == "array<f64>");
   if(!scalar(result)) ok = false;
-  for(t : types) if(!scalar(t)) ok = false;
+  for(t : types) if(!scalar(t) && !arr(t)) ok = false;
   emit(str entity, ts, xs) => {
     bytes = codegen(target, entity, ts, xs, 0);
     if(bytes.size == 0) ok = false;
@@ -517,6 +523,12 @@ jit_compile(str target, f, types, str result, chains) {
     } else if(k == "call") {
       callee = code_field(e, "callee");
       if(code_kind(callee) == "ident") code_field(callee, "name") else "?"
+    } else if(k == "index") {
+      o = code_field(e, "object");
+      s = if(code_kind(o) == "ident") slot(code_field(o, "name")) else -1;
+      if(s < 0) "?" else if(kinds[s] == "array<i64>") "i64" else if(kinds[s] == "array<f64>") "f64" else "?"
+    } else if(k == "member") {
+      if(code_field(e, "name") == "size") "i64" else "?"
     } else if(k == "if") ty(code_field(e, "then_"))
     else if(k == "block") {
       xs = code_field(e, "items");
@@ -530,6 +542,19 @@ jit_compile(str target, f, types, str result, chains) {
   store_slot(i64 s) => {
     if(kinds[s] == "f64") emit("store_f64", array{"i64", "i64", "i64"}, array{frame, off(s), acc_f});
     else emit("store", array{"i64", "i64", "i64"}, array{frame, off(s), acc});
+  };
+  // ловушка: метка, вид (1 — границы, 2 — деление на ноль, 3 — require) и узел
+  fault(i64 kind, e) => {
+    l = label();
+    faults.push(array{l, kind, code_id(e)});
+    l
+  };
+  array_slot(o) => if(code_kind(o) == "ident") slot(code_field(o, "name")) else -1;
+  // индекс в acc, проверка границ по размеру массива s; данные — в second
+  checked(i64 s, e) => {
+    emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(s + 1)});
+    jump_to("check_index", array{"i64", "i64"}, array{acc, second}, fault(1, e));
+    emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(s)});
   };
   gen(e) => {
     k = code_kind(e);
@@ -552,6 +577,23 @@ jit_compile(str target, f, types, str result, chains) {
       if(code_kind(t) == "chain") ok = false;
       else gen(t);
     } else if(k == "call") gen_call(e);
+    else if(k == "index") {
+      s = array_slot(code_field(e, "object"));
+      if((s < 0) || !arr(kinds[s])) ok = false;
+      else {
+        gen(code_field(e, "index"));
+        checked(s, e);
+        if(kinds[s] == "array<f64>") emit("load_index_f64", array{"i64", "i64", "i64"}, array{acc_f, second, acc});
+        else emit("load_index", array{"i64", "i64", "i64"}, array{acc, second, acc});
+      }
+    } else if(k == "member") {
+      s = array_slot(code_field(e, "object"));
+      if((s < 0) || (!arr(kinds[s]) || (code_field(e, "name") != "size"))) ok = false;
+      else emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(s + 1)});
+    } else if(k == "require") {
+      gen(code_field(e, "cond"));
+      jump_to("jump_unless", array{"bool"}, array{acc}, fault(3, e));
+    }
     else if(k == "block") {
       for(x : code_field(e, "items")) if(ok) gen(x);
     } else if(k == "if") {
@@ -631,6 +673,21 @@ jit_compile(str target, f, types, str result, chains) {
       else if(op == "!") emit("prefix!", array{"bool"}, array{acc});
       else ok = false;
     } else if((op == "=") && (code_kind(xs[0]) == "ident")) assign(code_field(xs[0], "name"), xs[1]);
+    else if((op == "=") && (code_kind(xs[0]) == "index")) { // xs[i] = v: значение — на стек, индекс, границы, запись
+      s = array_slot(code_field(xs[0], "object"));
+      if((s < 0) || !arr(kinds[s])) ok = false;
+      else {
+        t = ty(xs[1]);
+        if(t != (if(kinds[s] == "array<f64>") "f64" else "i64")) ok = false;
+        gen(xs[1]);
+        if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
+        emit("push_tmp", array{"i64"}, array{acc});
+        gen(code_field(xs[0], "index"));
+        checked(s, xs[0]);
+        emit("pop_tmp", array{"i64"}, array{third});
+        emit("store_index", array{"i64", "i64", "i64"}, array{second, acc, third});
+      }
+    }
     else if(((op == "+=") || ((op == "-=") || (op == "*="))) && (code_kind(xs[0]) == "ident")) {
       s = slot(code_field(xs[0], "name"));
       if(s < 0) ok = false;
@@ -650,8 +707,10 @@ jit_compile(str target, f, types, str result, chains) {
     } else {
       t = ty(xs[0]);
       if(t == "bool") t = "i64"; // == и != над bool — те же биты
-      if(((op == "/") || (op == "%")) && (t != "f64")) ok = false; // ловушка деления — пока склейка C++
-      else if((t != "i64") && (t != "f64")) ok = false;
+      if(((op == "/") || (op == "%")) && (t == "i64")) { // ловушка деления на ноль
+        operands(xs[0], xs[1], t);
+        jump_to(fmt"infix{op}", array{t, t}, regs(t), fault(2, e));
+      } else if((t != "i64") && (t != "f64")) ok = false;
       else {
         operands(xs[0], xs[1], t);
         emit(fmt"infix{op}", array{t, t}, regs(t));
@@ -664,18 +723,37 @@ jit_compile(str target, f, types, str result, chains) {
   frame_at = out.size;
   emit("frame_alloc", array{"i64"}, array{0});
   ps = code_field(f, "params");
+  ap = 0; // слово в области аргументов
   for(i : range(ps.size)) {
-    names.push(code_field(ps[i], "name"));
-    kinds.push(types[i]);
-    emit("load", array{"i64", "i64", "i64"}, array{acc, argbase, 8 * i});
-    emit("store", array{"i64", "i64", "i64"}, array{frame, off(i), acc});
+    words = if(arr(types[i])) 2 else 1;
+    for(w : range(words)) {
+      names.push(if(w == 0) code_field(ps[i], "name") else "");
+      kinds.push(if(w == 0) types[i] else "i64");
+      emit("load", array{"i64", "i64", "i64"}, array{acc, argbase, 8 * ap});
+      emit("store", array{"i64", "i64", "i64"}, array{frame, off(names.size - 1), acc});
+      ap += 1;
+    }
   }
+  names.push("");
+  kinds.push("i64");
+  args_slot = names.size - 1; // база области аргументов — для ловушек
+  emit("store", array{"i64", "i64", "i64"}, array{frame, off(args_slot), argbase});
   if(ok) gen(code_field(f, "body"));
   bind(ret);
   if(result == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f}); // f64 — битами в аккумуляторе
   emit("move", array{"i64", "i64"}, array{stack, frame});
   emit("frame_leave", array{}, array{});
   emit("ret", array{}, array{});
+  // заглушки ловушек: вид и узел — в слоты области аргументов, выход
+  for(x : faults) {
+    bind(x[0]);
+    emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(args_slot)});
+    emit("load_const", array{"i64", "i64"}, array{acc, x[1]});
+    emit("store", array{"i64", "i64", "i64"}, array{second, 8 * ap, acc});
+    emit("load_const", array{"i64", "i64"}, array{acc, x[2]});
+    emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 1), acc});
+    jump_to("jump", array{}, array{}, ret);
+  }
   if(!ok) return array{};
   for(x : fixes) {
     bytes = codegen(target, x.entity, x.types, x.args, labels[x.label] - x.at);

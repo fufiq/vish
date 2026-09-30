@@ -1,11 +1,17 @@
 // out: 56 9 -1 3628800 false true false
+// out: 34 2.5 -1.0 true
+// out: 10 3.0 [3.0, 6.0] 3 4
+// out: -1 -2
 // jit-compiled: sq
 // jit-compiled: mx
 // jit-compiled: fact
 // jit-compiled: both
 // jit-compiled: poly
 // jit-compiled: avg
-// out: 34 2.5 -1.0 true
+// jit-compiled: total
+// jit-compiled: scale
+// jit-compiled: at
+// jit-compiled: dv
 // jit-stats: fact(i64) → 
 // jit-stats: компилятор языка
 // machine
@@ -16,7 +22,9 @@
 // jit_compile прелюдии —
 // склейка на tz: обходит AST (code_field), раздаёт слоты кадра и метки, склеивает
 // байты кодогенераторов цели (codegen). JIT исполняет его код; не умеет — склейка
-// на C++. Проверка AArch64 в qemu прогоняет и эти байты.
+// на C++. Проверка AArch64 в qemu прогоняет и эти байты. Массивы и ловушки: VM
+// даёт область аргументов ({данные, размер} у массива) и слоты ошибки за ней —
+// в коде нет адресов хоста (решение автора).
 sq(i64 x) => x * (x + 1);
 
 mx(i64 a, i64 b) => if(a > b) a else b;
@@ -42,7 +50,43 @@ avg(f64 a, f64 b, i64 n) => {
   if(n < 0) -s else s
 }
 
+total(xs) => {
+  s = 0;
+  i = 0;
+  loop {
+    if(i >= xs.size) break;
+    s += xs[i];
+    i += 1;
+  }
+  s
+}
+
+scale(ys, f64 k) => {
+  i = 0;
+  loop {
+    if(i >= ys.size) break;
+    ys[i] = ys[i] * k;
+    i += 1;
+  }
+  ys[0]
+}
+
+at(xs, i64 k) => xs[k];
+
+dv(i64 a, i64 b) => a / b;
+
+pos(i64 x) => {
+  require(x > 0);
+  x
+}
+
 main() {
   print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
   print(poly(4) + 5, avg(2.0, 3.0, 1), avg(0.5, 1.5, -1), (avg(1.0, 1.0, 1) == 1.0) && ((0.1 + 0.2) != 0.3));
+  a = array{1, 2, 3, 4};
+  b = array{1.0, 2.0};
+  print(total(a), scale(b, 3.0), b, at(a, 2), dv(9, 2));
+  r = try { at(a, 7) } catch(out_of_bounds e) { -1 };
+  q = try { dv(1, 0) } catch(div_by_zero e) { -2 };
+  print(r, q);
 }
