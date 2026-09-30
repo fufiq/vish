@@ -192,3 +192,77 @@ parse_int(str s) => native "cpp" {
   }
   return make(good, good ? v : 0, good ? "" : cat("не число: ", in_quotes(text)));
 };
+
+// text(x) — текст значения (байты): число — десятичная запись.
+text(x) => native "cpp" {
+  if(!#x.known()) return erase(value(std::string("x")));
+  return value(#x.is<std::string>() ? #x.as<std::string>() : vm.show_v(#x));
+};
+
+// fill(n, x) — массив из n копий x.
+fill(i64 n, x) => native "cpp" {
+  if(!#n.known() || !#x.known()) return erase(value(array_v::of({#x.known() ? #x : *shape_of(#x)})));
+  array_v r;
+  for(int64_t i = 0; i < #n.as<int64_t>(); ++i) r.push(#x);
+  return value(std::move(r));
+};
+
+is_err(result r) => !r.ok;
+
+// Сущности компилятора как значения (§7.4).
+// emit(quote { объявления }) — объявления в текущую элаборацию.
+emit(q) => native "cpp" {
+  node_id code = vm.code_node(#q, where);
+  if(!vm.db.is<n_quote>(code)) vm.fail("emit: ожидался quote { объявления }", where);
+  for(node_id item: vm.db.as<n_quote>(code).items) vm.register_item(item);
+  return value();
+};
+
+// attrs(f | T) — атрибуты [[…]] функции или типа значениями.
+attrs(x) => native "cpp" {
+  std::vector<node_id> nodes;
+  symbol owner;
+  if(#x.is<fn_v>() && #x.as<fn_v>().name) {
+    owner = #x.as<fn_v>().name;
+    if(auto it = vm.functions.find(owner); it != vm.functions.end())
+      for(node_id f: it->second)
+        for(node_id at: vm.db.as<n_fn>(f).attrs) nodes.push_back(at);
+  } else if(#x.is<type_v>()) {
+    owner = vm.sym(vm.types.name(#x.as<type_v>().type));
+    if(auto it = vm.structs.find(owner); it != vm.structs.end())
+      for(node_id at: vm.db.as<n_struct>(it->second).attrs) nodes.push_back(at);
+  } else vm.fail("attrs: ожидалась функция или тип", where);
+  if(auto it = vm.ext_attrs.find(owner); it != vm.ext_attrs.end())
+    for(node_id at: it->second) nodes.push_back(at);
+  std::vector<value> vs;
+  for(node_id at: nodes) {
+    auto f = vm.eval(at, vm.globals, 0);
+    if(!f.normal()) vm.fail("атрибут не вычислился", vm.db[at].where);
+    vs.push_back(std::move(f.v));
+  }
+  return value(array_v::of(std::move(vs)));
+};
+
+// fields(T) — поля агрегата: field{name, type}.
+fields(t) => native "cpp" {
+  if(!#t.is<type_v>()) vm.fail("fields: ожидался тип", where);
+  symbol owner = vm.sym(vm.types.name(#t.as<type_v>().type));
+  if(!vm.structs.contains(owner)) vm.fail(cat("fields: ", vm.str(owner), " — не агрегат"), where);
+  std::vector<value> vs;
+  for(node_id f: vm.fields_of_struct(owner)) {
+    auto const & v = vm.db.as<n_var>(f);
+    auto tn = vm.str(vm.db.as<n_ident>(v.type).name);
+    type_id ty = vm.types.builtin(tn) ? vm.types.builtin(tn) : vm.types.named(tn);
+    agg_v d{vm.types.named("field"), {}};
+    d.fields.push_back({vm.sym("name"), value(std::string(vm.str(v.name)))});
+    d.fields.push_back({vm.sym("type"), value(type_v{ty})});
+    vs.push_back(value(std::move(d)));
+  }
+  return value(array_v::of(std::move(vs)));
+};
+
+// static_level(f) — уровень статичности функции (§12.3) значением.
+static_level(f) => native "cpp" {
+  if(!#f.is<fn_v>() || !#f.as<fn_v>().name) vm.fail("static_level: ожидалась функция", where);
+  return vm.static_level(#f.as<fn_v>().name, where);
+};

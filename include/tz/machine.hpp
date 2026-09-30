@@ -258,7 +258,7 @@ struct process_machine {
       if(st.scopes[k].caller == m_none) continue;
       p = find(st.scopes[k].caller, name);
       if(p.scope != m_none && st.scopes[k].fn != m_none && db.as<n_fn>(node_id(st.scopes[k].fn)).outline)
-        throw diagnostic(cat(helper.str(db.as<n_fn>(node_id(st.scopes[k].fn)).name), " помечена outline, но берёт имя ", s, " из окружения вызывающего"), db[node_id(st.scopes[k].fn)].where);
+        throw diagnostic(cat(helper.describe_fn(node_id(st.scopes[k].fn)), " помечена outline, но берёт имя ", s, " из окружения вызывающего"), db[node_id(st.scopes[k].fn)].where);
       return p;
     }
     return {};

@@ -4598,8 +4598,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"fill", "(n, x)"}, {"text", "(x)"}, {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"},
-      {"emit", "(quote)"}, {"static_level", "(f)"}, {"is_err", "(r)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -4612,51 +4611,6 @@ struct interpreter {
       if(captured) *captured += line + "\n";
       else put(stdout, cat(line, "\n"));
       return {};
-    }
-    // --- entity compiler as value (§7.4) ---
-    if(n == "emit" && a.size() == 1) { // Advertisements from quote to current elaboration
-      node_id q = code_node(a[0], where);
-      if(!db.is<n_quote>(q)) fail("emit: ожидался quote { объявления }", where);
-      for(node_id item: db.as<n_quote>(q).items) register_item(item);
-      return value();
-    }
-    if(n == "attrs" && a.size() == 1) { // [[…]] attributes of a function or type - values
-      std::vector<node_id> nodes;
-      symbol owner;
-      if(a[0].is<fn_v>() && a[0].as<fn_v>().name) {
-        owner = a[0].as<fn_v>().name;
-        if(auto it = functions.find(owner); it != functions.end())
-          for(node_id f: it->second)
-            for(node_id x: db.as<n_fn>(f).attrs) nodes.push_back(x);
-      } else if(a[0].is<type_v>()) {
-        owner = sym(types.name(a[0].as<type_v>().type));
-        if(auto it = structs.find(owner); it != structs.end())
-          for(node_id x: db.as<n_struct>(it->second).attrs) nodes.push_back(x);
-      } else fail("attrs: ожидалась функция или тип", where);
-      if(auto it = ext_attrs.find(owner); it != ext_attrs.end())
-        for(node_id x: it->second) nodes.push_back(x);
-      std::vector<value> vs;
-      for(node_id x: nodes) {
-        flow f = eval(x, globals, 0);
-        if(!f.normal()) fail("атрибут не вычислился", db[x].where);
-        vs.push_back(std::move(f.v));
-      }
-      return value(array_v::of(std::move(vs)));
-    }
-    if(n == "fields" && a.size() == 1 && a[0].is<type_v>()) { // aggregate field: {name, type}
-      symbol owner = sym(types.name(a[0].as<type_v>().type));
-      if(!structs.contains(owner)) fail(cat("fields: ", str(owner), " — не агрегат"), where);
-      std::vector<value> vs;
-      for(node_id f: fields_of_struct(owner)) {
-        auto const & v = db.as<n_var>(f);
-        auto tn = str(db.as<n_ident>(v.type).name);
-        type_id t = types.builtin(tn) ? types.builtin(tn) : types.named(tn);
-        agg_v d{types.named("field"), {}};
-        d.fields.push_back({sym("name"), value(std::string(str(v.name)))});
-        d.fields.push_back({sym("type"), value(type_v{t})});
-        vs.push_back(value(std::move(d)));
-      }
-      return value(array_v::of(std::move(vs)));
     }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);
@@ -4714,9 +4668,6 @@ struct interpreter {
     if(n.starts_with("stream_")) return stream_op(n, a, where);
     if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
-    if(n == "text" && a.size() == 1) // text of value (bytes): number - decimal record
-      return a[0].known() ? value(a[0].is<std::string>() ? a[0].as<std::string>() : show_v(a[0])) : erase(value(std::string("x")));
-    if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
       if(unknown(a[0]) || unknown(a[1])) return value(rt_v{}); // type
       if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
@@ -4727,12 +4678,6 @@ struct interpreter {
       if(!a[1].is<array_v>() && !(shape_of(a[1]) && shape_of(a[1])->is<array_v>()))
         fail(cat("is_index: ожидался массив, получено ", types.describe(a[1])), where);
       return erase(value(true));
-    }
-    if(n == "fill" && a.size() == 2 && types.describe(a[0]) == "i64") { // massif
-      if(!a[0].known() || !a[1].known()) return erase(value(array_v::of({a[1].known() ? a[1] : *shape_of(a[1])})));
-      array_v r;
-      for(int64_t i = 0; i < a[0].as<int64_t>(); ++i) r.push(a[1]);
-      return value(std::move(r));
     }
     if(n == "f64" && a.size() == 1 && types.describe(a[0]) == "i64")
       return a[0].known() ? value(double(a[0].as<int64_t>())) : erase(value(double(1)));
@@ -4762,10 +4707,6 @@ struct interpreter {
         }
       }
       return value(std::move(r));
-    }
-    if(n == "is_err" && a.size() == 1 && types.describe(a[0]) == "result") {
-      value okf = member(a[0], sym("ok"), where);
-      return okf.known() ? value(!okf.as<bool>()) : erase(value(true));
     }
     fail(cat("неизвестная функция ", n, "(", [&] {
             std::string s;
