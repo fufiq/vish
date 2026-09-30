@@ -45,6 +45,7 @@ struct m_fn {
   symbol name;
   node_id lambda;
   uint32_t env = m_none;
+  std::vector<node_id> set; // Local set of overloads (block functions of the same name)
 };
 // expr-параметр: выражение вызывающего в его области и кадре (§6.1).
 struct m_thunk {
@@ -696,6 +697,7 @@ struct process_machine {
   // Calling overloads fns with already calculated arguments (top of the value
   // stack: nargs pieces). The choice is by arrogance and types of parameters.
   node_id site_node; // Call Node - to mark "hidden here"
+  uint32_t invoke_parent = m_none; // calling a local set of overloads: its environment (takes invoke)
   void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where) {
     auto & f = fib();
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
@@ -703,19 +705,27 @@ struct process_machine {
     bool plain = bool(chosen);
     int best = -1;
     bool tie = false;
+    uint32_t parent = std::exchange(invoke_parent, m_none); // local set: environment of the set
+    uint32_t rejected = 0, by_value = 0; // All are cut off by meaning - an exception, like the interpreter.
     for(node_id fnode: fns) {
       auto const & fn = db.as<n_fn>(fnode);
-      if(plain || fn.params.size() != nargs) continue;
+      if(plain) continue;
+      if(fn.params.size() != nargs) {
+        ++rejected;
+        continue;
+      }
       int score = 0;
       bool fits = true;
       for(uint32_t i = 0; i < nargs && fits; ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
         if(p.type && db.is<n_pat>(p.type)) { // Applicant’s condition (as required)
-          uint32_t probe = new_scope(st.globals);
+          uint32_t probe = new_scope(parent == m_none ? st.globals : parent);
           bool ok = unpack_into(p.type, args[i], probe, where);
           release_scope(probe);
-          if(!ok) fits = false;
-          else score += 1 + int(helper.pattern_checks(p.type));
+          if(!ok) {
+            fits = false;
+            ++by_value;
+          } else score += 1 + int(helper.pattern_checks(p.type));
           continue;
         }
         if(p.type && db.is<n_ident>(p.type)) {
@@ -725,10 +735,17 @@ struct process_machine {
           else ++score;
         }
       }
-      if(!fits) continue;
+      if(!fits) {
+        ++rejected;
+        continue;
+      }
       if(has_leading_require(fn)) { // require at the beginning of the body - Candidate restriction (§5.2)
         int n = requires_hold(fnode, args, where);
-        if(n < 0) continue;
+        if(n < 0) {
+          ++rejected;
+          ++by_value;
+          continue;
+        }
         score += n;
       }
       if(score > best) {
@@ -736,6 +753,11 @@ struct process_machine {
         chosen = fnode;
         tie = false;
       } else if(score == best) tie = true;
+    }
+    if(!chosen && by_value && by_value == rejected) {
+      diagnostic d(cat("распаковка не удалась: ни одна перегрузка ", helper.str(db.as<n_fn>(fns.front()).name), " не подходит"), where, diag_kind::runtime);
+      d.type = "unpack_failed";
+      throw d;
     }
     if(!chosen) throw diagnostic(cat("нет подходящей перегрузки ", helper.str(db.as<n_fn>(fns.front()).name)), where);
     if(tie) throw diagnostic("неоднозначный вызов", where);
@@ -759,7 +781,7 @@ struct process_machine {
     }
     uint32_t id = ++st.frame_counter;
     f.frames.push_back({id, fn.name, fn.outline, caller_frame, plain});
-    uint32_t sc = new_scope(st.globals);
+    uint32_t sc = new_scope(parent == m_none ? st.globals : parent); // Local - on top of the surroundings of your block
     for(uint32_t i = 0; i < nargs; ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
       mval a = std::move(args[i]);
@@ -1283,6 +1305,10 @@ struct process_machine {
         mval & cv = cell(p);
         if(cv.is<m_thunk>() && db.is<n_lambda>(cv.as<m_thunk>().expr) && db.as<n_lambda>(cv.as<m_thunk>().expr).block)
           return call_block(n, cv.as<m_thunk>(), c.args);
+        if(cv.is<m_fn>() && !cv.as<m_fn>().set.empty()) { // localization
+          std::vector<node_id> fns = cv.as<m_fn>().set;
+          return eval_call_args(n, fns, c.args, false);
+        }
         if(cv.is<m_fn>() && cv.as<m_fn>().lambda) return call_closure(n, cv.as<m_fn>(), c.args);
         if(cv.is<m_fn>()) {
           auto it = helper.functions.find(cv.as<m_fn>().name);
@@ -1326,14 +1352,23 @@ struct process_machine {
     return c.args;
   }
 
-  std::vector<node_id> const & overloads_of(node_id any) {
+  // overload of the call n: local set (from the caller area) or module function; env is the
+  // local set environment (m_none is the global area).
+  std::vector<node_id> overloads_of(node_id n, node_id any, uint32_t scope, uint32_t * env = nullptr) {
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee))
+      if(place p = find(scope, db.as<n_ident>(db.as<n_call>(n).callee).name); p.scope != m_none)
+        if(mval & cv = cell(p); cv.is<m_fn>() && !cv.as<m_fn>().set.empty()) {
+          if(env) *env = cv.as<m_fn>().env;
+          return cv.as<m_fn>().set;
+        }
     return helper.functions.at(db.as<n_fn>(any).name);
   }
 
   void call_args_step(node_id n) {
     m_task & t = top();
     node_list args = call_args(n);
-    auto const & fns = overloads_of(t.extra);
+    uint32_t local = m_none;
+    std::vector<node_id> fns = overloads_of(n, t.extra, t.scope, &local);
     if(t.phase == 2) { // challenge
       mval r = pop_val();
       return finish(deref(r));
@@ -1361,6 +1396,7 @@ struct process_machine {
     t.phase = 2;
     uint32_t frame = t.frame;
     site_node = n;
+    invoke_parent = local;
     invoke(fns, t.a, frame, db[n].where);
   }
 
@@ -1716,8 +1752,19 @@ struct process_machine {
 
   // using operator ... - redefinition to the end of the frame of the function-context (checked).
   void eval_node(node_id n, n_fn const & f) {
-    if(!f.scoped) unsupported("локальная функция", n);
-    fib().overrides.push_back({f.name, n, top().frame});
+    m_task & t = top();
+    if(f.scoped) {
+      fib().overrides.push_back({f.name, n, t.frame});
+      return finish(mval{m_unit{}});
+    }
+    // Local function: the same names in this block are one set of overloads (like an interpreter)
+    capture(t.scope);
+    for(auto & v: st.scopes[t.scope].vars)
+      if(v.name == f.name && v.v.is<m_fn>() && !v.v.as<m_fn>().set.empty() && v.v.as<m_fn>().env == t.scope) {
+        v.v.as<m_fn>().set.push_back(n);
+        return finish(mval{m_unit{}});
+      }
+    declare(t.scope, f.name, mval{m_fn{{}, {}, t.scope, {n}}});
     finish(mval{m_unit{}});
   }
 

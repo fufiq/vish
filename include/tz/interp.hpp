@@ -1207,7 +1207,13 @@ struct interpreter {
       return ok();
     }
     capture(env);
-    env->declare(f.name, value(fn_v{{}, n, env})); // local function = lambda with a name
+    // local function: the same names in this block - one set of overloads
+    for(auto & [name, cell]: env->vars)
+      if(name == f.name && cell->is<fn_v>() && !cell->as<fn_v>().set.empty() && cell->as<fn_v>().env == env) {
+        cell->as<fn_v>().set.push_back(n);
+        return ok();
+      }
+    env->declare(f.name, value(fn_v{{}, n, env, {n}}));
     return ok();
   }
 
@@ -1275,6 +1281,39 @@ struct interpreter {
   static unpacked both(unpacked a, unpacked b) {
     if(a == unpacked::no || b == unpacked::no) return unpacked::no;
     return a == unpacked::maybe || b == unpacked::maybe ? unpacked::maybe : unpacked::yes;
+  }
+
+  // Whether samples-arrays of candidates cover any length (elements - names, , residue:
+  // without checks), in the same parameter - then there is no failure.
+  bool covers_all_lengths(auto const & cands) const {
+    int at = -1;
+    std::set<std::size_t> exact;
+    std::size_t from = ~std::size_t{0}; // length ≥ from
+    for(auto const & c: cands) {
+      auto const & fn = db.as<n_fn>(c.fn);
+      if(!fn.expr_body && db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.is<n_require>(db.as<n_block>(fn.body).items[0])) return false;
+      int mine = -1;
+      for(std::size_t i = 0; i < fn.params.size(); ++i)
+        if(node_id t = db.as<n_param>(fn.params[i]).type; t && db.is<n_pat>(t)) {
+          if(mine >= 0) return false;
+          mine = int(i);
+        }
+      if(mine < 0 || (at >= 0 && mine != at)) return false;
+      at = mine;
+      auto const & p = db.as<n_pat>(db.as<n_param>(fn.params[std::size_t(mine)]).type);
+      if(str(db.as<n_ident>(p.type).name) != "array") return false;
+      bool rest = false;
+      for(node_id x: p.items) {
+        if(!db.is<n_param>(x) || db.as<n_param>(x).type) return false; // check-in
+        rest = rest || db.as<n_param>(x).pack;
+      }
+      std::size_t n = p.items.size() - (rest ? 1 : 0);
+      if(rest) from = std::min(from, n);
+      else exact.insert(n);
+    }
+    for(std::size_t k = 0; k < from; ++k)
+      if(!exact.contains(k)) return false;
+    return from != ~std::size_t{0};
   }
 
   // Sample checks (types and values of elements) - its specificity among overloads.
@@ -3464,6 +3503,10 @@ struct interpreter {
     if(!fv.is<fn_v>()) fail(cat("значение типа ", types.describe(fv), " нельзя вызвать"), where);
     fn_v const & f = fv.as<fn_v>();
     if(f.name) return call_named(f.name, args, env, frame, where, node);
+    if(!f.set.empty()) { // local set of overloads: choice as functions, area - environment set
+      std::vector<node_id> fns = f.set;
+      return call_overloaded(fns, args, env, frame, {where, std::string(str(db.as<n_fn>(fns[0]).name)), node, frame}, f.env);
+    }
     node_list const & params = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).params : db.as<n_fn>(f.lambda).params;
     node_id body = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).body : db.as<n_fn>(f.lambda).body;
     if(params.size() != args.size()) fail(cat("ожидалось ", params.size(), " аргументов, передано ", args.size()), where);
@@ -3542,8 +3585,9 @@ struct interpreter {
   }
 
   // overload: Candidates by arity and types; require at the beginning of the body -
-  // candidate restriction (§5.4); choose the most specific.
-  flow call_overloaded(std::vector<node_id> const & fns, node_list const & args, scope * env, uint32_t frame, call_site site) {
+  // candidate restriction (§5.4); choose the most specific. base - environment of a local
+  // set of congestion (otherwise a global area)
+  flow call_overloaded(std::vector<node_id> const & fns, node_list const & args, scope * env, uint32_t frame, call_site site, scope * base = nullptr) {
     std::vector<value> vals(args.size());
     for(uint32_t i = 0; i < args.size(); ++i) {
       bool expr_everywhere = true;
@@ -3559,12 +3603,12 @@ struct interpreter {
         vals[i] = std::move(v);
       }
     }
-    return dispatch_split(fns, vals, 0, args, env, frame, site);
+    return dispatch_split(fns, vals, 0, args, env, frame, site, base);
   }
 
   // The split argument: Continuation-challenge is cloned by alternatives.
   flow dispatch_split(std::vector<node_id> const & fns, std::vector<value> & vals, uint32_t from, node_list const & args,
-      scope * env, uint32_t frame, call_site const & site) {
+      scope * env, uint32_t frame, call_site const & site, scope * base = nullptr) {
     for(uint32_t i = from; i < vals.size(); ++i) {
       if(!vals[i].is<split_v>()) continue;
       value orig = vals[i];
@@ -3575,7 +3619,7 @@ struct interpreter {
         auto copy = vals;
         flow r;
         try {
-          r = dispatch_split(fns, copy, i + 1, args, env, frame, site);
+          r = dispatch_split(fns, copy, i + 1, args, env, frame, site, base);
         } catch(diagnostic & d) { // Trace - the way: what is the argument in what state
           d.note(cat("в пути [", i < args.size() && db.is<n_ident>(args[i]) ? cat(str(db.as<n_ident>(args[i]).name), ": ") : std::string(),
                      alt.known() ? show_v(alt) : types.describe(alt), "]"),
@@ -3588,11 +3632,12 @@ struct interpreter {
       vals[i] = orig;
       return out;
     }
-    return select_and_invoke(fns, vals, args, env, frame, site);
+    return select_and_invoke(fns, vals, args, env, frame, site, base);
   }
 
   flow select_and_invoke(std::vector<node_id> const & fns, std::vector<value> & vals, node_list const & args,
-      scope * env, uint32_t frame, call_site const & site) {
+      scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr) {
+    scope * base = parent ? parent : globals; // local set: its environment
     struct candidate {
       node_id fn;
       int score;
@@ -3600,6 +3645,7 @@ struct interpreter {
     };
     std::vector<candidate> good;
     std::vector<std::string> rejected;
+    uint32_t by_value = 0; // cut off by value (sample, require), not type/arnost
     for(node_id f: fns) {
       auto const & fn = db.as<n_fn>(f);
       if(fn.params.size() != vals.size()) {
@@ -3612,10 +3658,13 @@ struct interpreter {
       for(uint32_t i = 0; i < fn.params.size() && why.empty(); ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
         if(p.type && db.is<n_pat>(p.type)) { // sample: unpacking - candidate condition (as required)
-          scope * probe = new_scope(globals);
+          scope * probe = new_scope(base);
           scope_hold hold{*this, probe};
           unpacked r = unpack_into(p.type, vals[i], probe, probe, 0, db[fn.params[i]].where);
-          if(r == unpacked::no) why = cat("аргумент ", i + 1, " не распаковывается в ", printer(db).print(p.type));
+          if(r == unpacked::no) {
+            why = cat("аргумент ", i + 1, " не распаковывается в ", printer(db).print(p.type));
+            ++by_value;
+          }
           else score += 1 + int(pattern_checks(p.type));
           maybe = maybe || r == unpacked::maybe;
         } else if(p.type && db.is<n_ident>(p.type)) {
@@ -3626,8 +3675,11 @@ struct interpreter {
         }
       }
       if(why.empty()) {
-        auto [passed, n_req, reason, unsure] = leading_requires(f, vals, args, env);
-        if(!passed) why = reason;
+        auto [passed, n_req, reason, unsure] = leading_requires(f, vals, args, env, base);
+        if(!passed) {
+          why = reason;
+          by_value += reason == "require не выполнено";
+        }
         score += n_req;
         maybe = maybe || unsure;
       }
@@ -3635,6 +3687,15 @@ struct interpreter {
       else rejected.push_back(cat(describe_fn(f), ": ", why));
     }
 
+    // all cut off values - runtime - overload found no branch: exception
+    // 
+    if(good.empty() && by_value && by_value == rejected.size()) {
+      diagnostic d(cat("распаковка не удалась: ни одна перегрузка ", site.what, " не подходит"), site.where, diag_kind::runtime);
+      d.type = "unpack_failed";
+      for(auto & r: rejected) d.note(cat("кандидат ", r), site.where);
+      for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+      throw d;
+    }
     if(good.empty()) {
       diagnostic d(cat("нет подходящей перегрузки ", site.what), site.where);
       for(auto & r: rejected) d.note(cat("кандидат ", r), site.where);
@@ -3653,11 +3714,13 @@ struct interpreter {
         reach.push_back(c);
         if(!c.maybe) break;
       }
+      if(reach.back().maybe && !covers_all_lengths(reach)) rt_check("unpack_failed", site.where); // Maybe none of them will.
       if(reach.size() > 1) {
         flow out;
         for(std::size_t k = 0; k < reach.size(); ++k) {
           auto copy = vals;
           if(site.node) emit({report_event::resolved, {}, cat(reach[k].fn.value), {}, {}, {}, site.node});
+          invoke_parent = parent;
           flow r = invoke(reach[k].fn, copy, args, env, site);
           out = k ? join_branches(out, r) : r;
         }
@@ -3673,16 +3736,17 @@ struct interpreter {
     // Which overload has chosen the challenge in this instance to move from
     // editor
     if(checking() && site.node) emit({report_event::resolved, {}, cat(good[0].fn.value), {}, {}, {}, site.node});
+    invoke_parent = parent;
     return invoke(good[0].fn, vals, args, env, site);
   }
 
   // require at the beginning of the body: run-time - Candidate condition does not
   // cut off - it is checked in runtime (§5.4). The fourth condition is run-time
   // (will decide the value: runtime - overload).
-  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env) {
+  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env, scope * base) {
     auto const & fn = db.as<n_fn>(f);
     if(fn.expr_body || !db.is<n_block>(fn.body)) return {true, 0, "", false};
-    scope * probe = new_scope(globals);
+    scope * probe = new_scope(base);
     scope_hold hold{*this, probe};
     bind_values(fn.params, vals, args, env, probe);
     int n = 0;
@@ -3700,6 +3764,7 @@ struct interpreter {
 
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
     auto const & fn = db.as<n_fn>(f);
+    scope * parent = std::exchange(invoke_parent, nullptr);
     check_inside(f, site);
     declared_invalidations(f, args, env, site.node);
     // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
@@ -3758,7 +3823,7 @@ struct interpreter {
 
     // Reactive cache: instance with unchanged dependencies is not rediscovered
     std::string memo_key = active_key + "#" + path;
-    bool memoize = checking() && cache && approx.empty() && memoizable(f, vals);
+    bool memoize = checking() && cache && approx.empty() && !parent && memoizable(f, vals); // localist
     if(memoize) {
       if(auto it = cache->entries.find(memo_key); it != cache->entries.end() && valid(it->second)) {
         ++cache->hits;
@@ -3805,7 +3870,7 @@ struct interpreter {
     frame_floors.push_back({frame_counter, false});
     flow r;
     for(uint32_t pass = 0;; ++pass) {
-      scope * inner = new_scope(globals);
+      scope * inner = new_scope(parent ? parent : globals); // Local function - on top of the surroundings of its block
       scope_hold hold{*this, inner};
       bind_values(fn.params, vals, args, env, inner, f);
       if(checking()) active.insert(active_key);
@@ -4284,6 +4349,7 @@ struct interpreter {
   check_cache * cache = nullptr;
   struct jit_engine * jit = nullptr;
   struct a64_check * a64 = nullptr; // AArch64 in parallel with host (qemu)
+  scope * invoke_parent = nullptr; // call from local overload set: set environment (takes invoke)
   std::optional<uint64_t> fuel;
   std::vector<std::pair<uint32_t, bool>> frame_floors; // (The first frame of the call was a return to the outside)
   std::vector<std::vector<report_event> *> recording;

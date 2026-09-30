@@ -105,6 +105,10 @@ struct fn_v {
   symbol name; // overload
   node_id lambda; // lambda
   scope * env = nullptr; // Lambda encirclement (area in arena, captured)
+  // Local functions of one name in one block - a set of overloads:
+// 
+  // 
+  std::vector<node_id> set;
 };
 
 // Uncomputed expression (expr parameter, §6.1): Calculated in the context of the
