@@ -132,6 +132,25 @@ struct fixed : formatter { i64 digits; }
 hex(i64 w) => hex{w};
 fixed(i64 d) => fixed{d};
 format_with(plain f, x) => text(x);
+// Примитивы — на C++ в теле функции: 
+// 
+// native "cpp" { … } собран в VM (tz native,
+// build.sh); #x — параметр значением VM. Неизвестный при разборе аргумент —
+// стёртое значение результата (как у встроенных).
+text_hex(i64 n, i64 width) => native "cpp" {
+  if(!#n.known() || !#width.known()) return erase(value(std::string("x")));
+  char buf[32];
+  snprintf(buf, sizeof buf, "%0*llx", int(#width.as<int64_t>()), static_cast<unsigned long long>(#n.as<int64_t>()));
+  return value(std::string(buf));
+};
+
+text_fixed(f64 x, i64 digits) => native "cpp" {
+  if(!#x.known() || !#digits.known()) return erase(value(std::string("x")));
+  char buf[64];
+  snprintf(buf, sizeof buf, "%.*f", int(#digits.as<int64_t>()), #x.as<double>());
+  return value(std::string(buf));
+};
+
 format_with(hex h, i64 x) => text_hex(x, h.width);
 format_with(fixed d, f64 x) => text_fixed(x, d.digits);
 
@@ -150,3 +169,26 @@ fmt(...parts) {
   }
   out
 }
+
+// parse_int(s) — result{ok, value, error}: цифры без знака.
+parse_int(str s) => native "cpp" {
+  auto make = [&](bool good, int64_t v, std::string err) {
+    agg_v r{vm.types.named("result"), {}};
+    r.fields.push_back({vm.sym("ok"), value(good)});
+    r.fields.push_back({vm.sym("value"), value(v)});
+    r.fields.push_back({vm.sym("error"), value(std::move(err))});
+    return value(std::move(r));
+  };
+  if(!#s.known()) return erase(make(true, 0, ""));
+  auto const & text = #s.as<std::string>();
+  int64_t v = 0;
+  bool good = !text.empty();
+  for(char ch: text) {
+    if(ch < '0' || ch > '9') {
+      good = false;
+      break;
+    }
+    v = v * 10 + (ch - '0');
+  }
+  return make(good, good ? v : 0, good ? "" : cat("не число: ", in_quotes(text)));
+};

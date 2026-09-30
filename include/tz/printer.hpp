@@ -243,6 +243,10 @@ struct printer {
     }
   }
 
+  void print_node(node_id, n_native const & x) {
+    out += cat("native ", in_quotes(str(x.lang)), " {", x.code, "}");
+  }
+
   void print_node(node_id, n_template const & t) {
     item(t.tag);
     out += '"';
@@ -504,7 +508,14 @@ struct printer {
 
   void print_node(node_id, n_ident const & i) { out += str(i.name); }
   void print_node(node_id, n_auto const &) { out += "auto"; }
-  void print_node(node_id, n_int const & i) { out += std::to_string(i.value); }
+  void print_node(node_id, n_int const & i) {
+    if(!i.ch) {
+      out += std::to_string(i.value);
+      return;
+    }
+    char c = char(i.value);
+    out += c == '\n' ? "'\\n'" : c == '\t' ? "'\\t'" : c == '\'' || c == '\\' ? cat("'\\", c, "'") : cat("'", c, "'");
+  }
 
   void print_node(node_id, n_float const & f) {
     auto s = cat(f.value);

@@ -82,6 +82,7 @@ struct n_ident {
 };
 struct n_int {
   int64_t value = 0;
+  bool ch = false; // written with the symbol 'c' (byte)
 };
 struct n_float {
   double value = 0;
@@ -254,9 +255,18 @@ struct n_template {
   node_list parts;
 };
 
+// native "cpp" { … } is a function body in C++ (§3.3):
+// 
+// Text as written; `#x` is the parameter x of the surrounding function with the
+// value of VM. It is going to VM (tz native).
+struct n_native {
+  symbol lang;
+  std::string code;
+};
+
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_template, n_use>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_template, n_use, n_native>;
 
 struct node {
   node_kind kind;

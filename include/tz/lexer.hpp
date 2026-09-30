@@ -14,6 +14,7 @@ enum class tok : uint8_t {
   int_lit,
   float_lit,
   str_lit,
+  char_lit, // 'c' - byte (i64)
   op, // operator
   open, // ( [ {
   close, // ) ] }
@@ -63,6 +64,9 @@ struct lexer {
       } else if(c == '"') {
         lex_string();
         t.kind = tok::str_lit;
+      } else if(c == '\'') {
+        lex_string('\'');
+        t.kind = tok::char_lit;
       } else if(c == '(' || c == '[' || c == '{') {
         ++pos;
         t.kind = tok::open;
@@ -118,13 +122,13 @@ struct lexer {
     return tok::int_lit;
   }
 
-  void lex_string() {
+  void lex_string(char quote = '"') {
     uint32_t start = pos++;
-    while(pos < src.size() && src[pos] != '"') {
+    while(pos < src.size() && src[pos] != quote) {
       if(src[pos] == '\\') ++pos;
       ++pos;
     }
-    if(pos >= src.size()) throw diagnostic("незакрытая строка", {start, start + 1});
+    if(pos >= src.size()) throw diagnostic(quote == '"' ? "незакрытая строка" : "незакрытый символ", {start, start + 1});
     ++pos;
   }
 

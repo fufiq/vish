@@ -1,0 +1,15 @@
+// out: 97 10 true
+// out: 00ff 3.14 42
+// machine
+// fmt-stable
+// store-roundtrip
+// native "cpp" { … } (§3.3): 
+// 
+// text_hex, text_fixed, parse_int — тела на C++ в
+// прелюдии, собранные в VM (tz native, build.sh); раньше — встроенные функции
+// интерпретатора. Символ 'c' — байт (i64), как s[k].
+main() {
+  s = "a";
+  print('a', '\n', s[0] == 'a');
+  print(text_hex(255, 4), text_fixed(3.14159, 2), parse_int("42").value);
+}

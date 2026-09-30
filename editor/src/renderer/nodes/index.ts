@@ -42,6 +42,7 @@ import './expressions/pat_field';
 import './expressions/subject';
 import './expressions/spread';
 import './expressions/template';
+import './expressions/native';
 
 export function tagOf(kind: string): string {
   return `tz-${kind.replace(/^n_/, '').replaceAll('_', '-')}`;

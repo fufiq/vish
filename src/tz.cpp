@@ -69,6 +69,53 @@ int main(int argc, char ** argv) {
   if(argc < 3) return usage();
   std::string cmd = argv[1];
   try {
+    // Assembling native “cpp” { … } (§3.3): Bodies from prelude and data files into a
+    // header that VM compiles into itself (build.sh). The file is rewritten only if it
+    // has changed: the exit code 3 is “reassemble”.
+    if(cmd == "native") {
+      tz::ast_db db;
+      tz::load_prelude(db);
+      for(int i = 3; i < argc; ++i) {
+        tz::os::mapped_file f(argv[i]);
+        tz::parser p(db, f.text(), argv[i]);
+        p.parse_module();
+        if(!p.errors().empty()) throw p.errors().front();
+      }
+      std::string out = "// Сгенерировано `tz native` из native \"cpp\" { … } библиотек — не править.\n#pragma once\n\nnamespace tz {\n\n";
+      std::string table;
+      uint32_t k = 0;
+      for(uint32_t i = 0; i < db.size(); ++i) {
+        if(!db.is<tz::n_native>(tz::node_id(i))) continue;
+        tz::node_id fn = tz::native_owner(db, tz::node_id(i));
+        std::string code = db.as<tz::n_native>(tz::node_id(i)).code;
+        auto const & ps = db.as<tz::n_fn>(fn).params;
+        for(std::size_t j = 0; j < ps.size(); ++j) { // #x - parameter x
+          std::string name = cat("#", db.strings.text(db.as<tz::n_param>(ps[j]).name));
+          for(std::size_t at = code.find(name); at != std::string::npos; at = code.find(name, at)) {
+            char next = at + name.size() < code.size() ? code[at + name.size()] : ' ';
+            if(std::isalnum(static_cast<unsigned char>(next)) || next == '_') {
+              at += name.size();
+              continue;
+            }
+            std::string arg = cat("(a[", j, "])");
+            code.replace(at, name.size(), arg);
+            at += arg.size();
+          }
+        }
+        std::string key = tz::native_key(db, fn);
+        out += cat("// ", key, "\nvalue native_", k, "(interpreter & vm, std::vector<value> & a, span where) {", code, "}\n\n");
+        table += cat("    {\"", key, "\", native_", k, "},\n");
+        ++k;
+      }
+      out += k ? cat("native_entry const native_entries[] = {\n", table, "};\n\nstd::span<native_entry const> native_table() { return native_entries; }\n")
+               : std::string("std::span<native_entry const> native_table() { return {}; }\n");
+      out += "\n} // namespace tz\n";
+      std::string old;
+      if(std::filesystem::exists(argv[2])) old = std::string(tz::os::mapped_file(argv[2]).text());
+      if(old == out) return 0;
+      tz::os::write_file(argv[2], out);
+      return 3;
+    }
     if(cmd == "test") {
       tz::test_runner r;
       r.a64 = argc > 3 && std::string_view(argv[3]) == "--a64";

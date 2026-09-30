@@ -1228,6 +1228,16 @@ struct process_machine {
   }
 
   // Tag "text {x} text" ст tag ("text", x, "text")
+  void eval_node(node_id n, n_native const &) {
+    native_entry const * e = native_of(db, n);
+    std::vector<value> a;
+    for(node_id pn: db.as<n_fn>(native_owner(db, n)).params) {
+      place p = find_lexical(top().scope, db.as<n_param>(pn).name);
+      a.push_back(p.scope == m_none ? value() : to_value(deref(st.scopes[p.scope].vars[p.slot].v)));
+    }
+    finish(from_value(e->fn(helper, a, db[n].where), db[n].where));
+  }
+
   void eval_node(node_id n, n_template const & tp) {
     m_task & t = top();
     if(t.phase > 0) return resume_call(n);

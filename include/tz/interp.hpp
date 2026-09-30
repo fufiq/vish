@@ -149,6 +149,40 @@ struct check_cache {
   std::vector<std::string> recomputed_names;
 };
 
+// Primitives introduced by native “cpp” { … } (§3.3): Bodies assembled in VM - out/native.hpp
+// generates `tz native` from library texts; key is name and parameter types.
+struct interpreter;
+struct native_entry {
+  std::string_view key;
+  value (*fn)(interpreter & vm, std::vector<value> & a, span where);
+};
+std::span<native_entry const> native_table();
+
+std::string native_key(ast_db const & db, node_id fn) {
+  auto const & f = db.as<n_fn>(fn);
+  std::string k = cat(db.strings.text(f.name), "(");
+  for(std::size_t i = 0; i < f.params.size(); ++i) {
+    auto const & p = db.as<n_param>(f.params[i]);
+    k += cat(i ? ", " : "", p.type && db.is<n_ident>(p.type) ? db.strings.text(db.as<n_ident>(p.type).name) : std::string_view("_"));
+  }
+  return k + ")";
+}
+
+// A function whose body is native.
+node_id native_owner(ast_db const & db, node_id n) {
+  node_id f = db[n].parent;
+  if(!f || !db.is<n_fn>(f) || db.as<n_fn>(f).body != n) throw diagnostic("native — только тело функции: f(…) => native \"cpp\" { … }", db[n].where);
+  return f;
+}
+
+native_entry const * native_of(ast_db const & db, node_id n) {
+  if(db.strings.text(db.as<n_native>(n).lang) != "cpp") throw diagnostic(cat("native: язык ", db.strings.text(db.as<n_native>(n).lang), " не поддержан — только \"cpp\""), db[n].where);
+  std::string key = native_key(db, native_owner(db, n));
+  for(auto const & e: native_table())
+    if(e.key == key) return &e;
+  throw diagnostic(cat("native ", key, " не собран в VM — пересоберите: ./build.sh"), db[n].where);
+}
+
 struct interpreter {
   // residual program inputs: known arguments and strings of stdin (§13.2).
   struct known_inputs {
@@ -1623,7 +1657,21 @@ struct interpreter {
     return found;
   }
 
-  // Tag "text {x} text" ст tag ("text", x, "text")
+  // Tag "text {x} text" ст tag ("text", x, "text") Body native: function parameters are VM
+  // values; effects are “unproven” (§3.3).
+  flow eval_node(node_id n, n_native const &, scope * env, uint32_t) {
+    native_entry const * e = native_of(db, n);
+    std::vector<value> a;
+    for(node_id pn: db.as<n_fn>(native_owner(db, n)).params) {
+      value * c = env->find(db.as<n_param>(pn).name);
+      a.push_back(c ? *c : value());
+    }
+    value r = e->fn(*this, a, db[n].where);
+    if(checking() && !r.known()) // “Not proven” at the level of staticity, not the type of exception
+      for(auto const & k: instance_keys) emit({report_event::rt_check, k, "native", {}, db[n].where, {}});
+    return ok(std::move(r));
+  }
+
   flow eval_node(node_id n, n_template const & t, scope * env, uint32_t frame) {
     symbol tag = db.as<n_ident>(t.tag).name;
     if(value * cell = find(env, tag)) { // Local tag - value-function
@@ -4549,8 +4597,8 @@ struct interpreter {
   // the editor. The internal ones (stream *, net *, * checked, file *) wrap prelude -
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
-      {"print", "(x)"}, {"read_floats", "(stdin)"}, {"parse_int", "(s)"}, {"range", "(n)"},
-      {"fill", "(n, x)"}, {"text", "(x)"}, {"text_hex", "(n, ширина)"}, {"text_fixed", "(x, знаки)"}, {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"},
+      {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
+      {"fill", "(n, x)"}, {"text", "(x)"}, {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"},
       {"emit", "(quote)"}, {"static_level", "(f)"}, {"is_err", "(r)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
@@ -4666,20 +4714,6 @@ struct interpreter {
     if(n.starts_with("stream_")) return stream_op(n, a, where);
     if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
-    if(n == "text_hex" && a.size() == 2) { // hexadecimal
-      if(!a[0].known() || !a[1].known()) return erase(value(std::string("x")));
-      if(!a[0].is<int64_t>() || !a[1].is<int64_t>()) fail("text_hex(i64, ширина)", where);
-      char buf[32];
-      snprintf(buf, sizeof buf, "%0*llx", int(a[1].as<int64_t>()), static_cast<unsigned long long>(a[0].as<int64_t>()));
-      return value(std::string(buf));
-    }
-    if(n == "text_fixed" && a.size() == 2) { // decimal
-      if(!a[0].known() || !a[1].known()) return erase(value(std::string("x")));
-      if(!a[0].is<double>() || !a[1].is<int64_t>()) fail("text_fixed(f64, знаки)", where);
-      char buf[64];
-      snprintf(buf, sizeof buf, "%.*f", int(a[1].as<int64_t>()), a[0].as<double>());
-      return value(std::string(buf));
-    }
     if(n == "text" && a.size() == 1) // text of value (bytes): number - decimal record
       return a[0].known() ? value(a[0].is<std::string>() ? a[0].as<std::string>() : show_v(a[0])) : erase(value(std::string("x")));
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
@@ -4728,27 +4762,6 @@ struct interpreter {
         }
       }
       return value(std::move(r));
-    }
-    if(n == "parse_int" && a.size() == 1 && types.describe(a[0]) == "str") {
-      auto make = [&](bool good, int64_t v, std::string err) {
-        agg_v r{types.named("result"), {}};
-        r.fields.push_back({sym("ok"), value(good)});
-        r.fields.push_back({sym("value"), value(v)});
-        r.fields.push_back({sym("error"), value(std::move(err))});
-        return value(std::move(r));
-      };
-      if(!a[0].known()) return erase(make(true, 0, ""));
-      auto const & s = a[0].as<std::string>();
-      int64_t v = 0;
-      bool good = !s.empty();
-      for(char ch: s) {
-        if(ch < '0' || ch > '9') {
-          good = false;
-          break;
-        }
-        v = v * 10 + (ch - '0');
-      }
-      return make(good, good ? v : 0, good ? "" : cat("не число: ", in_quotes(s)));
     }
     if(n == "is_err" && a.size() == 1 && types.describe(a[0]) == "result") {
       value okf = member(a[0], sym("ok"), where);
@@ -4895,3 +4908,5 @@ struct interpreter {
 };
 
 } // namespace tz
+
+#include "native.hpp" // out/native.hpp: tz native (build.sh)

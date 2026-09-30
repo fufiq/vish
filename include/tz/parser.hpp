@@ -1108,7 +1108,7 @@ struct parser {
   bool starts_operand(uint32_t k) const {
     token const & t = ahead(k);
     if(t.kind == tok::ident) return !is_keyword(t.text) || t.text == "if" || t.text == "throw" || t.text == "ct";
-    if(t.kind == tok::int_lit || t.kind == tok::float_lit || t.kind == tok::str_lit) return true;
+    if(t.kind == tok::int_lit || t.kind == tok::float_lit || t.kind == tok::str_lit || t.kind == tok::char_lit) return true;
     if(t.kind == tok::open) return t.ch() == '(' || t.ch() == '{';
     return t.kind == tok::op && t.ch() == '#';
   }
@@ -1378,6 +1378,12 @@ struct parser {
         advance();
         return db.add(n_float{parse_float(t.text)}, t.where);
       }
+      case tok::char_lit: { // 'c' - byte: strings - bytes (§4.0)
+        advance();
+        std::string b = unescape(t.text);
+        if(b.size() != 1) throw diagnostic("символ '…' — один байт", t.where);
+        return db.add(n_int{int64_t(uint8_t(b[0])), true}, t.where);
+      }
       case tok::str_lit: {
         advance();
         return db.add(n_str{unescape(t.text)}, t.where);
@@ -1390,6 +1396,17 @@ struct parser {
           advance();
           node_id body = block();
           return db.add(n_loop{body}, {start, toks[pos - 1].where.end});
+        }
+        if(t.text == "native" && ahead(1).kind == tok::str_lit && is_open('{', 2)) { // native "cpp" {code as is }
+          advance();
+          symbol lang = db.strings.intern(unescape(here().text));
+          advance();
+          uint32_t close = match[pos];
+          if(close == ~uint32_t{0}) throw diagnostic("native: незакрытый блок", here().where);
+          uint32_t b = here().where.end, e = toks[close].where.begin;
+          pos = close;
+          advance();
+          return db.add(n_native{lang, std::string(src.substr(b, e - b))}, {start, toks[pos - 1].where.end});
         }
         if(t.text == "quote" && is_open('{', 1)) { // quote { announcements }
           advance();
