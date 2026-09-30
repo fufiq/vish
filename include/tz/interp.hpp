@@ -1316,14 +1316,23 @@ struct interpreter {
     return from != ~std::size_t{0};
   }
 
-  // Sample checks (types and values of elements) - its specificity among overloads.
+  // Specificity of the sample among overloads:
+// Type or value verification
+  // element - +2; fixed element - +1; exact length (without residue) - +1: array {a, b}
+  // specifically array {x, ...xs}.
   uint32_t pattern_checks(node_id pat) const {
     uint32_t n = 0;
+    bool rest = false;
     for(node_id x: db.as<n_pat>(pat).items) {
+      if(db.is<n_param>(x) && db.as<n_param>(x).pack) {
+        rest = true;
+        continue;
+      }
+      ++n;
       if(db.is<n_pat>(x)) n += 1 + pattern_checks(x);
-      else if(!db.is<n_param>(x) || db.as<n_param>(x).type) ++n;
+      else if(!db.is<n_param>(x) || db.as<n_param>(x).type) n += 2;
     }
-    return n;
+    return n + (rest ? 0 : 1);
   }
 
   // Value in sample: names in into; values-elements are calculated in env.
