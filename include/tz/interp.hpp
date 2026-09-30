@@ -1409,7 +1409,7 @@ struct interpreter {
     std::size_t from = ~std::size_t{0}; // length ≥ from
     for(auto const & c: cands) {
       auto const & fn = db.as<n_fn>(c.fn);
-      if(!fn.expr_body && db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.is<n_require>(db.as<n_block>(fn.body).items[0])) return false;
+      if(db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.is<n_require>(db.as<n_block>(fn.body).items[0])) return false;
       int mine = -1;
       for(std::size_t i = 0; i < fn.params.size(); ++i)
         if(node_id t = db.as<n_param>(fn.params[i]).type; t && db.is<n_pat>(t)) {
@@ -4008,7 +4008,7 @@ struct interpreter {
   // (will decide the value: runtime - overload).
   std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env, scope * base) {
     auto const & fn = db.as<n_fn>(f);
-    if(fn.expr_body || !db.is<n_block>(fn.body)) return {true, 0, "", false};
+    if(!db.is<n_block>(fn.body)) return {true, 0, "", false}; // и f(x) => { require(…); … }
     scope * probe = new_scope(base);
     scope_hold hold{*this, probe};
     bind_values(fn.params, vals, args, env, probe);

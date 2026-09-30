@@ -698,6 +698,7 @@ struct process_machine {
   // stack: nargs pieces). The choice is by arrogance and types of parameters.
   node_id site_node; // Call Node - to mark "hidden here"
   uint32_t invoke_parent = m_none; // calling a local set of overloads: its environment (takes invoke)
+  uint32_t access_scope = m_none; // unpacking area - for expressions in sample appeals
   void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where, bool repacked = false) {
     auto & f = fib();
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
@@ -759,7 +760,7 @@ struct process_machine {
         continue;
       }
       if(has_leading_require(fn)) { // require at the beginning of the body - Candidate restriction (§5.2)
-        int n = requires_hold(fnode, args, where);
+        int n = requires_hold(fnode, args, where, parent);
         if(n < 0) {
           ++rejected;
           ++by_value;
@@ -855,18 +856,28 @@ struct process_machine {
   // Leads require the candidate on the values of the arguments: the number performed
   // (specificity), -1 - not fulfilled. Conditions are calculated by the transferred
   // values assistant - this is a calculation without a state of the process.
-  int requires_hold(node_id f, std::vector<mval> const & args, span where) {
+  int requires_hold(node_id f, std::vector<mval> const & args, span where, uint32_t parent = m_none) {
     auto const & fn = db.as<n_fn>(f);
-    scope * probe = helper.new_scope(helper.globals);
+    // environment: captured names of the local function (parent) - transferred values
+    node_list conds;
+    for(node_id s: db.as<n_block>(fn.body).items) {
+      if(!db.is<n_require>(s)) break;
+      conds.push_back(db.as<n_require>(s).cond);
+    }
+    scope * outer = helper_probe(conds, parent == m_none ? st.globals : parent);
     struct drop {
       interpreter & h;
       scope * s;
       ~drop() { h.drop_scope(s); }
-    } hold{helper, probe};
-    for(uint32_t i = 0; i < fn.params.size(); ++i) {
-      if(args[i].is<m_thunk>()) unsupported("require с expr-параметром", f);
-      probe->declare(db.as<n_param>(fn.params[i]).name, to_value(args[i]));
+    } hold_outer{helper, outer};
+    scope * probe = helper.new_scope(outer);
+    drop hold{helper, probe};
+    std::vector<value> vals;
+    for(auto const & a: args) {
+      if(a.is<m_thunk>()) unsupported("require с expr-параметром", f);
+      vals.push_back(to_value(a));
     }
+    helper.bind_values(fn.params, vals, {}, probe, probe); // And the samples and the tail. xx
     int n = 0;
     for(node_id s: db.as<n_block>(fn.body).items) {
       if(!db.is<n_require>(s)) break;
@@ -1029,6 +1040,42 @@ struct process_machine {
 
   // --- unpacking (P12), as in the interpreter; value-element - literal ---
 
+  // The expression without the state of the process is to help: free names are
+  // transferred from the scope (as for the chain tree and require).
+  scope * helper_probe(node_list const & exprs, uint32_t scope_id) {
+    scope * probe = helper.new_scope(helper.globals);
+    std::vector<symbol> names;
+    for(node_id e: exprs) helper.free_names(e, names);
+    for(symbol s: names) {
+      place p = find(scope_id, s);
+      if(p.scope == m_none) continue;
+      mval v = cell(p);
+      if(v.is<m_thunk>() || v.is<m_fn>()) continue; // functions - the assistant has its own
+      probe->declare(s, to_value(v));
+    }
+    return probe;
+  }
+  // nullopt - the calculation failed (VM error or exception): for the circulation of the sample - "not unpacked"
+  std::optional<mval> helper_eval(node_id e, uint32_t scope_id, std::optional<mval> subject, span where) {
+    scope * probe = helper_probe({e}, scope_id);
+    struct drop {
+      interpreter & h;
+      scope * s;
+      ~drop() { h.drop_scope(s); }
+    } hold{helper, probe};
+    if(subject) helper.subjects.push_back(to_value(*subject));
+    struct pop {
+      interpreter & h;
+      bool on;
+      ~pop() {
+        if(on) h.subjects.pop_back();
+      }
+    } unsub{helper, bool(subject)};
+    auto f = helper.eval(e, probe, 0);
+    if(f.kind != interpreter::flow_kind::normal) return std::nullopt;
+    return from_value(f.v, where);
+  }
+
   // Levels of coincidence of type, as in the interpreter: 2 - type is equal, 1 - value
   // is imaginable (out - in the type of parameter), 0 - no.
   int type_fit(mval const & v, std::string_view want, bool strict, mval & out) {
@@ -1074,7 +1121,13 @@ struct process_machine {
       if(!x.is<m_arr>() || k < 0 || uint64_t(k) >= x.as<m_arr>().items.size()) return std::nullopt;
       return x.as<m_arr>().items[std::size_t(k)];
     }
-    unsupported("обращение образца (вызов, индекс-выражение)", e);
+    // .f() call, index expression - to the assistant over the value (error - not unpacked)
+    try {
+      return helper_eval(e, access_scope, subject, db[e].where);
+    } catch(diagnostic const & d) {
+      if(d.kind != diag_kind::runtime) throw;
+      return std::nullopt;
+    }
   }
 
   bool unpack_into(node_id pat, mval const & v0, uint32_t into, span where) {
@@ -1094,13 +1147,18 @@ struct process_machine {
       if(db.is<n_int>(item)) lit = mval{db.as<n_int>(item).value};
       else if(db.is<n_float>(item)) lit = mval{db.as<n_float>(item).value};
       else if(db.is<n_str>(item)) lit = mval{db.as<n_str>(item).value};
-      else unsupported("значение-элемент образца — не литерал", item);
+      else { // expression - assistant (names - from the unpacking area)
+        auto got = helper_eval(item, into, std::nullopt, db[item].where);
+        if(!got) return false;
+        lit = *got;
+      }
       mval eq = primitive("eq", {e, lit}, db[item].where);
       return eq.is<bool>() && eq.as<bool>();
     };
     node_list pos, fields;
     for(node_id it: p.items) (db.is<n_pat_field>(it) ? fields : pos).push_back(it);
     auto interface = [&] {
+      access_scope = into;
       for(node_id it: fields) {
         auto got = access(db.as<n_pat_field>(it).access, v);
         if(!got || !elem(db.as<n_pat_field>(it).sub, deref(*got))) return false;
