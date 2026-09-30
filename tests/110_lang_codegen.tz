@@ -10,8 +10,8 @@
 // jit-compiled: r
 // machine
 // jit-stats: sum(array<i64>) → 
-// jit-stats: кодогенераторов языка: 2 (prelude)
-// jit-stats: кодогенераторов языка: 1 (программа)
+// jit-stats: (prelude, программа)
+// jit-stats: bits(i64) → 162 байт машинного кода
 // fmt-stable
 // store-roundtrip
 // Кодогенераторы на языке (§10.4): цель — контекст, в нём операция — её

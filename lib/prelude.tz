@@ -112,6 +112,19 @@ x64_sse(i64 prefix, i64 op, i64 dst, i64 src) => if((dst | src) > 7) array{prefi
 
 x64_rel32(i64 off) => array{off & 0xFF, (off >> 8) & 0xFF, (off >> 16) & 0xFF, (off >> 24) & 0xFF};
 
+// Память x86-64: [база + disp32] (mod 10; rsp/r12 — через SIB 0x24); REX — только
+// если не пустой (как у ассемблера).
+x64_rex(i64 w, i64 r, i64 x, i64 b) => {
+  v = 0x40 | (w << 3) | ((r >> 3) << 2) | ((x >> 3) << 1) | (b >> 3);
+  if(v == 0x40) array{} else array{v}
+};
+
+x64_mem(i64 r, i64 base, i64 disp) => array{0x80 | ((r & 7) << 3) | (base & 7), ...(if((base & 7) == 4) array{0x24} else array{}), ...x64_rel32(disp)};
+
+x64_rm(i64 op, i64 r, i64 base, i64 disp) => array{...x64_rex(1, r, 0, base), op, ...x64_mem(r, base, disp)};
+
+x64_sse_rm(i64 prefix, i64 op, i64 r, i64 base, i64 disp) => array{prefix, ...x64_rex(0, r, 0, base), 0xF, op, ...x64_mem(r, base, disp)};
+
 // / и % с ловушкой (fault — смещение от начала этих байтов до ловушки деления на
 // ноль): test b, b; je fault; cmp b, -1; jne обычное; (neg a | xor a, a); jmp
 // конец; обычное: cqo; idiv b; [mov a, rdx]; конец. INT_MIN / -1 — модульно, без
@@ -121,6 +134,16 @@ x64_divmod(i64 a, i64 b, i64 fault, i64 rem) => array{...x64_rr(0x85, b, b), 0xF
 a64_word(i64 w) => array{w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF};
 
 a64_rrr(i64 op, i64 d, i64 n, i64 m) => a64_word(op | (m << 16) | (n << 5) | d);
+
+// Память AArch64: смещение -256..255 — ldur/stur, иначе — через x16 (movz/movk) и
+// регистровое смещение; от sp слоты по 16 байт — смещение вдвое (как у ассемблера).
+a64_imm64(i64 d, i64 v) => array{...a64_word(0xD2800000 | ((v & 0xFFFF) << 5) | d), ...(if(((v >> 16) & 0xFFFF) != 0) a64_word(0xF2A00000 | (((v >> 16) & 0xFFFF) << 5) | d) else array{}), ...(if(((v >> 32) & 0xFFFF) != 0) a64_word(0xF2C00000 | (((v >> 32) & 0xFFFF) << 5) | d) else array{}), ...(if(((v >> 48) & 0xFFFF) != 0) a64_word(0xF2E00000 | (((v >> 48) & 0xFFFF) << 5) | d) else array{})};
+
+a64_mem(i64 unscaled, i64 regoff, i64 t, i64 base, i64 disp) => if((disp >= -256) && (disp <= 255)) a64_word(unscaled | ((disp & 0x1FF) << 12) | (base << 5) | t) else array{...a64_imm64(16, disp), ...a64_word(regoff | (16 << 16) | (base << 5) | t)};
+
+a64_scaled(i64 base, i64 disp) => if(base == 31) 2 * disp else disp;
+
+a64_mov(i64 d, i64 s) => if((d == 31) || (s == 31)) a64_word(0x91000000 | (s << 5) | d) else a64_word(0xAA0003E0 | (s << 16) | d);
 
 // / и % с ловушкой: cbz b, fault; sdiv (INT_MIN / -1 не падает — модульно);
 // остаток — msub через x16
@@ -138,6 +161,12 @@ amd64(expr body) {
   using operator (i64 a) * (i64 b) => x64_0f(0xAF, a, b); // imul
   using operator (i64 a) << (i64 b) => x64_shift(4, a); // shl a, cl
   using operator (i64 a) >> (i64 b) => x64_shift(7, a); // sar a, cl
+  move(i64 d, i64 s) => x64_rr(0x89, d, s); // mov d, s
+  load(i64 d, i64 base, i64 disp) => x64_rm(0x8B, d, base, disp); // mov d, [base + disp]
+  store(i64 base, i64 disp, i64 s) => x64_rm(0x89, s, base, disp); // mov [base + disp], s
+  move_f64(i64 d, i64 s) => x64_sse(0xF2, 0x10, d, s); // movsd d, s
+  load_f64(i64 d, i64 base, i64 disp) => x64_sse_rm(0xF2, 0x10, d, base, disp);
+  store_f64(i64 base, i64 disp, i64 s) => x64_sse_rm(0xF2, 0x11, s, base, disp);
   jump() => array{0xE9, ...x64_rel32(target - 5)}; // jmp target
   jump_unless(bool a) => array{...x64_rr(0x85, a, a), 0xF, 0x84, ...x64_rel32(target - 9)}; // test a, a; je target
   using operator (i64 a) / (i64 b) => x64_divmod(a, b, fault, 0);
@@ -164,6 +193,12 @@ arm64(expr body) {
   using operator (i64 a) * (i64 b) => a64_rrr(0x9B007C00, a, a, b); // madd a, a, b, xzr
   using operator (i64 a) << (i64 b) => a64_rrr(0x9AC02000, a, a, b); // lslv
   using operator (i64 a) >> (i64 b) => a64_rrr(0x9AC02800, a, a, b); // asrv
+  move(i64 d, i64 s) => a64_mov(d, s);
+  load(i64 d, i64 base, i64 disp) => a64_mem(0xF8400000, 0xF8606800, d, base, a64_scaled(base, disp)); // ldur/ldr
+  store(i64 base, i64 disp, i64 s) => a64_mem(0xF8000000, 0xF8206800, s, base, a64_scaled(base, disp)); // stur/str
+  move_f64(i64 d, i64 s) => a64_word(0x1E604000 | (s << 5) | d); // fmov
+  load_f64(i64 d, i64 base, i64 disp) => a64_mem(0xFC400000, 0xFC606800, d, base, a64_scaled(base, disp));
+  store_f64(i64 base, i64 disp, i64 s) => a64_mem(0xFC000000, 0xFC206800, s, base, a64_scaled(base, disp));
   jump() => a64_word(0x14000000 | ((target >> 2) & 0x3FFFFFF)); // b target
   jump_unless(bool a) => a64_word(0xB4000000 | (((target >> 2) & 0x7FFFF) << 5) | a); // cbz a, target
   using operator (i64 a) / (i64 b) => a64_divmod(a, b, fault, 0);
