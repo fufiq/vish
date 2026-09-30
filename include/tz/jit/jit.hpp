@@ -195,6 +195,7 @@ struct jit_machine {
 
   // Compiler in language (jit_compile prelude or programs): function code, purpose, types
   // → bytes. Empty - can not: gluing JIT in C++ (bootstrap).
+  interpreter * an_for_lang = nullptr; // parsing instance: chain trees for compiler language
   bool lang_compile(node_id fn, jit_fn & out) {
     node_id lc;
     for(uint32_t i = db.size(); i-- > 0;)
@@ -208,7 +209,15 @@ struct jit_machine {
     value r;
     try {
       interpreter comp(db, mod, {"jit"}, mode::run);
-      r = comp.analyze_instance(lc, {value(std::string(A::target)), comp.code_value(fn), value(array_v::of(std::move(types))), value(std::string(jt_name(out.result)))});
+      // Operator chain: the tree selected parsing instance (no priority - §4.4)
+      std::vector<value> chains;
+      auto walk = [&](this auto const & self, node_id n) -> void {
+        if(db.is<n_chain>(n))
+          if(node_id t = an_for_lang->chain_tree(n, 0)) chains.push_back(value(array_v::of({comp.code_value(n), comp.code_value(t)})));
+        db.for_each_child(n, [&](node_id c) { self(c); });
+      };
+      walk(db.as<n_fn>(fn).body);
+      r = comp.analyze_instance(lc, {value(std::string(A::target)), comp.code_value(fn), value(array_v::of(std::move(types))), value(std::string(jt_name(out.result))), value(array_v::of(std::move(chains)))});
     } catch(diagnostic const & d) {
       out.lang_error = d.what();
       return false;
@@ -2158,6 +2167,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
     }
+    an_for_lang = &an;
     if(lang_compile(fn, out)) return;
     jit_codegen<A>(*this, fn, out, an).run();
   } catch(jit_unsupported const & u) {

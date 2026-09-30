@@ -4671,7 +4671,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_field", "(c, поле)"}, {"code_has", "(c, поле)"}, {"codegen", "(цель, сущность, типы, аргументы, метка)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_field", "(c, поле)"}, {"code_id", "(c)"}, {"f64_bits", "(x)"}, {"code_has", "(c, поле)"}, {"codegen", "(цель, сущность, типы, аргументы, метка)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -4761,6 +4761,9 @@ struct interpreter {
             } else if constexpr(std::is_same_v<field_t, bool>) {
               out = value(f);
               has = true;
+            } else if constexpr(std::is_floating_point_v<field_t>) {
+              out = value(double(f));
+              has = true;
             } else if constexpr(std::is_integral_v<field_t>) {
               out = value(int64_t(f));
               has = true;
@@ -4777,6 +4780,8 @@ struct interpreter {
       if(!has && out.is<unit_v>()) fail(cat("поле ", want, " пусто"), where);
       return out;
     }
+    if(n == "f64_bits" && a.size() == 1 && types.describe(a[0]) == "f64") // bits f64 - i64 (constant in machine code)
+      return a[0].known() ? value(std::bit_cast<int64_t>(a[0].as<double>())) : erase(value(int64_t(1)));
     // codegen (purpose, essence, types, arguments, label) - bytes of the code generator in the language
     // (§10.4), the same operation that JIT does: a compiler in the language glues the code with them.
     if(n == "codegen" && a.size() == 5) {
@@ -4824,6 +4829,7 @@ struct interpreter {
         return value(std::string(s ? str(s) : ""));
       }
       if(n == "code_text") return value(printer(db).print(c));
+      if(n == "code_id") return value(int64_t(c.value)); // node number - compare node
     }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);

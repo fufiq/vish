@@ -3,6 +3,9 @@
 // jit-compiled: mx
 // jit-compiled: fact
 // jit-compiled: both
+// jit-compiled: poly
+// jit-compiled: avg
+// out: 34 2.5 -1.0 true
 // jit-stats: fact(i64) → 
 // jit-stats: компилятор языка
 // machine
@@ -31,6 +34,15 @@ fact(i64 n) => {
 
 both(i64 a, i64 b) => (a > 0) && ((b > 0) || (a == b));
 
+// цепочки: дерево выбирает разбор (приоритетов нет, [[associative]] — одно дерево)
+poly(i64 x) => (x * x) + (x * 2) + 1 + x;
+
+avg(f64 a, f64 b, i64 n) => {
+  s = (a + b) / 2.0;
+  if(n < 0) -s else s
+}
+
 main() {
   print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
+  print(poly(4) + 5, avg(2.0, 3.0, 1), avg(0.5, 1.5, -1), (avg(1.0, 1.0, 1) == 1.0) && ((0.1 + 0.2) != 0.3));
 }

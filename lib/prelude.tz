@@ -440,27 +440,34 @@ is_err(result r) => !r.ok;
 // 
 // 
 //.
-// JIT сначала зовёт jit_compile: код функции (AST), цель, типы параметров и
-// результата → байты машинного кода (кодогенераторы контекста цели через codegen);
-// пустой массив — не умеет, компилирует JIT на C++. *Моё:* подмножество — i64/bool,
-// n_op (без цепочек), if, loop/break/continue, переменные, return; своя раскладка:
-// все значения — в слотах кадра, выражение — аккумулятор, второй операнд — через стек.
+// JIT сначала зовёт jit_compile: цель, код функции (AST), типы параметров и
+// результата, деревья цепочек операторов (их выбрал разбор) → байты машинного кода
+// (кодогенераторы контекста цели через codegen); пустой массив — не умеет, код
+// даёт склейка на C++. *Моё:* подмножество — i64/bool/f64, операции, цепочки, if,
+// loop/break/continue, переменные, return, f64(x)/i64(x); своя раскладка: значения
+// — в слотах кадра, выражение — в аккумуляторе (f64 — в acc_f), второй операнд —
+// через стек.
 struct jc_fix { i64 at; str entity; array types; array args; i64 label; }
 
-jit_compile(str target, f, types, str result) {
+jit_compile(str target, f, types, str result, chains) {
   m = codegen(target, "model", array{}, array{}, 0);
-  acc = m[0];
-  second = m[1];
-  argbase = m[4];
-  frame = m[5];
-  stack = m[6];
+  ok = m.size > 0;
+  acc = if(ok) m[0] else 0;
+  second = if(ok) m[1] else 0;
+  acc_f = if(ok) m[2] else 0;
+  second_f = if(ok) m[3] else 0;
+  argbase = if(ok) m[4] else 0;
+  frame = if(ok) m[5] else 0;
+  stack = if(ok) m[6] else 0;
   out = array{};
   fixes = array{};
   labels = array{};
   names = array{};
+  kinds = array{};
   loops = array{};
-  ok = (m.size > 0) && ((result == "i64") || (result == "bool"));
-  for(t : types) if((t != "i64") && (t != "bool")) ok = false;
+  scalar(str t) => (t == "i64") || ((t == "bool") || (t == "f64"));
+  if(!scalar(result)) ok = false;
+  for(t : types) if(!scalar(t)) ok = false;
   emit(str entity, ts, xs) => {
     bytes = codegen(target, entity, ts, xs, 0);
     if(bytes.size == 0) ok = false;
@@ -483,19 +490,68 @@ jit_compile(str target, f, types, str result) {
     k
   };
   off(i64 k) => 0 - (8 * (k + 1));
+  tree(e) => {
+    t = e;
+    for(c : chains) if(code_id(c[0]) == code_id(e)) t = c[1];
+    t
+  };
+  compare(str op) => (op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || (op == ">=")))));
+  // тип выражения: f64 — в acc_f, остальное — в acc
+  ty(e) => {
+    k = code_kind(e);
+    if(k == "float") "f64"
+    else if(k == "int") "i64"
+    else if(k == "ident") {
+      name = code_field(e, "name");
+      s = slot(name);
+      if((name == "true") || (name == "false")) "bool" else if(s < 0) "?" else kinds[s]
+    } else if(k == "op") {
+      op = code_field(e, "op");
+      xs = code_field(e, "args");
+      if((op == "!") || (compare(op) || ((op == "&&") || (op == "||")))) "bool"
+      else if((op == "=") || ((op == "+=") || ((op == "-=") || (op == "*=")))) "unit"
+      else ty(xs[0])
+    } else if(k == "chain") {
+      t = tree(e);
+      if(code_kind(t) == "chain") "?" else ty(t)
+    } else if(k == "call") {
+      callee = code_field(e, "callee");
+      if(code_kind(callee) == "ident") code_field(callee, "name") else "?"
+    } else if(k == "if") ty(code_field(e, "then_"))
+    else if(k == "block") {
+      xs = code_field(e, "items");
+      if(code_field(e, "has_value") && (xs.size > 0)) ty(xs[xs.size - 1]) else "unit"
+    } else "unit"
+  };
+  load_slot(i64 s) => {
+    if(kinds[s] == "f64") emit("load_f64", array{"i64", "i64", "i64"}, array{acc_f, frame, off(s)});
+    else emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(s)});
+  };
+  store_slot(i64 s) => {
+    if(kinds[s] == "f64") emit("store_f64", array{"i64", "i64", "i64"}, array{frame, off(s), acc_f});
+    else emit("store", array{"i64", "i64", "i64"}, array{frame, off(s), acc});
+  };
   gen(e) => {
     k = code_kind(e);
     if(k == "int") emit("load_const", array{"i64", "i64"}, array{acc, code_field(e, "value")});
-    else if(k == "ident") {
+    else if(k == "float") {
+      emit("load_const", array{"i64", "i64"}, array{acc, f64_bits(code_field(e, "value"))});
+      emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
+    } else if(k == "ident") {
       name = code_field(e, "name");
       if(name == "true") emit("load_const", array{"i64", "i64"}, array{acc, 1});
       else if(name == "false") emit("load_const", array{"i64", "i64"}, array{acc, 0});
       else {
         s = slot(name);
         if(s < 0) ok = false;
-        else emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(s)});
+        else load_slot(s);
       }
     } else if(k == "op") gen_op(e);
+    else if(k == "chain") {
+      t = tree(e);
+      if(code_kind(t) == "chain") ok = false;
+      else gen(t);
+    } else if(k == "call") gen_call(e);
     else if(k == "block") {
       for(x : code_field(e, "items")) if(ok) gen(x);
     } else if(k == "if") {
@@ -528,34 +584,62 @@ jit_compile(str target, f, types, str result) {
       jump_to("jump", array{}, array{}, 0);
     } else ok = false;
   };
+  // f64(x), i64(x) — преобразования
+  gen_call(e) => {
+    callee = code_field(e, "callee");
+    xs = code_field(e, "args");
+    name = if(code_kind(callee) == "ident") code_field(callee, "name") else "";
+    if((name == "f64") && ((xs.size == 1) && (ty(xs[0]) == "i64"))) {
+      gen(xs[0]);
+      emit("to_f64", array{"i64", "i64"}, array{acc_f, acc});
+    } else if((name == "i64") && ((xs.size == 1) && (ty(xs[0]) == "f64"))) {
+      gen(xs[0]);
+      emit("to_i64", array{"i64", "i64"}, array{acc, acc_f});
+    } else ok = false;
+  };
   assign(str name, e) => {
+    t = ty(e);
+    if(!scalar(t)) ok = false;
     gen(e);
     s = slot(name);
     if(s < 0) {
       names.push(name);
+      kinds.push(t);
       s = names.size - 1;
     }
-    emit("store", array{"i64", "i64", "i64"}, array{frame, off(s), acc});
+    if(kinds[s] != t) ok = false;
+    store_slot(s);
   };
+  // второй операнд: вычислить, сохранить на стеке, вычислить первый, вернуть второй
+  operands(e0, e1, str t) => {
+    gen(e1);
+    if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
+    emit("push_tmp", array{"i64"}, array{acc});
+    gen(e0);
+    emit("pop_tmp", array{"i64"}, array{second});
+    if(t == "f64") emit("move_to_f64", array{"i64", "i64"}, array{second_f, second});
+  };
+  regs(str t) => if(t == "f64") array{acc_f, second_f} else array{acc, second};
   gen_op(e) => {
     op = code_field(e, "op");
     xs = code_field(e, "args");
     if(xs.size == 1) {
+      t = ty(xs[0]);
       gen(xs[0]);
-      if(op == "-") emit("negate", array{"i64"}, array{acc});
+      if((op == "-") && (t == "f64")) emit("prefix-", array{"f64"}, array{acc_f});
+      else if(op == "-") emit("negate", array{"i64"}, array{acc});
       else if(op == "!") emit("prefix!", array{"bool"}, array{acc});
       else ok = false;
     } else if((op == "=") && (code_kind(xs[0]) == "ident")) assign(code_field(xs[0], "name"), xs[1]);
-    else if(((op == "+=") || (op == "-=") || (op == "*=")) && (code_kind(xs[0]) == "ident")) {
-      name = code_field(xs[0], "name");
-      s = slot(name);
+    else if(((op == "+=") || ((op == "-=") || (op == "*="))) && (code_kind(xs[0]) == "ident")) {
+      s = slot(code_field(xs[0], "name"));
       if(s < 0) ok = false;
       else {
-        gen(xs[1]);
-        emit("move", array{"i64", "i64"}, array{second, acc});
-        emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(s)});
-        emit(if(op == "+=") "infix+" else if(op == "-=") "infix-" else "infix*", array{"i64", "i64"}, array{acc, second});
-        emit("store", array{"i64", "i64", "i64"}, array{frame, off(s), acc});
+        t = kinds[s];
+        operands(xs[0], xs[1], t);
+        name = if(op == "+=") "infix+" else if(op == "-=") "infix-" else "infix*";
+        emit(name, array{t, t}, regs(t));
+        store_slot(s);
       }
     } else if((op == "&&") || (op == "||")) {
       l = label();
@@ -563,14 +647,15 @@ jit_compile(str target, f, types, str result) {
       jump_to(if(op == "&&") "jump_unless" else "jump_if", array{"bool"}, array{acc}, l);
       gen(xs[1]);
       bind(l);
-    } else if((op == "/") || (op == "%") || (op == "=")) ok = false;
-    else {
-      gen(xs[0]);
-      emit("push_tmp", array{"i64"}, array{acc});
-      gen(xs[1]);
-      emit("move", array{"i64", "i64"}, array{second, acc});
-      emit("pop_tmp", array{"i64"}, array{acc});
-      emit(fmt"infix{op}", array{"i64", "i64"}, array{acc, second});
+    } else {
+      t = ty(xs[0]);
+      if(t == "bool") t = "i64"; // == и != над bool — те же биты
+      if(((op == "/") || (op == "%")) && (t != "f64")) ok = false; // ловушка деления — пока склейка C++
+      else if((t != "i64") && (t != "f64")) ok = false;
+      else {
+        operands(xs[0], xs[1], t);
+        emit(fmt"infix{op}", array{t, t}, regs(t));
+      }
     }
   };
   ret = label();
@@ -581,11 +666,13 @@ jit_compile(str target, f, types, str result) {
   ps = code_field(f, "params");
   for(i : range(ps.size)) {
     names.push(code_field(ps[i], "name"));
+    kinds.push(types[i]);
     emit("load", array{"i64", "i64", "i64"}, array{acc, argbase, 8 * i});
     emit("store", array{"i64", "i64", "i64"}, array{frame, off(i), acc});
   }
   if(ok) gen(code_field(f, "body"));
   bind(ret);
+  if(result == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f}); // f64 — битами в аккумуляторе
   emit("move", array{"i64", "i64"}, array{stack, frame});
   emit("frame_leave", array{}, array{});
   emit("ret", array{}, array{});
