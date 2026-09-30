@@ -381,7 +381,7 @@ struct printer {
 
   void print_node(node_id, n_struct const & st) {
     attrs(st.attrs);
-    out += cat("struct ", str(st.name), " {");
+    out += cat("struct ", str(st.name), st.base ? cat(" : ", str(st.base)) : std::string(), " {");
     for(node_id f: st.fields) {
       auto const & v = db.as<n_var>(f);
       out += v.ct ? " ct " : " ";

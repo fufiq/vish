@@ -157,6 +157,7 @@ struct n_struct {
   symbol name;
   node_list fields;
   node_list attrs;
+  symbol base; // struct e: base { … } - heir: base fields first, base substitution
 };
 // Extension of entity:
 //  

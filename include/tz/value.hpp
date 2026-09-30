@@ -416,6 +416,21 @@ struct type_registry {
     return intern_builtin(name);
   }
 
+  // The hierarchy of nominal types:
+// 
+  //;.
+  void set_parent(type_id t, type_id p) {
+    if(parents.size() <= t.value) parents.resize(t.value + 1);
+    parents[t.value] = p;
+  }
+  type_id parent(type_id t) const { return t && t.value < parents.size() ? parents[t.value] : type_id{}; }
+  // have - want or his heir
+  bool is_a(std::string_view have, std::string_view want) const {
+    for(type_id t = builtin(have); t; t = parent(t))
+      if(names[t.value] == want) return true;
+    return false;
+  }
+
   std::string_view name(type_id t) const { return t ? std::string_view(names[t.value]) : "?"; }
 
   type_id of(value const & x) const {
@@ -462,6 +477,7 @@ struct type_registry {
   }
 
   std::vector<std::string> names;
+  std::vector<type_id> parents; // nominal parent (empty - root)
 };
 
 std::string show(value const & x, type_registry const & types, interner const & strings) {

@@ -214,7 +214,11 @@ struct interpreter {
     if(db.is<n_fn>(item) && operator_name(str(db.as<n_fn>(item).name)) && !intrinsic_operator(item))
       user_ops.insert(db.as<n_fn>(item).name.value);
     if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
-    else if(db.is<n_struct>(item)) structs[db.as<n_struct>(item).name] = item;
+    else if(db.is<n_struct>(item)) {
+      auto const & st = db.as<n_struct>(item);
+      structs[st.name] = item;
+      if(st.base) types.set_parent(types.named(str(st.name)), types.named(str(st.base)));
+    }
     else if(db.is<n_extend>(item)) { // fields and attributes to entity, functions to overload
       auto const & e = db.as<n_extend>(item);
       if(e.target) { // overload of a specific function: under its current name
@@ -236,6 +240,9 @@ struct interpreter {
   void elaborate() {
     if(elaborated) return;
     elaborated = true;
+    // VM errors are one hierarchy: catch(vm_error e) catches any
+    for(std::string_view e: {"out_of_bounds", "div_by_zero", "require_failed", "unpack_failed", "closed_stream", "deadlock", "invalidated_alias", "io_error", "overflow"})
+      types.set_parent(types.named(e), types.named("vm_error"));
     for(node_id item: db.as<n_module>(mod).items) {
       if(db.is<n_ct>(item)) {
         ++ct_depth;
@@ -259,8 +266,10 @@ struct interpreter {
   // Unit fields: declaration + extension (in module order).
   std::vector<node_id> fields_of_struct(symbol name) const {
     std::vector<node_id> out;
-    if(auto it = structs.find(name); it != structs.end())
+    if(auto it = structs.find(name); it != structs.end()) {
+      if(symbol b = db.as<n_struct>(it->second).base) out = fields_of_struct(b); // basefields - first
       for(node_id f: db.as<n_struct>(it->second).fields) out.push_back(f);
+    }
     if(auto it = ext_fields.find(name); it != ext_fields.end())
       for(node_id f: it->second) out.push_back(f);
     return out;
@@ -1293,6 +1302,7 @@ struct interpreter {
   fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
     out = v;
     if(want == "auto" || types.describe(v) == want || types.name(types.of(v)) == want) return fit::exact;
+    if(!strict && types.is_a(types.name(types.of(v)), want)) return fit::representable; // base
     if(strict || !numeric_pair(v, want)) return fit::no;
     value const * x = shape_of(v);
     if(want == "f64") {
@@ -1461,9 +1471,10 @@ struct interpreter {
       return interface(r);
     }
     if(structs.contains(db.as<n_ident>(p.type).name)) {
-      if(!x->is<agg_v>() || types.name(x->as<agg_v>().type) != kind) return unpacked::no;
+      if(!x->is<agg_v>() || !types.is_a(types.name(x->as<agg_v>().type), kind)) return unpacked::no; // heir
       auto const & fs = x->as<agg_v>().fields;
-      if(!pos.empty() && fs.size() != pos.size()) fail(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", pos.size()), where);
+      std::size_t own = fields_of_struct(db.as<n_ident>(p.type).name).size(); // sample fields - base fields (first)
+      if(!pos.empty() && own != pos.size()) fail(cat("образец ", kind, "{…}: полей ", own, ", элементов ", pos.size()), where);
       unpacked r = unpacked::yes;
       for(std::size_t k = 0; k < pos.size() && r != unpacked::no; ++k) {
         if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) fail("...остаток — только в array{…}", db[pos[k]].where);
@@ -1888,7 +1899,7 @@ struct interpreter {
       auto const & p = db.as<n_param>(l.params[0]);
       std::string want = p.type && db.is<n_ident>(p.type) ? std::string(str(db.as<n_ident>(p.type).name)) : std::string();
       std::vector<value> hit, rest;
-      for(auto & v: thrown) (want.empty() || exception_type(v) == want ? hit : rest).push_back(std::move(v));
+      for(auto & v: thrown) (want.empty() || types.is_a(exception_type(v), want) ? hit : rest).push_back(std::move(v)); // and heirs
       thrown = std::move(rest);
       if(hit.empty()) continue;
       value caught = hit[0];

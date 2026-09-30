@@ -1035,6 +1035,7 @@ struct process_machine {
     out = v;
     std::string have = describe(v);
     if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2;
+    if(!strict && helper.types.is_a(have, want)) return 1; // base
     if(strict || !numeric_pair(v, want)) return 0;
     if(want == "f64") {
       int64_t i = v.as<int64_t>();
@@ -1132,9 +1133,10 @@ struct process_machine {
       return interface();
     }
     if(helper.structs.contains(db.as<n_ident>(p.type).name)) {
-      if(!v.is<m_agg>() || helper.types.name(v.as<m_agg>().type) != kind) return false;
+      if(!v.is<m_agg>() || !helper.types.is_a(helper.types.name(v.as<m_agg>().type), kind)) return false; // heir
       auto const & fs = v.as<m_agg>().fields;
-      if(!pos.empty() && fs.size() != pos.size()) throw diagnostic(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", pos.size()), where);
+      std::size_t own = helper.fields_of_struct(db.as<n_ident>(p.type).name).size(); // basefields
+      if(!pos.empty() && own != pos.size()) throw diagnostic(cat("образец ", kind, "{…}: полей ", own, ", элементов ", pos.size()), where);
       for(std::size_t k = 0; k < pos.size(); ++k) {
         if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) throw diagnostic("...остаток — только в array{…}", db[pos[k]].where);
         if(!elem(pos[k], fs[k].v)) return false;
@@ -1678,7 +1680,7 @@ struct process_machine {
       if(!db.is<n_lambda>(h) || db.as<n_lambda>(h).params.size() != 1) throw diagnostic("catch: блок с одним параметром — catch(E e) { … }", db[h].where);
       auto const & l = db.as<n_lambda>(h);
       auto const & p = db.as<n_param>(l.params[0]);
-      if(p.type && db.is<n_ident>(p.type) && helper.str(db.as<n_ident>(p.type).name) != type) continue;
+      if(p.type && db.is<n_ident>(p.type) && !helper.types.is_a(type, helper.str(db.as<n_ident>(p.type).name))) continue; // and heirs
       uint32_t sc = new_scope(hs.env);
       if(helper.str(p.name) != "_") declare(sc, p.name, std::move(f.pending.v));
       f.pending = {};

@@ -305,7 +305,7 @@ struct parser {
     uint32_t start = here().where.begin;
     node_list attrs = attributes();
     // Attributes enter the node before being added to the database, otherwise journal will not see them.
-    if(is_word("struct") && ahead(1).kind == tok::ident && is_open('{', 2)) return struct_decl(std::move(attrs));
+    if(is_word("struct") && ahead(1).kind == tok::ident && (is_open('{', 2) || is_op(":", 2))) return struct_decl(std::move(attrs));
     if(is_word("operator")) return operator_decl(std::move(attrs));
     if(auto f = try_fn_decl(false, attrs)) return *f;
     if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
@@ -455,6 +455,10 @@ struct parser {
     n_struct st;
     st.attrs = std::move(attrs);
     st.name = ident();
+    if(is_op(":")) { // struct method error : http { … }
+      eat_op(":");
+      st.base = ident();
+    }
     expect_open('{');
     while(!is_close('}')) {
       uint32_t f0 = here().where.begin;
