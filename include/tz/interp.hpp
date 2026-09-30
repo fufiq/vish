@@ -1342,8 +1342,21 @@ struct interpreter {
       for(auto const & d: level_details) why += cat("; ", d);
       fail_rt("require_failed", cat("нарушено требование require", why), db[n].where);
     }
-    if(checking() && !b) rt_check("require_failed", db[n].where);
+    // lead demand - overload selection condition: its failure runtime tells at the call
+    // (unpack_failed), the body is not executed
+    if(checking() && !b && !leading_require(n)) rt_check("require_failed", db[n].where);
     return ok(); // run-time - Condition: runtime (§5.4)
+  }
+
+  bool leading_require(node_id n) const {
+    for(uint32_t i = 0; i < db.size(); ++i) {
+      if(!db.is<n_fn>(node_id(i)) || !db.is<n_block>(db.as<n_fn>(node_id(i)).body)) continue;
+      for(node_id s: db.as<n_block>(db.as<n_fn>(node_id(i)).body).items) {
+        if(!db.is<n_require>(s)) break;
+        if(s == n) return true;
+      }
+    }
+    return false;
   }
 
   // --- branching ---
@@ -3780,6 +3793,9 @@ struct interpreter {
     if(std::ranges::any_of(args_in, [&](node_id a) { return db.is<n_spread>(a); })) { // ...t - in separate arguments
       std::vector<value> vals;
       args.clear();
+      uint32_t open_at = ~0u; // disclosure of run-time-length (parsing): place in arguments
+      value open_elem;
+      node_id open_node;
       for(node_id a: args_in) {
         if(!db.is<n_spread>(a)) {
           TZ_TRY(v, eval(a, env, frame));
@@ -3790,11 +3806,24 @@ struct interpreter {
         TZ_TRY(t, eval(db.as<n_spread>(a).value, env, frame));
         value const * x = shape_of(t);
         if(!x || !x->is<array_v>()) fail(cat("...: раскрывается массив или кортеж, получено ", types.describe(t)), db[a].where);
-        if(!t.known() && t.is<rt_v>()) fail("...: длина неизвестна при разборе — раскрытие массива известной длины", db[a].where);
+        if(!t.known() && t.is<rt_v>()) { // run-time: parsing of all lengths that overload takes
+          if(open_at != ~0u) fail("...: одно раскрытие массива рт-длины на вызов", db[a].where);
+          open_at = uint32_t(vals.size());
+          open_elem = element_type(t, db[a].where);
+          open_node = a;
+          continue;
+        }
         for(uint32_t k = 0; k < x->as<array_v>().size(); ++k) {
           vals.push_back(x->as<array_v>().get(k));
           args.push_back(a); // No space: value of the element
         }
+      }
+      if(open_at != ~0u) return spread_lengths(fns, vals, args, open_at, open_elem, open_node, env, frame, site, base);
+      if(!checking() && !std::ranges::any_of(fns, [&](node_id f) { return arity_fits(f, vals.size()); })) {
+        diagnostic d(cat("...: ", vals.size(), " аргументов — нет перегрузки ", site.what, " такой длины"), site.where, diag_kind::runtime);
+        d.type = "unpack_failed";
+        for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+        throw d;
       }
       return dispatch_split(fns, vals, 0, args, env, frame, site, base);
     }
@@ -3817,6 +3846,68 @@ struct interpreter {
   }
 
   // The split argument: Continuation-challenge is cloned by alternatives.
+  bool arity_fits(node_id f, std::size_t n) const {
+    std::size_t m = db.as<n_fn>(f).params.size();
+    return rest_param(f) ? n + 1 >= m : n == m;
+  }
+
+  // f(...t), length t - run-time (parsing). *My:* length - a value like the sample array
+  // {x, ...xs}: understand all the lengths that takes at least one overload - each exact
+  // length separately, the rest (tail ...xs) - one "open" call, where the tail - the array
+  // run-time - lengths; the results merge like branches if. The length that no one takes
+  // is runtime, the unpack_failed error.
+  flow spread_lengths(std::vector<node_id> const & fns, std::vector<value> const & vals, node_list const & args, uint32_t at,
+      value const & elem, node_id where, scope * env, uint32_t frame, call_site const & site, scope * base) {
+    std::size_t given = vals.size();
+    auto with = [&](std::size_t k, std::vector<value> & out, node_list & out_args) {
+      out.assign(vals.begin(), vals.begin() + at);
+      out_args.assign(args.begin(), args.begin() + at);
+      for(std::size_t j = 0; j < k; ++j) {
+        out.push_back(elem);
+        out_args.push_back(where);
+      }
+      out.insert(out.end(), vals.begin() + at, vals.end());
+      out_args.insert(out_args.end(), args.begin() + at, args.end());
+    };
+    std::set<std::size_t> lengths;
+    std::size_t open = ~std::size_t(0); // tail: lengths from open + 1
+    for(node_id f: fns) {
+      std::size_t m = db.as<n_fn>(f).params.size();
+      if(rest_param(f)) {
+        std::size_t k = m - 1 > given ? m - 1 - given : 0;
+        lengths.insert(k);
+        open = std::min(open, k);
+      } else if(m >= given)
+        lengths.insert(m - given);
+    }
+    if(open != ~std::size_t(0))
+      for(std::size_t k = open; k < *lengths.rbegin(); ++k) lengths.insert(k); // between-tail
+    if(lengths.empty()) fail(cat("нет перегрузки ", site.what, ", принимающей раскрытие ", printer(db).print(where)), site.where);
+    if(open == ~std::size_t(0) || *lengths.begin() > 0 || std::ranges::adjacent_find(lengths, [](std::size_t a, std::size_t b) { return b != a + 1; }) != lengths.end())
+      rt_check("unpack_failed", site.where); // There is a length that no one takes.
+    flow out;
+    bool first = true;
+    for(std::size_t k: lengths) {
+      std::vector<value> xs;
+      node_list as;
+      with(k, xs, as);
+      flow r = dispatch_split(fns, xs, 0, as, env, frame, site, base);
+      out = first ? r : join_branches(out, r);
+      first = false;
+    }
+    if(open != ~std::size_t(0)) { // lengths longer than those listed - only tail overload
+      std::vector<node_id> tails;
+      for(node_id f: fns)
+        if(rest_param(f)) tails.push_back(f);
+      std::vector<value> xs;
+      node_list as;
+      with(*lengths.rbegin() + 1, xs, as);
+      flow r = select_and_invoke(tails, xs, as, env, frame, site, base, false, true);
+      out = join_branches(out, r);
+    }
+    return out;
+  }
+
   flow dispatch_split(std::vector<node_id> const & fns, std::vector<value> & vals, uint32_t from, node_list const & args,
       scope * env, uint32_t frame, call_site const & site, scope * base = nullptr) {
     for(uint32_t i = from; i < vals.size(); ++i) {
@@ -3846,7 +3937,7 @@ struct interpreter {
   }
 
   flow select_and_invoke(std::vector<node_id> const & fns, std::vector<value> & vals, node_list const & args,
-      scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr, bool repacked = false) {
+      scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr, bool repacked = false, bool open = false) {
     scope * base = parent ? parent : globals; // local set: its environment
     struct candidate {
       node_id fn;
@@ -3913,7 +4004,7 @@ struct interpreter {
           for(auto & [k, v]: conv) converted[k] = v;
           in = &converted;
         }
-        auto [passed, n_req, reason, unsure] = leading_requires(f, *in, args, env, base);
+        auto [passed, n_req, reason, unsure] = leading_requires(f, *in, args, env, base, open);
         if(!passed) {
           why = reason;
           by_value += reason == "require не выполнено";
@@ -3983,6 +4074,7 @@ struct interpreter {
           for(auto & [i, v]: reach[k].conv) copy[i] = v;
           if(site.node) emit({report_event::resolved, {}, cat(reach[k].fn.value), {}, {}, {}, site.node});
           invoke_parent = parent;
+          invoke_open = open;
           flow r = invoke(reach[k].fn, copy, args, env, site);
           out = k ? join_branches(out, r) : r;
         }
@@ -3999,6 +4091,7 @@ struct interpreter {
     // editor
     if(checking() && site.node) emit({report_event::resolved, {}, cat(good[0].fn.value), {}, {}, {}, site.node});
     invoke_parent = parent;
+    invoke_open = open;
     for(auto & [i, v]: good[0].conv) vals[i] = std::move(v); // Values - in the types of parameters selected
     return invoke(good[0].fn, vals, args, env, site);
   }
@@ -4006,12 +4099,12 @@ struct interpreter {
   // require at the beginning of the body: run-time - Candidate condition does not
   // cut off - it is checked in runtime (§5.4). The fourth condition is run-time
   // (will decide the value: runtime - overload).
-  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env, scope * base) {
+  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env, scope * base, bool open = false) {
     auto const & fn = db.as<n_fn>(f);
     if(!db.is<n_block>(fn.body)) return {true, 0, "", false}; // и f(x) => { require(…); … }
     scope * probe = new_scope(base);
     scope_hold hold{*this, probe};
-    bind_values(fn.params, vals, args, env, probe);
+    bind_values(fn.params, vals, args, env, probe, {}, open);
     int n = 0;
     bool unsure = false;
     for(node_id s: db.as<n_block>(fn.body).items) {
@@ -4028,6 +4121,7 @@ struct interpreter {
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
     auto const & fn = db.as<n_fn>(f);
     scope * parent = std::exchange(invoke_parent, nullptr);
+    bool open = std::exchange(invoke_open, false);
     check_inside(f, site);
     declared_invalidations(f, args, env, site.node);
     // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
@@ -4054,7 +4148,7 @@ struct interpreter {
         all_known = false;
       }
     }
-    key += ")";
+    key += open ? ", ...рт)" : ")"; // The tail of run-time - length - its instance
     if(!overrides.empty()) { // instance is specialized in context:
       std::vector<std::string> ctxs;
       for(auto const & o: overrides)
@@ -4135,7 +4229,7 @@ struct interpreter {
     for(uint32_t pass = 0;; ++pass) {
       scope * inner = new_scope(parent ? parent : globals); // Local function - on top of the surroundings of its block
       scope_hold hold{*this, inner};
-      bind_values(fn.params, vals, args, env, inner, f);
+      bind_values(fn.params, vals, args, env, inner, f, open);
       if(checking()) active.insert(active_key);
       try {
         std::vector<value> escaped; // "painting": exceptions to instance
@@ -4225,13 +4319,20 @@ struct interpreter {
     return true;
   }
 
-  // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell.
-  void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner, node_id f = {}) {
+  // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell. open
+  // - tail run-time-length (parsing f(...t)): ...xs - erased array
+  void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner, node_id f = {}, bool open = false) {
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
       if(p.pack && p.mode == param_mode::let && i + 1 == params.size()) { // ...xs - the remainder of arguments (cortege)
         std::vector<value> rest;
         for(uint32_t j = i; j < vals.size(); ++j) rest.push_back(vals[j]);
+        if(open && !rest.empty()) {
+          value e = erase(rest[0]);
+          for(std::size_t j = 1; j < rest.size(); ++j) e = merge(e, erase(rest[j]));
+          inner->declare(p.name, erase(value(array_v::of({e}))));
+          break;
+        }
         inner->declare(p.name, value(array_v::of(std::move(rest))));
         break;
       }
@@ -4633,6 +4734,7 @@ struct interpreter {
   struct jit_engine * jit = nullptr;
   struct a64_check * a64 = nullptr; // AArch64 in parallel with host (qemu)
   scope * invoke_parent = nullptr; // call from local overload set: set environment (takes invoke)
+  bool invoke_open = false; // run-time-length tail call (takes invoke)
   std::vector<value> subjects; // unpackable values - roots of addresses .f: subsample
   std::vector<node_id> module_order; // used modules (previously), then the
   std::map<uint32_t, std::set<symbol>> module_names; // use k. {a, b}: visible module names

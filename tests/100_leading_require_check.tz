@@ -1,0 +1,27 @@
+// out: -1 0
+// stdin: -3
+// check: sign(рт f64): всё доказано статически
+// check: pos(рт f64): всё доказано статически
+// check: unpack_failed
+// machine
+// fmt-stable
+// store-roundtrip
+// Ведущий require — условие кандидата (§5.4), не проверка в теле: при
+// неудаче перегрузка не выбирается (,
+// unpack_failed у вызова). Разбор относит рт-проверку к вызову, а тело
+// экземпляра доказано статически.
+sign(x) => { require(x < 0.0); -1 }
+
+sign(x) => { require(x >= 0.0); 1 }
+
+pos(x) => { require(x > 0.0); 1 }
+
+main() {
+  t = read_floats(stdin);
+  r = try {
+    pos(t[0])
+  } catch(unpack_failed e) {
+    0
+  };
+  print(sign(t[0]), r);
+}

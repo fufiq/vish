@@ -1608,6 +1608,11 @@ struct process_machine {
       vals.resize(t.base);
       for(auto & v: ex) vals.push_back(std::move(v));
       nargs = uint32_t(ex.size());
+      if(!std::ranges::any_of(fns, [&](node_id f) { return helper.arity_fits(f, nargs); })) {
+        diagnostic d(cat("...: ", nargs, " аргументов — нет перегрузки ", helper.str(db.as<n_fn>(fns.front()).name), " такой длины"), db[n].where, diag_kind::runtime);
+        d.type = "unpack_failed";
+        throw d;
+      }
     }
     invoke(fns, nargs, frame, db[n].where);
   }

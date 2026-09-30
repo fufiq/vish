@@ -1,0 +1,36 @@
+// out: 9.0 5.0 5.0
+// out: 6.0 -1.0
+// stdin: 2 3 4
+// check: sum(рт f64, ...рт)
+// check: unpack_failed
+// machine
+// fmt-stable
+// store-roundtrip
+// Раскрытие f(...t) массива рт-длины. Длина — значение, как у образца
+// array{x, ...xs} (
+//). *Моё:* разбор проходит все длины,
+// которые принимает хоть одна перегрузка (хвост ...xs — массивом рт-длины);
+// длина, которую не принимает никто, — исключение unpack_failed.
+sum(...xs) => total(xs);
+
+total(array{}) => 0.0;
+
+total(array{x, ...xs}) => x + total(xs);
+
+pair(a, b) => a * b;
+
+pair(a, b, c) => a + b;
+
+head(x, ...rest) => x + 3.0;
+
+main() {
+  t = read_floats(stdin);
+  print(sum(...t), head(...t), pair(...t));
+  u = array{t[0], t[1], t[2], t[0]};
+  r = try {
+    pair(...u)
+  } catch(unpack_failed e) {
+    -1.0
+  };
+  print(sum(1.0, ...t, -4.0), r);
+}
