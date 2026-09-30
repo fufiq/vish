@@ -135,6 +135,7 @@ struct jit_fn {
   uint32_t jumps = 0; // throw that became a transition to catch (static exceptions)
   uint32_t lang_ops = 0; // operations whose code gives code generator in the language (target context)
   std::string lang_from; // from where code generator (modules)
+  uint32_t lang_bytes = 0; // byte of code from code generator language (the rest - C++: addresses host, spare)
 };
 
 struct jit_unsupported {
@@ -170,7 +171,7 @@ struct jit_machine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, ")") : "", "\n");
+      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, "), от C++: ", f->bytes - f->lang_bytes, " байт") : "", "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -217,7 +218,7 @@ struct jit_codegen {
     auto const & f = db.as<n_fn>(fn);
     psh(rbp);
     mv(rbp, rsp);
-    frame_patch = code.frame_alloc();
+    frame_patch = frame_alloc();
     // registers of variables that the caller is obliged to save - in the frame slots
     for(auto r: gpr_pool) {
       int32_t off = alloc();
@@ -250,8 +251,7 @@ struct jit_codegen {
       ld(rdi, rbp, s.off);
       mv(rsi, uint64_t(s.type == jt::arr_i64 ? 1 : 2));
       call_native(reinterpret_cast<void *>(&jit_array_data));
-      code.test(rax, rax);
-      code.jcc(e, fault(jit_fault_kind::layout, f.params[i])); // Type parsing guaranteed: we don't get here
+      jmp_unless(fault(jit_fault_kind::layout, f.params[i])); // Type parsing guaranteed: we don't get here
       if(s.data_reg >= 0) mv(gpr_pool[s.data_reg], rax);
       else st(rbp, s.data_off, rax);
       ld(rdi, rbp, s.off);
@@ -266,22 +266,22 @@ struct jit_codegen {
       throw jit_unsupported{f.body, cat("тип результата ", jt_name(body), " ≠ ", jt_name(out.result))};
     to_result(body);
 
-    code.bind(epilogue);
+    bnd(epilogue);
     for(auto [r, off]: saved) ld(r, rbp, off);
     mv(rsp, rbp);
     pp(rbp);
-    code.ret();
+    ret();
     for(auto & st: stubs) {
       emit_stub(st);
-      bind_lang(st.at);
     }
     if(!lang_patches.empty()) throw jit_unsupported{lang_patches.front().n, "переход кодогенератора языка на непривязанную метку"};
 
-    code.set_frame(frame_patch, (uint32_t(slots) * 8 + 15) & ~15u);
+    set_frame(frame_patch, (uint32_t(slots) * 8 + 15) & ~15u);
     out.bytes = code.size();
     out.unchecked = bce;
     out.jumps = throw_jumps;
     out.lang_ops = lang_ops;
+    out.lang_bytes = lang_bytes;
     for(auto const & m: lang_from) out.lang_from += (out.lang_from.empty() ? "" : ", ") + m;
     finish(out, code);
     out.ok = true;
@@ -508,18 +508,18 @@ struct jit_codegen {
 
   void emit_stub(stub & st) {
     using namespace x64;
-    code.bind(st.at);
+    bnd(st.at);
     if(st.to) {
       if(st.pop) stack_free(int32_t(8 * st.pop));
-      code.jmp(*st.to);
+      jmp_to(*st.to);
       return;
     }
     code.mov_addr(rax, &jit_fault);
-    code.store_imm32(rax, 0, int32_t(st.kind));
+    store_const(rax, 0, int32_t(st.kind));
     code.mov_addr(rax, &jit_fault_node);
-    code.store_imm32(rax, 0, int32_t(st.node.value));
+    store_const(rax, 0, int32_t(st.node.value));
     mv(rax, uint64_t(0));
-    code.jmp(epilogue);
+    jmp_to(epilogue);
   }
 
   // Call runtime; align the stack by 16 before calling.
@@ -528,8 +528,8 @@ struct jit_codegen {
     spill_xmm();
     bool pad = depth % 2 != 0;
     if(pad) stack_alloc(8);
-    code.mov_addr(rax, fn);
-    code.call(rax);
+    code.mov_addr(rax, fn); // host is the boundary with host (C++): AArch64 has a relocation
+    call_reg(rax);
     if(pad) stack_free(8);
     reload_xmm();
   }
@@ -711,6 +711,8 @@ struct jit_codegen {
         ng(rax);
         return t;
       }
+      if(op == "-" && t == jt::f64_ && emit_lang(n, "prefix-", {t})) return t;
+      if(op == "!" && t == jt::bool_ && emit_lang(n, "prefix!", {t})) return t;
       if(op == "-" && t == jt::f64_) {
         mv(rax, uint64_t(0x8000000000000000ull));
         mq(xmm1, rax);
@@ -726,10 +728,10 @@ struct jit_codegen {
     if(op == "&&" || op == "||") {
       label done;
       if(gen_value(o.args[0]) != jt::bool_) throw jit_unsupported{n, "логика не над bool"};
-      code.test(rax, rax);
-      code.jcc(op == "&&" ? e : ne, done);
+      if(op == "&&") jmp_unless(done);
+      else jmp_if(done);
       if(gen_value(o.args[1]) != jt::bool_) throw jit_unsupported{n, "логика не над bool"};
-      code.bind(done);
+      bnd(done);
       return jt::bool_;
     }
     jt a = gen_value(o.args[0]);
@@ -875,6 +877,8 @@ struct jit_codegen {
     // JIT register model - environment names code generator: battery and second operand register
     regs->declare(an.sym("acc"), value(int64_t(A::code_reg(x64::rax))));
     regs->declare(an.sym("second"), value(int64_t(A::code_reg(x64::rcx))));
+    regs->declare(an.sym("acc_f"), value(int64_t(A::code_xreg(x64::xmm0))));
+    regs->declare(an.sym("second_f"), value(int64_t(A::code_xreg(x64::xmm1))));
     auto const & ps = db.as<n_fn>(s).params;
     for(std::size_t k = 0; k < ps.size(); ++k) regs->declare(db.as<n_param>(ps[k]).name, value(args[k]));
     if(!label_name.empty()) regs->declare(an.sym(label_name), value(off));
@@ -922,6 +926,7 @@ struct jit_codegen {
     auto bytes = run_codegen(n, s, args, label_name, bound ? int64_t(target->pos) - int64_t(at) : 0);
     for(uint8_t b: bytes) code.byte(b);
     ++lang_ops;
+    lang_bytes += uint32_t(bytes.size());
     if(target && !bound) lang_patches.push_back({at, uint32_t(bytes.size()), n, s, args, std::string(label_name), target});
     return true;
   }
@@ -949,10 +954,10 @@ struct jit_codegen {
   }
   // time stack (except for a couple of frames in the prologue), transformations, forwarding gprеxmm
   void psh(x64::reg r) {
-    if(r == x64::rbp || !emit_lang_args(fn, "push_tmp", {jt::i64_}, {A::code_reg(r)})) code.push(r);
+    if(r == x64::rbp ? !emit_lang_args(fn, "frame_enter", {}, {}) : !emit_lang_args(fn, "push_tmp", {jt::i64_}, {A::code_reg(r)})) code.push(r);
   }
   void pp(x64::reg r) {
-    if(r == x64::rbp || !emit_lang_args(fn, "pop_tmp", {jt::i64_}, {A::code_reg(r)})) code.pop(r);
+    if(r == x64::rbp ? !emit_lang_args(fn, "frame_leave", {}, {}) : !emit_lang_args(fn, "pop_tmp", {jt::i64_}, {A::code_reg(r)})) code.pop(r);
   }
   void stack_alloc(int32_t n) {
     if(!emit_lang_args(fn, "stack_alloc", {jt::i64_}, {n})) code.sub_rsp(n);
@@ -974,6 +979,73 @@ struct jit_codegen {
   }
   void ng(x64::reg r) {
     if(!emit_lang_args(fn, "negate", {jt::i64_}, {A::code_reg(r)})) code.neg(r);
+  }
+
+  // Tags, transitions, frames, calls - code generator of the context of the goal.
+  void bnd(x64::label & l) { // tie the label and add language transitions to it
+    code.bind(l);
+    bind_lang(l);
+  }
+  void jmp_to(x64::label & l) {
+    if(!emit_lang(fn, "jump", {}, "target", &l)) code.jmp(l);
+  }
+  void jmp_unless(x64::label & l) { // Bool in the battery lies - transition
+    using namespace x64;
+    if(!emit_lang(fn, "jump_unless", {jt::bool_}, "target", &l)) {
+      code.test(rax, rax);
+      code.jcc(e, l);
+    }
+  }
+  void jmp_if(x64::label & l) { // Bool in the battery truth - transition
+    using namespace x64;
+    if(!emit_lang(fn, "jump_if", {jt::bool_}, "target", &l)) {
+      code.test(rax, rax);
+      code.jcc(ne, l);
+    }
+  }
+  void jmp_if_set(x64::reg base, x64::label & l) { // qword [base] ка 0 - transition (VM error mark)
+    using namespace x64;
+    if(!emit_lang_args(fn, "jump_if_set", {jt::i64_}, {A::code_reg(base)}, "target", &l)) {
+      code.cmp_mem_imm8(base, 0, 0);
+      code.jcc(ne, l);
+    }
+  }
+  void store_const(x64::reg base, int32_t disp, int32_t v) {
+    if(!emit_lang_args(fn, "store_const", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(base), disp, v})) code.store_imm32(base, disp, v);
+  }
+  void address(x64::reg d, x64::reg base, int32_t disp) {
+    if(!emit_lang_args(fn, "address", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(d), A::code_reg(base), disp})) code.lea(d, base, disp);
+  }
+  void call_reg(x64::reg r) {
+    if(!emit_lang_args(fn, "call_reg", {jt::i64_}, {A::code_reg(r)})) code.call(r);
+  }
+  void call_mem(x64::reg base, int32_t disp) {
+    if(!emit_lang_args(fn, "call_mem", {jt::i64_, jt::i64_}, {A::code_reg(base), disp})) code.call_mem(base, disp);
+  }
+  void ret() {
+    if(!emit_lang_args(fn, "ret", {}, {})) code.ret();
+  }
+  // frame: size known at the end - second code generator call with the same byte size
+  struct frame_site {
+    uint32_t at = 0, size = 0;
+    node_id codegen;
+  } frame_lang;
+  uint32_t frame_alloc() {
+    node_id s = find_codegen("frame_alloc", {jt::i64_});
+    if(!s) return code.frame_alloc();
+    uint32_t at = code.size();
+    auto bytes = run_codegen(fn, s, {0}, {}, 0);
+    for(uint8_t b: bytes) code.byte(b);
+    ++lang_ops;
+    lang_bytes += uint32_t(bytes.size());
+    frame_lang = {at, uint32_t(bytes.size()), s};
+    return at;
+  }
+  void set_frame(uint32_t at, uint32_t bytes) {
+    if(!frame_lang.codegen) return code.set_frame(at, bytes);
+    auto b = run_codegen(fn, frame_lang.codegen, {int64_t(bytes)}, {}, 0);
+    if(b.size() != frame_lang.size) throw jit_unsupported{fn, cat("кодогенератор ", A::target, ": длина frame_alloc зависит от размера")};
+    for(uint32_t k = 0; k < frame_lang.size; ++k) code.patch(frame_lang.at + k, b[k]);
   }
 
   // boundary check: k < n without a sign, otherwise - trap out_of_bounds (label `fault`)
@@ -1049,11 +1121,11 @@ struct jit_codegen {
         if(op == "/") ng(rax);
         else mv(rax, uint64_t(0));
         code.jmp(done);
-        code.bind(normal);
+        bnd(normal);
         code.cqo();
         code.idiv(rcx);
         if(op == "%") mv(rax, rdx);
-        code.bind(done);
+        bnd(done);
         return t;
       }
       return int_compare(n, op);
@@ -1219,9 +1291,11 @@ struct jit_codegen {
       if(gen_value(c.args[0]) != jt::i64_) throw jit_unsupported{n, "is_index: индекс не i64"};
       if(slot const * r = range_slot(c.args[1])) load_gpr(*r, rcx);
       else ld(rcx, rbp, array_slot(c.args[1]).size_off);
-      code.cmp(rax, rcx);
-      code.setcc(b, rax);
-      code.movzx_rax_al();
+      if(!emit_lang(n, "is_index", {jt::i64_, jt::i64_})) {
+        code.cmp(rax, rcx);
+        code.setcc(b, rax);
+        code.movzx_rax_al();
+      }
       return jt::bool_;
     }
     if(name == "intercept") return gen_intercept(n, c);
@@ -1302,18 +1376,17 @@ struct jit_codegen {
       to_result(t);
       st(rbp, base + int32_t(8 * i), rax);
     }
-    code.lea(rdi, rbp, base);
+    address(rdi, rbp, base);
     spill_xmm();
     bool pad = depth % 2 != 0;
     if(pad) stack_alloc(8);
     code.mov_addr(rax, &callee->entry);
-    code.call_mem(rax, 0);
+    call_mem(rax, 0);
     if(pad) stack_free(8);
     reload_xmm();
     // Error in the code called - come out, the mark is already
     code.mov_addr(rcx, &jit_fault);
-    code.cmp_mem_imm8(rcx, 0, 0);
-    code.jcc(ne, epilogue);
+    jmp_if_set(rcx, epilogue);
     if(callee->result == jt::f64_) mq(xmm0, rax);
     return callee->result;
   }
@@ -1355,8 +1428,7 @@ struct jit_codegen {
     mv(rcx, (uint64_t(carried) << 32) | n.value);
     call_native(reinterpret_cast<void *>(&jit_stream_call));
     code.mov_addr(rcx, &jit_fault);
-    code.cmp_mem_imm8(rcx, 0, 0);
-    code.jcc(ne, epilogue); // Error/Cancel in VM: Exit, mark is worth
+    jmp_if_set(rcx, epilogue); // Error/Cancel in VM: Exit, mark is worth
     if(result == jt::f64_) mq(xmm0, rax);
     return result;
   }
@@ -1442,8 +1514,7 @@ struct jit_codegen {
     mv(rcx, uint64_t(n.value));
     call_native(reinterpret_cast<void *>(&jit_stream_call));
     code.mov_addr(rcx, &jit_fault);
-    code.cmp_mem_imm8(rcx, 0, 0);
-    code.jcc(ne, epilogue);
+    jmp_if_set(rcx, epilogue);
     return jt::unit;
   }
 
@@ -1608,7 +1679,7 @@ struct jit_codegen {
     frames.push_back({target, exit, result, depth, false});
     jt body = gen_value(g.body);
     if(body != result && body != jt::unit) throw jit_unsupported{n, cat("тип результата ", jt_name(body), " ≠ ", jt_name(result))};
-    code.bind(*exit);
+    bnd(*exit);
     frames.pop_back();
     fn_base = base;
     ctx = cx;
@@ -1626,11 +1697,9 @@ struct jit_codegen {
     }
     jt t = in_region([&] { return gen_value(i.then_); });
     if(!emit_lang(n, "jump", {}, "target", &done)) code.jmp(done);
-    code.bind(else_);
-    bind_lang(else_);
+    bnd(else_);
     jt u = i.else_ ? in_region([&] { return gen_value(i.else_); }) : jt::unit;
-    code.bind(done);
-    bind_lang(done);
+    bnd(done);
     if(t != u && t != jt::unit && u != jt::unit) throw jit_unsupported{n, "ветки разных типов (расщепление)"};
     return t == u ? t : jt::unit;
   }
@@ -1687,10 +1756,10 @@ struct jit_codegen {
     if(t != fr.result) throw jit_unsupported{n, "тип return"};
     if(fr.top) {
       to_result(t);
-      code.jmp(epilogue); // epilogue restores rsp
+      jmp_to(epilogue); // epilogue restores rsp
     } else {
       if(depth > fr.depth) stack_free(int32_t(8 * (depth - fr.depth))); // transient
-      code.jmp(*fr.exit);
+      jmp_to(*fr.exit);
     }
     return jt::unit;
   }
@@ -1698,8 +1767,7 @@ struct jit_codegen {
   jt gen(node_id n, n_require const & r) {
     using namespace x64;
     if(gen_value(r.cond) != jt::bool_) throw jit_unsupported{r.cond, "require не bool"};
-    code.test(rax, rax);
-    code.jcc(e, fault(jit_fault_kind::require, n));
+    jmp_unless(fault(jit_fault_kind::require, n));
     return jt::unit;
   }
 
@@ -1709,13 +1777,12 @@ struct jit_codegen {
   jt gen(node_id n, n_loop const & l) {
     using namespace x64;
     label top, done;
-    code.bind(top);
+    bnd(top);
     loops.push_back({&top, &done, depth});
     in_region([&] { return gen_value(l.body); });
     loops.pop_back();
     if(!emit_lang(n, "jump", {}, "target", &top)) code.jmp(top);
-    code.bind(done);
-    bind_lang(done);
+    bnd(done);
     return jt::unit;
   }
 
@@ -1804,7 +1871,7 @@ struct jit_codegen {
             store_var(c.var);
           }
           if(depth > tf->depth) stack_free(int32_t(8 * (depth - tf->depth)));
-          code.jmp(*c.at);
+          jmp_to(*c.at);
           ++throw_jumps;
           return jt::unit;
         }
@@ -1812,12 +1879,12 @@ struct jit_codegen {
     code.mov_addr(rcx, &jit_thrown);
     st(rcx, 0, rax);
     code.mov_addr(rcx, &jit_thrown_type);
-    code.store_imm32(rcx, 0, int32_t(ty));
+    store_const(rcx, 0, int32_t(ty));
     code.mov_addr(rcx, &jit_fault_node);
-    code.store_imm32(rcx, 0, int32_t(n.value));
+    store_const(rcx, 0, int32_t(n.value));
     code.mov_addr(rcx, &jit_fault);
-    code.store_imm32(rcx, 0, int32_t(jit_fault_kind::thrown));
-    code.jmp(epilogue);
+    store_const(rcx, 0, int32_t(jit_fault_kind::thrown));
+    jmp_to(epilogue);
     return jt::unit;
   }
 
@@ -1864,11 +1931,11 @@ struct jit_codegen {
     jt b = gen_value(c.args[0]);
     tries.pop_back();
     if(b != result && b != jt::unit) throw jit_unsupported{n, "тип тела try"};
-    code.jmp(*end);
+    jmp_to(*end);
     for(std::size_t k = 0; k < handlers.size(); ++k) {
       auto const & l = db.as<n_lambda>(handlers[k]);
       catch_info const & ci = tf.catches[k];
-      code.bind(*ci.at);
+      bnd(*ci.at);
       jt cb = in_context(hs.ctx, [&] {
         scopes.emplace_back();
         if(ci.binds) scopes.back().push_back({db.as<n_param>(l.params[0]).name, ci.var});
@@ -1877,9 +1944,9 @@ struct jit_codegen {
         return r;
       });
       if(cb != result && cb != jt::unit) throw jit_unsupported{handlers[k], "тип catch"};
-      code.jmp(*end);
+      jmp_to(*end);
     }
-    code.bind(*end);
+    bnd(*end);
     return result;
   }
 
@@ -1925,6 +1992,7 @@ struct jit_codegen {
   std::vector<loop_frame> loops; // loop-covering
   uint32_t throw_jumps = 0;
   uint32_t lang_ops = 0;
+  uint32_t lang_bytes = 0;
   std::vector<std::string> lang_from; // code generator language modules
   uint32_t gpr_used = 0, xmm_used = 0; // occupied variable registers (pool bits)
   std::vector<std::pair<int8_t, int32_t>> live_xmm; // f64 in registers: (register, home slot)

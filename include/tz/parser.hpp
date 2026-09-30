@@ -1481,9 +1481,10 @@ struct parser {
   static int64_t parse_int(std::string_view s) {
     int64_t v = 0;
     if(s.starts_with("0x") || s.starts_with("0X")) {
+      uint64_t u = 0; // 0x... - bits i64 (0x8000000000000000000 - iconic bit), without UB overflow
       for(char c: s.substr(2))
-        if(c != '_') v = v * 16 + (c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
-      return v;
+        if(c != '_') u = u * 16 + uint64_t(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+      return int64_t(u);
     }
     for(char c: s)
       if(c != '_') v = v * 10 + (c - '0');
