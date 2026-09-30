@@ -195,10 +195,13 @@ struct printer {
     out += '}';
   }
 
-  void print_node(node_id, n_unpack const & u) {
+  void print_node(node_id n, n_unpack const & u) {
+    bool paren = db.is<n_op>(db[n].parent) || db.is<n_chain>(db[n].parent); // operand: (p = e) &&...
+    if(paren) out += '(';
     item(u.pattern);
     out += " = ";
     item(u.value);
+    if(paren) out += ')';
   }
 
   void print_node(node_id, n_param const & p) {

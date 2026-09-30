@@ -1354,19 +1354,20 @@ struct interpreter {
     return r;
   }
 
-  // Condition: success of unpacking - bool (in parsing unknown - run-time).
-  flow unpack_test(node_id n, scope * env, uint32_t frame, scope * into) {
-    auto const & u = db.as<n_unpack>(n);
-    TZ_TRY(v, eval(u.value, env, frame));
-    unpacked r = unpack_into(u.pattern, v, into, env, frame, db[n].where);
-    if(r == unpacked::maybe) return ok(erase(value(true)));
-    return ok(value(r == unpacked::yes));
+  bool has_unpack(node_id n) const {
+    if(db.is<n_unpack>(n)) return true;
+    if(db.is<n_lambda>(n)) return false;
+    bool found = false;
+    db.for_each_child(n, [&](node_id c) { found = found || has_unpack(c); });
+    return found;
   }
 
-  // Instructions: names - in the current area; not unpacked - exception.
+  // Instructions: names - in the current area; not unpacked - exception. Predicate (test):
+  // success - bool (in parsing unknown - run-time), names - with success.
   flow eval_node(node_id n, n_unpack const & u, scope * env, uint32_t frame) {
     TZ_TRY(v, eval(u.value, env, frame));
     unpacked r = unpack_into(u.pattern, v, env, env, frame, db[n].where);
+    if(u.test) return ok(r == unpacked::maybe ? erase(value(true)) : value(r == unpacked::yes));
     if(r == unpacked::no)
       fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(db).print(u.pattern), " ← ", checking() ? types.describe(v) : show_v(v)), db[n].where);
     if(r == unpacked::maybe) rt_check("unpack_failed", db[n].where);
@@ -1379,11 +1380,11 @@ struct interpreter {
     // if(образец = значение): Success is a condition, the sample names are only visible in the
     scope * then_env = env;
     std::optional<scope_hold> then_hold;
-    if(db.is<n_unpack>(i.cond)) {
+    if(has_unpack(i.cond)) { // Unpacking names in condition - only then
       then_env = new_scope(env);
       then_hold.emplace(*this, then_env);
     }
-    TZ_TRY(c, db.is<n_unpack>(i.cond) ? unpack_test(i.cond, env, frame, then_env) : eval(i.cond, env, frame));
+    TZ_TRY(c, eval(i.cond, then_env, frame));
     auto b = known_bool(c, db[i.cond].where);
     auto proof = index_check(i.cond, env);
     auto then_ = [&] {
@@ -3625,9 +3626,10 @@ struct interpreter {
         }
       }
       if(why.empty()) {
-        auto [passed, n_req, reason] = leading_requires(f, vals, args, env);
+        auto [passed, n_req, reason, unsure] = leading_requires(f, vals, args, env);
         if(!passed) why = reason;
         score += n_req;
+        maybe = maybe || unsure;
       }
       if(why.empty()) good.push_back({f, score, maybe});
       else rejected.push_back(cat(describe_fn(f), ": ", why));
@@ -3675,22 +3677,25 @@ struct interpreter {
   }
 
   // require at the beginning of the body: run-time - Candidate condition does not
-  // cut off - it is checked in runtime (§5.4).
-  std::tuple<bool, int, std::string> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env) {
+  // cut off - it is checked in runtime (§5.4). The fourth condition is run-time
+  // (will decide the value: runtime - overload).
+  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env) {
     auto const & fn = db.as<n_fn>(f);
-    if(fn.expr_body || !db.is<n_block>(fn.body)) return {true, 0, ""};
+    if(fn.expr_body || !db.is<n_block>(fn.body)) return {true, 0, "", false};
     scope * probe = new_scope(globals);
     scope_hold hold{*this, probe};
     bind_values(fn.params, vals, args, env, probe);
     int n = 0;
+    bool unsure = false;
     for(node_id s: db.as<n_block>(fn.body).items) {
       if(!db.is<n_require>(s)) break;
       ++n;
       flow c = eval(db.as<n_require>(s).cond, probe, 0);
-      if(c.v.is<bool>() && !c.v.as<bool>()) return {false, n, "require не выполнено"};
-      if(!c.v.is<bool>() && c.v.known()) return {false, n, "require не bool"};
+      if(c.v.is<bool>() && !c.v.as<bool>()) return {false, n, "require не выполнено", false};
+      if(!c.v.is<bool>() && c.v.known()) return {false, n, "require не bool", false};
+      unsure = unsure || !c.v.is<bool>();
     }
-    return {true, n, ""};
+    return {true, n, "", unsure};
   }
 
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {

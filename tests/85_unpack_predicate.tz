@@ -1,0 +1,35 @@
+// out: 7 -1
+// out: less 2 5
+// out: 7
+// out: true
+// machine
+// fmt-stable
+// store-roundtrip
+// Распаковка — предикат: 
+// 
+//.
+// В выражении образец = значение — bool, имена — при успехе; require(…) в начале
+// тела — условие кандидата (перегрузка по значению) и имена для тела; в условии
+// if имена видны только в then. Инструкция образец = значение; — исключение.
+struct point { i64 x; i64 y; }
+
+pair_sum(xs) {
+  require(array{a, b} = xs);
+  a + b
+}
+
+pair_sum(xs) => -1;
+
+norm1(p) {
+  require(point{x, y} = p);
+  x + y
+}
+
+main() {
+  print(pair_sum(array{3, 4}), pair_sum(array{1, 2, 3}));
+  q = point{2, 5};
+  if((point{u, v} = q) && u < v) print("less", u, v) else print("no");
+  print(norm1(q));
+  ok = (array{_, _} = array{1, 2});
+  print(ok);
+}

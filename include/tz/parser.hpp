@@ -626,12 +626,12 @@ struct parser {
     return db.add(std::move(p), {start, toks[pos - 1].where.end});
   }
 
-  node_id unpack() {
+  node_id unpack(bool test = false) {
     uint32_t start = here().where.begin;
     node_id p = pattern();
     eat_op("=");
     node_id v = expression();
-    return db.add(n_unpack{p, v}, {start, toks[pos - 1].where.end});
+    return db.add(n_unpack{p, v, test}, {start, toks[pos - 1].where.end});
   }
 
   node_id type_expr() {
@@ -1200,6 +1200,7 @@ struct parser {
   }
 
   node_id primary() {
+    if(pattern_ahead()) return unpack(true); // sample = value of the expression - predicate
     token const & t = here();
     uint32_t start = t.where.begin;
     switch(t.kind) {
@@ -1266,7 +1267,7 @@ struct parser {
     uint32_t start = here().where.begin;
     advance();
     expect_open('(');
-    node_id c = pattern_ahead() ? unpack() : expression(); // if(образец = значение) - Unpacking success
+    node_id c = expression(); // if(образец = значение) is the predicate of unpacking (primary)
     expect_close(')');
     node_id then_ = branch();
     node_id else_;

@@ -1021,7 +1021,9 @@ struct process_machine {
       return push_eval(u.value, t.scope, t.frame);
     }
     mval v = deref(pop_val());
-    if(!unpack_into(u.pattern, v, t.scope, db[n].where)) {
+    bool ok = unpack_into(u.pattern, v, t.scope, db[n].where);
+    if(u.test) return finish(mval{ok}); // predicate
+    if(!ok) {
       diagnostic d(cat("распаковка не удалась: ", printer(db).print(u.pattern), " ← ", helper.show_v(to_value(v))), db[n].where, diag_kind::runtime);
       d.type = "unpack_failed";
       throw d;
@@ -1031,20 +1033,15 @@ struct process_machine {
 
   void eval_node(node_id n, n_if const & i) {
     m_task & t = top();
-    if(t.phase == 0) {
+    if(t.phase == 0) { // Unpacking names in condition - in its area visible only then
       t.phase = 1;
-      return push_eval(db.is<n_unpack>(i.cond) ? db.as<n_unpack>(i.cond).value : i.cond, t.scope, t.frame);
+      t.a = helper.has_unpack(i.cond) ? new_scope(t.scope) : m_none;
+      t.owned = t.a; // release the end of if or bootstrapping
+      return push_eval(i.cond, t.a == m_none ? t.scope : t.a, t.frame);
     }
     if(t.phase == 1) {
-      uint32_t then_scope = t.scope;
-      bool c;
-      if(db.is<n_unpack>(i.cond)) { // if(образец = значение): Names - only then
-        mval v = deref(pop_val());
-        then_scope = new_scope(t.scope);
-        c = unpack_into(db.as<n_unpack>(i.cond).pattern, v, then_scope, db[i.cond].where);
-        if(c) top().owned = then_scope;
-        else release_scope(then_scope);
-      } else c = truthy(pop_val(), db[i.cond].where);
+      uint32_t then_scope = t.a == m_none ? t.scope : t.a;
+      bool c = truthy(pop_val(), db[i.cond].where);
       m_task & tt = top();
       tt.phase = 2;
       node_id next = c ? i.then_ : i.else_;

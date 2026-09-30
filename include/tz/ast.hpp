@@ -203,11 +203,13 @@ struct n_pat {
   node_id type;
   node_list items;
 };
-// sample = value: instruction (failure is an exception to unpack_failed) or
-// condition if (success is truth, names are visible in then)
+// sample = value: instruction (failure - exclusion of unpack_failed) or predicate in the
+// expression - require(…), if(…), && (success - truth, names - with success):
+//  
 struct n_unpack {
   node_id pattern;
   node_id value;
+  bool test = false; // predicate, not instruction
 };
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
