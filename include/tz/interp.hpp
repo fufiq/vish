@@ -4121,6 +4121,7 @@ struct interpreter {
   std::string * captured = nullptr;
   check_cache * cache = nullptr;
   struct jit_engine * jit = nullptr;
+  struct a64_check * a64 = nullptr; // AArch64 in parallel with host (qemu)
   std::optional<uint64_t> fuel;
   std::vector<std::pair<uint32_t, bool>> frame_floors; // (The first frame of the call was a return to the outside)
   std::vector<std::vector<report_event> *> recording;

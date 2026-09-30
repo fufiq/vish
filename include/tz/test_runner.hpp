@@ -33,6 +33,10 @@
 namespace tz {
 
 struct test_runner {
+  bool a64 = false; // --a64: each instance JIT is also coded AArch64 in qemu
+  uint32_t a64_checked = 0, a64_skipped = 0;
+  std::set<std::string> a64_notes;
+
   int run(std::string const & dir) {
     std::vector<std::filesystem::path> files;
     for(auto & e: std::filesystem::directory_iterator(dir))
@@ -47,6 +51,10 @@ struct test_runner {
       } else {
         put(stdout, cat("  FAIL ", f.filename().string(), "\n", why, "\n"));
       }
+    }
+    if(a64) {
+      put(stdout, cat("AArch64: проверено вызовов ", a64_checked, ", не проверено ", a64_skipped, "\n"));
+      for(auto const & n: a64_notes) put(stdout, cat("  не проверено  ", n, "\n"));
     }
     put(stdout, cat(passed, "/", files.size(), " тестов прошло\n"));
     return passed == files.size() ? 0 : 1;
@@ -388,6 +396,8 @@ struct test_runner {
       interpreter vm3(db, root, args, mode::run, input());
       jit_engine jit(db, root);
       vm3.use_jit(&jit);
+      a64_check check(db, root);
+      if(a64) vm3.a64 = &check;
       vm3.capture_output(&out3);
       try {
         vm3.run_main();
@@ -395,6 +405,12 @@ struct test_runner {
         err3 = render(d, path.filename().string(), db);
       }
       auto first_loc = [](std::string const & t) { return t.substr(0, t.find(": ошибка")); };
+      if(a64) {
+        a64_checked += check.checked;
+        a64_skipped += check.skipped;
+        a64_notes.insert(check.notes.begin(), check.notes.end());
+        for(auto const & m: check.mismatches) why += cat("    AArch64: ", m, "\n");
+      }
       if(out3 != out) why += cat("    JIT: вывод отличается: ", in_quotes(out3), " против ", in_quotes(out), "\n", jit.stats());
       for(auto & want: e.jit_stats)
         if(!jit.stats().contains(want)) why += cat("    нет в статистике JIT: ", in_quotes(want), "\n", jit.stats());

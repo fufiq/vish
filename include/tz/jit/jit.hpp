@@ -1832,6 +1832,12 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   }
 }
 
+} // namespace tz
+
+#include "a64_check.hpp"
+
+namespace tz {
+
 // Machine code flow operation: op 0 - new(cap = bits), 1 - write(id, bits), 2 - read, 3 -
 // more, 4 - close, 5 - yield; t_node - value type (jt) and node. The lock parks fiber right
 // here on its stack; the error and cancellation of fiber is in jit_pending.
@@ -1912,11 +1918,35 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
       raw[i] = reinterpret_cast<uint64_t>(cell && cell->is<array_v>() ? &cell->as<array_v>() : &vals[i].as<array_v>());
     }
   }
+  // AArch64 verification: same call to qemu before execution to host (inputs - as is)
+  std::optional<a64_check::outcome> shadow;
+  std::vector<a64_check::arg> sargs;
+  if(a64 && a64->calls[key]++ < 3) {
+    bool ok = true;
+    for(uint32_t i = 0; i < vals.size() && ok; ++i) {
+      a64_check::arg a;
+      if(param_types[i] == jt::arr_i64 || param_types[i] == jt::arr_f64) {
+        auto const * arr = reinterpret_cast<array_v const *>(raw[i]);
+        a.array = true;
+        for(uint32_t j = 0; j < i && a.same_as < 0; ++j)
+          if(raw[j] == raw[i] && (param_types[j] == jt::arr_i64 || param_types[j] == jt::arr_f64)) a.same_as = int(j);
+        for(uint32_t k = 0; k < arr->size() && ok; ++k) {
+          value e = arr->get(k);
+          if(e.is<int64_t>()) a.items.push_back(uint64_t(e.as<int64_t>()));
+          else if(e.is<double>()) a.items.push_back(std::bit_cast<uint64_t>(e.as<double>()));
+          else ok = false;
+        }
+      } else a.bits = raw[i];
+      sargs.push_back(std::move(a));
+    }
+    if(ok) shadow = a64->run(f, param_types, sargs);
+  }
   jit_fault = 0;
   jit_vm = this;
   auto entry = reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
   uint64_t bits = entry(raw.data());
   auto fault = jit_fault_kind(jit_fault);
+  if(shadow) a64->compare(*shadow, sargs, raw, code->result, bits, cat(db.strings.text(db.as<n_fn>(f).name), "(", jit_engine::types_str(param_types), ")"));
   if(fault == jit_fault_kind::vm_error) { // Error/Cancellation within the VM operation
     jit_fault = 0;
     std::rethrow_exception(std::exchange(jit_pending, nullptr));

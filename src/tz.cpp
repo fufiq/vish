@@ -26,7 +26,7 @@ using tz::cat;
 using tz::put;
 
 int usage() {
-  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] <программа> [аргументы...]   исполнить main()\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
+  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] [--a64] <программа> [аргументы...]   исполнить main(); --a64 — код AArch64 параллельно, в qemu-aarch64\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
   return 2;
 }
 
@@ -67,7 +67,11 @@ int main(int argc, char ** argv) {
   if(argc < 3) return usage();
   std::string cmd = argv[1];
   try {
-    if(cmd == "test") return tz::test_runner().run(argv[2]);
+    if(cmd == "test") {
+      tz::test_runner r;
+      r.a64 = argc > 3 && std::string_view(argv[3]) == "--a64";
+      return r.run(argv[2]);
+    }
     // Versions (§9.4): Semantic diff and triangular .tzdb fusion.
     if(cmd == "diff" && argc == 4) {
       tz::db_copy a, b;
@@ -106,7 +110,7 @@ int main(int argc, char ** argv) {
     }
 
     int at = 2;
-    bool show_instances = false, use_jit = false, jit_stats = false, machine = false;
+    bool show_instances = false, use_jit = false, jit_stats = false, machine = false, check_a64 = false;
     uint64_t dump_after = 0;
     std::string dump_path;
     while(cmd == "run" && at < argc && std::string_view(argv[at]).starts_with("--")) {
@@ -114,6 +118,7 @@ int main(int argc, char ** argv) {
       if(f == "--instances") show_instances = true;
       else if(f == "--jit") use_jit = true;
       else if(f == "--jit-stats") use_jit = jit_stats = true;
+      else if(f == "--a64") use_jit = check_a64 = true; // code AArch64 - parallel to host, in qemu
       else if(f == "--machine") machine = true;
       else if(f == "--dump-after" && at + 1 < argc) { // -dump-after N file.tzproc
         machine = true;
@@ -205,6 +210,8 @@ int main(int argc, char ** argv) {
       tz::interpreter vm(p.db, p.root, std::move(args));
       tz::jit_engine jit(p.db, p.root);
       if(use_jit) vm.use_jit(&jit);
+      tz::a64_check a64(p.db, p.root);
+      if(check_a64) vm.a64 = &a64;
       int code = 0;
       try {
         code = vm.run_main();
@@ -213,6 +220,10 @@ int main(int argc, char ** argv) {
       }
       if(show_instances) put(stderr, cat("экземпляры:\n", vm.instances()));
       if(jit_stats) put(stderr, cat("JIT:\n", jit.stats()));
+      if(check_a64) {
+        put(stderr, a64.report());
+        if(!a64.mismatches.empty() && !code) code = 1;
+      }
       return code;
     }
     if(cmd == "check") {
