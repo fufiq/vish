@@ -667,8 +667,7 @@ struct jit_codegen {
     }
     if(gen_value(index) != jt::i64_) throw jit_unsupported{index, "индекс не i64"};
     ld(rcx, rbp, s.size_off);
-    code.cmp(rax, rcx);
-    code.jcc(ae, fault(jit_fault_kind::bounds, n));
+    bounds(rax, rcx, n);
   }
 
   jt gen(node_id n, n_index const & i) {
@@ -679,8 +678,7 @@ struct jit_codegen {
       if(an.bounds_proven(n)) ++bce;
       else {
         load_gpr(rs, rcx);
-        code.cmp(rax, rcx);
-        code.jcc(ae, fault(jit_fault_kind::bounds, n));
+        bounds(rax, rcx, n);
       }
       return jt::i64_;
     }
@@ -688,10 +686,10 @@ struct jit_codegen {
     gen_checked_index(s, i.index, n);
     reg b = data_base(s, rcx);
     if(s.type == jt::arr_f64) {
-      code.movsd_load_idx(xmm0, b, rax);
+      ldxf(xmm0, b, rax);
       return jt::f64_;
     }
-    code.load_idx(rax, b, rax);
+    ldx(rax, b, rax);
     return jt::i64_;
   }
 
@@ -806,15 +804,14 @@ struct jit_codegen {
     if(an.bounds_proven(n)) ++bce;
     else {
       ld(rcx, rbp, a.size_off);
-      code.cmp(rdx, rcx);
-      code.jcc(ae, fault(jit_fault_kind::bounds, n));
+      bounds(rdx, rcx, n);
     }
     reg b = data_base(a, rcx);
     if(a.type == jt::arr_f64) {
-      code.movsd_load_idx(xmm1, b, rdx);
+      ldxf(xmm1, b, rdx);
       return jt::f64_;
     }
-    code.load_idx(rcx, b, rdx);
+    ldx(rcx, b, rdx);
     return jt::i64_;
   }
 
@@ -931,7 +928,31 @@ struct jit_codegen {
   void mv(x64::reg d, x64::reg r) {
     if(!emit_lang_args(fn, "move", {jt::i64_, jt::i64_}, {A::code_reg(d), A::code_reg(r)})) code.mov(d, r);
   }
-  void mv(x64::reg d, uint64_t imm) { code.mov(d, imm); }
+  void mv(x64::reg d, uint64_t imm) {
+    if(!emit_lang_args(fn, "load_const", {jt::i64_, jt::i64_}, {A::code_reg(d), int64_t(imm)})) code.mov(d, imm);
+  }
+  // array element: [base + index * 8]
+  void ldx(x64::reg d, x64::reg base, x64::reg index) {
+    if(!emit_lang_args(fn, "load_index", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(d), A::code_reg(base), A::code_reg(index)})) code.load_idx(d, base, index);
+  }
+  void stx(x64::reg base, x64::reg index, x64::reg r) {
+    if(!emit_lang_args(fn, "store_index", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(base), A::code_reg(index), A::code_reg(r)})) code.store_idx(base, index, r);
+  }
+  void ldxf(x64::xmm d, x64::reg base, x64::reg index) {
+    if(!emit_lang_args(fn, "load_index_f64", {jt::i64_, jt::i64_, jt::i64_}, {A::code_xreg(d), A::code_reg(base), A::code_reg(index)})) code.movsd_load_idx(d, base, index);
+  }
+  void stxf(x64::reg base, x64::reg index, x64::xmm r) {
+    if(!emit_lang_args(fn, "store_index_f64", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(base), A::code_reg(index), A::code_xreg(r)})) code.movsd_store_idx(base, index, r);
+  }
+  // boundary check: k < n without a sign, otherwise - trap out_of_bounds (label `fault`)
+  void bounds(x64::reg k, x64::reg size, node_id n) {
+    using namespace x64;
+    x64::label & f = fault(jit_fault_kind::bounds, n);
+    if(!emit_lang_args(n, "check_index", {jt::i64_, jt::i64_}, {A::code_reg(k), A::code_reg(size)}, "fault", &f)) {
+      code.cmp(k, size);
+      code.jcc(ae, f);
+    }
+  }
   void ld(x64::reg d, x64::reg base, int32_t disp) {
     if(!emit_lang_args(fn, "load", {jt::i64_, jt::i64_, jt::i64_}, {A::code_reg(d), A::code_reg(base), disp})) code.load(d, base, disp);
   }
@@ -965,7 +986,7 @@ struct jit_codegen {
   // The first operand is in rax/xmm0, the second in rcx/xmm1.
   jt binary(node_id n, std::string_view op, jt t) {
     using namespace x64;
-    if(t == jt::i64_ && (op == "/" || op == "%") && tries.empty() && find_codegen(cat("infix", op), {t, t})) { // trap
+    if(t == jt::i64_ && (op == "/" || op == "%") && find_codegen(cat("infix", op), {t, t})) { // trap
       emit_lang(n, cat("infix", op), {t, t}, "fault", &fault(jit_fault_kind::div_zero, n));
       return t;
     }
@@ -1106,11 +1127,11 @@ struct jit_codegen {
       if(op != "=") {
         reg b = data_base(s, rcx);
         if(et == jt::f64_) {
-          code.movsd_load_idx(xmm0, b, rax);
+          ldxf(xmm0, b, rax);
           ld(r8, rsp, 8);
           code.movq(xmm1, r8);
         } else {
-          code.load_idx(rax, b, rax);
+          ldx(rax, b, rax);
           ld(rcx, rsp, 8);
         }
         binary(n, op.substr(0, 1), et);
@@ -1124,8 +1145,8 @@ struct jit_codegen {
       code.add_rsp(8);
       depth -= 2;
       reg b = data_base(s, rcx);
-      if(et == jt::f64_) code.movsd_store_idx(b, rdx, xmm0);
-      else code.store_idx(b, rdx, rax);
+      if(et == jt::f64_) stxf(b, rdx, xmm0);
+      else stx(b, rdx, rax);
       return;
     }
     throw jit_unsupported{target, "цель присваивания"};

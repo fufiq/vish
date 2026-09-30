@@ -125,6 +125,12 @@ x64_rm(i64 op, i64 r, i64 base, i64 disp) => array{...x64_rex(1, r, 0, base), op
 
 x64_sse_rm(i64 prefix, i64 op, i64 r, i64 base, i64 disp) => array{prefix, ...x64_rex(0, r, 0, base), 0xF, op, ...x64_mem(r, base, disp)};
 
+x64_u64(i64 v) => array{v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF, (v >> 32) & 0xFF, (v >> 40) & 0xFF, (v >> 48) & 0xFF, (v >> 56) & 0xFF};
+
+// [база + индекс * 8]: ModRM 00 r 100 + SIB 11 индекс база; база rbp/r13 — через
+// disp8 = 0 (mod 01)
+x64_sib(i64 r, i64 base, i64 index) => if((base & 7) == 5) array{0x44 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7), 0x0} else array{0x4 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7)};
+
 // / и % с ловушкой (fault — смещение от начала этих байтов до ловушки деления на
 // ноль): test b, b; je fault; cmp b, -1; jne обычное; (neg a | xor a, a); jmp
 // конец; обычное: cqo; idiv b; [mov a, rdx]; конец. INT_MIN / -1 — модульно, без
@@ -167,6 +173,12 @@ amd64(expr body) {
   move_f64(i64 d, i64 s) => x64_sse(0xF2, 0x10, d, s); // movsd d, s
   load_f64(i64 d, i64 base, i64 disp) => x64_sse_rm(0xF2, 0x10, d, base, disp);
   store_f64(i64 base, i64 disp, i64 s) => x64_sse_rm(0xF2, 0x11, s, base, disp);
+  load_const(i64 d, i64 v) => array{0x48 | (d >> 3), 0xB8 + (d & 7), ...x64_u64(v)}; // movabs d, v
+  load_index(i64 d, i64 base, i64 index) => array{...x64_rex(1, d, index, base), 0x8B, ...x64_sib(d, base, index)};
+  store_index(i64 base, i64 index, i64 s) => array{...x64_rex(1, s, index, base), 0x89, ...x64_sib(s, base, index)};
+  load_index_f64(i64 d, i64 base, i64 index) => array{0xF2, ...x64_rex(0, d, index, base), 0xF, 0x10, ...x64_sib(d, base, index)};
+  store_index_f64(i64 base, i64 index, i64 s) => array{0xF2, ...x64_rex(0, s, index, base), 0xF, 0x11, ...x64_sib(s, base, index)};
+  check_index(i64 k, i64 n) => array{...x64_rr(0x39, k, n), 0xF, 0x83, ...x64_rel32(fault - 9)}; // cmp k, n; jae fault
   jump() => array{0xE9, ...x64_rel32(target - 5)}; // jmp target
   jump_unless(bool a) => array{...x64_rr(0x85, a, a), 0xF, 0x84, ...x64_rel32(target - 9)}; // test a, a; je target
   using operator (i64 a) / (i64 b) => x64_divmod(a, b, fault, 0);
@@ -199,6 +211,12 @@ arm64(expr body) {
   move_f64(i64 d, i64 s) => a64_word(0x1E604000 | (s << 5) | d); // fmov
   load_f64(i64 d, i64 base, i64 disp) => a64_mem(0xFC400000, 0xFC606800, d, base, a64_scaled(base, disp));
   store_f64(i64 base, i64 disp, i64 s) => a64_mem(0xFC000000, 0xFC206800, s, base, a64_scaled(base, disp));
+  load_const(i64 d, i64 v) => a64_imm64(d, v);
+  load_index(i64 d, i64 base, i64 index) => a64_word(0xF8607800 | (index << 16) | (base << 5) | d); // ldr d, [base, index, lsl 3]
+  store_index(i64 base, i64 index, i64 s) => a64_word(0xF8207800 | (index << 16) | (base << 5) | s);
+  load_index_f64(i64 d, i64 base, i64 index) => a64_word(0xFC607800 | (index << 16) | (base << 5) | d);
+  store_index_f64(i64 base, i64 index, i64 s) => a64_word(0xFC207800 | (index << 16) | (base << 5) | s);
+  check_index(i64 k, i64 n) => array{...a64_word(0xEB00001F | (n << 16) | (k << 5)), ...a64_word(0x54000002 | ((((fault - 4) >> 2) & 0x7FFFF) << 5))}; // cmp k, n; b.hs fault
   jump() => a64_word(0x14000000 | ((target >> 2) & 0x3FFFFFF)); // b target
   jump_unless(bool a) => a64_word(0xB4000000 | (((target >> 2) & 0x7FFFF) << 5) | a); // cbz a, target
   using operator (i64 a) / (i64 b) => a64_divmod(a, b, fault, 0);
