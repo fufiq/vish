@@ -1019,6 +1019,9 @@ struct process_machine {
       }
       throw diagnostic(cat("неизвестное имя ", s), db[n].where);
     }
+    if(p.scope == st.globals && std::ranges::contains(st.ct_vars, x.name) && !in_ct()) // ct-variable - in place (§7.3)
+      for(auto const & m: st.ct_memo)
+        if(m.node == n && m.ctx == t.ctx) return finish(mval(m.v));
     not_hidden(p, x.name, db[n].where);
     mval & c = cell(p);
     if(c.is<m_thunk>()) { // expr-parameter - the expression of the caller in its area and frame
@@ -1553,6 +1556,18 @@ struct process_machine {
         unsupported("вызов значения", n);
       }
       auto it = helper.functions.find(name);
+      if(it == helper.functions.end() && helper.str(name) == "code" && c.args.size() == 1) { // AST
+        node_id e = c.args[0];
+        uint32_t sc = t.scope;
+        while(db.is<n_ident>(e)) {
+          place q = find_lexical(sc, db.as<n_ident>(e).name);
+          if(q.scope == m_none || !st.scopes[q.scope].vars[q.slot].v.is<m_thunk>()) break;
+          m_thunk const & th = st.scopes[q.scope].vars[q.slot].v.as<m_thunk>();
+          e = th.expr;
+          sc = th.env;
+        }
+        return finish(from_value(helper.code_value(e), db[n].where));
+      }
       if(it == helper.functions.end() && helper.str(name) == "intercept") return begin_intercept(n, c.args);
       if(it == helper.functions.end() && helper.str(name) == "fiber_start") return begin_spawn(n, c.args);
       if(it == helper.functions.end() && helper.str(name) == "yield" && c.args.empty()) {

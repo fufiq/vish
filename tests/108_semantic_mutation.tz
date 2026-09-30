@@ -1,0 +1,27 @@
+// out: foo
+// out: bar
+// out: bar
+// machine
+// fmt-stable
+// store-roundtrip
+// Мутация семантики (§7.3): 
+// 
+// Чтение ct-переменной
+// вне ct-кода видит значение на момент исполнения в каноническом порядке
+// инстанцирования — по месту, как ct e; раньше читалось итоговое значение.
+ct word = "foo";
+
+f() {
+  ct {
+    word = "bar";
+  }
+}
+
+print_foo_or_bar() => print(word);
+
+main() {
+  print_foo_or_bar();
+  f();
+  print_foo_or_bar();
+  print_foo_or_bar();
+}

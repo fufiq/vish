@@ -1,0 +1,27 @@
+// out: op x += 2
+// out: call print(x)
+// out: 3
+// out: ident x
+// machine
+// fmt-stable
+// store-roundtrip
+// Код как значение — обход (§7.4): 
+//  
+// логика — на самом языке, не у хоста: 
+// code(x) — узел
+// выражения (у expr-параметра — код вызывающего), code_kind/items/name/text —
+// операции базового языка над ним. Не токены и не строка: 
+//.
+syntax traced {body} => {
+  for(s : code_items(code(body))) print(code_kind(s), code_text(s));
+  body;
+};
+
+main() {
+  x = 1;
+  traced {
+    x += 2;
+    print(x);
+  }
+  print(code_kind(code(x)), code_name(code(x)));
+}

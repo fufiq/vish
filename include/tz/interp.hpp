@@ -1166,6 +1166,7 @@ struct interpreter {
   bool has_ct(node_id n) const {
     if(!n) return false;
     if(db.is<n_ct>(n)) return true;
+    if(db.is<n_ident>(n) && std::ranges::contains(ct_names, db.as<n_ident>(n).name)) return true; // ct-variable reading - in place
     bool found = false;
     db.for_each_child(n, [&](node_id c) { found = found || has_ct(c); });
     return found;
@@ -1221,6 +1222,16 @@ struct interpreter {
 
   flow eval_node(node_id n, n_ident const & x, scope * env, uint32_t) {
     if(value * cell = find(env, x.name)) {
+      // ct-variable outside the ct-code: the value at the time of execution in canonical
+      // order instantiation (§7.3 para. 2), in place - as ct e.
+// 
+//.
+      if(ct_cells.contains(cell) && ct_depth == 0 && !level_probe) {
+        auto key = std::pair{n.value, ctx};
+        if(auto it = ct_memo.find(key); it != ct_memo.end()) return ok(it->second);
+        if(checking()) ct_memo[key] = *cell;
+        return ok(*cell);
+      }
       not_hidden(*cell, x.name, db[n].where);
       return read(cell, db[n].where);
     }
@@ -2156,6 +2167,15 @@ struct interpreter {
     agg_v c{types.named("code"), {}};
     c.fields.push_back({sym("node"), value(int64_t(n.value))});
     return value(std::move(c));
+  }
+
+  node_id code_of(node_id e, scope * env) {
+    while(db.is<n_ident>(e))
+      if(value * c = env->find(db.as<n_ident>(e).name); c && c->is<thunk_v>()) {
+        e = c->as<thunk_v>().expr;
+        env = c->as<thunk_v>().env;
+      } else break;
+    return e;
   }
 
   node_id code_node(value const & v, span where) {
@@ -3798,6 +3818,10 @@ struct interpreter {
         TZ_TRY(fv, read(cell));
         return call_value(fv, c.args, env, frame, where, n.value);
       }
+      // code(x) - AST expression value: the expr-parameter - the code of the caller
+      // (bypass and build node, §7.4):
+//.
+      if(str(name) == "code" && c.args.size() == 1 && !functions.contains(name)) return ok(code_value(code_of(c.args[0], env)));
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
       if(name == sym_spawn && !functions.contains(name)) return spawn(c.args, env, frame, where);
@@ -4598,7 +4622,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -4611,6 +4635,78 @@ struct interpreter {
       if(captured) *captured += line + "\n";
       else put(stdout, cat(line, "\n"));
       return {};
+    }
+    // --- entity compiler as a value (§7.4) -----------------------------------------------
+    // operations of the base language over the state of the compiler-interpreter, and not
+    // host calls "down": "Here in cp this is exactly what part of the program ... because in
+    // the cp in the database there is the integration of conditional api into the language."
+    if(n == "emit" && a.size() == 1) { // Advertisements from quote to current elaboration
+      node_id q = code_node(a[0], where);
+      if(!db.is<n_quote>(q)) fail("emit: ожидался quote { объявления }", where);
+      for(node_id item: db.as<n_quote>(q).items) register_item(item);
+      return value();
+    }
+    if(n == "attrs" && a.size() == 1) { // [[…]] attributes of a function or type - values
+      std::vector<node_id> nodes;
+      symbol owner;
+      if(a[0].is<fn_v>() && a[0].as<fn_v>().name) {
+        owner = a[0].as<fn_v>().name;
+        if(auto it = functions.find(owner); it != functions.end())
+          for(node_id f: it->second)
+            for(node_id x: db.as<n_fn>(f).attrs) nodes.push_back(x);
+      } else if(a[0].is<type_v>()) {
+        owner = sym(types.name(a[0].as<type_v>().type));
+        if(auto it = structs.find(owner); it != structs.end())
+          for(node_id x: db.as<n_struct>(it->second).attrs) nodes.push_back(x);
+      } else fail("attrs: ожидалась функция или тип", where);
+      if(auto it = ext_attrs.find(owner); it != ext_attrs.end())
+        for(node_id x: it->second) nodes.push_back(x);
+      std::vector<value> vs;
+      for(node_id x: nodes) {
+        flow f = eval(x, globals, 0);
+        if(!f.normal()) fail("атрибут не вычислился", db[x].where);
+        vs.push_back(std::move(f.v));
+      }
+      return value(array_v::of(std::move(vs)));
+    }
+    if(n == "fields" && a.size() == 1 && a[0].is<type_v>()) { // aggregate field: {name, type}
+      symbol owner = sym(types.name(a[0].as<type_v>().type));
+      if(!structs.contains(owner)) fail(cat("fields: ", str(owner), " — не агрегат"), where);
+      std::vector<value> vs;
+      for(node_id f: fields_of_struct(owner)) {
+        auto const & v = db.as<n_var>(f);
+        auto tn = str(db.as<n_ident>(v.type).name);
+        type_id t = types.builtin(tn) ? types.builtin(tn) : types.named(tn);
+        agg_v d{types.named("field"), {}};
+        d.fields.push_back({sym("name"), value(std::string(str(v.name)))});
+        d.fields.push_back({sym("type"), value(type_v{t})});
+        vs.push_back(value(std::move(d)));
+      }
+      return value(array_v::of(std::move(vs)));
+    }
+    if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
+    // Code bypass: type node, daughter node, name, text (projection)
+    if(n.starts_with("code_") && a.size() == 1) {
+      node_id c = code_node(a[0], where);
+      if(n == "code_kind") {
+        auto k = kind_name(db[c]);
+        return value(std::string(k.starts_with("n_") ? k.substr(2) : k));
+      }
+      if(n == "code_items") {
+        std::vector<value> xs;
+        db.for_each_child(c, [&](node_id x) { xs.push_back(code_value(x)); });
+        return value(array_v::of(std::move(xs)));
+      }
+      if(n == "code_name") {
+        symbol s;
+        if(db.is<n_ident>(c)) s = db.as<n_ident>(c).name;
+        else if(db.is<n_fn>(c)) s = db.as<n_fn>(c).name;
+        else if(db.is<n_var>(c)) s = db.as<n_var>(c).name;
+        else if(db.is<n_param>(c)) s = db.as<n_param>(c).name;
+        else if(db.is<n_call>(c) && db.is<n_ident>(db.as<n_call>(c).callee)) s = db.as<n_ident>(db.as<n_call>(c).callee).name;
+        return value(std::string(s ? str(s) : ""));
+      }
+      if(n == "code_text") return value(printer(db).print(c));
     }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);
