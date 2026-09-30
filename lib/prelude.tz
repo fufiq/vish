@@ -138,6 +138,8 @@ amd64(expr body) {
   using operator (i64 a) * (i64 b) => x64_0f(0xAF, a, b); // imul
   using operator (i64 a) << (i64 b) => x64_shift(4, a); // shl a, cl
   using operator (i64 a) >> (i64 b) => x64_shift(7, a); // sar a, cl
+  jump() => array{0xE9, ...x64_rel32(target - 5)}; // jmp target
+  jump_unless(bool a) => array{...x64_rr(0x85, a, a), 0xF, 0x84, ...x64_rel32(target - 9)}; // test a, a; je target
   using operator (i64 a) / (i64 b) => x64_divmod(a, b, fault, 0);
   using operator (i64 a) % (i64 b) => x64_divmod(a, b, fault, 1);
   using operator (f64 a) + (f64 b) => x64_sse(0xF2, 0x58, a, b); // addsd
@@ -162,6 +164,8 @@ arm64(expr body) {
   using operator (i64 a) * (i64 b) => a64_rrr(0x9B007C00, a, a, b); // madd a, a, b, xzr
   using operator (i64 a) << (i64 b) => a64_rrr(0x9AC02000, a, a, b); // lslv
   using operator (i64 a) >> (i64 b) => a64_rrr(0x9AC02800, a, a, b); // asrv
+  jump() => a64_word(0x14000000 | ((target >> 2) & 0x3FFFFFF)); // b target
+  jump_unless(bool a) => a64_word(0xB4000000 | (((target >> 2) & 0x7FFFF) << 5) | a); // cbz a, target
   using operator (i64 a) / (i64 b) => a64_divmod(a, b, fault, 0);
   using operator (i64 a) % (i64 b) => a64_divmod(a, b, fault, 1);
   using operator (f64 a) + (f64 b) => a64_rrr(0x1E602800, a, a, b); // fadd
