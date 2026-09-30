@@ -7,6 +7,7 @@ import './declarations/param';
 import './declarations/var';
 import './declarations/struct';
 import './declarations/extend';
+import './declarations/use';
 import './statements/block';
 import './statements/if';
 import './statements/loop';

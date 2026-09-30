@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0012"; // 0012: template with tag (n_template); 0011: struct base (hierarchy); 0010: disclosure ...t (n_spread); 0009: explicit at parameter (strict); 0008: unpacking interface (n_pat_field, n_subject); 0007: unpacking (n_pat, n_unpack); 0006: extension of function by link (target); 0005: internal module elements (inner); 0004: empty strings
+constexpr std::string_view tzdb_magic = "TZDB0013"; // 0013: modules (n_use, sealed); 0012: template with tag (n_template); 0011: base struct (hierarchy); 0010: disclosure ...t (n_spread); 0009: explicit at parameter (strict); 0008: unpacking interface (n_pat_field, n_subject); 0007: unpacking (n_pat, n_unpack); 0006: extension of function by link (target); 0005: internal elements of module (inner); 0004: blank lines
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;

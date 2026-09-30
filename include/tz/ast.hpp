@@ -36,6 +36,7 @@ struct n_module {
   // presentation of the editor module; access - transition. The layout is like blank; the
   // numbers, not node_list, are not children (they are not seen twice by rounds in the fields).
   std::vector<uint32_t> inner;
+  bool sealed = false; // sealed module k; - entity modules do not expand externally (§9.1)
 };
 struct n_fn {
   symbol name;
@@ -231,6 +232,15 @@ struct n_subject {}; // Unpackable value (implicit root of circulation)
 struct n_spread {
   node_id value;
 };
+// use geo.vec; / use geo.vec. {norm, dot} ; - Module as semantic inclusion:
+// 
+// 
+// Names - Empty: All module
+// announcements.
+struct n_use {
+  symbol key;
+  std::vector<symbol> names;
+};
 // Tag "text {выражение} text" - a template with the tag:
 //  
 // parts: текст (n_str), выражение, текст, …, текст.
@@ -241,7 +251,7 @@ struct n_template {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_template>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_template, n_use>;
 
 struct node {
   node_kind kind;

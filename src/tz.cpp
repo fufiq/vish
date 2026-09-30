@@ -18,6 +18,7 @@
 #include "tz/server.hpp"
 #include "tz/merge.hpp"
 #include "tz/machine.hpp"
+#include "tz/modules.hpp"
 #include "tz/jit/jit.hpp"
 
 namespace {
@@ -50,6 +51,7 @@ void load(program & p, std::string const & path) {
   tz::parser parser(p.db, file.text());
   p.root = parser.parse_module();
   p.parse_errors = parser.errors();
+  for(auto & e: tz::load_uses(p.db, p.root, std::filesystem::path(path).parent_path())) p.parse_errors.push_back(e); // use k; next to the program
 }
 
 int report_error(program const & p, tz::diagnostic const & d) {

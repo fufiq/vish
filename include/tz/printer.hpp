@@ -95,7 +95,7 @@ struct printer {
   // --- instruction ---
 
   void print_node(node_id, n_module const & m) {
-    if(m.name) out += cat("module ", str(m.name), ";\n");
+    if(m.name) out += cat(m.sealed ? "sealed " : "", "module ", str(m.name), ";\n");
     bool first = !m.name;
     for(uint32_t k = 0; k < m.items.size(); ++k) {
       node_id i = m.items[k];
@@ -207,6 +207,15 @@ struct printer {
   }
 
   void print_node(node_id, n_subject const &) {} // implicit root: .size, [1].flags
+
+  void print_node(node_id, n_use const & u) {
+    out += cat("use ", str(u.key));
+    if(!u.names.empty()) {
+      out += ".{";
+      for(std::size_t i = 0; i < u.names.size(); ++i) out += cat(i ? ", " : "", str(u.names[i]));
+      out += '}';
+    }
+  }
 
   void print_node(node_id, n_template const & t) {
     item(t.tag);

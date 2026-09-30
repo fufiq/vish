@@ -1,0 +1,10 @@
+// Модуль для теста 95_modules (ключ geo.vec — файл geo/vec.tz рядом с программой).
+module geo.vec;
+
+struct v2 { f64 x; f64 y; }
+
+dot(v2 a, v2 b) => (a.x * b.x) + (a.y * b.y);
+
+norm2(v2 a) => dot(a, a);
+
+scale(v2 a, f64 k) => v2{a.x * k, a.y * k};

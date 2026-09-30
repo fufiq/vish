@@ -168,13 +168,74 @@ struct interpreter {
     if(checking() && !inputs) args_v = erase(value(array_v::of({value(std::string("x"))}))); // arguments - runtime
     globals->declare(sym("args"), std::move(args_v));
     globals->declare(sym("stdin"), value(agg_v{types.named("stream"), {}})); // descriptor, no value
-    for(node_id m: {db.prelude, module}) { // prelude - first
-      if(!m || (m == db.prelude && m == module)) continue;
-      for(node_id item: db.as<n_module>(m).items)
-        if(!db.is<n_extend>(item)) register_item(item);
+    // prelude - first, then used modules (dependencies before), then your own; module error
+    // (no module, sealed) - program error during elaboration
+    try {
+      register_modules(module);
+    } catch(diagnostic const & d) {
+      setup_error = d;
     }
-    for(node_id item: db.as<n_module>(module).items) // Expansion - after announcements
-      if(db.is<n_extend>(item)) register_item(item);
+  }
+
+  void register_modules(node_id module) {
+    order_modules(module);
+    std::vector<node_id> all;
+    if(db.prelude && db.prelude != module) all.push_back(db.prelude);
+    all.insert(all.end(), module_order.begin(), module_order.end());
+    for(node_id m: all) {
+      registering = m;
+      for(node_id item: db.as<n_module>(m).items)
+        if(!db.is<n_extend>(item) && visible_item(m, item)) register_item(item);
+    }
+    for(node_id m: all) { // Expansion - after announcements
+      registering = m;
+      for(node_id item: db.as<n_module>(m).items)
+        if(db.is<n_extend>(item) && m != db.prelude && visible_item(m, item)) register_item(item);
+    }
+    registering = node_id{};
+  }
+
+  // --- Modules (§9.1): use - semantic key inclusion ---
+
+  // Modules in order of registration: used before, your last; selective use k. {a, b} - only
+  // named (use k; somewhere else - all).
+  void order_modules(node_id root) {
+    std::set<uint32_t> done;
+    auto visit = [&](auto && self, node_id m) -> void {
+      if(!done.insert(m.value).second) return;
+      for(node_id item: db.as<n_module>(m).items) {
+        if(!db.is<n_use>(item)) continue;
+        auto const & u = db.as<n_use>(item);
+        node_id dep;
+        for(uint32_t i = 0; i < db.size(); ++i)
+          if(db.is<n_module>(node_id(i)) && db.as<n_module>(node_id(i)).name == u.key) dep = node_id(i);
+        if(!dep) fail(cat("нет модуля ", str(u.key)), db[item].where);
+        auto & only = module_names[dep.value];
+        if(u.names.empty()) whole_modules.insert(dep.value);
+        else only.insert(u.names.begin(), u.names.end());
+        self(self, dep);
+      }
+      module_order.push_back(m);
+    };
+    visit(visit, root);
+  }
+  bool visible_item(node_id m, node_id item) const {
+    if(m == mod || m == db.prelude || whole_modules.contains(m.value)) return true;
+    symbol name = db.is<n_fn>(item) ? db.as<n_fn>(item).name : db.is<n_struct>(item) ? db.as<n_struct>(item).name
+        : db.is<n_extend>(item)                                                        ? db.as<n_extend>(item).name
+        : db.is<n_var>(item)                                                           ? db.as<n_var>(item).name
+                                                                                       : symbol{};
+    auto it = module_names.find(m.value);
+    return !name || (it != module_names.end() && it->second.contains(name));
+  }
+  // sealed module k; entity k is not extended from other modules (overload, fields, &f)
+  void check_sealed(symbol entity, node_id item) {
+    if(!registering) return;
+    auto [it, fresh] = entity_owner.try_emplace(entity.value, registering);
+    node_id owner = it->second;
+    if(fresh || owner == registering || !db.as<n_module>(owner).sealed) return;
+    diagnostic d(cat(str(entity), ": модуль ", str(db.as<n_module>(owner).name), " запечатан (sealed) — расширять его сущности можно только в нём"), db[item].where);
+    throw d;
   }
 
   // entity operator node: infix+/prefix-/postfix++.
@@ -211,6 +272,10 @@ struct interpreter {
 
   // Announcement in current elaboration: from a module or generated emit.
   void register_item(node_id item) {
+    if(db.is<n_fn>(item)) check_sealed(db.as<n_fn>(item).name, item);
+    else if(db.is<n_struct>(item)) check_sealed(db.as<n_struct>(item).name, item);
+    else if(db.is<n_extend>(item))
+      check_sealed(db.as<n_extend>(item).target ? db.as<n_fn>(node_id(db.as<n_extend>(item).target)).name : db.as<n_extend>(item).name, item);
     if(db.is<n_fn>(item) && operator_name(str(db.as<n_fn>(item).name)) && !intrinsic_operator(item))
       user_ops.insert(db.as<n_fn>(item).name.value);
     if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
@@ -240,25 +305,28 @@ struct interpreter {
   void elaborate() {
     if(elaborated) return;
     elaborated = true;
+    if(setup_error) throw *setup_error;
     // VM errors are one hierarchy: catch(vm_error e) catches any
     for(std::string_view e: {"out_of_bounds", "div_by_zero", "require_failed", "unpack_failed", "closed_stream", "deadlock", "invalidated_alias", "io_error", "overflow"})
       types.set_parent(types.named(e), types.named("vm_error"));
-    for(node_id item: db.as<n_module>(mod).items) {
-      if(db.is<n_ct>(item)) {
-        ++ct_depth;
-        flow f = eval(db.as<n_ct>(item).body, globals, 0);
-        --ct_depth;
-        if(f.kind == flow_kind::thr) uncaught(f);
-      }
-      if(db.is<n_var>(item) && db.as<n_var>(item).ct) { // ct x = e - in the order of the module
-        auto const & v = db.as<n_var>(item);
-        ++ct_depth;
-        flow f = eval(v.init, globals, 0);
-        --ct_depth;
-        if(f.kind == flow_kind::thr) uncaught(f);
-        if(!f.v.known()) fail(cat("ct ", str(v.name), ": значение должно быть известно при компиляции"), db[item].where);
-        ct_cells.insert(globals->declare(v.name, f.v));
-        ct_names.push_back(v.name);
+    for(node_id m: module_order) { // ct modules - in order of modules (used earlier)
+      for(node_id item: db.as<n_module>(m).items) {
+        if(db.is<n_ct>(item)) {
+          ++ct_depth;
+          flow f = eval(db.as<n_ct>(item).body, globals, 0);
+          --ct_depth;
+          if(f.kind == flow_kind::thr) uncaught(f);
+        }
+        if(db.is<n_var>(item) && db.as<n_var>(item).ct) { // ct x = e - in the order of the module
+          auto const & v = db.as<n_var>(item);
+          ++ct_depth;
+          flow f = eval(v.init, globals, 0);
+          --ct_depth;
+          if(f.kind == flow_kind::thr) uncaught(f);
+          if(!f.v.known()) fail(cat("ct ", str(v.name), ": значение должно быть известно при компиляции"), db[item].where);
+          ct_cells.insert(globals->declare(v.name, f.v));
+          ct_names.push_back(v.name);
+        }
       }
     }
   }
@@ -277,6 +345,7 @@ struct interpreter {
 
   // Launch main(). Returns the exit code.
   int run_main() {
+    if(setup_error) throw *setup_error; // Modules: no module, sealed
     auto it = functions.find(sym("main"));
     if(it == functions.end()) throw diagnostic("нет функции main", {});
     elaborate();
@@ -4565,6 +4634,12 @@ struct interpreter {
   struct a64_check * a64 = nullptr; // AArch64 in parallel with host (qemu)
   scope * invoke_parent = nullptr; // call from local overload set: set environment (takes invoke)
   std::vector<value> subjects; // unpackable values - roots of addresses .f: subsample
+  std::vector<node_id> module_order; // used modules (previously), then the
+  std::map<uint32_t, std::set<symbol>> module_names; // use k. {a, b}: visible module names
+  std::set<uint32_t> whole_modules; // use k; all advertisements
+  std::map<uint32_t, node_id> entity_owner; // entity → host module (sealed)
+  node_id registering; // module whose elements are recorded
+  std::optional<diagnostic> setup_error; // error of modules during creation - thrown during elaboration
   std::optional<uint64_t> fuel;
   std::vector<std::pair<uint32_t, bool>> frame_floors; // (The first frame of the call was a return to the outside)
   std::vector<std::vector<report_event> *> recording;

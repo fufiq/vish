@@ -1,0 +1,9 @@
+// error: area: модуль geo.sealed запечатан (sealed) — расширять его сущности можно только в нём
+// sealed module k; — сущности модуля не расширяются извне (§9.1, P13).
+use geo.sealed;
+
+area(i64 w, i64 h) => w * h;
+
+main() {
+  print(area(2.0, 3.0));
+}

@@ -1745,9 +1745,8 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
     bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept" // pure: convolution or code generator
         || name.starts_with("stream_") || name == "yield"; // Flow operations - VM call
-    for(node_id m: {db.prelude, module})
-      for(node_id item: m ? db.as<n_module>(m).items : node_list{})
-        known = known || (db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == name);
+    for(uint32_t i = 0; i < db.size() && !known; ++i) // functions of any database module (use)
+      known = db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == name;
     for(node_id p = db[n].parent; p && !known; p = db[p].parent) // expr-parameter is called: block of construction
       if(db.is<n_fn>(p))
         for(node_id pn: db.as<n_fn>(p).params)

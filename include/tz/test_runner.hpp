@@ -19,6 +19,7 @@
 
 #include "interp.hpp"
 #include "os.hpp"
+#include "modules.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
 #include "views.hpp"
@@ -126,6 +127,7 @@ struct test_runner {
         os::mapped_file f(file.string());
         parser p(db, f.text());
         root = p.parse_module();
+        load_uses(db, root, file.parent_path());
         session.emplace(db, root, file.filename().string());
         if(wire) {
           int fds[2];
@@ -356,9 +358,11 @@ struct test_runner {
     ast_db db;
     parser p(db, src);
     node_id root = p.parse_module();
+    auto module_errors = load_uses(db, root, path.parent_path()); // use k; modules next to the program
 
     std::string errors;
     for(auto const & d: p.errors()) errors += render(d, path.filename().string(), db);
+    for(auto const & d: module_errors) errors += render(d, path.filename().string(), db);
 
     if(e.fmt_stable) {
       std::string once = printer(db).print(root);

@@ -96,6 +96,10 @@ struct parser {
     }
     uint32_t start = here().where.begin;
     n_module m;
+    if(is_word("sealed") && is_word("module", 1)) { // sealed module k; does not expand from the outside
+      advance();
+      m.sealed = true;
+    }
     if(is_word("module")) {
       advance();
       m.name = db.strings.intern(dotted_name());
@@ -312,6 +316,31 @@ struct parser {
     // Name { … } - extension of entity
     if(ahead(0).kind == tok::ident && !is_keyword(ahead(0).text) && is_open('{', 1)) return extension(start);
     if(is_op("&") && ahead(1).kind == tok::ident && is_open('(', 2)) return fn_extension(start);
+    if(is_word("use") && ahead(1).kind == tok::ident) { // use geo.vec; / use geo.vec.{norm, dot};
+      advance();
+      n_use u;
+      std::string key(here().text);
+      ident();
+      while(is_op(".") && ahead(1).kind == tok::ident) {
+        advance();
+        key += '.';
+        key += here().text;
+        ident();
+      }
+      if(is_op(".") && is_open('{', 1)) {
+        advance();
+        expect_open('{');
+        while(!is_close('}')) {
+          u.names.push_back(ident());
+          if(is_op(",")) eat_op(",");
+          else break;
+        }
+        expect_close('}');
+      }
+      u.key = db.strings.intern(key);
+      end_statement();
+      return db.add(std::move(u), {start, toks[pos - 1].where.end});
+    }
     node_id s = statement();
     // There are no global process variables outside the functions - only ct (author's decision 2026-09-30)
     bool var = db.is<n_var>(s) && !db.as<n_var>(s).ct;
