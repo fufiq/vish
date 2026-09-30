@@ -3,6 +3,8 @@
 // out: 10 3.0 [3.0, 6.0] 3 4
 // out: -1 -2
 // out: 10 11.0 30 4 32
+// out: 6765 1024.0 18 ()
+// out: -1 -2
 // jit-compiled: sq
 // jit-compiled: mx
 // jit-compiled: fact
@@ -18,6 +20,12 @@
 // jit-compiled: each
 // jit-compiled: cnt
 // jit-compiled: hyp
+// jit-compiled: fib
+// jit-compiled: pw
+// jit-compiled: sumto
+// jit-compiled: show
+// jit-compiled: over
+// jit-compiled: dz
 // jit-stats: fact(i64) → 
 // jit-stats: компилятор языка
 // machine
@@ -32,7 +40,9 @@
 // даёт область аргументов ({данные, размер} у массива) и слоты ошибки за ней —
 // в коде нет адресов хоста (решение автора). Вызовы и конструкции
 // (for/while) — семантический инлайн: тип узла и перегрузку даёт разбор
-// экземпляра (jit_type), return в блоке — из функции, написавшей блок.
+// экземпляра (jit_type), return в блоке — из функции, написавшей блок. Рекурсия —
+// настоящий вызов себя (call на своё начало, область аргументов — в кадре),
+// ошибка вызванного переносится в свои слоты.
 sq(i64 x) => x * (x + 1);
 
 mx(i64 a, i64 b) => if(a > b) a else b;
@@ -118,6 +128,20 @@ cnt(i64 n) => {
 
 hyp(i64 a, i64 b) => sq(a) + sq(b);
 
+fib(i64 n) => if(n < 2) n else fib(n - 1) + fib(n - 2);
+
+pw(f64 x, i64 k) => if(k == 0) 1.0 else x * pw(x, k - 1);
+
+sumto(xs, i64 i) => if(i >= xs.size) 0 else xs[i] + sumto(xs, i + 1);
+
+show(i64 x) => {
+  y = x + 1;
+}
+
+over(xs, i64 i) => if(i > xs.size) 0 else xs[i] + over(xs, i + 1);
+
+dz(i64 n) => if(n == 0) 1 / n else dz(n - 1) + 1;
+
 main() {
   print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
   print(poly(4) + 5, avg(2.0, 3.0, 1), avg(0.5, 1.5, -1), (avg(1.0, 1.0, 1) == 1.0) && ((0.1 + 0.2) != 0.3));
@@ -129,4 +153,9 @@ main() {
   print(r, q);
   xs = array{1, 2, 3, 4};
   print(sum_for(xs), dot_for(array{1.0, 2.0}, array{3.0, 4.0}), each(xs), cnt(10), hyp(3, 4));
+  ys = array{5, 6, 7};
+  print(fib(20), pw(2.0, 10), sumto(ys, 0), show(3));
+  r2 = try { over(ys, 0) } catch(out_of_bounds e) { -1 };
+  q2 = try { dz(5) } catch(div_by_zero e) { -2 };
+  print(r2, q2);
 }

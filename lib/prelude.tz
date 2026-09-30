@@ -200,6 +200,7 @@ amd64(expr body) {
   address(i64 d, i64 base, i64 disp) => x64_rm(0x8D, d, base, disp); // lea
   call_reg(i64 r) => if(r >= 8) array{0x41, 0xFF, 0xD0 | (r & 7)} else array{0xFF, 0xD0 | r}; // call r
   call_mem(i64 base, i64 disp) => array{...x64_rex(0, 2, 0, base), 0xFF, ...x64_mem(2, base, disp)}; // call qword [base + disp]
+  call_self() => array{0xE8, ...x64_rel32(target - 5)}; // call target (своё начало: рекурсия)
   frame_enter() => array{0x55}; // push rbp
   frame_leave() => array{0x5D}; // pop rbp
   frame_alloc(i64 n) => array{0x48, 0x81, 0xEC, ...x64_rel32(n)}; // sub rsp, n (размер — вторым вызовом)
@@ -267,6 +268,7 @@ arm64(expr body) {
   address(i64 d, i64 base, i64 disp) => a64_add_imm(d, base, a64_scaled(base, disp));
   call_reg(i64 r) => array{...a64_word(0xD63F0000 | (r << 5)), ...a64_mov(acc, 0)}; // blr r; результат x0 → аккумулятор
   call_mem(i64 base, i64 disp) => array{...a64_mem(0xF8400000, 0xF8606800, 17, base, a64_scaled(base, disp)), ...a64_word(0xD63F0000 | (17 << 5)), ...a64_mov(acc, 0)};
+  call_self() => array{...a64_word(0x94000000 | ((target >> 2) & 0x3FFFFFF)), ...a64_mov(acc, 0)}; // bl target; результат x0 → аккумулятор
   frame_enter() => a64_word(0xA9BF7BFD); // stp x29, x30, [sp, #-16]!
   frame_leave() => a64_word(0xA8C17BFD); // ldp x29, x30, [sp], #16
   frame_alloc(i64 n) => array{...a64_word(0xD2800000 | (n << 5) | 16), ...a64_word(0xCB206000 | (16 << 16) | (31 << 5) | 31)}; // movz x16, n; sub sp, sp, x16
@@ -489,7 +491,7 @@ jit_compile(str target, f, types, str result) {
   inlined = array{}; // встроенные сейчас функции (рекурсия — не встраивается)
   scalar(str t) => (t == "i64") || ((t == "bool") || (t == "f64"));
   arr(str t) => (t == "array<i64>") || (t == "array<f64>");
-  if(!scalar(result)) bad("prelude.tz:487");
+  if(!scalar(result) && (result != "unit")) bad("prelude.tz:487");
   for(t : types) if(!scalar(t) && !arr(t)) bad("prelude.tz:488");
   emit(str entity, ts, xs) => {
     bytes = codegen(target, entity, ts, xs, 0);
@@ -836,6 +838,7 @@ jit_compile(str target, f, types, str result) {
   };
   gen_inline(e, str name, xs) => {
     g = choose(name, xs);
+    if((g.size == 1) && (code_id(g[0]) == code_id(f))) return call_self_with(e, xs); // рекурсия — настоящий вызов себя
     rec = false;
     if(g.size == 1) {
       for(x : inlined) if(code_id(x) == code_id(g[0])) rec = true;
@@ -890,6 +893,48 @@ jit_compile(str target, f, types, str result) {
     for(i : range(xs.size - 1)) r.push(xs[i]);
     r
   };
+  // Вызов себя: область аргументов вызываемого — в своём кадре (область[j] — слот
+  // k0 + W - 1 - j: кадр растёт вниз), её адрес — в базу аргументов, call на своё
+  // начало; ошибка вызванного — в свои слоты и выход (как ловушка).
+  call_self_with(e, xs) => {
+    ws = 0;
+    for(i : range(xs.size)) ws += if(arr(types[i])) 2 else 1;
+    w = ws + 2;
+    k0 = alloc(w);
+    area(i64 j) => off((k0 + w) - (1 + j));
+    j = 0;
+    for(i : range(xs.size)) {
+      if(arr(types[i])) {
+        s = var_of(xs[i]);
+        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad(fmt"массив в рекурсивный вызов: {code_text(xs[i])}");
+        else {
+          emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(env[s].slot)});
+          emit("store", array{"i64", "i64", "i64"}, array{frame, area(j), acc});
+          emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(env[s].slot + 1)});
+          emit("store", array{"i64", "i64", "i64"}, array{frame, area(j + 1), acc});
+        }
+        j += 2;
+      } else {
+        t = ty(xs[i]);
+        if(t != types[i]) bad(fmt"аргумент {t} вместо {types[i]}");
+        gen(xs[i]);
+        if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
+        emit("store", array{"i64", "i64", "i64"}, array{frame, area(j), acc});
+        j += 1;
+      }
+    }
+    emit("load_const", array{"i64", "i64"}, array{acc, 0});
+    emit("store", array{"i64", "i64", "i64"}, array{frame, area(ws), acc});
+    emit("address", array{"i64", "i64", "i64"}, array{argbase, frame, area(0)});
+    jump_to("call_self", array{}, array{}, entry);
+    emit("move", array{"i64", "i64"}, array{third, acc}); // результат — пока в стороне
+    emit("load", array{"i64", "i64", "i64"}, array{acc, frame, area(ws)});
+    l = label();
+    faults.push(array{l, -1, area(ws)}); // -1 — перенос ошибки вызванного
+    jump_to("jump_if", array{"bool"}, array{acc}, l);
+    emit("move", array{"i64", "i64"}, array{acc, third});
+    if(result == "f64") emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
+  };
   // body(v): аргументы — здесь, тело блока — в окружении и контексте вызывающего
   call_block(v, xs) => {
     l = v.th;
@@ -914,6 +959,8 @@ jit_compile(str target, f, types, str result) {
       }
     }
   };
+  entry = label();
+  bind(entry); // начало кода — цель call_self
   ret = label();
   ret_to = ret;
   inlined.push(f);
@@ -944,10 +991,17 @@ jit_compile(str target, f, types, str result) {
   for(x : faults) {
     bind(x[0]);
     emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(args_slot)});
-    emit("load_const", array{"i64", "i64"}, array{acc, x[1]});
-    emit("store", array{"i64", "i64", "i64"}, array{second, 8 * ap, acc});
-    emit("load_const", array{"i64", "i64"}, array{acc, x[2]});
-    emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 1), acc});
+    if(x[1] < 0) { // ошибка вызванного: вид и узел из его области (смещение слота — x[2])
+      emit("load", array{"i64", "i64", "i64"}, array{acc, frame, x[2]});
+      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * ap, acc});
+      emit("load", array{"i64", "i64", "i64"}, array{acc, frame, x[2] + 8}); // узел — следующее слово области
+      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 1), acc});
+    } else {
+      emit("load_const", array{"i64", "i64"}, array{acc, x[1]});
+      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * ap, acc});
+      emit("load_const", array{"i64", "i64"}, array{acc, x[2]});
+      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 1), acc});
+    }
     jump_to("jump", array{}, array{}, ret);
   }
   if(!ok) return why; // не умеет — причина (код даст склейка C++)
