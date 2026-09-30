@@ -4671,7 +4671,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_field", "(c, поле)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"code_has", "(c, поле)"}, {"codegen", "(цель, сущность, типы, аргументы, метка)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_field", "(c, поле)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"code_has", "(c, поле)"}, {"codegen", "(цель, сущность, типы, аргументы, метка)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -4800,6 +4800,12 @@ struct interpreter {
       if(!jit_analysis) return value(std::string("?"));
       observation const * o = jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>()));
       return value(std::string(o && o->seen ? jit_analysis->types.describe(o->v) : "?"));
+    }
+    // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
+    if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
+      observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
+      if(!o || !o->seen || o->effect || o->diverted || !o->v.known() || !(o->v.is<int64_t>() || o->v.is<double>() || o->v.is<bool>())) return value(array_v::of({}));
+      return value(array_v::of({o->v}));
     }
     // Operator chain tree selected by parsing (empty - path dependent)
     if(n == "jit_chain" && a.size() == 2 && a[1].is<int64_t>()) {

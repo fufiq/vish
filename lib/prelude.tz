@@ -491,6 +491,10 @@ jit_compile(str target, f, types, str result) {
   ctx = 0; // контекст встраивания (как в разборе)
   nslots = 0;
   ret_to = 0; // метка выхода функции, чей код сейчас компилируется (return — туда)
+  fr_fn = array{}; // встроенные функции от корня: код и метка выхода (return(f), return(caller))
+  fr_exit = array{};
+  fr_parent = array{}; // кто встроил (функция, чей код вызвал): return(caller) — туда
+  cur = 0; // функция, чей код сейчас компилируется (индекс в fr_*)
   inlined = array{}; // встроенные сейчас функции (рекурсия — не встраивается)
   depth = 0; // временных на стеке (push_tmp) — переход в catch их снимает
   tries = array{}; // охватывающие try: массивы jc_catch
@@ -595,17 +599,17 @@ jit_compile(str target, f, types, str result) {
     old_top = top;
     old_base = base;
     old_ctx = ctx;
-    old_ret = ret_to;
+    old_cur = cur;
     top = t;
     base = b;
     ctx = c;
-    ret_to = rt; // return в коде вызывающего — из его функции (семантический инлайн)
+    cur = rt; // return в коде вызывающего — из его функции (семантический инлайн)
     r = g();
     for(i : range(saved.size)) env[t + i] = saved[i];
     top = old_top;
     base = old_base;
     ctx = old_ctx;
-    ret_to = old_ret;
+    cur = old_cur;
     r
   };
   // значение имени: слот или код вызывающего
@@ -682,10 +686,25 @@ jit_compile(str target, f, types, str result) {
       if(loops.size == 0) bad("prelude.tz:626");
       else jump_to("jump", array{}, array{}, loops[loops.size - 2]);
     } else if(k == "return") {
-      if(code_has(e, "target")) bad("prelude.tz:629"); // return(f) — пока нет
+      to = cur;
+      if(code_has(e, "target")) { // return(f) — из внешней функции f, return(caller) — из вызывающей (§6.1)
+        tn = code_field(code_field(e, "target"), "name");
+        to = -1;
+        if(tn == "caller") to = fr_parent[cur];
+        else {
+          i = cur;
+          loop {
+            if(i < 0) break;
+            if((to < 0) && (code_field(fr_fn[i], "name") == tn)) to = i;
+            i = fr_parent[i];
+          }
+        }
+      }
+      if(to < 0) bad("return(цель): цели нет в цепочке встраивания");
       else {
         if(code_has(e, "value")) gen(code_field(e, "value"));
-        jump_to("jump", array{}, array{}, ret_to);
+        if(depth > 0) emit("stack_free", array{"i64"}, array{8 * depth}); // временные незавершённых выражений
+        jump_to("jump", array{}, array{}, fr_exit[to]);
       }
     } else if(k == "require") {
       gen(code_field(e, "cond"));
@@ -813,7 +832,17 @@ jit_compile(str target, f, types, str result) {
       }
     }
   };
+  // константа, известная разбору (zero(typeof(x)) и т. п.)
+  gen_const(v) => {
+    if(typeof(v) == f64) {
+      emit("load_const", array{"i64", "i64"}, array{acc, f64_bits(v)});
+      emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
+    } else if(typeof(v) == bool) emit("load_const", array{"i64", "i64"}, array{acc, if(v) 1 else 0});
+    else emit("load_const", array{"i64", "i64"}, array{acc, v});
+  };
   gen_call(e) => {
+    kc = jit_const(e, ctx);
+    if(kc.size == 1) return gen_const(kc[0]);
     callee = code_field(e, "callee");
     xs = code_field(e, "args");
     name = if(code_kind(callee) == "ident") code_field(callee, "name") else "";
@@ -885,7 +914,7 @@ jit_compile(str target, f, types, str result) {
         mode = code_field(p, "mode");
         a = xs[i];
         s = var_of(a);
-        if(mode == 4) binds.push(jc_var{code_field(p, "name"), "", 0, true, a, ctx, top, base, ret_to});
+        if(mode == 4) binds.push(jc_var{code_field(p, "name"), "", 0, true, a, ctx, top, base, cur});
         else if((s >= 0) && ((mode != 2) && !env[s].thunk)) {
           w = env[s];
           binds.push(jc_var{code_field(p, "name"), w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
@@ -906,16 +935,23 @@ jit_compile(str target, f, types, str result) {
         base = top;
         for(b : binds) put(b);
         ctx = inline_context(ctx, e);
-        old_ret = ret_to;
-        ret_to = exit;
+        old_cur = cur;
+        old_n = fr_fn.size;
+        fr_fn.push(fn);
+        fr_exit.push(exit);
+        fr_parent.push(cur);
+        cur = fr_fn.size - 1;
         inlined.push(fn);
         gen(code_field(fn, "body"));
         bind(exit);
         inlined = drop_last(inlined);
+        fr_fn = drop_last(fr_fn);
+        fr_exit = drop_last(fr_exit);
+        fr_parent = drop_last(fr_parent);
         top = old_top;
         base = old_base;
         ctx = old_ctx;
-        ret_to = old_ret;
+        cur = old_cur;
       }
     }
   };
@@ -1062,6 +1098,9 @@ jit_compile(str target, f, types, str result) {
   bind(entry); // начало кода — цель call_self
   ret = label();
   ret_to = ret;
+  fr_fn.push(f);
+  fr_exit.push(ret);
+  fr_parent.push(-1);
   inlined.push(f);
   emit("frame_enter", array{}, array{});
   emit("move", array{"i64", "i64"}, array{frame, stack});
