@@ -569,7 +569,7 @@ struct parser {
       advance();
       p.strict = true;
     }
-    if(p.mode != param_mode::let && is_op("...")) { // expr. hs - pack (repeated clause)
+    if(is_op("...")) { // expr. hs - pac clauses; ...xs - tail of arguments
       eat_op("...");
       p.pack = true;
     }
@@ -1167,6 +1167,12 @@ struct parser {
           at.end = toks[pos - 1].where.end;
           binders.push_back(std::move(b->first));
           binder_at.push_back(at);
+        } else if(!packed && is_op("...")) { // ...t - disclosure in arguments
+          uint32_t s0 = here().where.begin;
+          eat_op("...");
+          node_id v = expression();
+          c.args.push_back(db.add(n_spread{v}, {s0, toks[pos - 1].where.end}));
+          c.words.push_back(word);
         } else {
           c.args.push_back(expression());
           c.words.push_back(word);

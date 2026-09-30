@@ -224,10 +224,16 @@ struct n_pat_field {
   node_id sub;
 };
 struct n_subject {}; // Unpackable value (implicit root of circulation)
+// ...t in the call arguments - the array/cortege is revealed in the arguments:
+// 
+//  
+struct n_spread {
+  node_id value;
+};
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread>;
 
 struct node {
   node_kind kind;

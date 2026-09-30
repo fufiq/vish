@@ -1477,6 +1477,12 @@ struct interpreter {
     return interface(unpacked::yes);
   }
 
+  // ...xs last parameter - the tail of arguments (pack clause expr...) - Not him?
+  bool rest_param(node_id f) const {
+    auto const & ps = db.as<n_fn>(f).params;
+    return !ps.empty() && db.as<n_param>(ps.back()).pack && db.as<n_param>(ps.back()).mode == param_mode::let;
+  }
+
   bool has_unpack(node_id n) const {
     if(db.is<n_unpack>(n)) return true;
     if(db.is<n_lambda>(n)) return false;
@@ -1484,6 +1490,8 @@ struct interpreter {
     db.for_each_child(n, [&](node_id c) { found = found || has_unpack(c); });
     return found;
   }
+
+  flow eval_node(node_id n, n_spread const &, scope *, uint32_t) { fail("...раскрытие — только аргументом вызова", db[n].where); }
 
   flow eval_node(node_id n, n_subject const &, scope *, uint32_t) {
     if(subjects.empty()) fail("обращение без значения — только в образце", db[n].where);
@@ -3677,7 +3685,29 @@ struct interpreter {
   // overload: Candidates by arity and types; require at the beginning of the body -
   // candidate restriction (§5.4); choose the most specific. base - environment of a local
   // set of congestion (otherwise a global area)
-  flow call_overloaded(std::vector<node_id> const & fns, node_list const & args, scope * env, uint32_t frame, call_site site, scope * base = nullptr) {
+  flow call_overloaded(std::vector<node_id> const & fns, node_list const & args_in, scope * env, uint32_t frame, call_site site, scope * base = nullptr) {
+    node_list args = args_in;
+    if(std::ranges::any_of(args_in, [&](node_id a) { return db.is<n_spread>(a); })) { // ...t - in separate arguments
+      std::vector<value> vals;
+      args.clear();
+      for(node_id a: args_in) {
+        if(!db.is<n_spread>(a)) {
+          TZ_TRY(v, eval(a, env, frame));
+          vals.push_back(std::move(v));
+          args.push_back(a);
+          continue;
+        }
+        TZ_TRY(t, eval(db.as<n_spread>(a).value, env, frame));
+        value const * x = shape_of(t);
+        if(!x || !x->is<array_v>()) fail(cat("...: раскрывается массив или кортеж, получено ", types.describe(t)), db[a].where);
+        if(!t.known() && t.is<rt_v>()) fail("...: длина неизвестна при разборе — раскрытие массива известной длины", db[a].where);
+        for(uint32_t k = 0; k < x->as<array_v>().size(); ++k) {
+          vals.push_back(x->as<array_v>().get(k));
+          args.push_back(a); // No space: value of the element
+        }
+      }
+      return dispatch_split(fns, vals, 0, args, env, frame, site, base);
+    }
     std::vector<value> vals(args.size());
     for(uint32_t i = 0; i < args.size(); ++i) {
       bool expr_everywhere = true;
@@ -3739,16 +3769,28 @@ struct interpreter {
     uint32_t by_value = 0; // cut off by value (sample, require), not type/arnost
     for(node_id f: fns) {
       auto const & fn = db.as<n_fn>(f);
-      if(fn.params.size() != vals.size()) {
-        rejected.push_back(cat(describe_fn(f), ": ожидает ", fn.params.size(), " аргументов"));
+      bool tail = rest_param(f);
+      if(tail ? vals.size() + 1 < fn.params.size() : fn.params.size() != vals.size()) {
+        rejected.push_back(cat(describe_fn(f), ": ожидает ", tail ? "не меньше " : "", fn.params.size() - (tail ? 1 : 0), " аргументов"));
         continue;
       }
-      int score = 0;
+      int score = tail ? 0 : 1; // The exact number of arguments is more specific than the tail...xs
       bool maybe = false;
       std::string why;
       std::vector<std::pair<uint32_t, value>> conv; // Converted arguments of the candidate (representable)
       for(uint32_t i = 0; i < fn.params.size() && why.empty(); ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
+        if(tail && i + 1 == fn.params.size()) { // tail: T... xs - each element is represented in T
+          if(p.type && db.is<n_ident>(p.type))
+            for(uint32_t j = i; j < vals.size() && why.empty(); ++j) {
+              value got;
+              fit r = type_fit(vals[j], str(db.as<n_ident>(p.type).name), p.strict, got);
+              if(r == fit::no) why = cat("аргумент ", j + 1, " не ", str(db.as<n_ident>(p.type).name));
+              else if(r != fit::exact) conv.push_back({j, got});
+              maybe = maybe || r == fit::maybe;
+            }
+          break;
+        }
         if(p.type && db.is<n_pat>(p.type)) { // sample: unpacking - candidate condition (as required)
           scope * probe = new_scope(base);
           scope_hold hold{*this, probe};
@@ -4074,6 +4116,12 @@ struct interpreter {
   void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner, node_id f = {}) {
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
+      if(p.pack && p.mode == param_mode::let && i + 1 == params.size()) { // ...xs - the remainder of arguments (cortege)
+        std::vector<value> rest;
+        for(uint32_t j = i; j < vals.size(); ++j) rest.push_back(vals[j]);
+        inner->declare(p.name, value(array_v::of(std::move(rest))));
+        break;
+      }
       if(p.type && db.is<n_pat>(p.type)) { // parameter-sample: names - from the unpacking of the argument
         unpack_into(p.type, vals[i], inner, inner, 0, db[params[i]].where);
         continue;

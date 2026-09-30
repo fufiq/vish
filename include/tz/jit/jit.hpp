@@ -1023,8 +1023,10 @@ struct jit_codegen {
     if(auto it = an.functions.find(db.as<n_ident>(c.callee).name); it != an.functions.end()) candidates.assign(it->second.begin(), it->second.end());
     for(node_id item: candidates) {
       if(!db.is<n_fn>(item) || db.as<n_fn>(item).params.size() != c.args.size()) continue;
-      for(node_id p: db.as<n_fn>(item).params)
+      for(node_id p: db.as<n_fn>(item).params) {
         if(db.as<n_param>(p).type && db.is<n_pat>(db.as<n_param>(p).type)) throw jit_unsupported{n, cat("перегрузка ", name, " по образцу (рантайм-выбор)")};
+        if(db.as<n_param>(p).pack && db.as<n_param>(p).mode == param_mode::let) throw jit_unsupported{n, cat(name, ": хвост аргументов ...xs")};
+      }
       int score = 0;
       bool fits = true;
       auto const & ps = db.as<n_fn>(item).params;
@@ -1735,7 +1737,7 @@ struct jit_codegen {
 // disassembling (parsing can calculate a lot with compile-time).
 std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
   if(!n) return std::nullopt;
-  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n))
+  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
@@ -1769,11 +1771,16 @@ template<typename A>
 void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   out.deps[fn.value] = db.node_revision(fn);
   out.deps[mod.value] = db.node_revision(mod);
-  for(node_id p: db.as<n_fn>(fn).params)
+  for(node_id p: db.as<n_fn>(fn).params) {
     if(db.as<n_param>(p).type && db.is<n_pat>(db.as<n_param>(p).type)) {
       out.reason = "параметр-образец (распаковка) — интерпретатор";
       return;
     }
+    if(db.as<n_param>(p).pack && db.as<n_param>(p).mode == param_mode::let) {
+      out.reason = "хвост аргументов ...xs — интерпретатор";
+      return;
+    }
+  }
   if(auto bad = jit_prefilter(db, mod, db.as<n_fn>(fn).body)) {
     auto lc = locate(db.source(db[bad->first].where.source), db[bad->first].where.begin);
     out.reason = cat(bad->second, " (строка ", lc.line, ")");
@@ -1898,6 +1905,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   for(auto const & v: vals)
     if(v.is<thunk_v>()) return std::nullopt;
   auto const & params = db.as<n_fn>(f).params;
+  if(params.size() != vals.size() || rest_param(f)) return std::nullopt; // tail ...xs - interpreter
   for(uint32_t i = 0; i < params.size(); ++i) {
     auto m = db.as<n_param>(params[i]).mode;
     if(m == param_mode::expr || m == param_mode::own || m == param_mode::out) return std::nullopt;

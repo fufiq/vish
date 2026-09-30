@@ -208,6 +208,11 @@ struct printer {
 
   void print_node(node_id, n_subject const &) {} // implicit root: .size, [1].flags
 
+  void print_node(node_id, n_spread const & s) {
+    out += "...";
+    item(s.value);
+  }
+
   void print_node(node_id n, n_unpack const & u) {
     bool paren = db.is<n_op>(db[n].parent) || db.is<n_chain>(db[n].parent); // operand: (p = e) &&...
     if(paren) out += '(';
@@ -225,6 +230,8 @@ struct printer {
     if(p.type && !db.is<n_auto>(p.type)) {
       item(p.type);
       out += p.pack ? "... " : " ";
+    } else if(p.pack && p.mode == param_mode::let) { // xs - the tail of arguments
+      out += "...";
     } else if(p.pack) {
       out.pop_back();
       out += "... ";

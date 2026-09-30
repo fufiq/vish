@@ -1,0 +1,27 @@
+// out: 6 0 7
+// out: 15 4 26
+// out: 3
+// machine
+// fmt-stable
+// store-roundtrip
+// Паки: 
+// 
+// Хвост параметров ...xs — остаток
+// аргументов кортежем (T... xs — каждый представим в T); ...t при вызове
+// раскрывает массив/кортеж в аргументы. Точное число аргументов конкретнее хвоста.
+sum(...xs) => total(xs);
+
+total(array{}) => 0;
+
+total(array{x, ...xs}) => x + total(xs);
+
+first(x, ...rest) => x;
+
+ints(i64... xs) => xs.size;
+
+main() {
+  print(sum(1, 2, 3), sum(), first(7, 8, 9));
+  t = array{4, 5, 6};
+  print(sum(...t), first(...t), sum(1, ...t, 10));
+  print(ints(1, 2.0, 3));
+}

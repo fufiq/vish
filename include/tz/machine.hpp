@@ -711,15 +711,26 @@ struct process_machine {
     for(node_id fnode: fns) {
       auto const & fn = db.as<n_fn>(fnode);
       if(plain) continue;
-      if(fn.params.size() != nargs) {
+      bool tail = helper.rest_param(fnode);
+      if(tail ? nargs + 1 < fn.params.size() : fn.params.size() != nargs) {
         ++rejected;
         continue;
       }
-      int score = 0;
+      int score = tail ? 0 : 1; // The exact number of arguments is more specific than the tail...xs
       bool fits = true;
       std::vector<std::pair<uint32_t, mval>> conv; // candidate's converted arguments
-      for(uint32_t i = 0; i < nargs && fits; ++i) {
+      for(uint32_t i = 0; i < fn.params.size() && fits; ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
+        if(tail && i + 1 == fn.params.size()) { // tail: T... xs - each element is represented in T
+          if(p.type && db.is<n_ident>(p.type))
+            for(uint32_t j = i; j < nargs && fits; ++j) {
+              mval got;
+              int r = type_fit(deref(args[j]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
+              if(!r) fits = false;
+              else if(r == 1) conv.push_back({j, got});
+            }
+          break;
+        }
         if(p.type && db.is<n_pat>(p.type)) { // Applicant’s condition (as required)
           uint32_t probe = new_scope(parent == m_none ? st.globals : parent);
           bool ok = unpack_into(p.type, args[i], probe, where);
@@ -792,8 +803,14 @@ struct process_machine {
     uint32_t id = ++st.frame_counter;
     f.frames.push_back({id, fn.name, fn.outline, caller_frame, plain});
     uint32_t sc = new_scope(parent == m_none ? st.globals : parent); // Local - on top of the surroundings of your block
-    for(uint32_t i = 0; i < nargs; ++i) {
+    for(uint32_t i = 0; i < fn.params.size(); ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
+      if(p.pack && p.mode == param_mode::let && i + 1 == fn.params.size()) { // ...xs is the remainder of the argument
+        m_arr rest;
+        for(uint32_t j = i; j < nargs; ++j) rest.items.push_back(deref(args[j]));
+        declare(sc, p.name, mval{std::move(rest)});
+        break;
+      }
       mval a = std::move(args[i]);
       if(a.is<m_alias>() && a.as<m_alias>().index != m_none && (p.mode == param_mode::own || !helper.writes_param(chosen, i))) a = deref(a);
       if(p.mode == param_mode::own && a.is<m_alias>()) { // movement: the meaning goes away, the name of the caller is hidden (scalar - copy)
@@ -1103,6 +1120,16 @@ struct process_machine {
     std::string have = describe(v);
     if(have != kind && have.substr(0, have.find('<')) != kind) return false;
     return interface();
+  }
+
+  // ...t in arguments: meaning in its entirety; in arguments it unfolds call_args_step
+  void eval_node(node_id, n_spread const & s) {
+    m_task & t = top();
+    if(t.phase == 0) {
+      t.phase = 1;
+      return push_eval(s.value, t.scope, t.frame);
+    }
+    finish(deref(pop_val()));
   }
 
   // sample = value; - names in the current area, not unpacked - exception
@@ -1467,7 +1494,25 @@ struct process_machine {
     uint32_t frame = t.frame;
     site_node = n;
     invoke_parent = local;
-    invoke(fns, t.a, frame, db[n].where);
+    uint32_t nargs = t.a;
+    if(std::ranges::any_of(args, [&](node_id a) { return db.is<n_spread>(a); })) { // ...t - in separate arguments
+      auto & vals = fib().vals;
+      std::vector<mval> ex;
+      for(uint32_t k = 0; k < args.size(); ++k) {
+        mval v = vals[t.base + k];
+        if(!db.is<n_spread>(args[k])) {
+          ex.push_back(std::move(v));
+          continue;
+        }
+        mval x = deref(v);
+        if(!x.is<m_arr>()) throw diagnostic(cat("...: раскрывается массив или кортеж, получено ", describe(x)), db[args[k]].where);
+        for(auto const & e: x.as<m_arr>().items) ex.push_back(e);
+      }
+      vals.resize(t.base);
+      for(auto & v: ex) vals.push_back(std::move(v));
+      nargs = uint32_t(ex.size());
+    }
+    invoke(fns, nargs, frame, db[n].where);
   }
 
   // Built-in VM function: arguments are computed, then operation.
