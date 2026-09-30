@@ -14,7 +14,7 @@
 // machine
 // jit-stats: sum(array<i64>) → 
 // jit-stats: (prelude, программа)
-// jit-stats: bits(i64) → 162 байт машинного кода
+// jit-stats: bits(i64) → 
 // jit-stats: (prelude), от C++: 0 байт
 // fmt-stable
 // store-roundtrip

@@ -1,0 +1,36 @@
+// out: 56 9 -1 3628800 false true false
+// jit-compiled: sq
+// jit-compiled: mx
+// jit-compiled: fact
+// jit-compiled: both
+// jit-stats: fact(i64) → 
+// jit-stats: компилятор языка
+// machine
+// fmt-stable
+// store-roundtrip
+// Компилятор на языке (§10.4, шаг к раскрутке): 
+// 
+// jit_compile прелюдии —
+// склейка на tz: обходит AST (code_field), раздаёт слоты кадра и метки, склеивает
+// байты кодогенераторов цели (codegen). JIT исполняет его код; не умеет — склейка
+// на C++. Проверка AArch64 в qemu прогоняет и эти байты.
+sq(i64 x) => x * (x + 1);
+
+mx(i64 a, i64 b) => if(a > b) a else b;
+
+fact(i64 n) => {
+  r = 1;
+  k = n;
+  loop {
+    if(k <= 1) break;
+    r *= k;
+    k -= 1;
+  }
+  r
+}
+
+both(i64 a, i64 b) => (a > 0) && ((b > 0) || (a == b));
+
+main() {
+  print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
+}

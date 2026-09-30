@@ -136,6 +136,8 @@ struct jit_fn {
   uint32_t lang_ops = 0; // operations whose code gives code generator in the language (target context)
   std::string lang_from; // from where code generator (modules)
   uint32_t lang_bytes = 0; // byte of code from code generator language (the rest - C++: addresses host, spare)
+  bool by_lang = false; // all code - compiler in language (jit_compile)
+  std::string lang_error; // The compiler on the language fell - the reason (code was given by gluing C++)
 };
 
 struct jit_unsupported {
@@ -171,7 +173,8 @@ struct jit_machine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, "), от C++: ", f->bytes - f->lang_bytes, " байт") : "", "\n");
+      if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка\n");
+      else if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, "), от C++: ", f->bytes - f->lang_bytes, " байт") : "", "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -189,6 +192,38 @@ struct jit_machine {
   }
 
   void compile(node_id fn, jit_fn & out);
+
+  // Compiler in language (jit_compile prelude or programs): function code, purpose, types
+  // → bytes. Empty - can not: gluing JIT in C++ (bootstrap).
+  bool lang_compile(node_id fn, jit_fn & out) {
+    node_id lc;
+    for(uint32_t i = db.size(); i-- > 0;)
+      if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "jit_compile") {
+        lc = node_id(i);
+        break;
+      }
+    if(!lc) return false;
+    std::vector<value> types;
+    for(jt t: out.params) types.push_back(value(std::string(jt_name(t))));
+    value r;
+    try {
+      interpreter comp(db, mod, {"jit"}, mode::run);
+      r = comp.analyze_instance(lc, {value(std::string(A::target)), comp.code_value(fn), value(array_v::of(std::move(types))), value(std::string(jt_name(out.result)))});
+    } catch(diagnostic const & d) {
+      out.lang_error = d.what();
+      return false;
+    }
+    if(!r.is<array_v>() || r.as<array_v>().size() == 0) return false;
+    A code;
+    for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) code.byte(uint8_t(r.as<array_v>().get(k).as<int64_t>()));
+    out.deps[lc.value] = db.node_revision(lc);
+    out.bytes = code.size();
+    out.lang_bytes = out.bytes;
+    out.by_lang = true;
+    finish(out, code);
+    out.ok = true;
+    return true;
+  }
   ast_db & db;
   node_id mod;
   std::deque<jit_fn> fns; // instance arena (addresses stable)
@@ -840,29 +875,18 @@ struct jit_codegen {
   }
 
   node_id find_codegen_in_db(std::string_view entity, std::vector<jt> const & types) {
-    for(uint32_t i = db.size(); i-- > 0;) { // The last announcement is the first: the program redefines prelude
-      if(!db.is<n_fn>(node_id(i)) || db.strings.text(db.as<n_fn>(node_id(i)).name) != A::target) continue;
-      node_id body = db.as<n_fn>(node_id(i)).body;
-      if(!db.is<n_block>(body)) continue;
-      for(node_id s: db.as<n_block>(body).items | std::views::reverse) {
-        if(!db.is<n_fn>(s) || db.strings.text(db.as<n_fn>(s).name) != entity) continue;
-        auto const & ps = db.as<n_fn>(s).params;
-        bool fits = ps.size() == types.size();
-        for(std::size_t k = 0; fits && k < ps.size(); ++k) {
-          node_id ty = db.as<n_param>(ps[k]).type;
-          fits = ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == jt_name(types[k]);
-        }
-        if(!fits) continue;
-        out.deps[s.value] = db.node_revision(s); // editing code generator - recompilation
-        node_id m = s;
-        while(db[m].parent) m = db[m].parent;
-        std::string from = db.is<n_module>(m) && db.as<n_module>(m).name ? std::string(db.strings.text(db.as<n_module>(m).name)) : std::string("программа");
-        if(!std::ranges::contains(lang_from, from)) lang_from.push_back(from);
-        return s;
-      }
-    }
-    return {};
+    std::vector<std::string> names;
+    for(jt t: types) names.push_back(std::string(jt_name(t)));
+    node_id s = tz::find_codegen(db, A::target, entity, names).first;
+    if(!s) return {};
+    out.deps[s.value] = db.node_revision(s); // editing code generator - recompilation
+    node_id m = s;
+    while(db[m].parent) m = db[m].parent;
+    std::string from = db.is<n_module>(m) && db.as<n_module>(m).name ? std::string(db.strings.text(db.as<n_module>(m).name)) : std::string("программа");
+    if(!std::ranges::contains(lang_from, from)) lang_from.push_back(from);
+    return s;
   }
+
 
   // The value of code generator is bytes. Operands are the numbers of the target registers (the first
   // is the battery, the second is the register of the second operand); label is the displacement from
@@ -2134,6 +2158,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
     }
+    if(lang_compile(fn, out)) return;
     jit_codegen<A>(*this, fn, out, an).run();
   } catch(jit_unsupported const & u) {
     auto lc = locate(db.source(db[u.node].where.source), db[u.node].where.begin);

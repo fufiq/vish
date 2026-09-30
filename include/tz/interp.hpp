@@ -183,6 +183,31 @@ native_entry const * native_of(ast_db const & db, node_id n) {
   throw diagnostic(cat("native ", key, " не собран в VM — пересоберите: ./build.sh"), db[n].where);
 }
 
+// code generator entity in the context of the goal (§10.4): function-goal (amd64, arm64) and
+// in its body - `using operator` or context function with these types of parameters; the
+// last announcement - the first (program redefined prelude). The second is the function-goal
+// itself (`model()` is the register model).
+std::pair<node_id, node_id> find_codegen(ast_db const & db, std::string_view target, std::string_view entity, std::vector<std::string> const & types) {
+  for(uint32_t i = db.size(); i-- > 0;) {
+    if(!db.is<n_fn>(node_id(i)) || db.strings.text(db.as<n_fn>(node_id(i)).name) != target) continue;
+    node_id body = db.as<n_fn>(node_id(i)).body;
+    if(!db.is<n_block>(body)) continue;
+    auto const & items = db.as<n_block>(body).items;
+    for(auto it = items.rbegin(); it != items.rend(); ++it) {
+      node_id s = *it;
+      if(!db.is<n_fn>(s) || db.strings.text(db.as<n_fn>(s).name) != entity) continue;
+      auto const & ps = db.as<n_fn>(s).params;
+      bool fits = ps.size() == types.size();
+      for(std::size_t k = 0; fits && k < ps.size(); ++k) {
+        node_id ty = db.as<n_param>(ps[k]).type;
+        fits = ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == types[k];
+      }
+      if(fits) return {s, node_id(i)};
+    }
+  }
+  return {};
+}
+
 struct interpreter {
   // residual program inputs: known arguments and strings of stdin (§13.2).
   struct known_inputs {
@@ -2175,6 +2200,8 @@ struct interpreter {
         e = c->as<thunk_v>().expr;
         env = c->as<thunk_v>().env;
       } else break;
+    if(db.is<n_ident>(e) && !env->find(db.as<n_ident>(e).name)) // function name - its declaration (first overload)
+      if(auto it = functions.find(db.as<n_ident>(e).name); it != functions.end() && !it->second.empty()) return it->second.front();
     return e;
   }
 
@@ -4644,7 +4671,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_field", "(c, поле)"}, {"code_has", "(c, поле)"}, {"codegen", "(цель, сущность, типы, аргументы, метка)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -4707,6 +4734,74 @@ struct interpreter {
       return value(array_v::of(std::move(vs)));
     }
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
+    // The node field of code by name is a reflection of AST (§7.4): node - code, list - code
+    // array, symbol - str, number and flag - value. code_has - Is there a node in the field?
+    if((n == "code_field" || n == "code_has") && a.size() == 2 && a[1].is<std::string>()) {
+      node_id c = code_node(a[0], where);
+      std::string const & want = a[1].as<std::string>();
+      value out;
+      bool found = false, has = false;
+      std::visit([&](auto const & k) {
+        template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
+          if(!found && std::meta::identifier_of(m) == want) {
+            found = true;
+            using field_t = [:std::meta::type_of(m):];
+            auto const & f = k.[:m:];
+            if constexpr(std::is_same_v<field_t, node_id>) {
+              has = bool(f);
+              if(f) out = code_value(f);
+            } else if constexpr(std::is_same_v<field_t, node_list>) {
+              std::vector<value> xs;
+              for(node_id x: f) xs.push_back(code_value(x));
+              out = value(array_v::of(std::move(xs)));
+              has = true;
+            } else if constexpr(std::is_same_v<field_t, symbol>) {
+              out = value(std::string(f ? str(f) : ""));
+              has = bool(f);
+            } else if constexpr(std::is_same_v<field_t, bool>) {
+              out = value(f);
+              has = true;
+            } else if constexpr(std::is_integral_v<field_t>) {
+              out = value(int64_t(f));
+              has = true;
+            } else if constexpr(std::is_same_v<field_t, std::string>) {
+              out = value(f);
+              has = true;
+            }
+          }
+        }
+      },
+          db[c].kind);
+      if(!found) fail(cat("у узла ", kind_name(db[c]), " нет поля ", want), where);
+      if(n == "code_has") return value(has);
+      if(!has && out.is<unit_v>()) fail(cat("поле ", want, " пусто"), where);
+      return out;
+    }
+    // codegen (purpose, essence, types, arguments, label) - bytes of the code generator in the language
+    // (§10.4), the same operation that JIT does: a compiler in the language glues the code with them.
+    if(n == "codegen" && a.size() == 5) {
+      if(!a[0].is<std::string>() || !a[1].is<std::string>() || !a[2].is<array_v>() || !a[3].is<array_v>() || !a[4].is<int64_t>())
+        fail("codegen(str цель, str сущность, array типы, array аргументы, i64 метка)", where);
+      std::vector<std::string> types;
+      for(uint32_t k = 0; k < a[2].as<array_v>().size(); ++k) types.push_back(a[2].as<array_v>().get(k).as<std::string>());
+      auto [s, ctx_fn] = find_codegen(db, a[0].as<std::string>(), a[1].as<std::string>(), types);
+      if(!s) return value(array_v::of({}));
+      scope * regs = new_scope(globals);
+      scope_hold hold{*this, regs};
+      // The register model of the target is model() of its context: acc, second, acc_f, second_f.
+      if(auto [m, _] = find_codegen(db, a[0].as<std::string>(), "model", {}); m) {
+        flow mv = eval(db.as<n_fn>(m).body, regs, 0);
+        static constexpr std::array<std::string_view, 4> names{"acc", "second", "acc_f", "second_f"};
+        for(uint32_t k = 0; k < names.size() && mv.v.is<array_v>() && k < mv.v.as<array_v>().size(); ++k) regs->declare(sym(names[k]), mv.v.as<array_v>().get(k));
+      }
+      regs->declare(sym("target"), a[4]);
+      regs->declare(sym("fault"), a[4]);
+      auto const & ps = db.as<n_fn>(s).params;
+      for(uint32_t k = 0; k < ps.size() && k < a[3].as<array_v>().size(); ++k) regs->declare(db.as<n_param>(ps[k]).name, a[3].as<array_v>().get(k));
+      flow r = eval(db.as<n_fn>(s).body, regs, 0);
+      if(!r.normal()) fail("codegen: кодогенератор не вернул байты", where);
+      return r.v;
+    }
     // Code bypass: type node, daughter node, name, text (projection)
     if(n.starts_with("code_") && a.size() == 1) {
       node_id c = code_node(a[0], where);
