@@ -2,6 +2,7 @@
 // out: 34 2.5 -1.0 true
 // out: 10 3.0 [3.0, 6.0] 3 4
 // out: -1 -2
+// out: 10 11.0 30 4 32
 // jit-compiled: sq
 // jit-compiled: mx
 // jit-compiled: fact
@@ -12,6 +13,11 @@
 // jit-compiled: scale
 // jit-compiled: at
 // jit-compiled: dv
+// jit-compiled: sum_for
+// jit-compiled: dot_for
+// jit-compiled: each
+// jit-compiled: cnt
+// jit-compiled: hyp
 // jit-stats: fact(i64) → 
 // jit-stats: компилятор языка
 // machine
@@ -24,7 +30,9 @@
 // байты кодогенераторов цели (codegen). JIT исполняет его код; не умеет — склейка
 // на C++. Проверка AArch64 в qemu прогоняет и эти байты. Массивы и ловушки: VM
 // даёт область аргументов ({данные, размер} у массива) и слоты ошибки за ней —
-// в коде нет адресов хоста (решение автора).
+// в коде нет адресов хоста (решение автора). Вызовы и конструкции
+// (for/while) — семантический инлайн: тип узла и перегрузку даёт разбор
+// экземпляра (jit_type), return в блоке — из функции, написавшей блок.
 sq(i64 x) => x * (x + 1);
 
 mx(i64 a, i64 b) => if(a > b) a else b;
@@ -80,6 +88,36 @@ pos(i64 x) => {
   x
 }
 
+sum_for(xs) => {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
+  s
+}
+
+dot_for(a, b) => {
+  s = 0.0;
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
+  s
+}
+
+each(xs) => {
+  s = 0;
+  for(x : xs) s += x * x;
+  s
+}
+
+cnt(i64 n) => {
+  k = 0;
+  i = 0;
+  while(i < n) {
+    if((i % 3) == 0) k += 1;
+    i += 1;
+  }
+  k
+}
+
+hyp(i64 a, i64 b) => sq(a) + sq(b);
+
 main() {
   print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
   print(poly(4) + 5, avg(2.0, 3.0, 1), avg(0.5, 1.5, -1), (avg(1.0, 1.0, 1) == 1.0) && ((0.1 + 0.2) != 0.3));
@@ -89,4 +127,6 @@ main() {
   r = try { at(a, 7) } catch(out_of_bounds e) { -1 };
   q = try { dv(1, 0) } catch(div_by_zero e) { -2 };
   print(r, q);
+  xs = array{1, 2, 3, 4};
+  print(sum_for(xs), dot_for(array{1.0, 2.0}, array{3.0, 4.0}), each(xs), cnt(10), hyp(3, 4));
 }

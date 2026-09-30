@@ -174,7 +174,7 @@ struct jit_machine {
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
       if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка\n");
-      else if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, "), от C++: ", f->bytes - f->lang_bytes, " байт") : "", "\n");
+      else if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops, " (", f->lang_from, "), от C++: ", f->bytes - f->lang_bytes, " байт") : "", f->lang_error.empty() ? "" : cat(", компилятор языка не смог: ", f->lang_error), "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -209,19 +209,13 @@ struct jit_machine {
     value r;
     try {
       interpreter comp(db, mod, {"jit"}, mode::run);
-      // Operator chain: the tree selected parsing instance (no priority - §4.4)
-      std::vector<value> chains;
-      auto walk = [&](this auto const & self, node_id n) -> void {
-        if(db.is<n_chain>(n))
-          if(node_id t = an_for_lang->chain_tree(n, 0)) chains.push_back(value(array_v::of({comp.code_value(n), comp.code_value(t)})));
-        db.for_each_child(n, [&](node_id c) { self(c); });
-      };
-      walk(db.as<n_fn>(fn).body);
-      r = comp.analyze_instance(lc, {value(std::string(A::target)), comp.code_value(fn), value(array_v::of(std::move(types))), value(std::string(jt_name(out.result))), value(array_v::of(std::move(chains)))});
+      comp.jit_analysis = an_for_lang;
+      r = comp.analyze_instance(lc, {value(std::string(A::target)), comp.code_value(fn), value(array_v::of(std::move(types))), value(std::string(jt_name(out.result)))});
     } catch(diagnostic const & d) {
       out.lang_error = d.what();
       return false;
     }
+    if(r.is<std::string>()) out.lang_error = r.as<std::string>(); // Failure of the compiler in the language
     if(!r.is<array_v>() || r.as<array_v>().size() == 0) return false;
     A code;
     for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) code.byte(uint8_t(r.as<array_v>().get(k).as<int64_t>()));
