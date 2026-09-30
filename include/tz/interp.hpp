@@ -80,6 +80,11 @@ struct cell_book {
 
 struct scope {
   scope * parent = nullptr;
+  // The root of the body function: the environment of the call
+// Free name
+  // The body is searched there after lexical (interpreter::find).
+  scope * caller = nullptr;
+  node_id fn;
   std::vector<std::pair<symbol, value *>> vars;
   std::deque<value> storage;
   bool captured = false;
@@ -837,6 +842,8 @@ struct interpreter {
       s = &scope_arena.emplace_back();
     }
     s->parent = parent;
+    s->caller = nullptr;
+    s->fn = {};
     s->book = checking() ? &book : nullptr;
     return s;
   }
@@ -917,7 +924,7 @@ struct interpreter {
     while(db.is<n_index>(target) || db.is<n_member>(target))
       target = db.is<n_index>(target) ? db.as<n_index>(target).object : db.as<n_member>(target).object;
     if(!db.is<n_ident>(target)) return;
-    value * cell = env->find(db.as<n_ident>(target).name);
+    value * cell = find(env, db.as<n_ident>(target).name);
     if(!cell || cell->is<thunk_v>()) return;
     if(cell->is<ref_v>()) { // recording through a link - in the support element
       cell = cell->as<ref_v>().cell;
@@ -1179,7 +1186,7 @@ struct interpreter {
   flow eval_node(node_id, n_str const & x, scope *, uint32_t) { return ok(value(x.value)); }
 
   flow eval_node(node_id n, n_ident const & x, scope * env, uint32_t) {
-    if(value * cell = env->find(x.name)) {
+    if(value * cell = find(env, x.name)) {
       not_hidden(*cell, x.name, db[n].where);
       return read(cell, db[n].where);
     }
@@ -1256,6 +1263,24 @@ struct interpreter {
       first = false;
     }
     return result;
+  }
+
+  // Name: lexically (blocks, function, module), then functions, types and built-in names
+  // of the module, then the environment of the caller and its caller (O4, user decision:
+  // implicitly,
+// - Yarik.
+  value * find(scope * env, symbol name) {
+    if(value * c = env->find(name)) return c;
+    if(functions.contains(name) || structs.contains(name) || types.builtin(str(name)) || str(name) == "true" || str(name) == "false") return nullptr;
+    for(scope * s = env; s; s = s->parent) {
+      if(!s->caller) continue;
+      value * c = find(s->caller, name);
+      if(c && s->fn && db.as<n_fn>(s->fn).outline)
+        fail(cat(describe_fn(s->fn), " помечена outline, но берёт имя ", str(name), " из окружения вызывающего"), db[s->fn].where);
+      if(c && s->fn) caller_users.insert(s->fn.value);
+      return c;
+    }
+    return nullptr;
   }
 
   bool implicit_declaration(node_id s, scope * env) const {
@@ -1601,7 +1626,7 @@ struct interpreter {
   // Tag "text {x} text" ст tag ("text", x, "text")
   flow eval_node(node_id n, n_template const & t, scope * env, uint32_t frame) {
     symbol tag = db.as<n_ident>(t.tag).name;
-    if(value * cell = env->find(tag)) { // Local tag - value-function
+    if(value * cell = find(env, tag)) { // Local tag - value-function
       TZ_TRY(fv, read(cell));
       return call_value(fv, t.parts, env, frame, db[n].where, n.value);
     }
@@ -1715,8 +1740,8 @@ struct interpreter {
     if(!db.is<n_ident>(c.callee) || str(db.as<n_ident>(c.callee).name) != "is_index" || c.args.size() != 2) return std::nullopt;
     if(functions.contains(db.as<n_ident>(c.callee).name)) return std::nullopt; // is_index is not a language test.
     if(!db.is<n_ident>(c.args[0]) || !db.is<n_ident>(c.args[1])) return std::nullopt;
-    value * k = env->find(db.as<n_ident>(c.args[0]).name);
-    value * a = env->find(db.as<n_ident>(c.args[1]).name);
+    value * k = find(env, db.as<n_ident>(c.args[0]).name);
+    value * a = find(env, db.as<n_ident>(c.args[1]).name);
     if(!k || !a || k->is<thunk_v>() || a->is<thunk_v>()) return std::nullopt;
     return index_proof{k, add_fact({fact::index_of, a, db.as<n_ident>(c.args[1]).name, book.version(a)}), positive};
   }
@@ -2040,11 +2065,11 @@ struct interpreter {
   // expr-argument by name: thunk, unfolded to the expression of the caller (a
   // block transmitted further than another construction, too he).
   thunk_v thunk_arg(node_id arg, scope * env, span where) {
-    value * cell = db.is<n_ident>(arg) ? env->find(db.as<n_ident>(arg).name) : nullptr;
+    value * cell = db.is<n_ident>(arg) ? find(env, db.as<n_ident>(arg).name) : nullptr;
     if(!cell || !cell->is<thunk_v>()) fail("ожидался expr-параметр", where);
     thunk_v t = cell->as<thunk_v>();
     while(db.is<n_ident>(t.expr))
-      if(value * c = t.env->find(db.as<n_ident>(t.expr).name); c && c->is<thunk_v>()) t = c->as<thunk_v>();
+      if(value * c = find(t.env, db.as<n_ident>(t.expr).name); c && c->is<thunk_v>()) t = c->as<thunk_v>();
       else break;
     return t;
   }
@@ -2116,7 +2141,7 @@ struct interpreter {
     node_id copy = db.clone(n, [&](node_id x) -> std::optional<node_id> {
       if(!db.is<n_splice>(x)) return std::nullopt;
       symbol name = db.as<n_splice>(x).name;
-      value * cell = env->find(name);
+      value * cell = find(env, name);
       if(!cell) fail(cat("#", str(name), ": нет такого значения"), db[x].where);
       flow v = read(cell);
       if(!v.v.known()) fail(cat("#", str(name), ": значение неизвестно при компиляции"), db[x].where);
@@ -2208,7 +2233,7 @@ struct interpreter {
   // single element or size).
   value const * peek(node_id n, scope * env) {
     if(!db.is<n_ident>(n)) return nullptr;
-    value const * c = env->find(db.as<n_ident>(n).name);
+    value const * c = find(env, db.as<n_ident>(n).name);
     if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
@@ -2275,10 +2300,10 @@ struct interpreter {
   }
 
   // An index is a safe index of this array (a fact on the value of the index).
-  bool index_holds(n_index const & i, value const & idx, scope * env) const {
+  bool index_holds(n_index const & i, value const & idx, scope * env) {
     fact const * f = fact_of(idx, fact::index_of);
     if(!f || !db.is<n_ident>(i.object)) return false;
-    value const * cell = env->find(db.as<n_ident>(i.object).name);
+    value const * cell = find(env, db.as<n_ident>(i.object).name);
     return cell && holds(*f, cell, db.as<n_ident>(i.object).name);
   }
 
@@ -2378,7 +2403,7 @@ struct interpreter {
     std::string key = cat(n.value, ":");
     bool cacheable = true;
     for(symbol s: names) {
-      value const * cell = s ? env->find(s) : nullptr;
+      value const * cell = s ? find(env, s) : nullptr;
       if(!cell) {
         key += "-,";
         continue;
@@ -2552,7 +2577,7 @@ struct interpreter {
   std::optional<value> element_ref(node_id place_node, scope * env, uint32_t frame, node_id born) {
     if(!db.is<n_index>(place_node) || !db.is<n_ident>(db.as<n_index>(place_node).object)) return std::nullopt;
     auto const & i = db.as<n_index>(place_node);
-    value * cell = env->find(db.as<n_ident>(i.object).name);
+    value * cell = find(env, db.as<n_ident>(i.object).name);
     if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) return std::nullopt;
     not_hidden(*cell, db.as<n_ident>(i.object).name, db[place_node].where);
     flow fi = eval(i.index, env, frame);
@@ -2582,7 +2607,7 @@ struct interpreter {
 
   flow declare_ref(node_id n, n_var const & v, scope * env, uint32_t frame) {
     if(db.is<n_ident>(v.init)) { // auto&a = b is the second name of the same cell.
-      value * cell = env->find(db.as<n_ident>(v.init).name);
+      value * cell = find(env, db.as<n_ident>(v.init).name);
       if(!cell || cell->is<thunk_v>()) fail("auto& — ссылка на переменную или элемент массива", db[v.init].where);
       not_hidden(*cell, db.as<n_ident>(v.init).name, db[v.init].where);
       env->alias(v.name, cell);
@@ -2635,7 +2660,7 @@ struct interpreter {
   flow append(node_list const & args, scope * env, uint32_t frame, node_id n) {
     span where = db[n].where;
     if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("append(массив, значение)", where);
-    value * cell = env->find(db.as<n_ident>(args[0]).name);
+    value * cell = find(env, db.as<n_ident>(args[0]).name);
     if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("append: первый аргумент — переменная-массив", where);
     not_hidden(*cell, db.as<n_ident>(args[0]).name, where);
     TZ_TRY(x, eval(args[1], env, frame));
@@ -2674,7 +2699,7 @@ struct interpreter {
         if(!db.is<n_ident>(pn)) continue;
         for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
           if(db.as<n_param>(fn.params[k]).name == db.as<n_ident>(pn).name && db.is<n_ident>(args[k]))
-            if(value * cell = env->find(db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>())
+            if(value * cell = find(env, db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>())
               invalidate(cell->is<ref_v>() ? cell->as<ref_v>().cell : cell, node_id(site));
       }
     }
@@ -3373,7 +3398,7 @@ struct interpreter {
 
   value * place(node_id n, scope * env, uint32_t frame) {
     if(db.is<n_ident>(n)) {
-      if(value * c = env->find(db.as<n_ident>(n).name)) return c;
+      if(value * c = find(env, db.as<n_ident>(n).name)) return c;
       fail(cat("неизвестная переменная ", str(db.as<n_ident>(n).name)), db[n].where);
     }
     if(db.is<n_index>(n)) { // cell of the element is only in a common array
@@ -3479,7 +3504,7 @@ struct interpreter {
       }
       written(o.args[0], env);
       if(db.is<n_ident>(o.args[0]))
-        if(value * c = env->find(db.as<n_ident>(o.args[0]).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
+        if(value * c = find(env, db.as<n_ident>(o.args[0]).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
       if(!checking() && db.is<n_index>(o.args[0])) { // entry into an element: set, not cell
         auto const & ix = db.as<n_index>(o.args[0]);
         value * arr = place(ix.object, env, frame);
@@ -3573,7 +3598,7 @@ struct interpreter {
   }
 
   flow eval_node(node_id n, n_hide const & h, scope * env, uint32_t) {
-    value * cell = env->find(h.name);
+    value * cell = find(env, h.name);
     if(!cell || cell->is<thunk_v>()) fail(cat("hide: нет переменной ", str(h.name)), db[n].where);
     not_hidden(*cell, h.name, db[n].where);
     hide_cell(cell, n);
@@ -3681,7 +3706,7 @@ struct interpreter {
     }
     if(db.is<n_ident>(c.callee)) {
       symbol name = db.as<n_ident>(c.callee).name;
-      if(value * cell = env->find(name)) {
+      if(value * cell = find(env, name)) {
         if(cell->is<thunk_v>()) {
           thunk_v t = thunk_arg(c.callee, env, where);
           if(db.is<n_lambda>(t.expr) && db.as<n_lambda>(t.expr).block) return call_block(t, c.args, env, frame, where);
@@ -4117,6 +4142,8 @@ struct interpreter {
     auto const & fn = db.as<n_fn>(f);
     if(!db.is<n_block>(fn.body)) return {true, 0, "", false}; // и f(x) => { require(…); … }
     scope * probe = new_scope(base);
+    probe->caller = env;
+    probe->fn = f;
     scope_hold hold{*this, probe};
     bind_values(fn.params, vals, args, env, probe, {}, open);
     int n = 0;
@@ -4141,7 +4168,7 @@ struct interpreter {
     // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
     for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
       if(db.as<n_param>(fn.params[k]).mode == param_mode::own && db.is<n_ident>(args[k]) && !scalar(vals[k])) // scalar moves around
-        if(value * cell = env->find(db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>()) hide_cell(cell, node_id(site.node));
+        if(value * cell = find(env, db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>()) hide_cell(cell, node_id(site.node));
     if(fn.outline && inline_required(f))
       fail(cat(site.what, " помечена outline, но использует семантику инлайна"), db[f].where);
     if(checking() && param_writes_checked.insert(f.value).second)
@@ -4163,6 +4190,7 @@ struct interpreter {
       }
     }
     key += open ? ", ...рт)" : ")"; // The tail of run-time - length - its instance
+    if(caller_users.contains(f.value)) key += cat("@", site.node); // Takes the name of the caller - instance to the place of the call
     if(!overrides.empty()) { // instance is specialized in context:
       std::vector<std::string> ctxs;
       for(auto const & o: overrides)
@@ -4242,6 +4270,8 @@ struct interpreter {
     flow r;
     for(uint32_t pass = 0;; ++pass) {
       scope * inner = new_scope(parent ? parent : globals); // Local function - on top of the surroundings of its block
+      inner->caller = env; // call environment (O4)
+      inner->fn = f;
       scope_hold hold{*this, inner};
       bind_values(fn.params, vals, args, env, inner, f, open);
       if(checking()) active.insert(active_key);
@@ -4372,7 +4402,7 @@ struct interpreter {
 
   value * place_or_null(node_id n, scope * env) {
     if(!db.is<n_ident>(n)) return nullptr;
-    value * c = env->find(db.as<n_ident>(n).name);
+    value * c = find(env, db.as<n_ident>(n).name);
     if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
@@ -4768,6 +4798,7 @@ struct interpreter {
   mutable bool observations_dirty = false;
   std::set<uint32_t> live_fns;
   std::set<uint32_t> param_writes_checked;
+  std::set<uint32_t> caller_users; // functions that take names from the calling environment (O4)
   std::vector<std::string> param_writes; // What functions change the parameters
   mutable std::map<uint64_t, bool> writes;
   mutable std::set<uint64_t> writes_open;

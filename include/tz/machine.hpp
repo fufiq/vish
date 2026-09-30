@@ -88,6 +88,8 @@ struct m_scope {
   std::vector<m_var> vars;
   bool captured = false; // Lambda environment - lives longer than its block
   bool live = true;
+  uint32_t caller = m_none; // Body root function: call environment (O4)
+  uint32_t fn = m_none;
 };
 
 struct m_frame {
@@ -237,11 +239,27 @@ struct process_machine {
     uint32_t scope = m_none;
     uint32_t slot = 0;
   };
-  place find(uint32_t scope, symbol name) const {
+  place find_lexical(uint32_t scope, symbol name) const {
     for(uint32_t s = scope; s != m_none; s = st.scopes[s].parent) {
       auto const & vs = st.scopes[s].vars;
       for(uint32_t i = uint32_t(vs.size()); i-- > 0;)
         if(vs[i].name == name) return {s, i};
+    }
+    return {};
+  }
+  // Lexically, then (if it is not a function, type, or built-in name) - the environment
+  // of the caller and further along the call chain, as in the interpreter (O4).
+  place find(uint32_t scope, symbol name) const {
+    place p = find_lexical(scope, name);
+    if(p.scope != m_none) return p;
+    std::string_view s = helper.str(name);
+    if(helper.functions.contains(name) || helper.structs.contains(name) || helper.types.builtin(s) || s == "true" || s == "false") return {};
+    for(uint32_t k = scope; k != m_none; k = st.scopes[k].parent) {
+      if(st.scopes[k].caller == m_none) continue;
+      p = find(st.scopes[k].caller, name);
+      if(p.scope != m_none && st.scopes[k].fn != m_none && db.as<n_fn>(node_id(st.scopes[k].fn)).outline)
+        throw diagnostic(cat(helper.str(db.as<n_fn>(node_id(st.scopes[k].fn)).name), " помечена outline, но берёт имя ", s, " из окружения вызывающего"), db[node_id(st.scopes[k].fn)].where);
+      return p;
     }
     return {};
   }
@@ -829,6 +847,8 @@ struct process_machine {
     uint32_t id = ++st.frame_counter;
     f.frames.push_back({id, fn.name, fn.outline, caller_frame, plain});
     uint32_t sc = new_scope(parent == m_none ? st.globals : parent); // Local - on top of the surroundings of your block
+    st.scopes[sc].caller = f.tasks.empty() ? m_none : f.tasks.back().scope; // call environment (O4)
+    st.scopes[sc].fn = chosen.value;
     for(uint32_t i = 0; i < fn.params.size(); ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
       if(p.pack && p.mode == param_mode::let && i + 1 == fn.params.size()) { // ...xs is the remainder of the argument
@@ -1387,7 +1407,7 @@ struct process_machine {
     if(db.is<n_ident>(lhs)) {
       mval rhs = deref(pop_val());
       symbol name = db.as<n_ident>(lhs).name;
-      place p = find(t.scope, name);
+      place p = op == "=" ? find_lexical(t.scope, name) : find(t.scope, name); // x = e is a name that does not cause
       if(p.scope == m_none) {
         if(op != "=") throw diagnostic(cat("неизвестное имя ", helper.str(name)), db[lhs].where);
         declare(t.scope, name, std::move(rhs)); // x = e is an announcement if there is no name.
@@ -2089,7 +2109,7 @@ struct process_machine {
   std::string dump() {
     st.type_names = helper.types.names;
     writer w;
-    for(char c: std::string_view("TZPROC01")) w.put(c);
+    for(char c: std::string_view("TZPROC02")) w.put(c);
     w.put(name);
     w.put(root.value);
     w.put(db.journal());
@@ -2105,7 +2125,7 @@ struct restored_process {
 
   explicit restored_process(std::string_view bytes) {
     reader r(bytes);
-    for(char c: std::string_view("TZPROC01"))
+    for(char c: std::string_view("TZPROC02"))
       if(r.get<char>() != c) throw diagnostic("не дамп процесса tz", {});
     std::string name = r.get<std::string>();
     node_id root(r.get<uint32_t>());
