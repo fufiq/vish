@@ -509,6 +509,12 @@ struct printer {
   void print_node(node_id, n_ident const & i) { out += str(i.name); }
   void print_node(node_id, n_auto const &) { out += "auto"; }
   void print_node(node_id, n_int const & i) {
+    if(i.hex) {
+      char buf[24];
+      snprintf(buf, sizeof buf, "0x%llX", static_cast<unsigned long long>(i.value));
+      out += buf;
+      return;
+    }
     if(!i.ch) {
       out += std::to_string(i.value);
       return;

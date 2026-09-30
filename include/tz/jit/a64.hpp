@@ -32,6 +32,8 @@ struct image {
 };
 
 struct assembler {
+  static constexpr std::string_view target = "arm64"; // code generation context in language (§10.4)
+
   // --- registers and conditions ---
 
   static uint32_t x(reg r) {
@@ -209,6 +211,8 @@ struct assembler {
   image finalize() { return {std::move(buf), std::move(relocs)}; }
 
   // --- coding ---
+
+  void byte(uint8_t b) { buf.push_back(b); } // byte
 
   void word(uint32_t w) {
     for(int k = 0; k < 4; ++k) buf.push_back(uint8_t(w >> (8 * k)));

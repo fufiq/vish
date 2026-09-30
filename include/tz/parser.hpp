@@ -1372,7 +1372,7 @@ struct parser {
     switch(t.kind) {
       case tok::int_lit: {
         advance();
-        return db.add(n_int{parse_int(t.text)}, t.where);
+        return db.add(n_int{parse_int(t.text), false, t.text.starts_with("0x") || t.text.starts_with("0X")}, t.where);
       }
       case tok::float_lit: {
         advance();
@@ -1475,6 +1475,11 @@ struct parser {
 
   static int64_t parse_int(std::string_view s) {
     int64_t v = 0;
+    if(s.starts_with("0x") || s.starts_with("0X")) {
+      for(char c: s.substr(2))
+        if(c != '_') v = v * 16 + (c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+      return v;
+    }
     for(char c: s)
       if(c != '_') v = v * 10 + (c - '0');
     return v;

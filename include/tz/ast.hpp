@@ -83,6 +83,7 @@ struct n_ident {
 struct n_int {
   int64_t value = 0;
   bool ch = false; // written with the symbol 'c' (byte)
+  bool hex = false; // recorded 0x...
 };
 struct n_float {
   double value = 0;

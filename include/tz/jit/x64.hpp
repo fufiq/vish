@@ -47,6 +47,8 @@ struct code_block {
 };
 
 struct assembler {
+  static constexpr std::string_view target = "amd64"; // code generation context in language (§10.4)
+
   // --- whole ---
 
   void mov(reg dst, reg src) { op_rr(0x89, src, dst); }

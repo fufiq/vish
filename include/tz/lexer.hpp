@@ -112,6 +112,11 @@ struct lexer {
   }
 
   tok lex_number() {
+    if(src[pos] == '0' && (peek(1) == 'x' || peek(1) == 'X')) { // 0x2A - hexadecimal
+      pos += 2;
+      while(pos < src.size() && (std::isxdigit(static_cast<unsigned char>(src[pos])) || src[pos] == '_')) ++pos;
+      return tok::int_lit;
+    }
     while(pos < src.size() && (is_digit(src[pos]) || src[pos] == '_')) ++pos;
     // 1.5 - fractional; 1..5 and 1.foo() - none
     if(peek(0) == '.' && is_digit(peek(1))) {

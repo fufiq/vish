@@ -1,0 +1,35 @@
+// out: 46 -38 255
+// jit-compiled: sum
+// jit-compiled: diff
+// jit-stats: кодогенераторов языка: 2
+// jit-stats: diff(i64, i64) → 
+// fmt-stable
+// store-roundtrip
+// Кодогенераторы на языке (§10.4): цель — контекст, в нём операция — её
+// машинный код: 
+// 
+// 
+// add
+// для i64 — в прелюдии (amd64/arm64), sub — здесь, в программе: JIT берёт его
+// из базы без сборки VM.
+amd64(expr body) {
+  using operator (i64 a) - (i64 b) => array{0x48, 0x29, 0xC8}; // sub rax, rcx
+  body
+}
+
+arm64(expr body) {
+  using operator (i64 a) - (i64 b) => array{0x29, 0x1, 0x3, 0xCB}; // sub x9, x9, x3
+  body
+}
+
+sum(xs) {
+  s = 0;
+  for(i : range(xs.size)) s = s + xs[i];
+  s
+}
+
+diff(i64 a, i64 b) => a - b;
+
+main() {
+  print(sum(array{1, 2, 3, 40}), diff(2, 40), 0xFF);
+}

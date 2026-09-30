@@ -132,6 +132,7 @@ struct jit_fn {
   std::size_t bytes = 0; // size
   uint32_t unchecked = 0; // indexation without border checks (proven by parsing)
   uint32_t jumps = 0; // throw that became a transition to catch (static exceptions)
+  uint32_t lang_ops = 0; // operations whose code gives code generator in the language (target context)
 };
 
 struct jit_unsupported {
@@ -167,7 +168,7 @@ struct jit_machine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", "\n");
+      if(f->ok) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода", f->unchecked ? cat(", без проверки границ: ", f->unchecked) : "", f->jumps ? cat(", исключений переходом: ", f->jumps) : "", f->lang_ops ? cat(", кодогенераторов языка: ", f->lang_ops) : "", "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -274,6 +275,7 @@ struct jit_codegen {
     out.bytes = code.size();
     out.unchecked = bce;
     out.jumps = throw_jumps;
+    out.lang_ops = lang_ops;
     finish(out, code);
     out.ok = true;
   }
@@ -809,9 +811,53 @@ struct jit_codegen {
     return jt::i64_;
   }
 
+  // code generator language operations: in the target context function (amd64, arm64),
+  // the redefinition of `using operator` with operand types is its value, byte array,
+  // and there is machine code above the JIT register model (§10.4):
+// 
+// 
+// 
+//.
+  // code generator is taken from the database: the new one is added by the program, without building VM.
+  std::optional<std::vector<uint8_t>> lang_codegen(node_id n, std::string_view entity, jt t) {
+    for(uint32_t i = 0; i < db.size(); ++i) {
+      if(!db.is<n_fn>(node_id(i)) || db.strings.text(db.as<n_fn>(node_id(i)).name) != A::target) continue;
+      node_id body = db.as<n_fn>(node_id(i)).body;
+      if(!db.is<n_block>(body)) continue;
+      for(node_id s: db.as<n_block>(body).items) {
+        if(!db.is<n_fn>(s) || !db.as<n_fn>(s).scoped || db.strings.text(db.as<n_fn>(s).name) != entity) continue;
+        bool fits = true;
+        for(node_id p: db.as<n_fn>(s).params) {
+          node_id ty = db.as<n_param>(p).type;
+          fits = fits && ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == jt_name(t);
+        }
+        if(!fits) continue;
+        auto r = an.eval(db.as<n_fn>(s).body, an.globals, 0);
+        value const & v = r.v;
+        if(!r.normal() || !v.is<array_v>()) throw jit_unsupported{n, cat("кодогенератор ", A::target, " ", entity, ": ожидался массив байтов")};
+        std::vector<uint8_t> bytes;
+        for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) {
+          value b = v.as<array_v>().get(k);
+          if(!b.is<int64_t>() || b.as<int64_t>() < 0 || b.as<int64_t>() > 255) throw jit_unsupported{n, cat("кодогенератор ", A::target, " ", entity, ": байт вне 0..255")};
+          bytes.push_back(uint8_t(b.as<int64_t>()));
+        }
+        out.deps[s.value] = db.node_revision(s); // editing code generator - recompilation
+        return bytes;
+      }
+    }
+    return std::nullopt;
+  }
+
   // The first operand is in rax/xmm0, the second in rcx/xmm1.
   jt binary(node_id n, std::string_view op, jt t) {
     using namespace x64;
+    if(t == jt::i64_ || t == jt::f64_)
+      if(op == "+" || op == "-" || op == "*" || op == "/")
+        if(auto bytes = lang_codegen(n, cat("infix", op), t)) {
+          for(uint8_t b: *bytes) code.byte(b);
+          ++lang_ops;
+          return t;
+        }
     if(t == jt::i64_) {
       if(op == "+") {
         code.add(rax, rcx);
@@ -1704,6 +1750,7 @@ struct jit_codegen {
   };
   std::vector<loop_frame> loops; // loop-covering
   uint32_t throw_jumps = 0;
+  uint32_t lang_ops = 0;
   uint32_t gpr_used = 0, xmm_used = 0; // occupied variable registers (pool bits)
   std::vector<std::pair<int8_t, int32_t>> live_xmm; // f64 in registers: (register, home slot)
   std::vector<std::pair<x64::reg, int32_t>> saved; // saved registers of caller
