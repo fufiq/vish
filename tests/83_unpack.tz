@@ -1,0 +1,45 @@
+// stdin: 1.5 2.5 3
+// out: 24
+// out: 1 2 2 3 9 0
+// out: 7.0
+// out: -1.0
+// out: last 3.0
+// machine
+// fmt-stable
+// store-roundtrip
+// check: unpack_failed
+// Распаковка (P12): 
+// 
+// 
+//  
+// Образец — как конструктор (решение автора 2026-09-30):
+// объявление (неудача — исключение unpack_failed), условие if (имена — в then),
+// параметр (перегрузка по распаковке — «рантайм-перегрузки… по значениям»).
+struct point { i64 x; i64 y; }
+
+head(array{x, ...xs}) => x;
+
+head(array{}) => 0;
+
+sum(array{}) => 0.0;
+
+sum(array{x, ...xs}) => x + sum(xs);
+
+last(array{...init, x}) => x;
+
+main() {
+  array{a, i64 b, _, ...rest} = array{1, 2, 3, 4, 5};
+  point{px, (4)} = point{3, 4};
+  if(array{f, point{u, v}} = array{7, point{8, 9}}) print(f + u + v);
+  print(a, b, rest.size, px, head(array{9, 8}), head(array{}));
+  xs = read_floats(stdin);
+  print(sum(xs));
+  r = try {
+    array{p, q} = xs;
+    p + q
+  } catch(unpack_failed e) {
+    -1.0
+  };
+  print(r);
+  print("last", last(xs));
+}

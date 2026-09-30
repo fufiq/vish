@@ -569,6 +569,11 @@ struct parser {
       eat_op("...");
       p.pack = true;
     }
+    // foo(array{a, b, ...xs}) - parameter without a name, names give unpacking
+    if(p.mode == param_mode::let && here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) {
+      p.type = pattern();
+      return db.add(std::move(p), {start, toks[pos - 1].where.end});
+    }
     // [type] [...] name | name
     if(is_word("auto") && ahead(1).kind == tok::ident) throw diagnostic("auto не нужен: параметр без типа принимает всё", here().where);
     if(here().kind == tok::ident && (ahead(1).kind == tok::ident || is_op("...", 1))) {
@@ -580,6 +585,53 @@ struct parser {
     }
     p.name = ident();
     return db.add(std::move(p), {start, toks[pos - 1].where.end});
+  }
+
+  // The name {…} ... = - in front of the sample unpacking (after his `}` stands a single `=`).
+  bool pattern_ahead() const {
+    if(here().kind != tok::ident || !is_open('{', 1) || !ahead(1).glued) return false;
+    uint32_t m = match[pos + 1];
+    if(m == ~uint32_t{0}) return false;
+    return is_op("=", m + 1 - pos);
+  }
+
+  node_id pattern() {
+    uint32_t start = here().where.begin;
+    n_pat p;
+    symbol tn = ident();
+    p.type = db.add(n_ident{tn}, {start, toks[pos - 1].where.end});
+    expect_open('{');
+    while(!is_close('}') && !at_end()) {
+      uint32_t i0 = here().where.begin;
+      if(is_op("...")) { // leftover
+        eat_op("...");
+        n_param r;
+        r.pack = true;
+        r.name = ident();
+        p.items.push_back(db.add(std::move(r), {i0, toks[pos - 1].where.end}));
+      } else if(is_open('(')) { // (value) - the equality of the element
+        p.items.push_back(expression());
+      } else if(here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) {
+        p.items.push_back(pattern());
+      } else {
+        n_param b;
+        if(ahead(1).kind == tok::ident) b.type = type_expr(); // T-name
+        b.name = ident();
+        p.items.push_back(db.add(std::move(b), {i0, toks[pos - 1].where.end}));
+      }
+      if(is_op(",")) eat_op(",");
+      else break;
+    }
+    expect_close('}');
+    return db.add(std::move(p), {start, toks[pos - 1].where.end});
+  }
+
+  node_id unpack() {
+    uint32_t start = here().where.begin;
+    node_id p = pattern();
+    eat_op("=");
+    node_id v = expression();
+    return db.add(n_unpack{p, v}, {start, toks[pos - 1].where.end});
   }
 
   node_id type_expr() {
@@ -675,6 +727,12 @@ struct parser {
       advance();
       end_statement();
       return brk ? db.add(n_break{}, {start, toks[pos - 1].where.end}) : db.add(n_continue{}, {start, toks[pos - 1].where.end});
+    }
+    if(pattern_ahead()) { // sample = value;
+      node_id u = unpack();
+      end_statement();
+      db[u].where.end = toks[pos - 1].where.end;
+      return u;
     }
     if(auto v = try_var_decl()) return *v;
 
@@ -1208,7 +1266,7 @@ struct parser {
     uint32_t start = here().where.begin;
     advance();
     expect_open('(');
-    node_id c = expression();
+    node_id c = pattern_ahead() ? unpack() : expression(); // if(образец = значение) - Unpacking success
     expect_close(')');
     node_id then_ = branch();
     node_id else_;

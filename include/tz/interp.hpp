@@ -1263,12 +1263,131 @@ struct interpreter {
 
   // --- branching ---
 
+  // --- unpacking (P12) ---
+  //
+  // 
+// 
+// 
+// 
+//.
+
+  enum class unpacked { no, yes, maybe }; // Maybe - only in parsing (length/value - run-time)
+  static unpacked both(unpacked a, unpacked b) {
+    if(a == unpacked::no || b == unpacked::no) return unpacked::no;
+    return a == unpacked::maybe || b == unpacked::maybe ? unpacked::maybe : unpacked::yes;
+  }
+
+  // Sample checks (types and values of elements) - its specificity among overloads.
+  uint32_t pattern_checks(node_id pat) const {
+    uint32_t n = 0;
+    for(node_id x: db.as<n_pat>(pat).items) {
+      if(db.is<n_pat>(x)) n += 1 + pattern_checks(x);
+      else if(!db.is<n_param>(x) || db.as<n_param>(x).type) ++n;
+    }
+    return n;
+  }
+
+  // Value in sample: names in into; values-elements are calculated in env.
+  unpacked unpack_into(node_id pat, value const & v, scope * into, scope * env, uint32_t frame, span where) {
+    auto const & p = db.as<n_pat>(pat);
+    std::string_view kind = str(db.as<n_ident>(p.type).name);
+    value const * x = shape_of(v);
+    if(unknown(v) || !x) return unpacked::maybe; // Type unknown even at parsing
+    auto elem = [&](node_id item, value const & e) -> unpacked {
+      if(db.is<n_pat>(item)) return unpack_into(item, e, into, env, frame, where);
+      if(db.is<n_param>(item)) {
+        auto const & b = db.as<n_param>(item);
+        if(b.type) {
+          auto want = str(db.as<n_ident>(b.type).name);
+          if(types.describe(e) != want && types.name(types.of(e)) != want) return unpacked::no;
+        }
+        if(str(b.name) != "_") into->declare(b.name, e);
+        return unpacked::yes;
+      }
+      flow f = eval(item, env, frame); // Equality of the element
+      value eq = binary("==", e, f.v, db[item].where);
+      if(!eq.is<bool>()) return unpacked::maybe;
+      return eq.as<bool>() ? unpacked::yes : unpacked::no;
+    };
+    if(kind == "array") {
+      if(!x->is<array_v>()) return unpacked::no;
+      auto const & a = x->as<array_v>();
+      std::size_t rest = p.items.size();
+      for(std::size_t k = 0; k < p.items.size(); ++k)
+        if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) {
+          if(rest != p.items.size()) fail("в образце — один ...остаток", where);
+          rest = k;
+        }
+      std::size_t fixed = p.items.size() - (rest < p.items.size() ? 1 : 0);
+      bool sized = v.known() || !v.is<rt_v>(); // length known: value (not erased array)
+      if(sized && (rest < p.items.size() ? a.size() < fixed : a.size() != fixed)) return unpacked::no;
+      unpacked r = sized ? unpacked::yes : unpacked::maybe;
+      value any = sized ? value() : element_type(v, where);
+      std::size_t tail = rest < p.items.size() ? p.items.size() - rest - 1 : 0;
+      for(std::size_t k = 0; k < p.items.size(); ++k) {
+        if(k == rest) { // ...the remainder is an array of remaining
+          auto const & b = db.as<n_param>(p.items[k]);
+          value part = v;
+          if(sized) {
+            std::vector<value> xs;
+            for(std::size_t j = k; j + tail < a.size(); ++j) xs.push_back(a.get(uint32_t(j)));
+            part = value(array_v::of(std::move(xs)));
+          }
+          if(str(b.name) != "_") into->declare(b.name, part);
+          continue;
+        }
+        std::size_t at = k < rest ? k : a.size() - (p.items.size() - k);
+        r = both(r, elem(p.items[k], sized ? a.get(uint32_t(at)) : any));
+        if(r == unpacked::no) return r;
+      }
+      return r;
+    }
+    if(!structs.contains(db.as<n_ident>(p.type).name)) fail(cat("образец ", kind, "{…}: не struct и не array"), db[p.type].where);
+    if(!x->is<agg_v>() || types.name(x->as<agg_v>().type) != kind) return unpacked::no;
+    auto const & fs = x->as<agg_v>().fields;
+    if(fs.size() != p.items.size()) fail(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", p.items.size()), where);
+    unpacked r = unpacked::yes;
+    for(std::size_t k = 0; k < fs.size() && r != unpacked::no; ++k) {
+      if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) fail("...остаток — только в array{…}", db[p.items[k]].where);
+      r = both(r, elem(p.items[k], fs[k].second));
+    }
+    return r;
+  }
+
+  // Condition: success of unpacking - bool (in parsing unknown - run-time).
+  flow unpack_test(node_id n, scope * env, uint32_t frame, scope * into) {
+    auto const & u = db.as<n_unpack>(n);
+    TZ_TRY(v, eval(u.value, env, frame));
+    unpacked r = unpack_into(u.pattern, v, into, env, frame, db[n].where);
+    if(r == unpacked::maybe) return ok(erase(value(true)));
+    return ok(value(r == unpacked::yes));
+  }
+
+  // Instructions: names - in the current area; not unpacked - exception.
+  flow eval_node(node_id n, n_unpack const & u, scope * env, uint32_t frame) {
+    TZ_TRY(v, eval(u.value, env, frame));
+    unpacked r = unpack_into(u.pattern, v, env, env, frame, db[n].where);
+    if(r == unpacked::no)
+      fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(db).print(u.pattern), " ← ", checking() ? types.describe(v) : show_v(v)), db[n].where);
+    if(r == unpacked::maybe) rt_check("unpack_failed", db[n].where);
+    return ok();
+  }
+
+  flow eval_node(node_id n, n_pat const &, scope *, uint32_t) { fail("образец — только в распаковке", db[n].where); }
+
   flow eval_node(node_id n, n_if const & i, scope * env, uint32_t frame) {
-    TZ_TRY(c, eval(i.cond, env, frame));
+    // if(образец = значение): Success is a condition, the sample names are only visible in the
+    scope * then_env = env;
+    std::optional<scope_hold> then_hold;
+    if(db.is<n_unpack>(i.cond)) {
+      then_env = new_scope(env);
+      then_hold.emplace(*this, then_env);
+    }
+    TZ_TRY(c, db.is<n_unpack>(i.cond) ? unpack_test(i.cond, env, frame, then_env) : eval(i.cond, env, frame));
     auto b = known_bool(c, db[i.cond].where);
     auto proof = index_check(i.cond, env);
     auto then_ = [&] {
-      if(!proof || !proof->positive) return eval(i.then_, env, frame);
+      if(!proof || !proof->positive) return eval(i.then_, then_env, frame);
       uint32_t saved = std::exchange(proof->cell->proof, proof->fact); // if(is_index(k, xs)) { xs[k] }
       flow t = eval(i.then_, env, frame);
       if(proof->cell->proof == proof->fact) proof->cell->proof = saved;
@@ -3476,6 +3595,7 @@ struct interpreter {
     struct candidate {
       node_id fn;
       int score;
+      bool maybe = false; // Whether it is suitable - decide the value (unpacking run-time values in parsing)
     };
     std::vector<candidate> good;
     std::vector<std::string> rejected;
@@ -3486,10 +3606,18 @@ struct interpreter {
         continue;
       }
       int score = 0;
+      bool maybe = false;
       std::string why;
       for(uint32_t i = 0; i < fn.params.size() && why.empty(); ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
-        if(p.type && db.is<n_ident>(p.type)) {
+        if(p.type && db.is<n_pat>(p.type)) { // sample: unpacking - candidate condition (as required)
+          scope * probe = new_scope(globals);
+          scope_hold hold{*this, probe};
+          unpacked r = unpack_into(p.type, vals[i], probe, probe, 0, db[fn.params[i]].where);
+          if(r == unpacked::no) why = cat("аргумент ", i + 1, " не распаковывается в ", printer(db).print(p.type));
+          else score += 1 + int(pattern_checks(p.type));
+          maybe = maybe || r == unpacked::maybe;
+        } else if(p.type && db.is<n_ident>(p.type)) {
           auto want = str(db.as<n_ident>(p.type).name);
           if(types.describe(vals[i]) != want && types.name(types.of(vals[i])) != want)
             why = cat("параметр ", str(p.name), " ожидает ", want, ", передано ", types.describe(vals[i]));
@@ -3501,7 +3629,7 @@ struct interpreter {
         if(!passed) why = reason;
         score += n_req;
       }
-      if(why.empty()) good.push_back({f, score});
+      if(why.empty()) good.push_back({f, score, maybe});
       else rejected.push_back(cat(describe_fn(f), ": ", why));
     }
 
@@ -3512,8 +3640,29 @@ struct interpreter {
       for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
       throw d;
     }
-    std::ranges::sort(good, std::greater{}, &candidate::score);
-    if(good.size() > 1 && good[0].score == good[1].score) {
+    std::ranges::stable_sort(good, std::greater{}, &candidate::score);
+    // runtime - overload in terms of:
+// parsing candidates,
+    // whose unpacking depends on the run-time-value, all are sorted out - by specificity,
+    // to the first exactly suitable; the results merge like if branches.
+    if(checking() && good[0].maybe) {
+      std::vector<candidate> reach;
+      for(auto const & c: good) {
+        reach.push_back(c);
+        if(!c.maybe) break;
+      }
+      if(reach.size() > 1) {
+        flow out;
+        for(std::size_t k = 0; k < reach.size(); ++k) {
+          auto copy = vals;
+          if(site.node) emit({report_event::resolved, {}, cat(reach[k].fn.value), {}, {}, {}, site.node});
+          flow r = invoke(reach[k].fn, copy, args, env, site);
+          out = k ? join_branches(out, r) : r;
+        }
+        return out;
+      }
+    }
+    if(good.size() > 1 && good[0].score == good[1].score && !good[0].maybe && !good[1].maybe) {
       diagnostic d(cat("неоднозначный вызов ", site.what), site.where);
       for(auto & c: good)
         if(c.score == good[0].score) d.note(cat("кандидат ", describe_fn(c.fn)), db[c.fn].where);
@@ -3586,7 +3735,7 @@ struct interpreter {
     // of the type of result, the body is disassembled again until the type ceases to
     // change.
 //).
-    std::string active_key = key;
+    std::string active_key = cat(key, "@", f.value); // overload: Another with the same argument is not recursion
     if(checking()) {
       active_key += "|";
       // The expr-argument is the code of the caller: the nested for(…) for(…) is not
@@ -3747,6 +3896,10 @@ struct interpreter {
   void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner, node_id f = {}) {
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
+      if(p.type && db.is<n_pat>(p.type)) { // parameter-sample: names - from the unpacking of the argument
+        unpack_into(p.type, vals[i], inner, inner, 0, db[params[i]].where);
+        continue;
+      }
       // array element to variable parameter - reference to element, not copy
       if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && db.is<n_index>(args[i]) && writes_param(f, i))
         if(auto r = element_ref(args[i], env, 0, args[i])) {
@@ -3855,6 +4008,10 @@ struct interpreter {
     for(uint32_t i = 0; i < fn.params.size(); ++i) {
       if(i) s += ", ";
       auto const & p = db.as<n_param>(fn.params[i]);
+      if(p.type && db.is<n_pat>(p.type)) {
+        s += printer(db).print(p.type);
+        continue;
+      }
       if(p.type && db.is<n_ident>(p.type)) s += cat(str(db.as<n_ident>(p.type).name), " ");
       s += str(p.name);
     }

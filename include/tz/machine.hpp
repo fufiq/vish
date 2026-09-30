@@ -710,6 +710,14 @@ struct process_machine {
       bool fits = true;
       for(uint32_t i = 0; i < nargs && fits; ++i) {
         auto const & p = db.as<n_param>(fn.params[i]);
+        if(p.type && db.is<n_pat>(p.type)) { // Applicant’s condition (as required)
+          uint32_t probe = new_scope(st.globals);
+          bool ok = unpack_into(p.type, args[i], probe, where);
+          release_scope(probe);
+          if(!ok) fits = false;
+          else score += 1 + int(helper.pattern_checks(p.type));
+          continue;
+        }
         if(p.type && db.is<n_ident>(p.type)) {
           if(args[i].is<m_thunk>()) continue;
           std::string want(helper.str(db.as<n_ident>(p.type).name)), have = describe(args[i]);
@@ -761,7 +769,8 @@ struct process_machine {
         a = deref(a);
         if(!a.is<bool>() && !a.is<int64_t>() && !a.is<double>()) var_of({al.scope, al.slot}).hidden = site_node.value + 1;
       }
-      declare(sc, p.name, std::move(a));
+      if(p.type && db.is<n_pat>(p.type)) unpack_into(p.type, a, sc, db[fn.params[i]].where); // names
+      else declare(sc, p.name, std::move(a));
     }
     f.vals.resize(f.vals.size() - nargs);
     uint64_t ctx = f.tasks.empty() ? 0 : f.tasks.back().ctx;
@@ -944,18 +953,103 @@ struct process_machine {
     finish(mval{m_unit{}});
   }
 
+  // --- unpacking (P12), as in the interpreter; value-element - literal ---
+
+  bool unpack_into(node_id pat, mval const & v0, uint32_t into, span where) {
+    auto const & p = db.as<n_pat>(pat);
+    std::string_view kind = helper.str(db.as<n_ident>(p.type).name);
+    mval v = deref(v0);
+    auto elem = [&](node_id item, mval const & e) -> bool {
+      if(db.is<n_pat>(item)) return unpack_into(item, e, into, where);
+      if(db.is<n_param>(item)) {
+        auto const & b = db.as<n_param>(item);
+        if(b.type) {
+          std::string want(helper.str(db.as<n_ident>(b.type).name)), have = describe(e);
+          if(have != want && have.substr(0, have.find('<')) != want) return false;
+        }
+        if(helper.str(b.name) != "_") declare(into, b.name, e);
+        return true;
+      }
+      mval lit;
+      if(db.is<n_int>(item)) lit = mval{db.as<n_int>(item).value};
+      else if(db.is<n_float>(item)) lit = mval{db.as<n_float>(item).value};
+      else if(db.is<n_str>(item)) lit = mval{db.as<n_str>(item).value};
+      else unsupported("значение-элемент образца — не литерал", item);
+      mval eq = primitive("eq", {e, lit}, db[item].where);
+      return eq.is<bool>() && eq.as<bool>();
+    };
+    if(kind == "array") {
+      if(!v.is<m_arr>()) return false;
+      auto const & a = v.as<m_arr>().items;
+      std::size_t rest = p.items.size();
+      for(std::size_t k = 0; k < p.items.size(); ++k)
+        if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) {
+          if(rest != p.items.size()) throw diagnostic("в образце — один ...остаток", where);
+          rest = k;
+        }
+      std::size_t fixed = p.items.size() - (rest < p.items.size() ? 1 : 0);
+      if(rest < p.items.size() ? a.size() < fixed : a.size() != fixed) return false;
+      std::size_t tail = rest < p.items.size() ? p.items.size() - rest - 1 : 0;
+      for(std::size_t k = 0; k < p.items.size(); ++k) {
+        if(k == rest) {
+          m_arr part;
+          for(std::size_t j = k; j + tail < a.size(); ++j) part.items.push_back(a[j]);
+          if(helper.str(db.as<n_param>(p.items[k]).name) != "_") declare(into, db.as<n_param>(p.items[k]).name, mval{std::move(part)});
+          continue;
+        }
+        std::size_t at = k < rest ? k : a.size() - (p.items.size() - k);
+        if(!elem(p.items[k], a[at])) return false;
+      }
+      return true;
+    }
+    if(!helper.structs.contains(db.as<n_ident>(p.type).name)) throw diagnostic(cat("образец ", kind, "{…}: не struct и не array"), db[p.type].where);
+    if(!v.is<m_agg>() || helper.types.name(v.as<m_agg>().type) != kind) return false;
+    auto const & fs = v.as<m_agg>().fields;
+    if(fs.size() != p.items.size()) throw diagnostic(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", p.items.size()), where);
+    for(std::size_t k = 0; k < fs.size(); ++k) {
+      if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) throw diagnostic("...остаток — только в array{…}", db[p.items[k]].where);
+      if(!elem(p.items[k], fs[k].v)) return false;
+    }
+    return true;
+  }
+
+  // sample = value; - names in the current area, not unpacked - exception
+  void eval_node(node_id n, n_unpack const & u) {
+    m_task & t = top();
+    if(t.phase == 0) {
+      t.phase = 1;
+      return push_eval(u.value, t.scope, t.frame);
+    }
+    mval v = deref(pop_val());
+    if(!unpack_into(u.pattern, v, t.scope, db[n].where)) {
+      diagnostic d(cat("распаковка не удалась: ", printer(db).print(u.pattern), " ← ", helper.show_v(to_value(v))), db[n].where, diag_kind::runtime);
+      d.type = "unpack_failed";
+      throw d;
+    }
+    finish(mval{m_unit{}});
+  }
+
   void eval_node(node_id n, n_if const & i) {
     m_task & t = top();
     if(t.phase == 0) {
       t.phase = 1;
-      return push_eval(i.cond, t.scope, t.frame);
+      return push_eval(db.is<n_unpack>(i.cond) ? db.as<n_unpack>(i.cond).value : i.cond, t.scope, t.frame);
     }
     if(t.phase == 1) {
-      bool c = truthy(pop_val(), db[i.cond].where);
-      t.phase = 2;
+      uint32_t then_scope = t.scope;
+      bool c;
+      if(db.is<n_unpack>(i.cond)) { // if(образец = значение): Names - only then
+        mval v = deref(pop_val());
+        then_scope = new_scope(t.scope);
+        c = unpack_into(db.as<n_unpack>(i.cond).pattern, v, then_scope, db[i.cond].where);
+        if(c) top().owned = then_scope;
+        else release_scope(then_scope);
+      } else c = truthy(pop_val(), db[i.cond].where);
+      m_task & tt = top();
+      tt.phase = 2;
       node_id next = c ? i.then_ : i.else_;
       if(!next) return finish(mval{m_unit{}});
-      return push_eval(next, t.scope, t.frame);
+      return push_eval(next, c ? then_scope : tt.scope, tt.frame);
     }
     (void)n;
     mval v = deref(pop_val());

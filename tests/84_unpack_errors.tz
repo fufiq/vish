@@ -1,0 +1,13 @@
+// out: no
+// error: распаковка не удалась: point{x, (5)} ← point{x: 1, y: 2}
+// machine
+// Неудачная распаковка в условии — ложь (else), в объявлении — исключение
+// unpack_failed; не пойманное — ошибка программы с местом распаковки.
+struct point { i64 x; i64 y; }
+
+main() {
+  p = point{1, 2};
+  if(point{x, (7)} = p) print("yes") else print("no");
+  point{x, (5)} = p;
+  print(x);
+}

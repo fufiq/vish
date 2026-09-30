@@ -178,8 +178,32 @@ struct printer {
     out += ')';
   }
 
+  void print_node(node_id, n_pat const & p) {
+    item(p.type);
+    out += '{';
+    for(std::size_t i = 0; i < p.items.size(); ++i) {
+      node_id x = p.items[i];
+      out += i ? ", " : "";
+      if(db.is<n_param>(x) && db.as<n_param>(x).pack) out += cat("...", str(db.as<n_param>(x).name));
+      else if(db.is<n_param>(x) || db.is<n_pat>(x)) item(x);
+      else { // meaning in brackets (otherwise it is a name)
+        out += '(';
+        item(x);
+        out += ')';
+      }
+    }
+    out += '}';
+  }
+
+  void print_node(node_id, n_unpack const & u) {
+    item(u.pattern);
+    out += " = ";
+    item(u.value);
+  }
+
   void print_node(node_id, n_param const & p) {
     static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct "};
+    if(p.type && db.is<n_pat>(p.type)) return item(p.type); // parameter-sample: names give unpacking
     out += modes[uint32_t(p.mode)];
     if(p.type && !db.is<n_auto>(p.type)) {
       item(p.type);

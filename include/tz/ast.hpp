@@ -193,9 +193,26 @@ struct n_hole {
   std::string reason;
 }; // undisassembled fragment (§4.1)
 
+// Unpacking (P12):
+// 
+// The sample is written as a constructor (author's decision 2026-09-30): Name {…} /
+// array {…}; elements - n_param (name, T name, , ... residue), nested n_pat or
+// expression-value (in the text - in parentheses).
+//
+struct n_pat {
+  node_id type;
+  node_list items;
+};
+// sample = value: instruction (failure is an exception to unpack_failed) or
+// condition if (success is truth, names are visible in then)
+struct n_unpack {
+  node_id pattern;
+  node_id value;
+};
+
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack>;
 
 struct node {
   node_kind kind;

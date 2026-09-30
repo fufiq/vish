@@ -18,6 +18,7 @@ import './statements/throw';
 import './statements/hide';
 import './statements/ct';
 import './statements/try_compile';
+import './statements/unpack';
 import './expressions/ident';
 import './expressions/int';
 import './expressions/float';
@@ -35,6 +36,7 @@ import './expressions/quote';
 import './expressions/splice';
 import './expressions/auto';
 import './expressions/hole';
+import './expressions/pat';
 
 export function tagOf(kind: string): string {
   return `tz-${kind.replace(/^n_/, '').replaceAll('_', '-')}`;

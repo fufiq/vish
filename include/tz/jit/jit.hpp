@@ -1023,6 +1023,8 @@ struct jit_codegen {
     if(auto it = an.functions.find(db.as<n_ident>(c.callee).name); it != an.functions.end()) candidates.assign(it->second.begin(), it->second.end());
     for(node_id item: candidates) {
       if(!db.is<n_fn>(item) || db.as<n_fn>(item).params.size() != c.args.size()) continue;
+      for(node_id p: db.as<n_fn>(item).params)
+        if(db.as<n_param>(p).type && db.is<n_pat>(db.as<n_param>(p).type)) throw jit_unsupported{n, cat("перегрузка ", name, " по образцу (рантайм-выбор)")};
       int score = 0;
       bool fits = true;
       auto const & ps = db.as<n_fn>(item).params;
@@ -1733,7 +1735,7 @@ struct jit_codegen {
 // disassembling (parsing can calculate a lot with compile-time).
 std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
   if(!n) return std::nullopt;
-  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n))
+  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.is<n_try_compile>(n) || db.is<n_construct>(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
@@ -1767,6 +1769,11 @@ template<typename A>
 void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   out.deps[fn.value] = db.node_revision(fn);
   out.deps[mod.value] = db.node_revision(mod);
+  for(node_id p: db.as<n_fn>(fn).params)
+    if(db.as<n_param>(p).type && db.is<n_pat>(db.as<n_param>(p).type)) {
+      out.reason = "параметр-образец (распаковка) — интерпретатор";
+      return;
+    }
   if(auto bad = jit_prefilter(db, mod, db.as<n_fn>(fn).body)) {
     auto lc = locate(db.source(db[bad->first].where.source), db[bad->first].where.begin);
     out.reason = cat(bad->second, " (строка ", lc.line, ")");
