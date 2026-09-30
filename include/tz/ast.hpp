@@ -47,6 +47,9 @@ struct n_fn {
   bool expr_body = false;
   node_list attrs; // [[…]] - values calculated during compilation (§7.4)
   bool scoped = false; // Using Operator - Redefinition in Context (§8.2)
+  // syntax: запись формы — слова и символы, "(" — параметр в скобках, "{" —
+  // parameter-block (in order of parameters); the first word is the name entity (§4.4 )
+  std::vector<symbol> form;
 };
 struct n_param {
   symbol name;
@@ -91,6 +94,7 @@ struct n_call {
   node_list args;
   std::vector<symbol> words; // The Word of Clause in Every Argument (Empty - Everything in Your Head)
   bool tail = false; // The final argument is the tail unit / instruction
+  uint32_t form = 0; // Syntax ad entry: ad node + 1
 };
 struct n_op {
   symbol op;

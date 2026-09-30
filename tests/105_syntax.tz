@@ -1,0 +1,53 @@
+// out: мало 3
+// out: 2 1
+// out: 5
+// machine
+// fmt-stable
+// store-roundtrip
+// syntax — форма записи, объявленная кодом: 
+// 
+//;
+// 
+// Объявление повторяет
+// запись (как operator): слова и символы, (x) — параметр, {x} — блок. Сущность —
+// функция с expr-параметрами: семантический инлайн, запись в expr-параметр —
+// запись в место вызывающего.
+syntax repeat {body} until(expr c) => loop {
+  body;
+  if(c) break;
+};
+
+syntax unless(bool c) {body} => if(!c) body;
+
+syntax swap(expr a) <-> (expr b) => {
+  t = a;
+  a = b;
+  b = t;
+}
+
+syntax twice {body} then {after} => {
+  body;
+  body;
+  after;
+}
+
+main() {
+  i = 0;
+  repeat {
+    i += 1;
+  } until(i >= 3);
+  unless(i > 5) {
+    print("мало", i);
+  }
+  x = 1;
+  y = 2;
+  swap(x) <-> (y);
+  print(x, y);
+  n = 0;
+  twice {
+    n += 1;
+  } then {
+    n += 3;
+  }
+  print(n);
+}

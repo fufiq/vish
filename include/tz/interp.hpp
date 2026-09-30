@@ -3518,48 +3518,68 @@ struct interpreter {
         env->declare(name, std::move(rhs));
         return ok();
       }
-      written(o.args[0], env);
-      if(db.is<n_ident>(o.args[0]))
-        if(value * c = find(env, db.as<n_ident>(o.args[0]).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
-      if(!checking() && db.is<n_index>(o.args[0])) { // entry into an element: set, not cell
-        auto const & ix = db.as<n_index>(o.args[0]);
-        value * arr = place(ix.object, env, frame);
-        if(!arr) fail("присваивание не в переменную", db[o.args[0]].where);
-        TZ_TRY(idx, eval(ix.index, env, frame));
-        uint32_t k = checked_index(*arr, idx, db[o.args[0]].where);
-        value cur = arr->as<array_v>().get(k);
-        arr->as<array_v>().set(k, op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
-        return ok();
-      }
-      value * target = place(o.args[0], env, frame);
-      if(!target) {
-        if(checking() && db.is<n_index>(o.args[0])) { // entry into the run-time-array element: type reconciliation
-          node_id saved_write = std::exchange(index_write, o.args[0]);
-          flow cur_f = eval(o.args[0], env, frame);
-          index_write = saved_write;
-          if(!cur_f.normal()) return cur_f;
-          value cur = std::move(cur_f.v);
-          value res = op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
-          if(!unknown(cur) && !unknown(res) && types.describe(cur) != types.describe(res))
-            fail(cat("элемент массива типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)),
-                where);
-          return ok();
-        }
-        fail("присваивание не в переменную", db[o.args[0]].where);
-      }
-      if(ct_cells.contains(target) && ct_depth == 0 && !level_probe)
-        fail("ct-переменная меняется только кодом при компиляции (ct { … })", where);
-      bool pinned = target->pinned;
-      if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
-      if(op == "=") *target = std::move(rhs);
-      else *target = binary(std::string_view(op).substr(0, 1), *target, rhs, where);
-      if(pinned) pin(*target, {}, where); // The ct field remains a state during compilation
-      if(target->is<array_v>() && db.is<n_ident>(o.args[0])) target->as<array_v>().gen = ++array_gen; // New buffer - old links are invalid
-      return ok();
+      return assign(o.args[0], op, std::move(rhs), env, frame, where);
     }
     TZ_TRY(a, eval(o.args[0], env, frame));
     TZ_TRY(b, eval(o.args[1], env, frame));
     return ok(binary(op, a, b, where));
+  }
+
+  // place op = value. The expr parameter is the code of the caller: writing to it is writing to
+  // its place (semantic inlining, §6: a = b in swap changes the x caller).
+  flow assign(node_id lhs, std::string_view op, value rhs, scope * env, uint32_t frame, span where) {
+    if(db.is<n_ident>(lhs))
+      if(value * c = find(env, db.as<n_ident>(lhs).name); c && c->is<thunk_v>()) {
+        thunk_v t = c->as<thunk_v>();
+        uint64_t saved = std::exchange(ctx, t.ctx);
+        flow r;
+        try {
+          r = assign(t.expr, op, std::move(rhs), t.env, t.frame, where);
+        } catch(...) {
+          ctx = saved;
+          throw;
+        }
+        ctx = saved;
+        return r;
+      }
+    written(lhs, env);
+    if(db.is<n_ident>(lhs))
+      if(value * c = find(env, db.as<n_ident>(lhs).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
+    if(!checking() && db.is<n_index>(lhs)) { // entry into an element: set, not cell
+      auto const & ix = db.as<n_index>(lhs);
+      value * arr = place(ix.object, env, frame);
+      if(!arr) fail("присваивание не в переменную", db[lhs].where);
+      TZ_TRY(idx, eval(ix.index, env, frame));
+      uint32_t k = checked_index(*arr, idx, db[lhs].where);
+      value cur = arr->as<array_v>().get(k);
+      arr->as<array_v>().set(k, op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
+      return ok();
+    }
+    value * target = place(lhs, env, frame);
+    if(!target) {
+      if(checking() && db.is<n_index>(lhs)) { // entry into the run-time-array element: type reconciliation
+        node_id saved_write = std::exchange(index_write, lhs);
+        flow cur_f = eval(lhs, env, frame);
+        index_write = saved_write;
+        if(!cur_f.normal()) return cur_f;
+        value cur = std::move(cur_f.v);
+        value res = op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
+        if(!unknown(cur) && !unknown(res) && types.describe(cur) != types.describe(res))
+          fail(cat("элемент массива типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)),
+              where);
+        return ok();
+      }
+      fail("присваивание не в переменную", db[lhs].where);
+    }
+    if(ct_cells.contains(target) && ct_depth == 0 && !level_probe)
+      fail("ct-переменная меняется только кодом при компиляции (ct { … })", where);
+    bool pinned = target->pinned;
+    if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
+    if(op == "=") *target = std::move(rhs);
+    else *target = binary(std::string_view(op).substr(0, 1), *target, rhs, where);
+    if(pinned) pin(*target, {}, where); // The ct field remains a state during compilation
+    if(target->is<array_v>() && db.is<n_ident>(lhs)) target->as<array_v>().gen = ++array_gen; // New buffer - old links are invalid
+    return ok();
   }
 
   value unary(std::string_view op, value const & x, span where) {

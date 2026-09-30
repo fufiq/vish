@@ -37,7 +37,7 @@ struct parser {
     }
     match_brackets();
     for(uint32_t i = 0; i < db.size(); ++i)
-      if(db.is<n_fn>(node_id(i))) learn(db.as<n_fn>(node_id(i)));
+      if(db.is<n_fn>(node_id(i))) learn(db.as<n_fn>(node_id(i)), node_id(i));
   }
 
   // --- designs declared code (§4.4) ---
@@ -52,8 +52,12 @@ struct parser {
     bool bare = false; // head without brackets: try { … }
   };
 
-  void learn(n_fn const & f) {
+  void learn(n_fn const & f, node_id id = {}) {
     if(!f.name) return;
+    if(!f.form.empty()) { // Syntax - a form of recording, not a call design
+      if(id) syntaxes[f.name.value].push_back(id);
+      return;
+    }
     learn_operator(f);
     bool any_clause = false;
     uint32_t head = 0;
@@ -311,6 +315,7 @@ struct parser {
     // Attributes enter the node before being added to the database, otherwise journal will not see them.
     if(is_word("struct") && ahead(1).kind == tok::ident && (is_open('{', 2) || is_op(":", 2))) return struct_decl(std::move(attrs));
     if(is_word("operator")) return operator_decl(std::move(attrs));
+    if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl(std::move(attrs));
     if(auto f = try_fn_decl(false, attrs)) return *f;
     if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
     // Name { … } - extension of entity
@@ -954,6 +959,91 @@ struct parser {
     return db.add(std::move(f), {start, toks[pos - 1].where.end});
   }
 
+  // syntax word (x) {тело} word ... => expression; is a form of writing declared by the
+  // code:
+//;
+  // 
+// An announcement
+  // It repeats the recording like an operator. entity is a function with the name of the
+  // first word: (x) is a parameter (mode as a parameter), {x} is a block (expr).
+  node_id syntax_decl(node_list attrs) {
+    uint32_t start = here().where.begin;
+    advance();
+    n_fn f;
+    f.attrs = std::move(attrs);
+    f.name = ident();
+    f.form.push_back(f.name);
+    while(!is_op("=>") && !at_end()) {
+      if(is_open('(')) {
+        advance();
+        f.params.push_back(param());
+        expect_close(')');
+        f.form.push_back(db.strings.intern("("));
+      } else if(is_open('{')) {
+        uint32_t p0 = here().where.begin;
+        advance();
+        n_param p;
+        p.mode = param_mode::expr;
+        p.name = ident();
+        expect_close('}');
+        f.params.push_back(db.add(std::move(p), {p0, toks[pos - 1].where.end}));
+        f.form.push_back(db.strings.intern("{"));
+      } else if(here().kind == tok::ident) {
+        f.form.push_back(db.strings.intern(here().text));
+        advance();
+      } else if(here().kind == tok::op) {
+        f.form.push_back(db.strings.intern(symbol_run()));
+      } else throw diagnostic("в записи syntax — слова, символы, (параметр) и {блок}", here().where);
+    }
+    expect_op("=>");
+    f.body = is_open('{') ? block() : expression();
+    f.expr_body = true;
+    if(is_op(";")) eat_op(";");
+    node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
+    learn(db.as<n_fn>(id), id);
+    return id;
+  }
+
+  // Sign up for syntax ads with that first word (last ad is first). None came up -
+  // nullopt, the position is not shifted.
+  std::optional<node_id> syntax_use(uint32_t start) {
+    auto it = syntaxes.find(db.strings.intern(here().text).value);
+    if(it == syntaxes.end()) return std::nullopt;
+    uint32_t saved = pos;
+    for(auto d = it->second.rbegin(); d != it->second.rend(); ++d) {
+      pos = saved;
+      auto const & form = db.as<n_fn>(*d).form;
+      try {
+        uint32_t h0 = here().where.begin;
+        advance();
+        n_call c;
+        c.callee = db.add(n_ident{form[0]}, {h0, toks[pos - 1].where.end});
+        c.form = d->value + 1;
+        for(std::size_t k = 1; k < form.size(); ++k) {
+          auto piece = db.strings.text(form[k]);
+          if(piece == "(") {
+            expect_open('(');
+            c.args.push_back(expression());
+            expect_close(')');
+          } else if(piece == "{") {
+            if(!is_open('{')) throw diagnostic("ожидался блок", here().where);
+            c.args.push_back(block());
+          } else if(op_char(piece[0])) {
+            if(symbol_run() != piece) throw diagnostic(cat("ожидалось ", piece), here().where);
+          } else {
+            if(!is_word(piece)) throw diagnostic(cat("ожидалось ", piece), here().where);
+            advance();
+          }
+        }
+        c.tail = db.strings.text(form.back()) == "{";
+        return db.add(std::move(c), {start, toks[pos - 1].where.end});
+      } catch(diagnostic const &) {
+      }
+    }
+    pos = saved;
+    return std::nullopt;
+  }
+
   std::string symbol_run() { // carrier
     std::string s;
     while(here().kind == tok::op && op_char(here().ch()) && (s.empty() || here().glued) && !(s.empty() && is_op("=>"))) {
@@ -1294,6 +1384,7 @@ struct parser {
       }
       case tok::ident: {
         if(ahead(1).kind == tok::str_lit && ahead(1).glued) return template_string();
+        if(auto u = syntax_use(start)) return *u;
         if(t.text == "if" && is_open('(', 1)) return if_expression();
         if(t.text == "loop" && is_open('{', 1)) {
           advance();
@@ -1497,6 +1588,7 @@ struct parser {
   uint32_t statement_head = ~uint32_t{0}; // starting-point
   bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
   std::unordered_map<uint32_t, construct> constructs; // head-name
+  std::unordered_map<uint32_t, std::vector<node_id>> syntaxes; // Syntax announcements by first word
   struct op_forms {
     bool prefix = false, infix = false, postfix = false, assoc = false;
   };

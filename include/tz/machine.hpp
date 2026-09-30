@@ -1419,6 +1419,13 @@ struct process_machine {
         declare(t.scope, name, std::move(rhs)); // x = e is an announcement if there is no name.
         return finish(mval{m_unit{}});
       }
+      // expr parameter - the code of the caller: the record goes to its place (x in swap(x) <->(y))
+      while(p.scope != m_none && st.scopes[p.scope].vars[p.slot].v.is<m_thunk>()) {
+        m_thunk const & th = st.scopes[p.scope].vars[p.slot].v.as<m_thunk>();
+        if(!db.is<n_ident>(th.expr)) unsupported("запись в expr-параметр, чьё выражение — не имя", n);
+        p = find(th.env, db.as<n_ident>(th.expr).name);
+        if(p.scope == m_none) throw diagnostic("присваивание не в переменную", db[lhs].where);
+      }
       if(p.scope == st.globals && std::ranges::contains(st.ct_vars, name) && !in_ct())
         throw diagnostic("ct-переменная меняется только кодом при компиляции (ct { … })", db[n].where);
       mval & c = cell(p);

@@ -35,6 +35,11 @@ std::string item_key(ast_db const & db, node_id n) {
   auto str = [&](symbol s) { return std::string(db.strings.text(s)); };
   if(db.is<n_fn>(n)) {
     auto const & f = db.as<n_fn>(n);
+    if(!f.form.empty()) { // syntax - by writing the form
+      std::string k = "syntax";
+      for(symbol p: f.form) k += " " + str(p);
+      return k;
+    }
     std::string k = str(f.name) + "(";
     for(uint32_t i = 0; i < f.params.size(); ++i) {
       auto const & p = db.as<n_param>(f.params[i]);

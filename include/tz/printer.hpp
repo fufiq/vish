@@ -121,6 +121,18 @@ struct printer {
 
   void print_node(node_id, n_fn const & f) {
     attrs(f.attrs);
+    if(!f.form.empty()) { // syntax - the record repeats the ad
+      out += "syntax ";
+      form(f.form, [&](std::size_t k, bool block) {
+        auto const & p = db.as<n_param>(f.params[k]);
+        if(block) out += cat("{", str(p.name), "}");
+        else params({f.params[k]});
+      });
+      out += " => ";
+      item(f.body);
+      if(!db.is<n_block>(f.body)) out += ';';
+      return;
+    }
     if(f.outline) out += "outline ";
     if(f.result_type) {
       item(f.result_type);
@@ -166,6 +178,20 @@ struct printer {
     } else {
       out += ' ';
       item(f.body);
+    }
+  }
+
+  // Syntax form: word through space, (...) close to word, {…} through space;
+  // hole(k, блок) prints k hole.
+  void form(std::vector<symbol> const & pieces, auto && hole) {
+    std::size_t k = 0;
+    for(std::size_t i = 0; i < pieces.size(); ++i) {
+      auto p = str(pieces[i]);
+      bool paren = p == "(";
+      bool after_word = i && std::isalpha(static_cast<unsigned char>(str(pieces[i - 1])[0])) != 0;
+      if(i && !(paren && after_word)) out += ' ';
+      if(paren || p == "{") hole(k++, !paren);
+      else out += p;
     }
   }
 
@@ -553,6 +579,18 @@ struct printer {
   // Challenge: head and clauses. The parameters of the construction block are printed in
   // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
   void print_node(node_id, n_call const & c) {
+    if(c.form && c.form - 1 < db.size() && db.is<n_fn>(node_id(c.form - 1)) && !db.as<n_fn>(node_id(c.form - 1)).form.empty()) {
+      auto const & pieces = db.as<n_fn>(node_id(c.form - 1)).form;
+      std::size_t shown = 0;
+      form(pieces, [&](std::size_t k, bool block) {
+        if(k >= c.args.size()) return;
+        if(!block) out += '(';
+        item(c.args[k]);
+        if(!block) out += ')';
+        shown = k + 1;
+      });
+      if(shown == c.args.size()) return;
+    }
     item(c.callee);
     auto word = [&](uint32_t i) { return c.words.empty() ? symbol{} : c.words[i]; };
     uint32_t n = uint32_t(c.args.size());
