@@ -603,6 +603,22 @@ struct parser {
     expect_open('{');
     while(!is_close('}') && !at_end()) {
       uint32_t i0 = here().where.begin;
+      if((is_op(".") && !is_op("...")) || is_open('[')) { // .field: subsample - value interface
+        node_id e = db.add(n_subject{}, {i0, i0});
+        if(is_open('[')) {
+          advance();
+          node_id k = expression();
+          expect_close(']');
+          e = db.add(n_index{e, k}, {i0, toks[pos - 1].where.end});
+        }
+        e = postfix(e);
+        expect_op(":");
+        node_id sub = pattern_element();
+        p.items.push_back(db.add(n_pat_field{e, sub}, {i0, toks[pos - 1].where.end}));
+        if(is_op(",")) eat_op(",");
+        else break;
+        continue;
+      }
       if(is_op("...")) { // leftover
         eat_op("...");
         n_param r;
@@ -624,6 +640,17 @@ struct parser {
     }
     expect_close('}');
     return db.add(std::move(p), {start, toks[pos - 1].where.end});
+  }
+
+  // Subsample: name, T name, , (value) or nested sample.
+  node_id pattern_element() {
+    uint32_t i0 = here().where.begin;
+    if(is_open('(')) return expression();
+    if(here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) return pattern();
+    n_param b;
+    if(ahead(1).kind == tok::ident) b.type = type_expr();
+    b.name = ident();
+    return db.add(std::move(b), {i0, toks[pos - 1].where.end});
   }
 
   node_id unpack(bool test = false) {

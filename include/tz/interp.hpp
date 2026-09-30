@@ -1329,6 +1329,7 @@ struct interpreter {
         continue;
       }
       ++n;
+      if(db.is<n_pat_field>(x)) x = db.as<n_pat_field>(x).sub; // circulation
       if(db.is<n_pat>(x)) n += 1 + pattern_checks(x);
       else if(!db.is<n_param>(x) || db.as<n_param>(x).type) n += 2;
     }
@@ -1357,24 +1358,52 @@ struct interpreter {
       if(!eq.is<bool>()) return unpacked::maybe;
       return eq.as<bool>() ? unpacked::yes : unpacked::no;
     };
+    // Position elements and interface references (.field: subsample)
+    node_list pos, fields;
+    for(node_id it: p.items) (db.is<n_pat_field>(it) ? fields : pos).push_back(it);
+    auto interface = [&](unpacked r) {
+      for(node_id it: fields) {
+        if(r == unpacked::no) return r;
+        auto const & f = db.as<n_pat_field>(it);
+        // The application failed (border, exception) - was not unpacked:
+//  
+        subjects.push_back(v);
+        flow got;
+        try {
+          got = eval(f.access, env, frame);
+        } catch(diagnostic const & d) {
+          subjects.pop_back();
+          if(d.kind != diag_kind::runtime) throw;
+          return unpacked::no;
+        } catch(...) {
+          subjects.pop_back();
+          throw;
+        }
+        subjects.pop_back();
+        if(got.kind == flow_kind::thr) return unpacked::no;
+        r = both(r, elem(f.sub, got.v));
+      }
+      return r;
+    };
     if(kind == "array") {
       if(!x->is<array_v>()) return unpacked::no;
       auto const & a = x->as<array_v>();
-      std::size_t rest = p.items.size();
-      for(std::size_t k = 0; k < p.items.size(); ++k)
-        if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) {
-          if(rest != p.items.size()) fail("в образце — один ...остаток", where);
+      std::size_t rest = pos.size();
+      for(std::size_t k = 0; k < pos.size(); ++k)
+        if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) {
+          if(rest != pos.size()) fail("в образце — один ...остаток", where);
           rest = k;
         }
-      std::size_t fixed = p.items.size() - (rest < p.items.size() ? 1 : 0);
+      bool open = rest < pos.size() || (pos.empty() && !fields.empty()); // Interface only - any length
+      std::size_t fixed = pos.size() - (rest < pos.size() ? 1 : 0);
       bool sized = v.known() || !v.is<rt_v>(); // length known: value (not erased array)
-      if(sized && (rest < p.items.size() ? a.size() < fixed : a.size() != fixed)) return unpacked::no;
+      if(sized && (open ? a.size() < fixed : a.size() != fixed)) return unpacked::no;
       unpacked r = sized ? unpacked::yes : unpacked::maybe;
       value any = sized ? value() : element_type(v, where);
-      std::size_t tail = rest < p.items.size() ? p.items.size() - rest - 1 : 0;
-      for(std::size_t k = 0; k < p.items.size(); ++k) {
+      std::size_t tail = rest < pos.size() ? pos.size() - rest - 1 : 0;
+      for(std::size_t k = 0; k < pos.size(); ++k) {
         if(k == rest) { // ...the remainder is an array of remaining
-          auto const & b = db.as<n_param>(p.items[k]);
+          auto const & b = db.as<n_param>(pos[k]);
           value part = v;
           if(sized) {
             std::vector<value> xs;
@@ -1384,22 +1413,27 @@ struct interpreter {
           if(str(b.name) != "_") into->declare(b.name, part);
           continue;
         }
-        std::size_t at = k < rest ? k : a.size() - (p.items.size() - k);
-        r = both(r, elem(p.items[k], sized ? a.get(uint32_t(at)) : any));
+        std::size_t at = k < rest ? k : a.size() - (pos.size() - k);
+        r = both(r, elem(pos[k], sized ? a.get(uint32_t(at)) : any));
         if(r == unpacked::no) return r;
       }
-      return r;
+      return interface(r);
     }
-    if(!structs.contains(db.as<n_ident>(p.type).name)) fail(cat("образец ", kind, "{…}: не struct и не array"), db[p.type].where);
-    if(!x->is<agg_v>() || types.name(x->as<agg_v>().type) != kind) return unpacked::no;
-    auto const & fs = x->as<agg_v>().fields;
-    if(fs.size() != p.items.size()) fail(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", p.items.size()), where);
-    unpacked r = unpacked::yes;
-    for(std::size_t k = 0; k < fs.size() && r != unpacked::no; ++k) {
-      if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) fail("...остаток — только в array{…}", db[p.items[k]].where);
-      r = both(r, elem(p.items[k], fs[k].second));
+    if(structs.contains(db.as<n_ident>(p.type).name)) {
+      if(!x->is<agg_v>() || types.name(x->as<agg_v>().type) != kind) return unpacked::no;
+      auto const & fs = x->as<agg_v>().fields;
+      if(!pos.empty() && fs.size() != pos.size()) fail(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", pos.size()), where);
+      unpacked r = unpacked::yes;
+      for(std::size_t k = 0; k < pos.size() && r != unpacked::no; ++k) {
+        if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) fail("...остаток — только в array{…}", db[pos[k]].where);
+        r = both(r, elem(pos[k], fs[k].second));
+      }
+      return interface(r);
     }
-    return r;
+    // It's not an aggregation.
+    if(!pos.empty()) fail(cat("образец ", kind, "{…}: не struct и не array — только обращения .f: подобразец"), db[p.type].where);
+    if(types.name(types.of(v)) != kind && types.describe(v) != kind) return unpacked::no;
+    return interface(unpacked::yes);
   }
 
   bool has_unpack(node_id n) const {
@@ -1409,6 +1443,12 @@ struct interpreter {
     db.for_each_child(n, [&](node_id c) { found = found || has_unpack(c); });
     return found;
   }
+
+  flow eval_node(node_id n, n_subject const &, scope *, uint32_t) {
+    if(subjects.empty()) fail("обращение без значения — только в образце", db[n].where);
+    return ok(subjects.back());
+  }
+  flow eval_node(node_id n, n_pat_field const &, scope *, uint32_t) { fail("элемент образца — только в распаковке", db[n].where); }
 
   // Instructions: names - in the current area; not unpacked - exception. Predicate (test):
   // success - bool (in parsing unknown - run-time), names - with success.
@@ -4359,6 +4399,7 @@ struct interpreter {
   struct jit_engine * jit = nullptr;
   struct a64_check * a64 = nullptr; // AArch64 in parallel with host (qemu)
   scope * invoke_parent = nullptr; // call from local overload set: set environment (takes invoke)
+  std::vector<value> subjects; // unpackable values - roots of addresses .f: subsample
   std::optional<uint64_t> fuel;
   std::vector<std::pair<uint32_t, bool>> frame_floors; // (The first frame of the call was a return to the outside)
   std::vector<std::vector<report_event> *> recording;

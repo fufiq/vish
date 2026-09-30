@@ -211,10 +211,19 @@ struct n_unpack {
   node_id value;
   bool test = false; // predicate, not instruction
 };
+// Sample element - reference to the interface of the unpackable value:
+// 
+// access is an expression from n_subject (.field, .size, .f(),
+// [k]); sub is a sub-sample of the result.
+struct n_pat_field {
+  node_id access;
+  node_id sub;
+};
+struct n_subject {}; // Unpackable value (implicit root of circulation)
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack>;
+    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject>;
 
 struct node {
   node_kind kind;

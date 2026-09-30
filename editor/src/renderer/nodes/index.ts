@@ -37,6 +37,8 @@ import './expressions/splice';
 import './expressions/auto';
 import './expressions/hole';
 import './expressions/pat';
+import './expressions/pat_field';
+import './expressions/subject';
 
 export function tagOf(kind: string): string {
   return `tz-${kind.replace(/^n_/, '').replaceAll('_', '-')}`;

@@ -977,6 +977,32 @@ struct process_machine {
 
   // --- unpacking (P12), as in the interpreter; value-element - literal ---
 
+  // Reference to the interface from the unpackable value: .field, .size, [literal]; failed
+  // (no field, border) - nullopt: not unpacked.
+  std::optional<mval> access(node_id e, mval const & subject) {
+    if(db.is<n_subject>(e)) return subject;
+    if(db.is<n_member>(e)) {
+      auto const & m = db.as<n_member>(e);
+      auto o = access(m.object, subject);
+      if(!o) return std::nullopt;
+      mval x = deref(*o);
+      if(x.is<m_arr>() && helper.str(m.name) == "size") return mval{int64_t(x.as<m_arr>().items.size())};
+      if(x.is<m_agg>())
+        for(auto const & f: x.as<m_agg>().fields)
+          if(f.name == m.name) return f.v;
+      return std::nullopt;
+    }
+    if(db.is<n_index>(e) && db.is<n_int>(db.as<n_index>(e).index)) {
+      auto o = access(db.as<n_index>(e).object, subject);
+      if(!o) return std::nullopt;
+      mval x = deref(*o);
+      int64_t k = db.as<n_int>(db.as<n_index>(e).index).value;
+      if(!x.is<m_arr>() || k < 0 || uint64_t(k) >= x.as<m_arr>().items.size()) return std::nullopt;
+      return x.as<m_arr>().items[std::size_t(k)];
+    }
+    unsupported("обращение образца (вызов, индекс-выражение)", e);
+  }
+
   bool unpack_into(node_id pat, mval const & v0, uint32_t into, span where) {
     auto const & p = db.as<n_pat>(pat);
     std::string_view kind = helper.str(db.as<n_ident>(p.type).name);
@@ -1000,39 +1026,54 @@ struct process_machine {
       mval eq = primitive("eq", {e, lit}, db[item].where);
       return eq.is<bool>() && eq.as<bool>();
     };
+    node_list pos, fields;
+    for(node_id it: p.items) (db.is<n_pat_field>(it) ? fields : pos).push_back(it);
+    auto interface = [&] {
+      for(node_id it: fields) {
+        auto got = access(db.as<n_pat_field>(it).access, v);
+        if(!got || !elem(db.as<n_pat_field>(it).sub, deref(*got))) return false;
+      }
+      return true;
+    };
     if(kind == "array") {
       if(!v.is<m_arr>()) return false;
       auto const & a = v.as<m_arr>().items;
-      std::size_t rest = p.items.size();
-      for(std::size_t k = 0; k < p.items.size(); ++k)
-        if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) {
-          if(rest != p.items.size()) throw diagnostic("в образце — один ...остаток", where);
+      std::size_t rest = pos.size();
+      for(std::size_t k = 0; k < pos.size(); ++k)
+        if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) {
+          if(rest != pos.size()) throw diagnostic("в образце — один ...остаток", where);
           rest = k;
         }
-      std::size_t fixed = p.items.size() - (rest < p.items.size() ? 1 : 0);
-      if(rest < p.items.size() ? a.size() < fixed : a.size() != fixed) return false;
-      std::size_t tail = rest < p.items.size() ? p.items.size() - rest - 1 : 0;
-      for(std::size_t k = 0; k < p.items.size(); ++k) {
+      bool open = rest < pos.size() || (pos.empty() && !fields.empty());
+      std::size_t fixed = pos.size() - (rest < pos.size() ? 1 : 0);
+      if(open ? a.size() < fixed : a.size() != fixed) return false;
+      std::size_t tail = rest < pos.size() ? pos.size() - rest - 1 : 0;
+      for(std::size_t k = 0; k < pos.size(); ++k) {
         if(k == rest) {
           m_arr part;
           for(std::size_t j = k; j + tail < a.size(); ++j) part.items.push_back(a[j]);
-          if(helper.str(db.as<n_param>(p.items[k]).name) != "_") declare(into, db.as<n_param>(p.items[k]).name, mval{std::move(part)});
+          if(helper.str(db.as<n_param>(pos[k]).name) != "_") declare(into, db.as<n_param>(pos[k]).name, mval{std::move(part)});
           continue;
         }
-        std::size_t at = k < rest ? k : a.size() - (p.items.size() - k);
-        if(!elem(p.items[k], a[at])) return false;
+        std::size_t at = k < rest ? k : a.size() - (pos.size() - k);
+        if(!elem(pos[k], a[at])) return false;
       }
-      return true;
+      return interface();
     }
-    if(!helper.structs.contains(db.as<n_ident>(p.type).name)) throw diagnostic(cat("образец ", kind, "{…}: не struct и не array"), db[p.type].where);
-    if(!v.is<m_agg>() || helper.types.name(v.as<m_agg>().type) != kind) return false;
-    auto const & fs = v.as<m_agg>().fields;
-    if(fs.size() != p.items.size()) throw diagnostic(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", p.items.size()), where);
-    for(std::size_t k = 0; k < fs.size(); ++k) {
-      if(db.is<n_param>(p.items[k]) && db.as<n_param>(p.items[k]).pack) throw diagnostic("...остаток — только в array{…}", db[p.items[k]].where);
-      if(!elem(p.items[k], fs[k].v)) return false;
+    if(helper.structs.contains(db.as<n_ident>(p.type).name)) {
+      if(!v.is<m_agg>() || helper.types.name(v.as<m_agg>().type) != kind) return false;
+      auto const & fs = v.as<m_agg>().fields;
+      if(!pos.empty() && fs.size() != pos.size()) throw diagnostic(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", pos.size()), where);
+      for(std::size_t k = 0; k < pos.size(); ++k) {
+        if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) throw diagnostic("...остаток — только в array{…}", db[pos[k]].where);
+        if(!elem(pos[k], fs[k].v)) return false;
+      }
+      return interface();
     }
-    return true;
+    if(!pos.empty()) throw diagnostic(cat("образец ", kind, "{…}: не struct и не array — только обращения .f: подобразец"), db[p.type].where);
+    std::string have = describe(v);
+    if(have != kind && have.substr(0, have.find('<')) != kind) return false;
+    return interface();
   }
 
   // sample = value; - names in the current area, not unpacked - exception

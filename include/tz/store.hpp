@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0007"; // 0007: unpacking (n_pat, n_unpack); 0006: extension of the link function (target); 0005: internal module elements (inner); 0004: empty lines
+constexpr std::string_view tzdb_magic = "TZDB0008"; // 0008: unpacking interface (n_pat_field, n_subject); 0007: unpacking (n_pat, n_unpack); 0006: extension of function by link (target); 0005: internal module elements (inner); 0004: empty lines
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;

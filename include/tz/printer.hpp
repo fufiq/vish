@@ -185,7 +185,7 @@ struct printer {
       node_id x = p.items[i];
       out += i ? ", " : "";
       if(db.is<n_param>(x) && db.as<n_param>(x).pack) out += cat("...", str(db.as<n_param>(x).name));
-      else if(db.is<n_param>(x) || db.is<n_pat>(x)) item(x);
+      else if(db.is<n_param>(x) || db.is<n_pat>(x) || db.is<n_pat_field>(x)) item(x);
       else { // meaning in brackets (otherwise it is a name)
         out += '(';
         item(x);
@@ -194,6 +194,19 @@ struct printer {
     }
     out += '}';
   }
+
+  void print_node(node_id, n_pat_field const & f) {
+    item(f.access);
+    out += ": ";
+    if(db.is<n_param>(f.sub) || db.is<n_pat>(f.sub)) item(f.sub);
+    else {
+      out += '(';
+      item(f.sub);
+      out += ')';
+    }
+  }
+
+  void print_node(node_id, n_subject const &) {} // implicit root: .size, [1].flags
 
   void print_node(node_id n, n_unpack const & u) {
     bool paren = db.is<n_op>(db[n].parent) || db.is<n_chain>(db[n].parent); // operand: (p = e) &&...
