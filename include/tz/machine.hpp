@@ -234,22 +234,25 @@ struct process_machine {
   m_state & st;
   std::string * captured = nullptr; // output - in line (tests), otherwise stdout
 
-  process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {})
-      : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump)) {
-    for(node_id item: db.as<n_module>(root).items) // The state of the program the machine is not yet performing
-      if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) throw diagnostic("машина процессов: пока не поддержано — состояние программы [[state]]", db[item].where);
-    helper.elaborate();
+  process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {}, int dump_fd = -1)
+      : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump, dump_fd)) {
+    helper.elaborate(); // [[state]] - the assistant opens the state of the program (cell - it)
     if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
   }
   ~process_machine() {
+    try {
+      save_state_vars(true);
+    } catch(...) {
+    }
     st.~m_state();
     close_band(band);
     machine_space = outer_space;
   }
   process_machine(process_machine const &) = delete;
 
-  // The state is in the process lane: new or dump pages at the same addresses.
-  m_state & place_state(std::string_view dump) {
+  // The state is in the process lane: new or dump pages at the same addresses. dump_fd - dump file:
+  // pages are displayed as a copy when written (file does not change)
+  m_state & place_state(std::string_view dump, int dump_fd) {
     if(dump.empty()) {
       if(!open_band(band, 0)) throw diagnostic("машина процессов: нет свободной полосы адресов", {});
       machine_space = &band;
@@ -261,8 +264,14 @@ struct process_machine {
     machine_space = &band;
     std::size_t at = h.pages_at;
     for(auto const & p: h.pieces) { // Pages - as they were, in the same addresses
-      band.commit(band.lo + p.addr, p.len);
-      std::memcpy(band.lo + p.addr, dump.data() + at, p.len);
+      if(dump_fd >= 0) {
+        if(mmap(band.lo + p.addr, p.len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, dump_fd, off_t(at)) == MAP_FAILED)
+          throw diagnostic("дамп процесса: не отобразить страницы", {});
+        band.pieces.push_back(p);
+      } else {
+        band.commit(band.lo + p.addr, p.len);
+        std::memcpy(band.lo + p.addr, dump.data() + at, p.len);
+      }
       at += p.len;
     }
     band.small_used = h.small_used;
@@ -629,6 +638,11 @@ struct process_machine {
         // the result, depending on the forks (branches give different), is not a value: read it ct- node from the memo
         if(portable(*x)) declare(st.globals, v.name, from_value(*x, db[item].where));
       }
+    for(node_id item: db.as<n_module>(root).items) // [[state]] - value from the state of the program
+      if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) {
+        value * x = helper.globals->find(db.as<n_var>(item).name);
+        if(x) declare(st.globals, db.as<n_var>(item).name, from_value(*x, db[item].where));
+      }
     auto it = helper.functions.find(helper.sym("main"));
     if(it == helper.functions.end()) throw diagnostic("нет функции main", {});
     invoke(it->second, 0, 0, db[it->second.front()].where);
@@ -692,7 +706,28 @@ struct process_machine {
 
   void run(uint64_t max_steps = ~uint64_t{0}) {
     while(max_steps-- > 0 && step()) {}
+    if(st.done) save_state_vars(true);
   }
+
+  // [[state]] (§12.2): The value of the variable is in the program state cell (its level) at
+  // completion and the dump when the interpreter resets the state to the disk.
+  bool state_saved = false;
+  void save_state_vars(bool close) {
+    if(state_saved || !helper.state_level || st.globals == m_none) return;
+    for(node_id item: db.as<n_module>(root).items)
+      if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) {
+        symbol name = db.as<n_var>(item).name;
+        place p = find(st.globals, name);
+        value * cell = helper.globals->find(name);
+        if(p.scope == m_none || !cell) continue;
+        *cell = adopt_into(to_value(cell_value(p)), &*helper.state_level);
+      }
+    if(close) {
+      helper.save_program_state();
+      state_saved = true;
+    } else save_state(*helper.state_level);
+  }
+  mval cell_value(place p) { return deref(st.scopes[p.scope].vars[p.slot].v); }
 
   // --- раскрутка ------------------------------------------------------------------------------
 
@@ -2232,6 +2267,7 @@ struct process_machine {
   // Dump is the header (base journal, process level metadata, state location) and the level
   // page as it is: values are not serialized.
   std::string dump() {
+    save_state_vars(false); // Program state to disk: the resumed process has the same
     st.type_names.clear();
     for(auto const & n: helper.types.names) st.type_names.emplace_back(n);
     dump_head h;
@@ -2249,7 +2285,7 @@ struct process_machine {
     h.pieces = band.pieces;
     writer w0;
     w0.put(h);
-    h.pages_at = w0.bytes.size() + 16; // Header size does not depend on pages_at
+    h.pages_at = (w0.bytes.size() + address_space::page - 1) / address_space::page * address_space::page; // Pages - from the boundary of the page (display)
     writer w;
     w.put(h);
     w.bytes.resize(h.pages_at, 0);
@@ -2263,12 +2299,12 @@ struct restored_process {
   ast_db db;
   std::optional<process_machine> m;
 
-  explicit restored_process(std::string_view bytes) {
+  explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
     if(std::string_view(h.magic) != "TZPROC03") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
-    m.emplace(db, node_id(h.root), h.name, bytes);
+    m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }
 };
 

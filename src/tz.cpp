@@ -148,7 +148,8 @@ int main(int argc, char ** argv) {
     // Renew the process from the dump - "to another VM" (M5): another tz process.
     if(cmd == "resume") {
       tz::os::mapped_file f(argv[2]);
-      tz::restored_process r(f.text());
+      int fd = ::open(argv[2], O_RDONLY | O_CLOEXEC); // Dump pages - displaying the file
+      tz::restored_process r(f.text(), fd);
       r.m->run();
       return int(r.m->st.exit_code);
     }

@@ -377,19 +377,7 @@ struct test_runner {
 
     // Program state (§12.2) in its temporary directory for each execution
     // out2: — вывод второго запуска с тем же состоянием
-    struct state_dirs {
-      std::vector<std::filesystem::path> made;
-      void fresh() {
-        std::string t = (std::filesystem::temp_directory_path() / "tz-state-XXXXXX").string();
-        if(!mkdtemp(t.data())) throw diagnostic("раннер: нет временного каталога состояния", {});
-        made.emplace_back(t);
-        state_dir = t;
-      }
-      ~state_dirs() {
-        for(auto const & d: made) std::filesystem::remove_all(d);
-        state_dir.clear();
-      }
-    } states;
+    state_dirs states;
     states.fresh();
     std::string out;
     std::string instances;
@@ -551,9 +539,26 @@ struct test_runner {
     return rendered.substr(at + 14, end == std::string::npos ? std::string::npos : end - at - 14);
   }
 
+  // Temporary state directories of the program (§12.2): its own for each execution
+  struct state_dirs {
+    std::vector<std::filesystem::path> made;
+    void fresh() {
+      std::string t = (std::filesystem::temp_directory_path() / "tz-state-XXXXXX").string();
+      if(!mkdtemp(t.data())) throw diagnostic("раннер: нет временного каталога состояния", {});
+      made.emplace_back(t);
+      state_dir = t;
+    }
+    ~state_dirs() {
+      for(auto const & d: made) std::filesystem::remove_all(d);
+      state_dir.clear();
+    }
+  };
+
   static std::string machine_check(ast_db & db, node_id root, std::filesystem::path const & path, expect const & e, std::string const & out,
       std::string const & errors) {
     std::string why, mout, merr;
+    state_dirs states;
+    states.fresh();
     try {
       process_machine m(db, root, path.filename().string());
       m.captured = &mout;
@@ -568,6 +573,7 @@ struct test_runner {
       uint64_t n = 0;
       std::from_chars(at.data(), at.data() + at.size(), n);
       std::string dout;
+      states.fresh();
       try {
         std::string bytes;
         { // The original process goes away: the restored one has the same addresses (pages as is)
