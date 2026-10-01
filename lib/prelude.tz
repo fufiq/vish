@@ -470,6 +470,10 @@ struct jc_range {} // тег: значение range(n) — в слоте гра
 // граница) или expr-параметр (код, контекст, окружение и функция вызывающего)
 struct jc_var { str name; type kind; i64 slot; bool thunk; code th; i64 th_ctx; i64 th_top; i64 th_base; i64 th_ret; }
 
+// генератор, ждущий своего for: тело spawn (expr) и его вид, область, слоты, которые
+// тело читает снаружи, узел spawn
+struct jc_gen { code w; i64 w_ctx; i64 w_top; i64 w_base; i64 w_ret; i64 region; array caps; code at; }
+
 // catch в машинном коде: тип (unit — любой), метка, переменная значения, глубина стека
 struct jc_catch { type ty; i64 label; bool binds; str name; i64 slot; i64 depth; }
 
@@ -493,7 +497,6 @@ jit_compile(cg, f, types, type result) {
   base = 0; // первая запись текущей (встроенной) функции
   ctx = 0; // контекст встраивания (как в разборе)
   nslots = 0;
-  inlined = array{}; // встроенные сейчас функции (рекурсия — не встраивается)
   depth = 0; // временных на стеке (push_tmp) — переход в catch их снимает
   tries = array{}; // охватывающие try: массивы jc_catch
   jumps = 0; // throw, ставших переходом в catch
@@ -501,6 +504,31 @@ jit_compile(cg, f, types, type result) {
   fr_exit = array{};
   fr_parent = array{};
   cur = 0;
+  // Генератор → цикл (O11): s = stream(…); spawn { W }; for(x : s) B — без файбера: в
+  // месте for исполняется W, где write(s, v) — это B с x = v: 
+// Условия — как у
+  // склейки C++ (*моё*): наблюдаемое не меняется.
+  gens = array{}; // jc_gen, ждущие for
+  region = 0; // область управления: ветка или тело цикла
+  regions = 0;
+  fusing = false; // идёт свёртка: генерируется W
+  in_b = false; // внутри W — тело потребителя B
+  f_stream = -1; // слот потока свёртки
+  f_elem = unit;
+  f_body = f; // блок for: (x) { B }
+  f_env = array{}; // окружение места for — B генерируется в нём
+  f_top = 0;
+  f_base = 0;
+  f_ctx = 0;
+  f_cur = 0;
+  f_outer = array{}; // слоты, видимые W снаружи
+  f_caps = array{}; // слоты, которые W читает
+  f_closes = 0;
+  has(xs, i64 x) => {
+    r = false;
+    for(y : xs) if(y == x) r = true;
+    r
+  };
   is_stream(type t) => (t == stream(i64)) || ((t == stream(f64)) || (t == stream(bool)));
   is_arr(type t) => (t == array(i64)) || (t == array(f64));
   scalar(type t) => (t == i64) || ((t == bool) || ((t == f64) || is_stream(t))); // поток — его номер
@@ -558,7 +586,18 @@ jit_compile(cg, f, types, type result) {
     k
   };
   load_slot(type kind, i64 s) => put_bytes(if(kind == f64) cg.load_f64(acc_f, frame, off(s)) else cg.load(acc, frame, off(s)));
-  store_slot(type kind, i64 s) => put_bytes(if(kind == f64) cg.store_f64(frame, off(s), acc_f) else cg.store(frame, off(s), acc));
+  // запись, которая сделала бы порядок W и B наблюдаемым
+  wrote(i64 sl) => {
+    if(!fusing) {
+      for(g : gens) if(has(g.caps, sl)) bad("переменную генератора меняют после spawn");
+    } else if(!in_b && has(f_outer, sl)) bad("генератор пишет наружу");
+    else if(in_b && has(f_caps, sl)) bad("потребитель пишет то, что читает генератор");
+  };
+  store_slot(type kind, i64 s) => {
+    wrote(s);
+    store_bytes(kind, s);
+  };
+  store_bytes(type kind, i64 s) => put_bytes(if(kind == f64) cg.store_f64(frame, off(s), acc_f) else cg.store(frame, off(s), acc));
   drop_last(xs) => {
     r = array{};
     for(i : range(xs.size - 1)) r.push(xs[i]);
@@ -575,6 +614,7 @@ jit_compile(cg, f, types, type result) {
   // ловушка: метка, вид (1 — границы, 2 — деление на ноль, 3 — require, 5 — throw, 6 — VM), узел
   vm_error_type(i64 kind) => if(kind == 1) out_of_bounds else if(kind == 2) div_by_zero else if(kind == 3) require_failed else vm_error;
   trap(i64 kind, e) => {
+    if(fusing && !in_b) bad("генератор может упасть: свёртка изменила бы, где ошибка");
     l = label();
     to = catch_for(vm_error_type(kind));
     if(to.size == 0) faults.push(array{l, kind, code_id(e)});
@@ -652,7 +692,9 @@ jit_compile(cg, f, types, type result) {
       v = env[k];
       if(code_kind(v.th) == n_lambda) bad("блок — только body(v)");
       else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
-    } else if(is_arr(env[k].kind)) bad("массив значением");
+    } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
+    else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
+    else if(is_arr(env[k].kind)) bad("массив значением");
     else load_slot(env[k].kind, env[k].slot);
   };
   gen_const(v) => {
@@ -690,10 +732,10 @@ jit_compile(cg, f, types, type result) {
       l_done = label();
       gen(c);
       jump_unless(acc, l_else);
-      gen(t);
+      in_region(() => gen(t));
       jump(l_done);
       bind(l_else);
-      if(given(el)) gen(el);
+      if(given(el)) in_region(() => gen(el));
       bind(l_done);
     } else if(k == n_loop) {
       array{body} = code_fields(e);
@@ -702,7 +744,7 @@ jit_compile(cg, f, types, type result) {
       bind(t);
       loops.push(t);
       loops.push(done);
-      gen(body);
+      in_region(() => gen(body));
       jump(t);
       bind(done);
       loops = drop_last(drop_last(loops));
@@ -857,6 +899,7 @@ jit_compile(cg, f, types, type result) {
       else {
         t = ty(xs[1]);
         if(t != elem(env[s].kind)) bad("тип элемента");
+        wrote(env[s].slot);
         gen(xs[1]);
         if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
         put_bytes(cg.push_tmp(acc));
@@ -921,6 +964,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.to_i64(acc, acc_f));
     } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
+    else if((name == "fiber_start") && (xs.size == 1)) gen_spawn(e, xs[0]);
     else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // примитив ядра a[i]
     else if(name == "hide") {} // скрытие имени — только при компиляции
     else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
@@ -944,7 +988,8 @@ jit_compile(cg, f, types, type result) {
   gen_stream(e, str name, xs) => {
     op = if(name == "stream_new") 0 else if(name == "stream_write") 1 else if(name == "stream_read") 2 else if(name == "stream_more") 3 else if(name == "stream_close") 4 else 5;
     carried = unit;
-    if(tries.size > 0) bad("операция потока внутри try");
+    if(fusing && !in_b) sink(e, op, xs);
+    else if(tries.size > 0) bad("операция потока внутри try");
     else if(op == 0) {
       if((xs.size != 1) || (ty(xs[0]) != i64)) bad("stream_new(ёмкость i64)");
       gen(xs[0]);
@@ -970,6 +1015,9 @@ jit_compile(cg, f, types, type result) {
         if(op == 2) carried = elem(st);
       }
     }
+    if(ok && !(fusing && !in_b)) vm_service(op, carried, e);
+  };
+  vm_service(i64 op, type carried, e) => {
     put_bytes(cg.load_const(ca3, (jt_code(carried) << 32) | code_id(e)));
     put_bytes(cg.load(acc, frame, off(args_slot)));
     put_bytes(cg.load(acc, acc, 8 * (ap + 4)));
@@ -1010,11 +1058,19 @@ jit_compile(cg, f, types, type result) {
     if(tie) array{} else pick
   };
   gen_inline(e, str name, xs) => {
+    gk = if((name == "for") && (xs.size == 2)) generator_of(xs[0]) else -1;
+    if(gk >= 0) return gen_fused(e, xs, gk);
     g = choose(name, xs);
     if((g.size == 1) && (code_id(g[0]) == code_id(f))) return call_self_with(xs); // рекурсия — настоящий вызов себя
     rec = false;
     if(g.size == 1) {
-      for(x : inlined) if(code_id(x) == code_id(g[0])) rec = true;
+      // рекурсия — по цепочке «кто встроил» от текущего кода: блок вызывающего
+      // (тело for) генерируется в его цепочке, а не внутри встроенной конструкции
+      k = cur;
+      while(k >= 0) {
+        if(code_id(fr_fn[k]) == code_id(g[0])) rec = true;
+        k = fr_parent[k];
+      }
     }
     array{_, ps, _, body, is_outline, ...rest} = if(g.size == 1) code_fields(g[0]) else array{"", array{}, false, false, true};
     if((g.size == 0) || (rec || is_outline)) bad(fmt"вызов {name}: нет встраиваемой перегрузки");
@@ -1051,10 +1107,8 @@ jit_compile(cg, f, types, type result) {
         fr_exit.push(exit);
         fr_parent.push(cur);
         cur = fr_fn.size - 1;
-        inlined.push(fn);
         gen(body);
         bind(exit);
-        inlined = drop_last(inlined);
         fr_fn = drop_last(fr_fn);
         fr_exit = drop_last(fr_exit);
         fr_parent = drop_last(fr_parent);
@@ -1069,6 +1123,7 @@ jit_compile(cg, f, types, type result) {
   // k0 + w - 1 - j: кадр растёт вниз), её адрес — в базу аргументов, call на своё
   // начало; ошибка вызванного — в свои слоты и выход (как ловушка).
   call_self_with(xs) => {
+    if(fusing && !in_b) bad("генератор: настоящий вызов");
     ws = 0;
     for(i : range(xs.size)) ws += if(is_arr(types[i])) 2 else 1;
     w = ws + 4;
@@ -1210,13 +1265,242 @@ jit_compile(cg, f, types, type result) {
       });
     }
   };
+  // ветка или тело цикла: spawn внутри свёртывается только с for в ней же
+  in_region(g) => {
+    saved = region;
+    regions += 1;
+    region = regions;
+    g();
+    for(x : gens) if(x.region == region) bad("spawn без for по его потоку в той же области");
+    region = saved;
+  };
+  // имена в коде (для того, что W читает снаружи)
+  idents(c, found) => {
+    if(code_kind(c) == n_ident) {
+      array{nm} = code_fields(c);
+      found.push(nm);
+    }
+    for(x : code_items(c)) idents(x, found);
+  };
+  pending(i64 sl) => {
+    r = false;
+    for(g : gens) if(has(g.caps, sl)) r = true;
+    r
+  };
+  // spawn { W }: генератор ждёт for по своему потоку
+  gen_spawn(e, b) => {
+    v = var_of(b);
+    if(fusing) bad("spawn внутри генератора");
+    else if((v < 0) || !env[v].thunk) bad("spawn");
+    else {
+      w = env[v];
+      names = array{};
+      idents(w.th, names);
+      caps = array{};
+      in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => {
+        for(nm : names) {
+          k = find(nm);
+          if((k >= 0) && !env[k].thunk) caps.push(env[k].slot);
+        }
+      });
+      gens.push(jc_gen{w.th, w.th_ctx, w.th_top, w.th_base, w.th_ret, region, caps, e});
+    }
+  };
+  // for(stream s, expr body) по потоку, который видит ожидающий spawn: номер генератора
+  generator_of(a) => {
+    k = -1;
+    if(!fusing && (gens.size > 0)) {
+      v = var_of(a);
+      if((v >= 0) && (!env[v].thunk && is_stream(env[v].kind))) {
+        for(i : range(gens.size)) if((k < 0) && has(gens[i].caps, env[v].slot)) k = i;
+      }
+    }
+    k
+  };
+  is_block(c) => (code_kind(c) == n_lambda) && {
+    array{_, _, block} = code_fields(c);
+    block
+  };
+  // B не выходит из цикла for: нет return, break/continue — только своих циклов
+  consumer_stays(c, i64 inl) => {
+    k = code_kind(c);
+    if(k == n_return) false
+    else if(((k == n_break) || (k == n_continue)) && (inl == 0)) false
+    else {
+      inner = inl + if((k == n_loop) || is_block(c)) 1 else 0;
+      r = true;
+      for(x : code_items(c)) if(r && !consumer_stays(x, inner)) r = false;
+      r
+    }
+  };
+  arity_fns(str nm, i64 n) => {
+    fs = array{};
+    for(g : functions_named(nm)) {
+      array{_, ps, ...rest} = code_fields(g);
+      if(ps.size == n) fs.push(g);
+    }
+    fs
+  };
+  // return/throw/close вне хвоста W (с вызванными функциями)
+  gen_escapes(c, seen) => {
+    k = code_kind(c);
+    r = false;
+    if((k == n_return) || (k == n_throw)) r = true;
+    else if(k == n_call) {
+      array{cal, cxs, ...rest} = code_fields(c);
+      nm = callee_name(cal);
+      if(nm == "close") r = true;
+      else if(nm != "") {
+        for(g : arity_fns(nm, cxs.size)) if(!r && !has(seen, code_id(g))) {
+          seen.push(code_id(g));
+          array{_, _, _, gb, ...grest} = code_fields(g);
+          if(gen_escapes(gb, seen)) r = true;
+        }
+      }
+    }
+    for(x : code_items(c)) if(!r && gen_escapes(x, seen)) r = true;
+    r
+  };
+  // перегрузка вызова в теле W по типам разбора (контекст встраивания cc): одна или нет
+  pick_fn(str nm, cxs, i64 cc) => {
+    fs = array{};
+    for(g : arity_fns(nm, cxs.size)) {
+      array{_, ps, ...rest} = code_fields(g);
+      fits = true;
+      for(i : range(ps.size)) {
+        array{_, pt, ...prest} = code_fields(ps[i]);
+        if(given(pt)) {
+          want = type_of_code(pt);
+          at = jit_type(cxs[i], cc);
+          if(!given(want) || !given(at)) fits = false;
+          else if((want != at) && (want != type_family(at))) fits = false;
+        }
+      }
+      if(fits) fs.push(g);
+    }
+    fs
+  };
+  // W кончается close(s): последнее действие — close или вызов, который им кончается
+  gen_tail(c, seen, i64 cc) => {
+    k = code_kind(c);
+    if(k == n_lambda) {
+      array{_, lb, _} = code_fields(c);
+      gen_tail(lb, seen, cc)
+    } else if(k == n_block) {
+      array{items, ...rest} = code_fields(c);
+      r = items.size > 0;
+      for(i : range(items.size)) if(r && (((i + 1) < items.size) && gen_escapes(items[i], seen))) r = false;
+      r && gen_tail(items[items.size - 1], seen, cc)
+    } else if(k != n_call) false
+    else {
+      array{cal, cxs, ...rest} = code_fields(c);
+      nm = callee_name(cal);
+      if(nm == "") false
+      else if(nm == "close") true
+      else {
+        r = true;
+        for(x : cxs) if(r && gen_escapes(x, seen)) r = false;
+        fs = pick_fn(nm, cxs, cc);
+        if(!r || ((fs.size != 1) || has(seen, code_id(fs[0])))) false
+        else {
+          seen.push(code_id(fs[0]));
+          array{_, _, _, fb, ...frest} = code_fields(fs[0]);
+          gen_tail(fb, seen, inline_context(cc, c))
+        }
+      }
+    }
+  };
+  gen_fused(e, xs, i64 k) => {
+    g = gens[k];
+    v = var_of(xs[0]);
+    sl = env[v].slot;
+    body = xs[1];
+    others = false;
+    for(i : range(gens.size)) if((i != k) && has(gens[i].caps, sl)) others = true;
+    if(g.region != region) bad("for по потоку генератора — не в области spawn");
+    else if(others) bad("поток видят несколько spawn");
+    else if(!is_block(body)) bad("тело for");
+    else {
+      array{bps, bb, _} = code_fields(body);
+      if(bps.size != 1) bad("тело for");
+      else if(!consumer_stays(bb, 0)) bad("тело for выходит из цикла");
+      else if(!gen_tail(g.w, array{}, g.w_ctx)) bad("генератор: close(s) — не последнее действие, или return/throw");
+      else {
+        rest = array{};
+        for(i : range(gens.size)) if(i != k) rest.push(gens[i]);
+        gens = rest;
+        f_stream = sl;
+        f_elem = elem(env[v].kind);
+        f_body = body;
+        f_env = env;
+        f_top = top;
+        f_base = base;
+        f_ctx = ctx;
+        f_cur = cur;
+        f_outer = array{};
+        for(i : range(g.w_top)) if(!env[i].thunk) f_outer.push(env[i].slot);
+        f_caps = g.caps;
+        f_closes = 0;
+        fusing = true;
+        in_view(g.w_top, g.w_base, g.w_ctx, g.w_ret, () => {
+          wb = g.w;
+          if(code_kind(wb) == n_lambda) {
+            array{_, lb, _} = code_fields(wb);
+            wb = lb;
+          }
+          gen(wb);
+        });
+        fusing = false;
+        if(f_closes != 1) bad("генератор: close(s) не один раз");
+        // поток после цикла — закрытый и пустой, как после настоящего обмена
+        put_bytes(cg.load(acc, frame, off(sl)));
+        put_bytes(cg.move(ca1, acc));
+        vm_service(4, unit, e);
+      }
+    }
+  };
+  // операция VM внутри W: write(s, v) — тело потребителя с x = v; close(s) — конец
+  sink(e, i64 op, xs) => {
+    v = if(xs.size > 0) var_of(xs[0]) else -1;
+    if((v < 0) || (env[v].thunk || ((env[v].slot != f_stream) || ((op != 1) && (op != 4))))) bad("генератор: другая операция VM");
+    else if(op == 4) f_closes += 1;
+    else {
+      t = ty(xs[1]);
+      if(t != f_elem) bad("тип записи ≠ типу потока");
+      else {
+        gen(xs[1]);
+        p = alloc(1);
+        store_bytes(t, p);
+        array{bps, bb, _} = code_fields(f_body);
+        array{pname, ...prest} = code_fields(bps[0]);
+        w_env = env;
+        w_top = top;
+        w_base = base;
+        w_ctx = ctx;
+        w_cur = cur;
+        env = f_env;
+        top = f_top;
+        base = f_base;
+        ctx = f_ctx;
+        cur = f_cur;
+        in_b = true;
+        put(jc_var{pname, t, p, false, f, 0, 0, 0, 0});
+        gen(bb);
+        in_b = false;
+        env = w_env;
+        top = w_top;
+        base = w_base;
+        ctx = w_ctx;
+        cur = w_cur;
+      }
+    }
+  };
   entry = label();
   bind(entry); // начало кода — цель call_self
   ret = label();
   fr_fn.push(f);
   fr_exit.push(ret);
   fr_parent.push(-1);
-  inlined.push(f);
   put_bytes(cg.frame_enter());
   put_bytes(cg.move(frame, stack));
   frame_at = out.size;
@@ -1236,6 +1520,7 @@ jit_compile(cg, f, types, type result) {
   args_slot = alloc(1); // база области аргументов — для ловушек
   put_bytes(cg.store(frame, off(args_slot), argbase));
   if(ok) gen(fbody);
+  if(gens.size > 0) bad("spawn (файбер) — интерпретатор");
   bind(ret);
   if(result == f64) put_bytes(cg.move_from_f64(acc, acc_f)); // f64 — битами в аккумуляторе
   put_bytes(cg.move(stack, frame));

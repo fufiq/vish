@@ -233,7 +233,10 @@ struct jit_machine {
       if(std::getenv("TZ_LANG_DEBUG")) put(stderr, render(d, "?", db)); // compiler debugging
       return false;
     }
-    if(r.is<std::string>()) out.lang_error = r.as<std::string>(); // Failure of the compiler in the language
+    if(r.is<std::string>()) { // Failure of the compiler in the language
+      out.lang_error = r.as<std::string>();
+      if(std::getenv("TZ_LANG_DEBUG")) put(stderr, cat("компилятор языка: ", db.strings.text(db.as<n_fn>(fn).name), ": ", out.lang_error, "\n"));
+    }
     if(!r.is<array_v>() || r.as<array_v>().size() == 0) return false;
     if(r.as<array_v>().get(0).is<array_v>()) { // {bytes, note for statistics}
       value note = r.as<array_v>().size() > 1 ? r.as<array_v>().get(1) : value();

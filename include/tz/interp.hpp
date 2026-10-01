@@ -4814,6 +4814,16 @@ struct interpreter {
       observation const * o = jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>()));
       if(!o || !o->seen) return value();
       std::string d = jit_analysis->types.describe(o->v);
+      // flow: element type - from parsing (execution - parsing of the entire program), as in gluing C + +
+      if(value const * x = shape_of(o->v); x && x->is<agg_v>() && jit_analysis->types.name(x->as<agg_v>().type) == "stream" && !x->as<agg_v>().fields.empty()) {
+        auto const & fs = x->as<agg_v>().fields;
+        value const & id = fs[0].second;
+        auto const & ss = jit_analysis->root->streams;
+        value shape;
+        if(id.is<int64_t>() && id.as<int64_t>() >= 0 && uint64_t(id.as<int64_t>()) < ss.size() && ss[std::size_t(id.as<int64_t>())].typed) shape = ss[std::size_t(id.as<int64_t>())].shape;
+        else if(fs.size() > 1) shape = fs[1].second;
+        if(shape.known() || shape.is<rt_v>()) d = cat("stream<", jit_analysis->types.describe(shape), ">");
+      }
       return value(type_v{types.named(d)});
     }
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
