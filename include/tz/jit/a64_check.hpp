@@ -125,9 +125,11 @@ struct a64_check {
     bool lang = main_fn.by_lang;
     uint64_t d_lang_fault = 0;
     for(std::size_t i = 0; i < args.size(); ++i) d_args.push_back(data_word(0));
-    if(lang) { // type of error, node, thrown value, its type, VM service, call memory
+    uint64_t d_gen = 0;
+    if(lang) { // type of error, node, thrown value, its type, VM service, call memory, generation counter
       d_lang_fault = data_word(0);
-      for(int k = 0; k < 5; ++k) data_word(0);
+      for(int k = 0; k < 6; ++k) data_word(0);
+      d_gen = data_word(0);
     }
     std::vector<uint64_t> d_headers;
     for(auto const & a: args) {
@@ -211,6 +213,7 @@ struct a64_check {
     };
     for(std::size_t i = 0; i < eng.fns.size(); ++i) put(d_cells[i], base + fn_addr[i]);
     if(lang) put(d_lang_fault + 32, base + code_at + service_at);
+    if(lang) put(d_lang_fault + 48, base + data_addr + d_gen);
     for(std::size_t i = 0; i < args.size(); ++i) {
       if(!args[i].array) {
         put(d_args[i], args[i].bits);

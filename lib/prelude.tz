@@ -496,7 +496,7 @@ jit_compile(cg, f, types, type result) {
   why = "";
   // массив — адрес ячейки значения VM; данные и размер код читает из неё в момент обращения
   // (§12.2: память — у VM, без копий в кадре): смещения сообщает VM
-  array{a_data, a_size} = jit_layout();
+  array{a_data, a_size, a_cap, a_gen} = jit_layout();
   // агрегат — поля в памяти ячейки по номеру поля типа: данные полей, шаг, скаляр в поле
   array{ag_data, ag_stride, ag_scalar} = jit_agg_layout();
   bad(str w) => {
@@ -862,6 +862,46 @@ jit_compile(cg, f, types, type result) {
     jump_to(trap(1, e), 3, acc, second);
     arr_data(second, env[s].slot);
   };
+  // append(xs, x) (push): место в словах есть — запись и n + 1 машинным кодом («бесконечный
+  // вектор»: растущий массив не переезжает, §12.2); нет — VM через службу (op 9: рост,
+  // выбор раскладки первым элементом). Общая раскладка держит вместимость 0 (*моё*).
+  gen_append(e, a, x) => {
+    s = var_of(a);
+    t = ty(x);
+    if((s < 0) || (env[s].thunk || (!arr_like(env[s].kind) || ((t != i64) && (t != f64))))) vm_or_bad(e, "append не в массив-переменную");
+    else {
+      gen(x);
+      if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+      sl = env[s].slot;
+      slow = label();
+      done = label();
+      put_bytes(cg.load(second, sb(sl), so(sl)));
+      put_bytes(cg.load(third, second, a_size));
+      put_bytes(cg.load(second, second, a_cap));
+      put_bytes(cg.is_index(third, second));
+      jump_unless(third, slow);
+      put_bytes(cg.load(second, sb(sl), so(sl)));
+      put_bytes(cg.load(third, second, a_size));
+      put_bytes(cg.load(second, second, a_data));
+      put_bytes(cg.store_index(second, third, acc));
+      put_bytes(cg.address(third, third, 1));
+      put_bytes(cg.load(second, sb(sl), so(sl)));
+      put_bytes(cg.store(second, a_size, third));
+      // push инвалидирует опору всегда (§12.1, как у интерпретатора): новое поколение буфера
+      put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
+      put_bytes(cg.load(acc, acc, 8 * (ap + 6)));
+      put_bytes(cg.load(third, acc, 0));
+      put_bytes(cg.address(third, third, 1));
+      put_bytes(cg.store(acc, 0, third));
+      put_bytes(cg.store(second, a_gen, third));
+      jump(done);
+      bind(slow);
+      put_bytes(cg.move(ca2, acc));
+      put_bytes(cg.load(ca1, sb(sl), so(sl)));
+      vm_service(9, t, e);
+      bind(done);
+    }
+  };
   // размер и данные массива — из его ячейки (слот sl — её адрес)
   arr_size(i64 r, i64 sl) => {
     put_bytes(cg.load(r, sb(sl), so(sl)));
@@ -1076,7 +1116,7 @@ jit_compile(cg, f, types, type result) {
     array{callee, xs0, ...rest} = code_fields(e);
     if(dotted(callee)) {
       array{_, ys, _} = code_fields(callee);
-      if(is_handle(ty(ys[0])) && !is_arr(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
+      if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
       else {
         args = array{ys[0]};
         for(x : xs0) args.push(x);
@@ -1103,6 +1143,7 @@ jit_compile(cg, f, types, type result) {
     else if((name == "fiber_start") && (xs.size == 1)) gen_spawn(e, xs[0]);
     else if(name == "print") gen_print(e, xs);
     else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // примитив ядра a[i]
+    else if((name == "append") && (xs.size == 2)) gen_append(e, xs[0], xs[1]);
     else if(name == "hide") {} // скрытие имени — только при компиляции
     else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
       gen(xs[0]);
@@ -1472,7 +1513,7 @@ jit_compile(cg, f, types, type result) {
     if(gen_sub) bad("рекурсивный вызов функции из её локальной функции");
     ws = 0;
     ws = xs.size; // массив — адрес ячейки (одно слово)
-    w = ws + 6; // + ошибка (4), служба VM, память вызова
+    w = ws + 7; // + ошибка (4), служба VM, память вызова, счётчик поколений
     k0 = alloc(w);
     area(i64 j) => off((k0 + w) - (1 + j));
     j = 0;
@@ -1496,7 +1537,7 @@ jit_compile(cg, f, types, type result) {
     }
     put_bytes(cg.load_const(acc, 0));
     put_bytes(cg.store(frame, area(ws), acc));
-    for(q : range(2)) { // служба VM и память вызова — из своей области
+    for(q : range(3)) { // служба VM, память вызова, счётчик поколений — из своей области
       put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
       put_bytes(cg.load(acc, acc, 8 * ((ap + 4) + q)));
       put_bytes(cg.store(frame, area((ws + 4) + q), acc));

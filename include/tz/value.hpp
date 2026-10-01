@@ -342,7 +342,9 @@ void array_v::to_generic() {
   if(repr == layout::generic) return;
   value_list all;
   for(uint32_t i = 0; i < size(); ++i) all.push_back(get(i));
-  dense.clear();
+  address_space * home = dense.home; // General layout - without dense words: capacity 0 (machine code)
+  dense.release();                    // Writes in words only when n < cap
+  dense.home = home;
   items = std::move(all);
   repr = layout::generic;
 }
@@ -519,7 +521,7 @@ field_list::~field_list() { clear(); }
 // Dense array in the cell value: data offsets and size - machine code reads them from memory
 // (§12.2, without copies); cell array - loan indicates the array in the cell.
 struct array_offsets {
-  uint64_t data, size, in_value;
+  uint64_t data, size, cap, gen, in_value;
 };
 array_offsets const & array_layout() {
   static array_offsets o = [] {
@@ -527,7 +529,7 @@ array_offsets const & array_layout() {
     auto const * b = reinterpret_cast<char const *>(&v);
     auto const & a = v.as<array_v>();
     return array_offsets{uint64_t(reinterpret_cast<char const *>(&a.dense.data) - b), uint64_t(reinterpret_cast<char const *>(&a.dense.n) - b),
-        uint64_t(reinterpret_cast<char const *>(&a) - b)};
+        uint64_t(reinterpret_cast<char const *>(&a.dense.cap) - b), uint64_t(reinterpret_cast<char const *>(&a.gen) - b), uint64_t(reinterpret_cast<char const *>(&a) - b)};
   }();
   return o;
 }

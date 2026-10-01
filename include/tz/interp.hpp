@@ -5081,7 +5081,7 @@ struct interpreter {
         if(str(db.as<n_var>(fs[k]).name) == a[1].as<str_v>().view()) return value(int64_t(k));
       return value(int64_t(-1));
     }
-    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size))}));
+    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().gen))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
       observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;

@@ -484,6 +484,12 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       }
       return 0;
     }
+    if(op == 9) { // push when there is no space in words: id is an array cell, bits is an element
+      array_v & a = reinterpret_cast<value *>(id)->as<array_v>();
+      a.push(jit_bits_value(uint64_t(t), bits));
+      a.gen = ++vm.array_gen; // growth: the buffer could have moved
+      return 0;
+    }
     if(op == 0) {
       where = vm.db[at].where; // place of creation - element type key
       std::vector<value> a{value(int64_t(bits))};
@@ -603,6 +609,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     area.insert(area.end(), 4, 0); // type of error, node, thrown value, its type
     area.push_back(reinterpret_cast<uint64_t>(&jit_vm_service)); // VM service (streams, print, node)
     area.push_back(reinterpret_cast<uint64_t>(&mem)); // memory
+    area.push_back(reinterpret_cast<uint64_t>(&array_gen)); // Buffer generation counter (push machine code)
     bits = entry(area.data());
     jit_fault = area[fault_at]; // Error - from slots given by VM (not the host address in the code)
     jit_fault_node = area[fault_at + 1];
