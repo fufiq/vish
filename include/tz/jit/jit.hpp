@@ -78,18 +78,16 @@ value port_value(value const & x, type_registry const & from, type_registry & to
 
 // An interpreter executing machine code (VM operations from code through it).
 interpreter * jit_vm = nullptr;
-// Values of VM of one call of machine code (author's decision 2026-10-01: memory - VM): value
-// number - index, arrays-arguments - cells of the caller. Table - to call (address - in the field
-// of arguments): fiber switched inside the machine code, a common table would mix them.
+// Memory of the context of calling the machine code values that VM has created for the code;
+// the code holds their addresses. To call (address in the field of arguments): fiber is
+// switched inside the machine code.
 //
-struct jit_table {
-  std::vector<value *> refs;
+struct jit_call_mem {
   std::deque<value> own;
   std::vector<value> print_args; // Print: Arguments of the line to the last
-  uint64_t add(value v) {
+  value * add(value v) {
     own.push_back(std::move(v));
-    refs.push_back(&own.back());
-    return refs.size() - 1;
+    return &own.back();
   }
 };
 // Excluding the language from node that VM computed: machine code is labeled vm_error
@@ -2266,13 +2264,13 @@ value jit_bits_value(uint64_t kind, uint64_t b) {
   return kind == 2 ? value(std::bit_cast<double>(b)) : kind == 3 ? value(b != 0) : value(int64_t(b));
 }
 uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t want) {
-  auto & tb = *reinterpret_cast<jit_table *>(buf[0]);
+  auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
   uint64_t n = buf[1];
   scope * s = vm.new_scope(vm.globals);
   for(uint64_t i = 0; i < n; ++i) {
     uint64_t * e = buf + 2 + 3 * i;
     symbol name = vm.db.as<n_ident>(node_id{uint32_t(e[0])}).name;
-    if(e[1] == 9) s->alias(name, tb.refs[std::size_t(e[2])]);
+    if(e[1] == 9) s->alias(name, reinterpret_cast<value *>(e[2])); // The value of VM is at the cell address
     else s->declare(name, jit_bits_value(e[1], e[2]));
   }
   interpreter::flow r = vm.eval(at, s, 0);
@@ -2289,7 +2287,7 @@ uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t wa
   }
   if(!r.normal()) throw diagnostic("внутренняя ошибка JIT: return/break в узле, который вычисляет VM", vm.db[at].where);
   if(want == 0) return 0;
-  if(want == 9) return tb.add(std::move(r.v));
+  if(want == 9) return reinterpret_cast<uint64_t>(mem.add(std::move(r.v)));
   uint64_t b = jit_value_bits(r.v, want);
   if(jit_fault) jit_fault_node = at.value;
   return b;
@@ -2307,31 +2305,13 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       return 0;
     }
     // print (author's decision 2026-10-01: memory and output - in VM, through the service): 6 - value (bits, type), 7 - string
-    // literal node ; id - table of call values, bit 40 node - the last argument 8 - node at calculates the interpreter (what the
-    // compiler in the language does not know): id - buffer {таблица, n, (узел имени, вид, биты) × n} , type 1-3 - scalar, 9 - value
-    // number; modified s - back to the buffer; bits - type of the result
+    // literal node; id - table of call values, bit 40 node - the last argument 8 - node at calculates the interpreter (what the
+    // compiler in the language does not know): id - buffer {память вызова, n, (узел имени, вид, биты) × n}, type 1-3 - scalar, 9 -
+    // the address of the cell value of VM; modified s - back to the buffer; bits - the type of result
     //
     if(op == 8) return jit_eval_node(vm, at, reinterpret_cast<uint64_t *>(id), bits);
-    // 9, 10 - data and array size by number (id - table, bits - number, type - jt)
-    if(op == 9 || op == 10) {
-      auto & tb = *reinterpret_cast<jit_table *>(id);
-      value * v = tb.refs[std::size_t(bits)];
-      if(!v->is<array_v>()) {
-        jit_fault = uint64_t(jit_fault_kind::layout);
-        jit_fault_node = at.value;
-        return 0;
-      }
-      array_v & a = v->as<array_v>();
-      if(op == 10) return a.size();
-      void * d = jit_array_data(&a, t == jt::arr_f64 ? 2 : 1);
-      if(!d) {
-        jit_fault = uint64_t(jit_fault_kind::layout);
-        jit_fault_node = at.value;
-      }
-      return reinterpret_cast<uint64_t>(d);
-    }
     if(op == 6 || op == 7) {
-      auto & pa = reinterpret_cast<jit_table *>(id)->print_args;
+      auto & pa = reinterpret_cast<jit_call_mem *>(id)->print_args;
       if(op == 7) pa.push_back(value(vm.db.as<n_str>(at).value));
       else if(t == jt::f64_) pa.push_back(value(std::bit_cast<double>(bits)));
       else if(t == jt::bool_) pa.push_back(value(bits != 0));
@@ -2404,7 +2384,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   if(!code) return std::nullopt;
 
   std::vector<uint64_t> raw(vals.size());
-  std::vector<value *> cells(vals.size()); // cell arrays-arguments - in the table of values
+  std::vector<value *> cells(vals.size()); // Argument array cells: the compiler code in the language holds their addresses
   for(uint32_t i = 0; i < vals.size(); ++i) {
     value const & v = vals[i];
     if(v.is<int64_t>()) raw[i] = uint64_t(v.as<int64_t>());
@@ -2444,24 +2424,23 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   jit_vm = this;
   auto entry = reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
   uint64_t bits;
-  jit_table table;
-  if(code->by_lang) { // Compiler code in language: array - {данные, размер, номер}, behind arguments - error slots
+  jit_call_mem mem;
+  if(code->by_lang) { // Compiler code in language: array - cell address (data and size code reads from it), behind the arguments - error slots
     std::vector<uint64_t> area;
     for(uint32_t i = 0; i < vals.size(); ++i) {
       if(param_types[i] == jt::arr_i64 || param_types[i] == jt::arr_f64) {
-        auto * arr = reinterpret_cast<array_v *>(raw[i]);
-        void * data = jit_array_data(arr, param_types[i] == jt::arr_i64 ? 1 : 2);
-        if(!data) throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[f].where);
-        area.push_back(reinterpret_cast<uint64_t>(data));
-        area.push_back(arr->size());
-        table.refs.push_back(cells[i]);
-        area.push_back(table.refs.size() - 1);
+        value * c = cells[i];
+        if(array_v const * b = c->as<array_v>().borrowed) c = cell_of(b); // loan
+        array_v const & arr = c->as<array_v>();
+        auto want = param_types[i] == jt::arr_i64 ? array_v::layout::ints : array_v::layout::floats;
+        if(!arr.empty() && arr.kind() != want) throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[f].where);
+        area.push_back(reinterpret_cast<uint64_t>(c));
       } else area.push_back(raw[i]);
     }
     std::size_t fault_at = area.size();
     area.insert(area.end(), 4, 0); // type of error, node, thrown value, its type
     area.push_back(reinterpret_cast<uint64_t>(&jit_vm_service)); // VM service (streams, print, node)
-    area.push_back(reinterpret_cast<uint64_t>(&table)); // VM value of this call
+    area.push_back(reinterpret_cast<uint64_t>(&mem)); // memory
     bits = entry(area.data());
     jit_fault = area[fault_at]; // Error - from slots given by VM (not the host address in the code)
     jit_fault_node = area[fault_at + 1];

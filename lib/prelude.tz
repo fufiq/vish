@@ -481,6 +481,9 @@ jit_compile(cg, f, types, type result) {
   array{acc, second, acc_f, second_f, argbase, frame, stack, third, ca0, ca1, ca2, ca3, cret2} = cg.model();
   ok = true;
   why = "";
+  // массив — адрес ячейки значения VM; данные и размер код читает из неё в момент обращения
+  // (§12.2: память — у VM, без копий в кадре): смещения сообщает VM
+  array{a_data, a_size} = jit_layout();
   bad(str w) => {
     if(ok) why = w;
     ok = false;
@@ -531,8 +534,15 @@ jit_compile(cg, f, types, type result) {
   };
   is_stream(type t) => (t == stream(i64)) || ((t == stream(f64)) || (t == stream(bool)));
   is_arr(type t) => (t == array(i64)) || (t == array(f64));
-  // значение VM (решение автора 2026-10-01: память — у VM): в слоте — номер в таблице
-  // значений вызова; у массива ещё данные и размер для кода
+  // массив с типом элементов, известным позже (array{} до push): в слоте всё равно адрес ячейки
+  arr_like(type t) => is_arr(t) || (type_family(t) == type_family(array(i64)));
+  // тип массива переменной s по месту o: у разбора — по месту использования
+  arr_type(i64 s, o) => if(is_arr(env[s].kind)) env[s].kind else {
+    u = jit_type(o, ctx);
+    if(given(u)) u else env[s].kind
+  };
+  // значение VM (решение автора 2026-10-01: память — у VM): в слоте — адрес его
+  // ячейки (массив — тоже: данные и размер код читает из ячейки)
   is_handle(type t) => (t != unit) && (!((t == i64) || ((t == bool) || ((t == f64) || is_stream(t)))) && (t != jc_range));
   scalar(type t) => (t == i64) || ((t == bool) || ((t == f64) || is_stream(t))); // поток — его номер
   elem(type t) => if((t == array(f64)) || (t == stream(f64))) f64 else if(t == stream(bool)) bool else i64;
@@ -579,7 +589,7 @@ jit_compile(cg, f, types, type result) {
     top += 1;
   };
   declare(str name, type kind) => {
-    s = alloc(if(is_arr(kind)) 3 else 1); // массив — {данные, размер, номер значения VM}
+    s = alloc(1); // массив и значение VM — адрес ячейки
     put(jc_var{name, kind, s, false, f, 0, 0, 0, 0});
     s
   };
@@ -800,12 +810,21 @@ jit_compile(cg, f, types, type result) {
   };
   // индекс в acc, проверка границ по размеру массива (запись s); данные — в second
   checked(i64 s, e) => {
-    put_bytes(cg.load(second, frame, off(env[s].slot + 1)));
+    arr_size(second, env[s].slot);
     jump_to(trap(1, e), (i64 o) => {
       fault = o;
       cg.check_index(acc, second)
     });
-    put_bytes(cg.load(second, frame, off(env[s].slot)));
+    arr_data(second, env[s].slot);
+  };
+  // размер и данные массива — из его ячейки (слот sl — её адрес)
+  arr_size(i64 r, i64 sl) => {
+    put_bytes(cg.load(r, frame, off(sl)));
+    put_bytes(cg.load(r, r, a_size));
+  };
+  arr_data(i64 r, i64 sl) => {
+    put_bytes(cg.load(r, frame, off(sl)));
+    put_bytes(cg.load(r, r, a_data));
   };
   // a[i] — парный оператор [] (узел n_op "[]")
   index_parts(e) => if(code_kind(e) == n_op) {
@@ -835,11 +854,12 @@ jit_compile(cg, f, types, type result) {
     s = var_of(o);
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
     else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
-    else if(!is_arr(env[s].kind)) bad("индекс не массива");
+    else if(!arr_like(env[s].kind)) bad("индекс не массива");
+    else if(!is_arr(arr_type(s, o))) bad("тип элементов массива неизвестен");
     else {
       gen(ix);
       checked(s, e);
-      put_bytes(if(env[s].kind == array(f64)) cg.load_index_f64(acc_f, second, acc) else cg.load_index(acc, second, acc));
+      put_bytes(if(arr_type(s, o) == array(f64)) cg.load_index_f64(acc_f, second, acc) else cg.load_index(acc, second, acc));
     }
   };
   assign(str name, e, bool fresh) => {
@@ -882,7 +902,7 @@ jit_compile(cg, f, types, type result) {
   gen_size(xs) => {
     s = var_of(xs[0]);
     if((s < 0) || env[s].thunk) bad("обращение .size не к переменной");
-    else if(is_arr(env[s].kind)) put_bytes(cg.load(acc, frame, off(env[s].slot + 1)));
+    else if(arr_like(env[s].kind)) arr_size(acc, env[s].slot);
     else if(env[s].kind == jc_range) put_bytes(cg.load(acc, frame, off(env[s].slot)));
     else bad(".size не массива");
   };
@@ -907,10 +927,10 @@ jit_compile(cg, f, types, type result) {
     } else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: значение — на стек, индекс, границы, запись
       array{o, ix} = index_parts(xs[0]);
       s = var_of(o);
-      if((s < 0) || (env[s].thunk || !is_arr(env[s].kind))) bad("запись не в элемент массива-переменной");
+      if((s < 0) || (env[s].thunk || !arr_like(env[s].kind))) bad("запись не в элемент массива-переменной");
       else {
         t = ty(xs[1]);
-        if(t != elem(env[s].kind)) bad("тип элемента");
+        if(!is_arr(arr_type(s, o)) || (t != elem(arr_type(s, o)))) bad("тип элемента");
         wrote(env[s].slot);
         gen(xs[1]);
         if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
@@ -959,10 +979,26 @@ jit_compile(cg, f, types, type result) {
       }
     }
   };
+  // a.f(b) ≡ f(a, b), если у a нет поля f 
+// вызов с первым аргументом a; агрегат — у VM (поле-функция)
+  dotted(callee) => (code_kind(callee) == n_op) && {
+    array{op, ys, post} = code_fields(callee);
+    post && ((ys.size == 1) && (code_name(callee) != ""))
+  };
   gen_call(e) => {
+    array{callee, xs0, ...rest} = code_fields(e);
+    if(dotted(callee)) {
+      array{_, ys, _} = code_fields(callee);
+      if(is_handle(ty(ys[0])) && !is_arr(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
+      else {
+        args = array{ys[0]};
+        for(x : xs0) args.push(x);
+        gen_named_call(e, code_name(callee), args);
+      }
+    } else gen_named_call(e, callee_name(callee), xs0);
+  };
+  gen_named_call(e, str name, xs) => {
     kc = jit_const(e, ctx);
-    array{callee, xs, ...rest} = code_fields(e);
-    name = callee_name(callee);
     v = find(name);
     if(kc.size == 1) gen_const(kc[0]);
     else if(name == "") bad("вызов значения");
@@ -990,7 +1026,8 @@ jit_compile(cg, f, types, type result) {
       if((s < 0) || env[s].thunk) bad("is_index не над переменной");
       else {
         gen(xs[0]);
-        put_bytes(cg.load(second, frame, off(if(env[s].kind == jc_range) env[s].slot else env[s].slot + 1)));
+        if(env[s].kind == jc_range) put_bytes(cg.load(second, frame, off(env[s].slot)));
+        else arr_size(second, env[s].slot);
         put_bytes(cg.is_index(acc, second));
       }
     } else gen_inline(e, name, xs);
@@ -1036,7 +1073,7 @@ jit_compile(cg, f, types, type result) {
     if(tries.size > 0) bad("print внутри try");
     else if(fusing && !in_b) bad("генератор: print");
     else if(xs.size == 0) {
-      table_to(ca1);
+      mem_to(ca1);
       vm_service_code(6, 1 << 8, e);
     } else {
       simple = true;
@@ -1049,7 +1086,7 @@ jit_compile(cg, f, types, type result) {
   };
   gen_print_arg(e, x, i64 last) => {
     if(code_kind(x) == n_str) {
-      table_to(ca1);
+      mem_to(ca1);
       vm_service_code(7, last << 8, x);
     } else {
       t = ty(x);
@@ -1058,13 +1095,13 @@ jit_compile(cg, f, types, type result) {
         gen(x);
         if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
         put_bytes(cg.move(ca2, acc));
-        table_to(ca1);
+        mem_to(ca1);
         vm_service_code(6, jt_code(t) | (last << 8), e);
       }
     }
   };
-  // адрес таблицы значений вызова — в регистр r (из области аргументов)
-  table_to(i64 r) => {
+  // адрес памяти контекста вызова — в регистр r (из области аргументов)
+  mem_to(i64 r) => {
     put_bytes(cg.load(r, frame, off(args_slot)));
     put_bytes(cg.load(r, r, 8 * (ap + 5)));
   };
@@ -1179,8 +1216,8 @@ jit_compile(cg, f, types, type result) {
   call_self_with(xs) => {
     if(fusing && !in_b) bad("генератор: настоящий вызов");
     ws = 0;
-    for(i : range(xs.size)) ws += if(is_arr(types[i])) 3 else 1;
-    w = ws + 6; // + ошибка (4), служба VM, таблица значений
+    ws = xs.size; // массив — адрес ячейки (одно слово)
+    w = ws + 6; // + ошибка (4), служба VM, память вызова
     k0 = alloc(w);
     area(i64 j) => off((k0 + w) - (1 + j));
     j = 0;
@@ -1191,12 +1228,8 @@ jit_compile(cg, f, types, type result) {
         else {
           put_bytes(cg.load(acc, frame, off(env[s].slot)));
           put_bytes(cg.store(frame, area(j), acc));
-          put_bytes(cg.load(acc, frame, off(env[s].slot + 1)));
-          put_bytes(cg.store(frame, area(j + 1), acc));
-          put_bytes(cg.load(acc, frame, off(env[s].slot + 2)));
-          put_bytes(cg.store(frame, area(j + 2), acc));
         }
-        j += 3;
+        j += 1;
       } else {
         t = ty(xs[i]);
         if(t != types[i]) bad(fmt"аргумент {t} вместо {types[i]}");
@@ -1208,7 +1241,7 @@ jit_compile(cg, f, types, type result) {
     }
     put_bytes(cg.load_const(acc, 0));
     put_bytes(cg.store(frame, area(ws), acc));
-    for(q : range(2)) { // служба VM и таблица значений — из своей области
+    for(q : range(2)) { // служба VM и память вызова — из своей области
       put_bytes(cg.load(acc, frame, off(args_slot)));
       put_bytes(cg.load(acc, acc, 8 * ((ap + 4) + q)));
       put_bytes(cg.store(frame, area((ws + 4) + q), acc));
@@ -1594,7 +1627,7 @@ jit_compile(cg, f, types, type result) {
     array{items, ...rest} = code_fields(body);
     (items.size > 0) && is_call_of(items[0], "require")
   };
-  // результат — в acc (f64 — в acc_f), значение VM — номер в acc
+  // результат — в acc (f64 — в acc_f), значение VM — адрес ячейки в acc
   vm_eval(e, type t) => {
     vs = vm_vars(e);
     n = vs.size;
@@ -1612,8 +1645,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.store(frame, buf(2 + (3 * i)), acc));
       put_bytes(cg.load_const(acc, vm_kind(v.kind)));
       put_bytes(cg.store(frame, buf(3 + (3 * i)), acc));
-      if(is_arr(v.kind)) put_bytes(cg.load(acc, frame, off(v.slot + 2)));
-      else if(v.kind == f64) {
+      if(v.kind == f64) {
         load_slot(f64, v.slot);
         put_bytes(cg.move_from_f64(acc, acc_f));
       } else put_bytes(cg.load(acc, frame, off(v.slot)));
@@ -1626,8 +1658,7 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.store(frame, off(keep), acc));
     for(i : range(n)) {
       v = env[vs[i][1]];
-      if(is_arr(v.kind)) refresh_array(v.kind, v.slot, e);
-      else if(!is_handle(v.kind)) { // скаляр мог измениться (mut-параметр вызова)
+      if(!is_handle(v.kind)) { // скаляр мог измениться (mut-параметр вызова)
         put_bytes(cg.load(acc, frame, buf(4 + (3 * i))));
         if(v.kind == f64) put_bytes(cg.move_to_f64(acc_f, acc));
         store_bytes(v.kind, v.slot);
@@ -1636,17 +1667,7 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.load(acc, frame, off(keep)));
     if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
   };
-  // данные и размер массива по номеру значения VM (op 9, 10)
-  refresh_array(type t, i64 sl, e) => {
-    for(q : range(2)) {
-      put_bytes(cg.load(acc, frame, off(args_slot)));
-      put_bytes(cg.load(ca1, acc, 8 * (ap + 5)));
-      put_bytes(cg.load(ca2, frame, off(sl + 2)));
-      vm_service(9 + q, t, e);
-      put_bytes(cg.store(frame, off(sl + q), acc));
-    }
-  };
-  // x = e, где e — значение VM: номер в слот (у массива — ещё данные и размер)
+  // x = e, где e — значение VM: адрес его ячейки в слот
   assign_handle(str name, e, type t, bool fresh) => {
     vm_or_bad(e, fmt"значение {t}");
     s = if(fresh) -1 else find(name);
@@ -1660,8 +1681,7 @@ jit_compile(cg, f, types, type result) {
       else {
         sl = env[s].slot;
         wrote(sl);
-        put_bytes(cg.store(frame, off(if(is_arr(t)) sl + 2 else sl), acc));
-        if(is_arr(t)) refresh_array(t, sl, e);
+        put_bytes(cg.store(frame, off(sl), acc));
       }
     }
   };
@@ -1681,7 +1701,7 @@ jit_compile(cg, f, types, type result) {
   for(i : range(fps.size)) {
     array{pname, ...prest} = code_fields(fps[i]);
     s = declare(pname, types[i]);
-    for(w : range(if(is_arr(types[i])) 3 else 1)) {
+    for(w : range(1)) {
       put_bytes(cg.load(acc, argbase, 8 * ap));
       put_bytes(cg.store(frame, off(s + w), acc));
       ap += 1;

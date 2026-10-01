@@ -322,6 +322,23 @@ void array_v::set(uint32_t i, value v) {
   items[i] = std::move(v);
 }
 
+// Dense array in the cell value: data offsets and size - machine code reads them from memory
+// (§12.2, without copies); cell array - loan indicates the array in the cell.
+struct array_offsets {
+  uint64_t data, size, in_value;
+};
+array_offsets const & array_layout() {
+  static array_offsets o = [] {
+    value v{array_v{}};
+    auto const * b = reinterpret_cast<char const *>(&v);
+    auto const & a = v.as<array_v>();
+    return array_offsets{uint64_t(reinterpret_cast<char const *>(&a.dense.data) - b), uint64_t(reinterpret_cast<char const *>(&a.dense.n) - b),
+        uint64_t(reinterpret_cast<char const *>(&a) - b)};
+  }();
+  return o;
+}
+value * cell_of(array_v const * a) { return reinterpret_cast<value *>(const_cast<char *>(reinterpret_cast<char const *>(a)) - array_layout().in_value); }
+
 // Whether the samples are the same types (structurally, without values).
 bool same_shape(value const & a, value const & b);
 

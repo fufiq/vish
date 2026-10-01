@@ -95,8 +95,8 @@ address_space & space() {
 // 8-byte word vector (i64, f64 - bits): size and capacity - out of data.
 struct words {
   uint64_t * data = nullptr;
-  uint32_t n = 0;
-  uint32_t cap = 0; // words: small - 2^k, growing - on connected pages
+  uint64_t n = 0; // word: machine code reads size from memory
+  uint64_t cap = 0; // words: small - 2^k, growing - on connected pages
   bool big = false;
 
   words() = default;
@@ -118,7 +118,7 @@ struct words {
   }
   ~words() { release(); }
 
-  uint32_t size() const { return n; }
+  uint32_t size() const { return uint32_t(n); }
   bool empty() const { return n == 0; }
   uint64_t & operator[](uint32_t i) { return data[i]; }
   uint64_t operator[](uint32_t i) const { return data[i]; }
@@ -129,33 +129,33 @@ struct words {
   }
 
   // place under want words: small grows in classes, then - his range (no longer moves)
-  void reserve(uint32_t want) {
+  void reserve(uint64_t want) {
     if(want <= cap) return;
     if(big) {
       size_t have = size_t(cap) * 8, need = (size_t(want) * 8 + address_space::page - 1) / address_space::page * address_space::page;
       need = std::max(need, have * 2); // pages - with a margin of twice (without moving)
       need = std::min(need, address_space::big_range);
       address_space::commit(reinterpret_cast<std::byte *>(data) + have, need - have);
-      cap = uint32_t(need / 8);
+      cap = need / 8;
       return;
     }
     uint64_t * old = data;
-    uint32_t old_cap = cap;
-    uint32_t grow = std::max(want, cap * 2); // petty
+    uint64_t old_cap = cap;
+    uint64_t grow = std::max(want, cap * 2); // petty
     if(grow <= address_space::small_max) {
-      uint32_t k = address_space::class_of(grow);
+      uint32_t k = address_space::class_of(uint32_t(grow));
       data = space().take_small(k);
-      cap = uint32_t(1) << k;
+      cap = uint64_t(1) << k;
     } else {
       data = space().take_big();
       big = true;
       size_t need = (size_t(want) * 8 + address_space::page - 1) / address_space::page * address_space::page;
       address_space::commit(data, need);
-      cap = uint32_t(need / 8);
+      cap = need / 8;
     }
     if(old) {
       if(n) std::memcpy(data, old, size_t(n) * 8);
-      space().give_small(old, address_space::class_of(old_cap));
+      space().give_small(old, address_space::class_of(uint32_t(old_cap)));
     }
   }
 
@@ -171,7 +171,7 @@ struct words {
   void release() {
     if(!data) return;
     if(big) space().give_big(data, size_t(cap) * 8);
-    else space().give_small(data, address_space::class_of(cap));
+    else space().give_small(data, address_space::class_of(uint32_t(cap)));
     data = nullptr;
     n = cap = 0;
     big = false;
@@ -196,7 +196,7 @@ struct str_v {
   char operator[](uint32_t i) const { return reinterpret_cast<char const *>(w.data)[i]; }
   void append(std::string_view s) {
     if(s.empty()) return;
-    uint32_t need = uint32_t((len + s.size() + 7) / 8);
+    uint64_t need = (len + s.size() + 7) / 8;
     w.reserve(need);
     std::memcpy(reinterpret_cast<char *>(w.data) + len, s.data(), s.size());
     len += uint32_t(s.size());

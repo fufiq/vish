@@ -4843,6 +4843,9 @@ struct interpreter {
       }
       return value(type_v{types.named(d)});
     }
+    // Data offsets and the size of the dense array in the VM value cell (§12.2): machine code reads
+    // them from memory
+    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
       observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
@@ -4893,6 +4896,7 @@ struct interpreter {
         else if(db.is<n_var>(c)) s = db.as<n_var>(c).name;
         else if(db.is<n_param>(c)) s = db.as<n_param>(c).name;
         else if(db.is<n_call>(c) && db.is<n_ident>(db.as<n_call>(c).callee)) s = db.as<n_ident>(db.as<n_call>(c).callee).name;
+        else if(db.is_member(c)) s = db.member_of(c).name; // a.x - name x
         return value(std::string(s ? str(s) : ""));
       }
       if(n == "code_text") return value(printer(db).print(c));

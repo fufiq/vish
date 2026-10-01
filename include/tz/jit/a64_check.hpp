@@ -120,17 +120,12 @@ struct a64_check {
     std::vector<uint64_t> d_cells;
     for(std::size_t i = 0; i < eng.fns.size(); ++i) d_cells.push_back(data_word(0));
     std::vector<uint64_t> d_args, d_arrays; // for array: header {данные, размер} and data
-    // Compiler code in language: array in arguments - {данные, размер, номер}, behind them - error slots
+    // Compiler code in language: Array in arguments - the address of the value cell (data and size by
+    // VM offsets), behind the arguments - error slots
     bool lang = main_fn.by_lang;
     uint64_t d_lang_fault = 0;
-    for(auto const & a: args) {
-      d_args.push_back(data_word(0));
-      if(lang && a.array) {
-        data_word(0);
-        data_word(0);
-      }
-    }
-    if(lang) { // type of error, node, thrown value, its type, VM service, table of values
+    for(std::size_t i = 0; i < args.size(); ++i) d_args.push_back(data_word(0));
+    if(lang) { // type of error, node, thrown value, its type, VM service, call memory
       d_lang_fault = data_word(0);
       for(int k = 0; k < 5; ++k) data_word(0);
     }
@@ -142,7 +137,9 @@ struct a64_check {
         continue;
       }
       d_headers.push_back(data_word(0));
-      data_word(a.items.size());
+      if(lang) // Value cell: words before data offsets and size
+        for(uint64_t k = 1; k <= std::max(array_layout().data, array_layout().size) / 8; ++k) data_word(0);
+      else data_word(a.items.size());
       d_arrays.push_back(data.size());
       for(uint64_t v: a.items) data_word(v);
     }
@@ -250,12 +247,12 @@ struct a64_check {
         put(d_args[i], args[i].bits);
         continue;
       }
-      if(lang) { // {data, size, number}
-        put(d_args[i], base + data_addr + d_arrays[i]);
-        put(d_args[i] + 8, args[i].items.size());
-        put(d_args[i] + 16, i);
-      } else put(d_args[i], base + data_addr + d_headers[i]);
-      if(args[i].same_as < 0) put(d_headers[i], args[i].items.empty() ? 8 : base + data_addr + d_arrays[i]);
+      put(d_args[i], base + data_addr + d_headers[i]);
+      if(args[i].same_as >= 0) continue;
+      if(lang) { // Value cell: data and size by VM offsets
+        put(d_headers[i] + array_layout().data, args[i].items.empty() ? 8 : base + data_addr + d_arrays[i]);
+        put(d_headers[i] + array_layout().size, args[i].items.size());
+      } else put(d_headers[i], args[i].items.empty() ? 8 : base + data_addr + d_arrays[i]);
     }
 
     std::vector<uint8_t> out(code_at, 0);
