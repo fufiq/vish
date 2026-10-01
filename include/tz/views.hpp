@@ -172,7 +172,7 @@ struct residual_view {
       auto op = db.strings.text(o.op);
       return (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && o.args[0] == n;
     }
-    if(db.is<n_index>(p) && db.as<n_index>(p).object == n) return is_lvalue(p);
+    if(db.is_index(p) && db.index_of(p).object == n) return is_lvalue(p);
     return false;
   }
 
@@ -298,9 +298,9 @@ struct slice_view {
     } else if(db.is<n_op>(n) && is_assign(db.as<n_op>(n))) {
       auto const & o = db.as<n_op>(n);
       node_id t = o.args[0];
-      while(db.is<n_index>(t)) {
-        uses(db.as<n_index>(t).index, s.uses);
-        t = db.as<n_index>(t).object;
+      while(db.is_index(t)) {
+        uses(db.index_of(t).index, s.uses);
+        t = db.index_of(t).object;
       }
       if(db.is<n_ident>(t)) {
         s.defs.insert(db.as<n_ident>(t).name);

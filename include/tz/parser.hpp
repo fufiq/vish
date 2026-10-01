@@ -651,7 +651,7 @@ struct parser {
           advance();
           node_id k = expression();
           expect_close(']');
-          e = db.add(n_index{e, k}, {i0, toks[pos - 1].where.end});
+          e = db.add(n_op{db.strings.intern("[]"), {e, k}}, {i0, toks[pos - 1].where.end});
         }
         e = postfix(e);
         expect_op(":");
@@ -1222,7 +1222,7 @@ struct parser {
         advance();
         node_id i = expression();
         expect_close(']');
-        e = db.add(n_index{e, i}, {start, toks[pos - 1].where.end});
+        e = db.add(n_op{db.strings.intern("[]"), {e, i}}, {start, toks[pos - 1].where.end});
       } else if(is_open('{') && here().glued && db.is<n_ident>(e)) {
         node_list items = brace_items();
         e = db.add(n_construct{e, std::move(items)}, {start, toks[pos - 1].where.end});

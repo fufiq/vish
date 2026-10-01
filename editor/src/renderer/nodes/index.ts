@@ -26,7 +26,6 @@ import './expressions/op';
 import './expressions/chain';
 import './expressions/member';
 import './expressions/field';
-import './expressions/index';
 import './expressions/lambda';
 import './expressions/construct';
 import './expressions/quote';

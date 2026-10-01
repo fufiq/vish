@@ -623,7 +623,10 @@ jit_compile(cg, f, types, type result) {
     else if(k == n_float) f64
     else if(k == n_op) {
       array{op, xs, _} = code_fields(e);
-      if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool
+      if(op == "[]") {
+        a = ty(xs[0]);
+        if(a == jc_range) i64 else elem(a)
+      } else if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool
       else ty(xs[0])
     } else if(k == n_chain) {
       c = jit_chain(e, ctx);
@@ -667,7 +670,6 @@ jit_compile(cg, f, types, type result) {
       if(t.size == 0) bad("цепочка: дерево зависит от пути");
       else gen(t[0]);
     } else if(k == n_call) gen_call(e);
-    else if(k == n_index) gen_index(e);
     else if(k == n_member) {
       array{o, name} = code_fields(e);
       s = var_of(o);
@@ -757,8 +759,13 @@ jit_compile(cg, f, types, type result) {
     });
     put_bytes(cg.load(second, frame, off(env[s].slot)));
   };
+  // a[i] — парный оператор [] (узел n_op "[]")
+  index_parts(e) => if(code_kind(e) == n_op) {
+    array{op, xs, _} = code_fields(e);
+    if((op == "[]") && (xs.size == 2)) xs else array{}
+  } else array{};
   gen_index(e) => {
-    array{o, ix} = code_fields(e);
+    array{o, ix} = index_parts(e);
     s = var_of(o);
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
     else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
@@ -803,7 +810,8 @@ jit_compile(cg, f, types, type result) {
   };
   gen_op(e) => {
     array{op, xs, _} = code_fields(e);
-    if(xs.size == 1) {
+    if(op == "[]") gen_index(e);
+    else if(xs.size == 1) {
       t = ty(xs[0]);
       gen(xs[0]);
       g = op_codegen(cg, e, array{t});
@@ -813,8 +821,8 @@ jit_compile(cg, f, types, type result) {
     } else if((op == "=") && (code_kind(xs[0]) == n_ident)) {
       array{name} = code_fields(xs[0]);
       assign(name, xs[1], false);
-    } else if((op == "=") && (code_kind(xs[0]) == n_index)) { // xs[i] = v: значение — на стек, индекс, границы, запись
-      array{o, ix} = code_fields(xs[0]);
+    } else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: значение — на стек, индекс, границы, запись
+      array{o, ix} = index_parts(xs[0]);
       s = var_of(o);
       if((s < 0) || (env[s].thunk || !is_arr(env[s].kind))) bad("запись не в элемент массива-переменной");
       else {

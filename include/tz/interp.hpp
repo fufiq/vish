@@ -980,8 +980,8 @@ struct interpreter {
   void written(node_id target, scope * env) {
     if(!checking()) return;
     bool whole = db.is<n_ident>(target);
-    while(db.is<n_index>(target) || db.is<n_member>(target))
-      target = db.is<n_index>(target) ? db.as<n_index>(target).object : db.as<n_member>(target).object;
+    while(db.is_index(target) || db.is<n_member>(target))
+      target = db.is_index(target) ? db.index_of(target).object : db.as<n_member>(target).object;
     if(!db.is<n_ident>(target)) return;
     value * cell = find(env, db.as<n_ident>(target).name);
     if(!cell || cell->is<thunk_v>()) return;
@@ -1937,7 +1937,7 @@ struct interpreter {
     if(symbol h = db.hide_name(n)) return h == name; // Hide Self - Changing the location of the caller
     if(db.is<n_var>(n) && db.as<n_var>(n).ref) { // auto&e = name[i] - the entry in e changes the name
       node_id t = db.as<n_var>(n).init;
-      while(db.is<n_index>(t)) t = db.as<n_index>(t).object;
+      while(db.is_index(t)) t = db.index_of(t).object;
       if(db.is<n_ident>(t) && db.as<n_ident>(t).name == name) return true;
     }
     if(db.is<n_lambda>(n)) { // construction block - part of the code; closure - no
@@ -1958,8 +1958,8 @@ struct interpreter {
       auto op = str(o.op);
       if((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && !o.args.empty()) {
         node_id t = o.args[0];
-        while(db.is<n_index>(t) || db.is<n_member>(t))
-          t = db.is<n_index>(t) ? db.as<n_index>(t).object : db.as<n_member>(t).object;
+        while(db.is_index(t) || db.is<n_member>(t))
+          t = db.is_index(t) ? db.index_of(t).object : db.as<n_member>(t).object;
         if(db.is<n_ident>(t) && db.as<n_ident>(t).name == name) return true;
       }
     }
@@ -1968,8 +1968,8 @@ struct interpreter {
       if(auto it = functions.find(callee); it != functions.end())
         for(uint32_t k = 0; k < args.size(); ++k) {
           node_id a = args[k];
-          while(db.is<n_index>(a) || db.is<n_member>(a))
-            a = db.is<n_index>(a) ? db.as<n_index>(a).object : db.as<n_member>(a).object;
+          while(db.is_index(a) || db.is<n_member>(a))
+            a = db.is_index(a) ? db.index_of(a).object : db.as<n_member>(a).object;
           if(!db.is<n_ident>(a) || db.as<n_ident>(a).name != name) continue;
           for(node_id fn: it->second)
             if(writes_param(fn, k)) return true;
@@ -2353,7 +2353,7 @@ struct interpreter {
     return ok(lift(obj, [&](value const & o) { return member(o, sym(name), db[n].where); }));
   }
 
-  flow eval_node(node_id n, n_index const & i, scope * env, uint32_t frame) {
+  flow eval_index(node_id n, index_view const & i, scope * env, uint32_t frame) {
     span where = db[n].where;
     if(value const * arr = peek(i.object, env); arr && arr->is<array_v>()) {
       TZ_TRY(idx, eval(i.index, env, frame));
@@ -2369,7 +2369,7 @@ struct interpreter {
     return index_rt(n, i, obj, idx, env);
   }
 
-  flow index_rt(node_id n, n_index const & i, value const & obj, value const & idx, scope * env) {
+  flow index_rt(node_id n, index_view const & i, value const & obj, value const & idx, scope * env) {
     span where = db[n].where;
     // index type - property of instance, not values: place of use instantiation error
     // (§13.4), including when array and index is run-time
@@ -2418,7 +2418,7 @@ struct interpreter {
   }
 
   // An index is a safe index of this array (a fact on the value of the index).
-  bool index_holds(n_index const & i, value const & idx, scope * env) {
+  bool index_holds(index_view const & i, value const & idx, scope * env) {
     fact const * f = fact_of(idx, fact::index_of);
     if(!f || !db.is<n_ident>(i.object)) return false;
     value const * cell = find(env, db.as<n_ident>(i.object).name);
@@ -2426,7 +2426,7 @@ struct interpreter {
   }
 
   // The range(xs.size) element on the safe index is the safe xs index.
-  uint32_t index_result(n_index const & i, value const & arr, value const & idx, scope * env) {
+  uint32_t index_result(index_view const & i, value const & arr, value const & idx, scope * env) {
     fact const * r = fact_of(arr, fact::range_of);
     if(!r || !index_holds(i, idx, env)) return 0;
     return add_fact({fact::index_of, r->cell, r->name, r->version});
@@ -2437,7 +2437,7 @@ struct interpreter {
       emit({report_event::unproven, {}, {}, {}, {}, {}, n.value});
       return;
     }
-    auto const & i = db.as<n_index>(n);
+    auto const & i = db.index_of(n);
     std::string text = db.is<n_ident>(i.object) && db.is<n_ident>(i.index)
         ? cat(str(db.as<n_ident>(i.object).name), "[", str(db.as<n_ident>(i.index).name), "]", index_write == n ? " (запись)" : "")
         : std::string("индекс");
@@ -2693,8 +2693,8 @@ struct interpreter {
 
   // auto&e = v[i] / place-argument of the variable parameter: reference to the element.
   std::optional<value> element_ref(node_id place_node, scope * env, uint32_t frame, node_id born) {
-    if(!db.is<n_index>(place_node) || !db.is<n_ident>(db.as<n_index>(place_node).object)) return std::nullopt;
-    auto const & i = db.as<n_index>(place_node);
+    if(!db.is_index(place_node) || !db.is<n_ident>(db.index_of(place_node).object)) return std::nullopt;
+    auto const & i = db.index_of(place_node);
     value * cell = find(env, db.as<n_ident>(i.object).name);
     if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) return std::nullopt;
     not_hidden(*cell, db.as<n_ident>(i.object).name, db[place_node].where);
@@ -3519,8 +3519,8 @@ struct interpreter {
       if(value * c = find(env, db.as<n_ident>(n).name)) return c;
       fail(cat("неизвестная переменная ", str(db.as<n_ident>(n).name)), db[n].where);
     }
-    if(db.is<n_index>(n)) { // cell of the element is only in a common array
-      auto const & i = db.as<n_index>(n);
+    if(db.is_index(n)) { // cell of the element is only in a common array
+      auto const & i = db.index_of(n);
       value * arr = place(i.object, env, frame);
       flow idx = eval(i.index, env, frame);
       if(!arr || arr->is<rt_v>() || !idx.v.known()) return nullptr;
@@ -3541,6 +3541,7 @@ struct interpreter {
   // --- operator ---
 
   flow eval_node(node_id n, n_op const & o, scope * env, uint32_t frame) {
+    if(db.is_index(n)) return eval_index(n, db.index_of(n), env, frame);
     auto op = str(o.op);
     span where = db[n].where;
     // Operator declared to be an unbuilt primitive code calls its entity (overload by
@@ -3647,8 +3648,8 @@ struct interpreter {
     written(lhs, env);
     if(db.is<n_ident>(lhs))
       if(value * c = find(env, db.as<n_ident>(lhs).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
-    if(!checking() && db.is<n_index>(lhs)) { // entry into an element: set, not cell
-      auto const & ix = db.as<n_index>(lhs);
+    if(!checking() && db.is_index(lhs)) { // entry into an element: set, not cell
+      auto const & ix = db.index_of(lhs);
       value * arr = place(ix.object, env, frame);
       if(!arr) fail("присваивание не в переменную", db[lhs].where);
       TZ_TRY(idx, eval(ix.index, env, frame));
@@ -3659,7 +3660,7 @@ struct interpreter {
     }
     value * target = place(lhs, env, frame);
     if(!target) {
-      if(checking() && db.is<n_index>(lhs)) { // entry into the run-time-array element: type reconciliation
+      if(checking() && db.is_index(lhs)) { // entry into the run-time-array element: type reconciliation
         node_id saved_write = std::exchange(index_write, lhs);
         flow cur_f = eval(lhs, env, frame);
         index_write = saved_write;
@@ -4562,7 +4563,7 @@ struct interpreter {
         continue;
       }
       // array element to variable parameter - reference to element, not copy
-      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && db.is<n_index>(args[i]) && writes_param(f, i))
+      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && db.is_index(args[i]) && writes_param(f, i))
         if(auto r = element_ref(args[i], env, 0, args[i])) {
           inner->declare(p.name, std::move(*r));
           continue;

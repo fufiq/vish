@@ -122,10 +122,6 @@ struct n_field {
   node_id object;
   node_id key;
 };
-struct n_index {
-  node_id object;
-  node_id index;
-};
 struct n_if {
   node_id cond;
   node_id then_;
@@ -248,7 +244,7 @@ struct n_native {
 };
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
-    n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_return,
+    n_call, n_op, n_member, n_field, n_if, n_loop, n_break, n_continue, n_return,
     n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
 
 struct node {
@@ -288,6 +284,12 @@ struct journal_entry {
   journal_op op;
 };
 
+// a[i]: operator node object and index []
+struct index_view {
+  node_id object;
+  node_id index;
+};
+
 struct ast_db {
   node_id add(node_kind k, span where) {
     ++revision;
@@ -323,6 +325,15 @@ struct ast_db {
     if(c.args.size() != 1 || !c.words.empty() || !is<n_ident>(c.callee) || strings.text(as<n_ident>(c.callee).name) != "require") return {};
     return c.args[0];
   }
+
+  // a[i] is a paired operator [] over an object and an index:
+// node - n_op "[]" {a, i}
+  bool is_index(node_id n) const {
+    if(!is<n_op>(n)) return false;
+    auto const & o = as<n_op>(n);
+    return o.args.size() == 2 && !o.postfix && strings.text(o.op) == "[]";
+  }
+  index_view index_of(node_id n) const { return {as<n_op>(n).args[0], as<n_op>(n).args[1]}; }
 
   // try_compile { … } - kernel call with tail unit:
 // 

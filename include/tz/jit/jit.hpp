@@ -731,7 +731,7 @@ struct jit_codegen {
     bounds(rax, rcx, n);
   }
 
-  jt gen(node_id n, n_index const & i) {
+  jt gen_index(node_id n, index_view const & i) {
     using namespace x64;
     if(slot const * r = range_slot(i.object)) { // range: element k is k
       slot rs = *r;
@@ -756,6 +756,7 @@ struct jit_codegen {
 
   jt gen(node_id n, n_op const & o) {
     using namespace x64;
+    if(db.is_index(n)) return gen_index(n, db.index_of(n));
     auto op = db.strings.text(o.op);
     if(an.user_operator(n)) { // code operator: built-in operation if its overload is not accepted by these types
       std::vector<std::string> ts;
@@ -824,8 +825,8 @@ struct jit_codegen {
       slot const * s = find(db.as<n_ident>(n).name);
       return s && !s->thunk && !is_array(s->type);
     }
-    if(db.is<n_index>(n)) {
-      auto const & i = db.as<n_index>(n);
+    if(db.is_index(n)) {
+      auto const & i = db.index_of(n);
       if(!db.is<n_ident>(i.object)) return false;
       slot const * a = find(db.as<n_ident>(i.object).name);
       if(!a || a->thunk || !is_array(a->type)) return false;
@@ -860,7 +861,7 @@ struct jit_codegen {
       else load_gpr(s, rcx);
       return s.type;
     }
-    auto const & i = db.as<n_index>(n);
+    auto const & i = db.index_of(n);
     slot a = *find(db.as<n_ident>(i.object).name);
     if(db.is<n_int>(i.index)) mv(rdx, uint64_t(db.as<n_int>(i.index).value));
     else load_gpr(*find(db.as<n_ident>(i.index).name), rdx);
@@ -1268,8 +1269,8 @@ struct jit_codegen {
       store_var(*s);
       return;
     }
-    if(db.is<n_index>(target)) {
-      auto const & ix = db.as<n_index>(target);
+    if(db.is_index(target)) {
+      auto const & ix = db.index_of(target);
       slot s = array_slot(ix.object);
       shared_write(s, n);
       jt et = s.type == jt::arr_f64 ? jt::f64_ : jt::i64_;

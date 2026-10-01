@@ -1136,11 +1136,11 @@ struct process_machine {
           if(f.name == m.name) return f.v;
       return std::nullopt;
     }
-    if(db.is<n_index>(e) && db.is<n_int>(db.as<n_index>(e).index)) {
-      auto o = access(db.as<n_index>(e).object, subject);
+    if(db.is_index(e) && db.is<n_int>(db.index_of(e).index)) {
+      auto o = access(db.index_of(e).object, subject);
       if(!o) return std::nullopt;
       mval x = deref(*o);
-      int64_t k = db.as<n_int>(db.as<n_index>(e).index).value;
+      int64_t k = db.as<n_int>(db.index_of(e).index).value;
       if(!x.is<m_arr>() || k < 0 || uint64_t(k) >= x.as<m_arr>().items.size()) return std::nullopt;
       return x.as<m_arr>().items[std::size_t(k)];
     }
@@ -1356,7 +1356,7 @@ struct process_machine {
     finish(mval{m_fn{symbol{}, n, env}});
   }
 
-  void eval_node(node_id n, n_index const & ix) {
+  void eval_index(node_id n, index_view const & ix) {
     m_task & t = top();
     if(t.phase < 2) {
       node_id next = t.phase == 0 ? ix.object : ix.index;
@@ -1380,6 +1380,7 @@ struct process_machine {
   }
 
   void eval_node(node_id n, n_op const & o) {
+    if(db.is_index(n)) return eval_index(n, db.index_of(n));
     m_task & t = top();
     std::string_view op = helper.str(o.op);
     bool assign = op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=";
@@ -1437,8 +1438,8 @@ struct process_machine {
       if(whole && c.is<m_arr>()) c.as<m_arr>().gen = ++st.array_gen; // New buffer - old links are invalid
       return finish(mval{m_unit{}});
     }
-    if(db.is<n_index>(lhs) && db.is<n_ident>(db.as<n_index>(lhs).object)) { // xs[i] = e
-      auto const & ix = db.as<n_index>(lhs);
+    if(db.is_index(lhs) && db.is<n_ident>(db.index_of(lhs).object)) { // xs[i] = e
+      auto const & ix = db.index_of(lhs);
       if(t.phase == 1) {
         t.phase = 2;
         return push_eval(ix.index, t.scope, t.frame);
@@ -1943,7 +1944,7 @@ struct process_machine {
   }
   void elem_ref_step() {
     m_task & t = top();
-    auto const & ix = db.as<n_index>(t.node);
+    auto const & ix = db.index_of(t.node);
     if(t.phase == 0) {
       t.phase = 1;
       return push_eval(ix.index, t.scope, t.frame);
@@ -1963,7 +1964,7 @@ struct process_machine {
     if(al.index != m_none) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where); // interpreter-like
     finish(mval{m_alias{al.scope, al.slot, uint32_t(k), arr.as<m_arr>().gen}});
   }
-  static bool elem_place(ast_db const & db, node_id x) { return db.is<n_index>(x) && db.is<n_ident>(db.as<n_index>(x).object); }
+  static bool elem_place(ast_db const & db, node_id x) { return db.is_index(x) && db.is<n_ident>(db.index_of(x).object); }
 
   void eval_node(node_id n, n_var const & v) {
     m_task & t = top();
