@@ -314,6 +314,7 @@ arm64(expr body) {
 spawn(expr body) => fiber_start(body);
 stream() => stream_new(16);
 stream(i64 cap) => stream_new(cap);
+stream(type t) => stream_type(t); // тип потока — функция над типами: stream(i64)
 write(stream s, own x) => stream_write(s, x);
 read(stream s) => stream_read(s);
 more(stream s) => stream_more(s);
@@ -443,49 +444,43 @@ is_err(result r) => !r.ok;
 // 
 // 
 //.
-// JIT сначала зовёт jit_compile: цель, код функции (AST), типы параметров и
-// результата → байты машинного кода (кодогенераторы контекста цели через codegen);
-// пустой массив — не умеет, код даёт склейка на C++. Типы узлов и деревья цепочек —
-// у разбора экземпляра (jit_type, jit_chain): 
-// Вызовы — семантический инлайн (D10):
-// expr-параметр — код вызывающего в его контексте, блок конструкции — body(v).
-// Вход (решение автора: слот от VM, без адресов хоста в коде): область
-// аргументов — скаляр одним словом, массив — {данные, размер}, за ними — вид ошибки
-// и её узел; ловушка пишет их туда и выходит. *Моё:* подмножество — i64/bool/f64,
-// массивы-параметры, range, операции, цепочки, if, loop/break/continue, переменные,
-// return, встраивание функций и конструкций, f64(x)/i64(x), деление и границы с
-// ловушкой, require; своя раскладка: значения — в слотах кадра, выражение — в
-// аккумуляторе (f64 — в acc_f), второй операнд — через стек.
-struct jc_fix { i64 at; str entity; array types; array args; i64 label; }
+// Компиляция — вычисление кода программы в контексте цели: 
+// 
+// Цель —
+// сущность (amd64, arm64): её члены (cg.load, cg.jump…) и переопределённые в ней
+// операции (op_codegen: оператор узла программы с типами операндов) — байты.
+// Без строк: 
+//  — вид узла — тег (n_op, n_if…), узел — распаковкой образцом,
+// типы — значения (i64, array(i64), stream(f64)). Типы узлов и деревья цепочек — у
+// разбора экземпляра: 
+//. Регистры модели (acc, second…) и смещения меток (target, fault)
+// кодогенераторы берут из окружения компилятора (O4). Вызовы — семантический инлайн
+// (D10); рекурсия — call на своё начало. Вход (решение автора: слот от VM, без
+// адресов хоста в коде): область аргументов — скаляр словом, массив — {данные,
+// размер}, за ними вид ошибки, узел, брошенное значение и его тип, служба VM.
+// JIT зовёт jit_compile(цель, код функции, типы параметров, тип результата);
+// причина-строка — не умеет (код даст склейка C++).
+struct jc_range {} // тег: значение range(n) — в слоте граница n
 
-// имя в окружении: слот (kind — тип; массив — два слота: данные, размер; range —
-// граница) или expr-параметр (код, контекст и окружение вызывающего)
-struct jc_var { str name; str kind; i64 slot; bool thunk; code th; i64 th_ctx; i64 th_top; i64 th_base; i64 th_ret; }
+// имя в окружении: слот (kind — тип; массив — два слота: данные, размер; jc_range —
+// граница) или expr-параметр (код, контекст, окружение и функция вызывающего)
+struct jc_var { str name; type kind; i64 slot; bool thunk; code th; i64 th_ctx; i64 th_top; i64 th_base; i64 th_ret; }
 
-// catch в машинном коде: тип (пусто — любой), метка, переменная значения, глубина стека
-struct jc_catch { str type; i64 label; bool binds; str name; str kind; i64 slot; i64 depth; }
+// catch в машинном коде: тип (unit — любой), метка, переменная значения, глубина стека
+struct jc_catch { type ty; i64 label; bool binds; str name; i64 slot; i64 depth; }
 
-jit_compile(str target, f, types, str result) {
-  m = codegen(target, "model", array{}, array{}, 0);
-  ok = m.size > 7;
-  acc = if(ok) m[0] else 0;
-  second = if(ok) m[1] else 0;
-  acc_f = if(ok) m[2] else 0;
-  second_f = if(ok) m[3] else 0;
-  argbase = if(ok) m[4] else 0;
-  frame = if(ok) m[5] else 0;
-  stack = if(ok) m[6] else 0;
-  third = if(ok) m[7] else 0;
-  carg = if(m.size > 12) array{m[8], m[9], m[10], m[11]} else array{0, 0, 0, 0}; // аргументы службы VM
-  cret2 = if(m.size > 12) m[12] else 0;
-  if(m.size <= 12) ok = false;
-  out = array{};
+jit_compile(cg, f, types, type result) {
+  array{acc, second, acc_f, second_f, argbase, frame, stack, third, ca0, ca1, ca2, ca3, cret2} = cg.model();
+  ok = true;
   why = "";
   bad(str w) => {
     if(ok) why = w;
     ok = false;
   };
-  fixes = array{};
+  out = array{};
+  fix_at = array{}; // переходы на метки: место, метка, кодогенератор от смещения
+  fix_label = array{};
+  fix_mk = array{};
   labels = array{};
   faults = array{};
   loops = array{};
@@ -494,23 +489,21 @@ jit_compile(str target, f, types, str result) {
   base = 0; // первая запись текущей (встроенной) функции
   ctx = 0; // контекст встраивания (как в разборе)
   nslots = 0;
-  ret_to = 0; // метка выхода функции, чей код сейчас компилируется (return — туда)
-  fr_fn = array{}; // встроенные функции от корня: код и метка выхода (return(f), return(caller))
-  fr_exit = array{};
-  fr_parent = array{}; // кто встроил (функция, чей код вызвал): return(caller) — туда
-  cur = 0; // функция, чей код сейчас компилируется (индекс в fr_*)
   inlined = array{}; // встроенные сейчас функции (рекурсия — не встраивается)
   depth = 0; // временных на стеке (push_tmp) — переход в catch их снимает
   tries = array{}; // охватывающие try: массивы jc_catch
   jumps = 0; // throw, ставших переходом в catch
-  stream(str t) => (t == "stream<i64>") || ((t == "stream<f64>") || (t == "stream<bool>"));
-  scalar(str t) => (t == "i64") || ((t == "bool") || ((t == "f64") || stream(t))); // поток — его номер
-  arr(str t) => (t == "array<i64>") || (t == "array<f64>");
-  if(!scalar(result) && (result != "unit")) bad("prelude.tz:487");
-  for(t : types) if(!scalar(t) && !arr(t)) bad("prelude.tz:488");
-  emit(str entity, ts, xs) => {
-    bytes = codegen(target, entity, ts, xs, 0);
-    if(bytes.size == 0) bad("prelude.tz:491");
+  fr_fn = array{}; // встроенные функции от корня: код, выход, кто встроил (return(f), return(caller))
+  fr_exit = array{};
+  fr_parent = array{};
+  cur = 0;
+  is_stream(type t) => (t == stream(i64)) || ((t == stream(f64)) || (t == stream(bool)));
+  is_arr(type t) => (t == array(i64)) || (t == array(f64));
+  scalar(type t) => (t == i64) || ((t == bool) || ((t == f64) || is_stream(t))); // поток — его номер
+  elem(type t) => if((t == array(f64)) || (t == stream(f64))) f64 else if(t == stream(bool)) bool else i64;
+  if(!scalar(result) && (result != unit)) bad("тип результата");
+  for(t : types) if(!scalar(t) && !is_arr(t)) bad("тип параметра");
+  put_bytes(bytes) => {
     for(b : bytes) out.push(b);
   };
   label() => {
@@ -520,10 +513,25 @@ jit_compile(str target, f, types, str result) {
   bind(i64 l) => {
     labels[l] = out.size;
   };
-  jump_to(str entity, ts, xs, i64 l) => {
-    fixes.push(jc_fix{out.size, entity, ts, xs, l});
-    emit(entity, ts, xs);
+  // переход на метку: кодогенератор от смещения (до привязки — 0, потом — настоящее)
+  jump_to(i64 l, mk) => {
+    fix_at.push(out.size);
+    fix_label.push(l);
+    fix_mk.push(mk);
+    put_bytes(mk(0));
   };
+  jump(i64 l) => jump_to(l, (i64 o) => {
+    target = o;
+    cg.jump()
+  });
+  jump_unless(i64 r, i64 l) => jump_to(l, (i64 o) => {
+    target = o;
+    cg.jump_unless(r)
+  });
+  jump_if(i64 r, i64 l) => jump_to(l, (i64 o) => {
+    target = o;
+    cg.jump_if(r)
+  });
   off(i64 k) => 0 - (8 * (k + 1));
   alloc(i64 n) => {
     k = nslots;
@@ -535,8 +543,8 @@ jit_compile(str target, f, types, str result) {
     else env.push(v);
     top += 1;
   };
-  declare(str name, str kind) => {
-    s = alloc(if(arr(kind)) 2 else 1);
+  declare(str name, type kind) => {
+    s = alloc(if(is_arr(kind)) 2 else 1);
     put(jc_var{name, kind, s, false, f, 0, 0, 0, 0});
     s
   };
@@ -545,57 +553,30 @@ jit_compile(str target, f, types, str result) {
     for(i : range(top)) if((i >= base) && (env[i].name == name)) k = i;
     k
   };
-  // тип узла — у разбора; имя, которое разбор прочёл без наблюдения, — по окружению
-  ty(e) => {
-    t = jit_type(e, ctx);
-    k = code_kind(e);
-    v = if((k == "ident") && ((t == "?") || (t == "stream"))) find(code_field(e, "name")) else -1; // stream — без типа элементов
-    if((t != "?") && (v < 0)) t
-    else if(v >= 0) {
-      if(env[v].thunk) in_view(env[v].th_top, env[v].th_base, env[v].th_ctx, env[v].th_ret, () => ty(env[v].th)) else env[v].kind
-    } else if(k == "int") "i64"
-    else if(k == "float") "f64"
-    else if(k == "op") {
-      op = code_field(e, "op");
-      xs = code_field(e, "args");
-      if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) "bool"
-      else ty(xs[0])
-    } else if(k == "chain") {
-      c = jit_chain(e, ctx);
-      if(c.size == 0) "?" else ty(c[0])
-    } else "?"
+  load_slot(type kind, i64 s) => put_bytes(if(kind == f64) cg.load_f64(acc_f, frame, off(s)) else cg.load(acc, frame, off(s)));
+  store_slot(type kind, i64 s) => put_bytes(if(kind == f64) cg.store_f64(frame, off(s), acc_f) else cg.store(frame, off(s), acc));
+  drop_last(xs) => {
+    r = array{};
+    for(i : range(xs.size - 1)) r.push(xs[i]);
+    r
   };
-  load_slot(str kind, i64 s) => {
-    if(kind == "f64") emit("load_f64", array{"i64", "i64", "i64"}, array{acc_f, frame, off(s)});
-    else emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(s)});
+  // ближайший catch для типа (последний try — первым); unit — любой
+  catch_for(type t) => {
+    r = array{};
+    for(i : range(tries.size)) {
+      for(c : tries[tries.size - (1 + i)]) if((r.size == 0) && ((c.ty == unit) || (c.ty == t))) r.push(c);
+    }
+    r
   };
-  store_slot(str kind, i64 s) => {
-    if(kind == "f64") emit("store_f64", array{"i64", "i64", "i64"}, array{frame, off(s), acc_f});
-    else emit("store", array{"i64", "i64", "i64"}, array{frame, off(s), acc});
-  };
-  vm_name(i64 kind) => if(kind == 1) "out_of_bounds" else if(kind == 2) "div_by_zero" else if(kind == 3) "require_failed" else "vm_error";
-  fault(i64 kind, e) => {
+  // ловушка: метка, вид (1 — границы, 2 — деление на ноль, 3 — require, 5 — throw, 6 — VM), узел
+  vm_error_type(i64 kind) => if(kind == 1) out_of_bounds else if(kind == 2) div_by_zero else if(kind == 3) require_failed else vm_error;
+  trap(i64 kind, e) => {
     l = label();
-    to = catch_for(vm_name(kind));
+    to = catch_for(vm_error_type(kind));
     if(to.size == 0) faults.push(array{l, kind, code_id(e)});
     else if(to[0].binds) bad("catch использует объект ошибки VM");
     else faults.push(array{l, -2, to[0].label, depth - to[0].depth}); // ошибка VM в try — переход в catch
     l
-  };
-  // ближайший catch для типа (снаружи внутрь — последний try первым)
-  catch_for(str t) => {
-    r = array{};
-    for(i : range(tries.size)) {
-      fr = tries[tries.size - (1 + i)];
-      for(c : fr) if((r.size == 0) && ((c.type == "") || (c.type == t))) r.push(c);
-    }
-    r
-  };
-  // сколько раз имя встречается в коде (catch(e) без использования e)
-  uses(c, str name) => {
-    n = if((code_kind(c) == "ident") && (code_field(c, "name") == name)) 1 else 0;
-    for(x : code_items(c)) n += uses(x, name);
-    n
   };
   // окружение вызывающего: записи выше его вершины — в сторону, потом обратно
   in_view(i64 t, i64 b, i64 c, i64 rt, g) => {
@@ -617,310 +598,350 @@ jit_compile(str target, f, types, str result) {
     cur = old_cur;
     r
   };
-  // значение имени: слот или код вызывающего
+  var_of(e) => if(code_kind(e) == n_ident) {
+    array{name} = code_fields(e);
+    find(name)
+  } else -1;
+  callee_name(e) => if(code_kind(e) == n_ident) {
+    array{name} = code_fields(e);
+    name
+  } else "";
+  is_call_of(e, str name) => (code_kind(e) == n_call) && {
+    array{c, ...rest} = code_fields(e);
+    callee_name(c) == name
+  };
+  // тип узла: имя — по окружению компилятора, иначе — у разбора, иначе — по виду узла
+  ty(e) => {
+    k = code_kind(e);
+    v = var_of(e);
+    t = jit_type(e, ctx);
+    if(v >= 0) {
+      w = env[v];
+      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else w.kind
+    } else if(given(t)) t
+    else if(k == n_int) i64
+    else if(k == n_float) f64
+    else if(k == n_op) {
+      array{op, xs, _} = code_fields(e);
+      if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool
+      else ty(xs[0])
+    } else if(k == n_chain) {
+      c = jit_chain(e, ctx);
+      if(c.size == 0) unit else ty(c[0])
+    } else unit
+  };
   gen_name(e) => {
-    name = code_field(e, "name");
+    array{name} = code_fields(e);
     k = find(name);
-    if(name == "true") emit("load_const", array{"i64", "i64"}, array{acc, 1});
-    else if(name == "false") emit("load_const", array{"i64", "i64"}, array{acc, 0});
-    else if(k < 0) bad("prelude.tz:563");
+    if(name == "true") put_bytes(cg.load_const(acc, 1));
+    else if(name == "false") put_bytes(cg.load_const(acc, 0));
+    else if(k < 0) bad(fmt"имя {name}");
     else if(env[k].thunk) {
       v = env[k];
-      if(code_kind(v.th) == "lambda") bad("prelude.tz:566"); // блок — только body(v)
+      if(code_kind(v.th) == n_lambda) bad("блок — только body(v)");
       else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
-    } else if(arr(env[k].kind)) bad("prelude.tz:568"); // массив значением — пока нет
+    } else if(is_arr(env[k].kind)) bad("массив значением");
     else load_slot(env[k].kind, env[k].slot);
   };
-  // запись имени в окружении (без expr-параметров)
-  var_of(e) => if(code_kind(e) == "ident") find(code_field(e, "name")) else -1;
-  // range(n) — значение-граница (в слоте — n)
-  is_range(e) => (code_kind(e) == "call") && ((code_kind(code_field(e, "callee")) == "ident") && (code_field(code_field(e, "callee"), "name") == "range"));
+  gen_const(v) => {
+    if(typeof(v) == f64) {
+      put_bytes(cg.load_const(acc, f64_bits(v)));
+      put_bytes(cg.move_to_f64(acc_f, acc));
+    } else if(typeof(v) == bool) put_bytes(cg.load_const(acc, if(v) 1 else 0));
+    else put_bytes(cg.load_const(acc, v));
+  };
+  // codegen::eval: значение узла программы — байтами в аккумулятор (f64 — в acc_f)
   gen(e) => {
     k = code_kind(e);
     if(!ok) {
-    } else if(k == "int") emit("load_const", array{"i64", "i64"}, array{acc, code_field(e, "value")});
-    else if(k == "float") {
-      emit("load_const", array{"i64", "i64"}, array{acc, f64_bits(code_field(e, "value"))});
-      emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
-    } else if(k == "ident") gen_name(e);
-    else if(k == "op") gen_op(e);
-    else if(k == "chain") {
+    } else if(k == n_int) {
+      array{v, ...rest} = code_fields(e);
+      put_bytes(cg.load_const(acc, v));
+    } else if(k == n_float) {
+      array{v} = code_fields(e);
+      gen_const(v);
+    } else if(k == n_ident) gen_name(e);
+    else if(k == n_op) gen_op(e);
+    else if(k == n_chain) {
       t = jit_chain(e, ctx);
-      if(t.size == 0) bad("prelude.tz:584");
+      if(t.size == 0) bad("цепочка: дерево зависит от пути");
       else gen(t[0]);
-    } else if(k == "call") gen_call(e);
-    else if(k == "index") gen_index(e);
-    else if(k == "member") {
-      s = var_of(code_field(e, "object"));
-      if((s < 0) || ((code_field(e, "name") != "size") || env[s].thunk)) bad("prelude.tz:590");
-      else if(arr(env[s].kind)) emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(env[s].slot + 1)});
-      else if(env[s].kind == "range") emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(env[s].slot)});
-      else bad("prelude.tz:593");
-    } else if(k == "block") {
+    } else if(k == n_call) gen_call(e);
+    else if(k == n_index) gen_index(e);
+    else if(k == n_member) {
+      array{o, name} = code_fields(e);
+      s = var_of(o);
+      if((s < 0) || ((name != "size") || env[s].thunk)) bad("обращение .имя");
+      else if(is_arr(env[s].kind)) put_bytes(cg.load(acc, frame, off(env[s].slot + 1)));
+      else if(env[s].kind == jc_range) put_bytes(cg.load(acc, frame, off(env[s].slot)));
+      else bad(".size не массива");
+    } else if(k == n_block) {
+      array{items, ...rest} = code_fields(e);
       saved_top = top;
-      for(x : code_field(e, "items")) if(ok) gen(x);
+      for(x : items) if(ok) gen(x);
       top = saved_top;
-    } else if(k == "if") {
+    } else if(k == n_if) {
+      array{c, t, el} = code_fields(e);
       l_else = label();
       l_done = label();
-      gen(code_field(e, "cond"));
-      jump_to("jump_unless", array{"bool"}, array{acc}, l_else);
-      gen(code_field(e, "then_"));
-      jump_to("jump", array{}, array{}, l_done);
+      gen(c);
+      jump_unless(acc, l_else);
+      gen(t);
+      jump(l_done);
       bind(l_else);
-      if(code_has(e, "else_")) gen(code_field(e, "else_"));
+      if(given(el)) gen(el);
       bind(l_done);
-    } else if(k == "loop") {
+    } else if(k == n_loop) {
+      array{body} = code_fields(e);
       t = label();
       done = label();
       bind(t);
       loops.push(t);
       loops.push(done);
-      gen(code_field(e, "body"));
-      jump_to("jump", array{}, array{}, t);
+      gen(body);
+      jump(t);
       bind(done);
-      loops[loops.size - 1] = -1; // цикл кончился: снять (массив без pop — метка -1)
-      loops[loops.size - 2] = -1;
-      live = array{};
-      for(x : loops) if(x >= 0) live.push(x);
-      loops = live;
-    } else if(k == "break") {
-      if(loops.size == 0) bad("prelude.tz:623");
-      else jump_to("jump", array{}, array{}, loops[loops.size - 1]);
-    } else if(k == "continue") {
-      if(loops.size == 0) bad("prelude.tz:626");
-      else jump_to("jump", array{}, array{}, loops[loops.size - 2]);
-    } else if(k == "return") {
+      loops = drop_last(drop_last(loops));
+    } else if(k == n_break) {
+      if(loops.size == 0) bad("break вне цикла");
+      else jump(loops[loops.size - 1]);
+    } else if(k == n_continue) {
+      if(loops.size == 0) bad("continue вне цикла");
+      else jump(loops[loops.size - 2]);
+    } else if(k == n_return) {
+      array{v, tg} = code_fields(e);
       to = cur;
-      if(code_has(e, "target")) { // return(f) — из внешней функции f, return(caller) — из вызывающей (§6.1)
-        tn = code_field(code_field(e, "target"), "name");
+      if(given(tg)) { // return(f) — из внешней функции f, return(caller) — из вызывающей (§6.1)
+        tn = callee_name(tg);
         to = -1;
         if(tn == "caller") to = fr_parent[cur];
         else {
           i = cur;
           loop {
             if(i < 0) break;
-            if((to < 0) && (code_field(fr_fn[i], "name") == tn)) to = i;
+            array{fname, ...rest} = code_fields(fr_fn[i]);
+            if((to < 0) && (fname == tn)) to = i;
             i = fr_parent[i];
           }
         }
       }
       if(to < 0) bad("return(цель): цели нет в цепочке встраивания");
       else {
-        if(code_has(e, "value")) gen(code_field(e, "value"));
-        if(depth > 0) emit("stack_free", array{"i64"}, array{8 * depth}); // временные незавершённых выражений
-        jump_to("jump", array{}, array{}, fr_exit[to]);
+        if(given(v)) gen(v);
+        if(depth > 0) put_bytes(cg.stack_free(8 * depth)); // временные незавершённых выражений
+        jump(fr_exit[to]);
       }
-    } else if(k == "require") {
-      gen(code_field(e, "cond"));
-      jump_to("jump_unless", array{"bool"}, array{acc}, fault(3, e));
-    } else if(k == "var") {
-      if(code_field(e, "ref") || code_field(e, "ct")) bad("prelude.tz:638");
-      else if(code_has(e, "type") && (code_kind(code_field(e, "type")) == "ident")) { // T x = e: значение — в тип T (§5.8)
-        want = code_field(code_field(e, "type"), "name");
-        init = code_field(e, "init");
+    } else if(k == n_require) {
+      array{c} = code_fields(e);
+      gen(c);
+      jump_unless(acc, trap(3, e));
+    } else if(k == n_var) {
+      array{name, vt, init, _, is_ct, is_ref, _} = code_fields(e);
+      if(is_ref || is_ct) bad("ссылка или ct-переменная");
+      else if(given(vt) && (code_kind(vt) == n_ident)) { // T x = e: значение — в тип T (§5.8)
+        want = type_of_code(vt);
         t = ty(init);
-        if(want == t) assign(code_field(e, "name"), init, true);
-        else if((want == "f64") && (t == "i64")) {
+        if(want == t) assign(name, init, true);
+        else if((want == f64) && (t == i64)) {
           gen(init);
-          emit("to_f64", array{"i64", "i64"}, array{acc_f, acc});
-          declare(code_field(e, "name"), "f64");
-          store_slot("f64", env[top - 1].slot);
+          put_bytes(cg.to_f64(acc_f, acc));
+          declare(name, f64);
+          store_slot(f64, env[top - 1].slot);
         } else bad(fmt"объявление {want} из {t}");
-      } else assign(code_field(e, "name"), code_field(e, "init"), true);
-    } else if(k == "hide") {
-    } else if(k == "throw") gen_throw(e);
-    else bad("prelude.tz:641");
+      } else assign(name, init, true);
+    } else if(k == n_hide) {
+    } else if(k == n_throw) gen_throw(e);
+    else bad(fmt"узел {k}");
   };
   // индекс в acc, проверка границ по размеру массива (запись s); данные — в second
   checked(i64 s, e) => {
-    emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(env[s].slot + 1)});
-    jump_to("check_index", array{"i64", "i64"}, array{acc, second}, fault(1, e));
-    emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(env[s].slot)});
+    put_bytes(cg.load(second, frame, off(env[s].slot + 1)));
+    jump_to(trap(1, e), (i64 o) => {
+      fault = o;
+      cg.check_index(acc, second)
+    });
+    put_bytes(cg.load(second, frame, off(env[s].slot)));
   };
   gen_index(e) => {
-    s = var_of(code_field(e, "object"));
-    if((s < 0) || env[s].thunk) bad("prelude.tz:651");
-    else if(env[s].kind == "range") gen(code_field(e, "index")); // элемент range(n) по индексу is_index — сам индекс
-    else if(!arr(env[s].kind)) bad("prelude.tz:653");
+    array{o, ix} = code_fields(e);
+    s = var_of(o);
+    if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
+    else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
+    else if(!is_arr(env[s].kind)) bad("индекс не массива");
     else {
-      gen(code_field(e, "index"));
+      gen(ix);
       checked(s, e);
-      if(env[s].kind == "array<f64>") emit("load_index_f64", array{"i64", "i64", "i64"}, array{acc_f, second, acc});
-      else emit("load_index", array{"i64", "i64", "i64"}, array{acc, second, acc});
+      put_bytes(if(env[s].kind == array(f64)) cg.load_index_f64(acc_f, second, acc) else cg.load_index(acc, second, acc));
     }
   };
   assign(str name, e, bool fresh) => {
-    t = ty(e);
-    if(!scalar(t) && (t != "range")) bad("prelude.tz:663");
+    t = if(is_call_of(e, "range")) jc_range else ty(e);
+    if(!scalar(t) && (t != jc_range)) bad(fmt"присваивание значения {t}");
     gen(e);
     s = if(fresh) -1 else find(name);
-    if((s >= 0) && env[s].thunk) bad("prelude.tz:666");
+    if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру");
     else {
       if(s < 0) {
         declare(name, t);
         s = top - 1;
       }
-      if(env[s].kind != t) bad("prelude.tz:672");
+      if(env[s].kind != t) bad("тип переменной меняется");
       else store_slot(t, env[s].slot);
     }
   };
   // второй операнд: вычислить, на стек, первый, второй — в second
-  operands(e0, e1, str t) => {
+  operands(e0, e1, type t) => {
     gen(e1);
-    if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
-    emit("push_tmp", array{"i64"}, array{acc});
+    if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+    put_bytes(cg.push_tmp(acc));
     depth += 1;
     gen(e0);
-    emit("pop_tmp", array{"i64"}, array{second});
+    put_bytes(cg.pop_tmp(second));
     depth -= 1;
-    if(t == "f64") emit("move_to_f64", array{"i64", "i64"}, array{second_f, second});
+    if(t == f64) put_bytes(cg.move_to_f64(second_f, second));
   };
-  regs(str t) => if(t == "f64") array{acc_f, second_f} else array{acc, second};
+  regs(type t) => if(t == f64) array{acc_f, second_f} else array{acc, second};
+  // операция узла программы — её кодогенератор в цели (codegen::eval)
+  apply_op(e, type t, g) => {
+    r = regs(t);
+    g(r[0], r[1])
+  };
   gen_op(e) => {
-    op = code_field(e, "op");
-    xs = code_field(e, "args");
+    array{op, xs, _} = code_fields(e);
     if(xs.size == 1) {
       t = ty(xs[0]);
       gen(xs[0]);
-      if((op == "-") && (t == "f64")) emit("prefix-", array{"f64"}, array{acc_f});
-      else if((op == "-") && (t == "i64")) emit("negate", array{"i64"}, array{acc});
-      else if((op == "!") && (t == "bool")) emit("prefix!", array{"bool"}, array{acc});
-      else bad("prelude.tz:695");
-    } else if((op == "=") && (code_kind(xs[0]) == "ident")) assign(code_field(xs[0], "name"), xs[1], false);
-    else if((op == "=") && (code_kind(xs[0]) == "index")) { // xs[i] = v: значение — на стек, индекс, границы, запись
-      s = var_of(code_field(xs[0], "object"));
-      if((s < 0) || (env[s].thunk || !arr(env[s].kind))) bad("prelude.tz:699");
+      g = op_codegen(cg, e, array{t});
+      if((op == "-") && (t == i64)) put_bytes(cg.negate(acc));
+      else if(!given(g)) bad(fmt"нет кодогенератора {op} над {t}");
+      else put_bytes(g(if(t == f64) acc_f else acc));
+    } else if((op == "=") && (code_kind(xs[0]) == n_ident)) {
+      array{name} = code_fields(xs[0]);
+      assign(name, xs[1], false);
+    } else if((op == "=") && (code_kind(xs[0]) == n_index)) { // xs[i] = v: значение — на стек, индекс, границы, запись
+      array{o, ix} = code_fields(xs[0]);
+      s = var_of(o);
+      if((s < 0) || (env[s].thunk || !is_arr(env[s].kind))) bad("запись не в элемент массива-переменной");
       else {
         t = ty(xs[1]);
-        if(t != (if(env[s].kind == "array<f64>") "f64" else "i64")) bad("prelude.tz:702");
+        if(t != elem(env[s].kind)) bad("тип элемента");
         gen(xs[1]);
-        if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
-        emit("push_tmp", array{"i64"}, array{acc});
+        if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+        put_bytes(cg.push_tmp(acc));
         depth += 1;
-        gen(code_field(xs[0], "index"));
+        gen(ix);
         checked(s, xs[0]);
-        emit("pop_tmp", array{"i64"}, array{third});
+        put_bytes(cg.pop_tmp(third));
         depth -= 1;
-        emit("store_index", array{"i64", "i64", "i64"}, array{second, acc, third});
+        put_bytes(cg.store_index(second, acc, third));
       }
-    } else if(((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/=")))) && (code_kind(xs[0]) == "ident")) {
+    } else if(((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/=")))) && (code_kind(xs[0]) == n_ident)) {
       s = var_of(xs[0]);
-      if((s < 0) || env[s].thunk) bad("prelude.tz:713");
+      if((s < 0) || env[s].thunk) bad("составное присваивание");
       else {
         t = env[s].kind;
-        if(!scalar(t) || ((op == "/=") && (t != "f64"))) bad("prelude.tz:716");
+        g = op_codegen(cg, e, array{t, t}); // a op= b — кодогенератор op
+        if(!given(g) || ((op == "/=") && (t != f64))) bad(fmt"{op} над {t}");
         else {
           operands(xs[0], xs[1], t);
-          name = if(op == "+=") "infix+" else if(op == "-=") "infix-" else if(op == "*=") "infix*" else "infix/";
-          emit(name, array{t, t}, regs(t));
+          put_bytes(apply_op(e, t, g));
           store_slot(t, env[s].slot);
         }
       }
-    } else if((op == "&&") || (op == "||")) {
+    } else if((op == "&&") || (op == "||")) { // короткая логика — переходы
       l = label();
       gen(xs[0]);
-      jump_to(if(op == "&&") "jump_unless" else "jump_if", array{"bool"}, array{acc}, l);
+      if(op == "&&") jump_unless(acc, l) else jump_if(acc, l);
       gen(xs[1]);
       bind(l);
     } else {
       t = ty(xs[0]);
-      if(t == "bool") t = "i64"; // == и != над bool — те же биты
-      if(((op == "/") || (op == "%")) && (t == "i64")) { // ловушка деления на ноль
-        operands(xs[0], xs[1], t);
-        jump_to(fmt"infix{op}", array{t, t}, regs(t), fault(2, e));
-      } else if((t != "i64") && (t != "f64")) bad(fmt"операция {op} над {t}: {code_text(e)}");
-      else if(ty(xs[1]) != ty(xs[0])) bad("prelude.tz:737");
-      else {
-        operands(xs[0], xs[1], t);
-        emit(fmt"infix{op}", array{t, t}, regs(t));
+      ot = if(t == bool) i64 else t; // == и != над bool — те же биты
+      g = op_codegen(cg, e, array{ot, ot});
+      if(!given(g)) bad(fmt"нет кодогенератора {op} над {t}");
+      else if(ty(xs[1]) != t) bad("типы операндов");
+      else if(((op == "/") || (op == "%")) && (ot == i64)) { // ловушка деления на ноль
+        operands(xs[0], xs[1], ot);
+        jump_to(trap(2, e), (i64 o) => {
+          fault = o;
+          g(acc, second)
+        });
+      } else {
+        operands(xs[0], xs[1], ot);
+        put_bytes(apply_op(e, ot, g));
       }
     }
   };
-  // константа, известная разбору (zero(typeof(x)) и т. п.)
-  gen_const(v) => {
-    if(typeof(v) == f64) {
-      emit("load_const", array{"i64", "i64"}, array{acc, f64_bits(v)});
-      emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
-    } else if(typeof(v) == bool) emit("load_const", array{"i64", "i64"}, array{acc, if(v) 1 else 0});
-    else emit("load_const", array{"i64", "i64"}, array{acc, v});
-  };
   gen_call(e) => {
     kc = jit_const(e, ctx);
-    if(kc.size == 1) return gen_const(kc[0]);
-    callee = code_field(e, "callee");
-    xs = code_field(e, "args");
-    name = if(code_kind(callee) == "ident") code_field(callee, "name") else "";
+    array{callee, xs, ...rest} = code_fields(e);
+    name = callee_name(callee);
     v = find(name);
-    if(name == "") bad("prelude.tz:749");
+    if(kc.size == 1) gen_const(kc[0]);
+    else if(name == "") bad("вызов значения");
     else if((v >= 0) && env[v].thunk) call_block(env[v], xs);
-    else if(v >= 0) bad("prelude.tz:751"); // значение-функция — пока нет
-    else if((name == "f64") && ((xs.size == 1) && (ty(xs[0]) == "i64"))) {
+    else if(v >= 0) bad("значение-функция");
+    else if((name == "f64") && ((xs.size == 1) && (ty(xs[0]) == i64))) {
       gen(xs[0]);
-      emit("to_f64", array{"i64", "i64"}, array{acc_f, acc});
-    } else if((name == "i64") && ((xs.size == 1) && (ty(xs[0]) == "f64"))) {
+      put_bytes(cg.to_f64(acc_f, acc));
+    } else if((name == "i64") && ((xs.size == 1) && (ty(xs[0]) == f64))) {
       gen(xs[0]);
-      emit("to_i64", array{"i64", "i64"}, array{acc, acc_f});
-    } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == "i64"))) gen(xs[0]); // range(n) — граница
+      put_bytes(cg.to_i64(acc, acc_f));
+    } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
     else if((name == "stream_new") || ((name == "stream_write") || ((name == "stream_read") || ((name == "stream_more") || ((name == "stream_close") || ((name == "yield") && (xs.size == 0))))))) gen_stream(e, name, xs);
     else if((name == "is_index") && (xs.size == 2)) {
       s = var_of(xs[1]);
-      if((s < 0) || env[s].thunk) bad("prelude.tz:761");
+      if((s < 0) || env[s].thunk) bad("is_index не над переменной");
       else {
         gen(xs[0]);
-        n_at = if(env[s].kind == "range") env[s].slot else env[s].slot + 1;
-        emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(n_at)});
-        emit("is_index", array{"i64", "i64"}, array{acc, second});
+        put_bytes(cg.load(second, frame, off(if(env[s].kind == jc_range) env[s].slot else env[s].slot + 1)));
+        put_bytes(cg.is_index(acc, second));
       }
     } else gen_inline(e, name, xs);
   };
   // Операция потока — служба VM (адрес — в области аргументов, не в коде): op, номер
   // потока, биты значения, (тип << 32) | узел; ответ — значение и признак ошибки
-  // (ошибка/отмена в VM — вид 6, VM перебросит отложенное исключение)
-  jt_code(str t) => if(t == "i64") 1 else if(t == "f64") 2 else if(t == "bool") 3 else 0;
-  elem_of(str t) => if(t == "stream<i64>") "i64" else if(t == "stream<f64>") "f64" else if(t == "stream<bool>") "bool" else "?";
+  jt_code(type t) => if(t == i64) 1 else if(t == f64) 2 else if(t == bool) 3 else 0;
   gen_stream(e, str name, xs) => {
     op = if(name == "stream_new") 0 else if(name == "stream_write") 1 else if(name == "stream_read") 2 else if(name == "stream_more") 3 else if(name == "stream_close") 4 else 5;
-    carried = "";
+    carried = unit;
     if(tries.size > 0) bad("операция потока внутри try");
     else if(op == 0) {
-      if((xs.size != 1) || (ty(xs[0]) != "i64")) bad("stream_new(ёмкость i64)");
+      if((xs.size != 1) || (ty(xs[0]) != i64)) bad("stream_new(ёмкость i64)");
       gen(xs[0]);
-      emit("move", array{"i64", "i64"}, array{carg[2], acc});
-      emit("load_const", array{"i64", "i64"}, array{carg[1], 0});
+      put_bytes(cg.move(ca2, acc));
+      put_bytes(cg.load_const(ca1, 0));
     } else if(op != 5) {
       st = ty(xs[0]);
-      if(!stream(st)) bad(fmt"не поток известного типа: {st}");
+      if(!is_stream(st)) bad(fmt"не поток известного типа: {st}");
       else if(op == 1) {
-        carried = elem_of(st);
+        carried = elem(st);
         gen(xs[0]);
-        emit("push_tmp", array{"i64"}, array{acc});
+        put_bytes(cg.push_tmp(acc));
         depth += 1;
         if(ty(xs[1]) != carried) bad("тип записи ≠ типу потока");
         gen(xs[1]);
-        if(carried == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
-        emit("move", array{"i64", "i64"}, array{carg[2], acc});
-        emit("pop_tmp", array{"i64"}, array{carg[1]});
+        if(carried == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+        put_bytes(cg.move(ca2, acc));
+        put_bytes(cg.pop_tmp(ca1));
         depth -= 1;
       } else {
         gen(xs[0]);
-        emit("move", array{"i64", "i64"}, array{carg[1], acc});
-        if(op == 2) carried = elem_of(st);
+        put_bytes(cg.move(ca1, acc));
+        if(op == 2) carried = elem(st);
       }
     }
-    emit("load_const", array{"i64", "i64"}, array{carg[3], (jt_code(carried) << 32) | code_id(e)});
-    emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(args_slot)});
-    emit("load", array{"i64", "i64", "i64"}, array{acc, acc, 8 * (ap + 4)});
-    emit("load_const", array{"i64", "i64"}, array{carg[0], op});
+    put_bytes(cg.load_const(ca3, (jt_code(carried) << 32) | code_id(e)));
+    put_bytes(cg.load(acc, frame, off(args_slot)));
+    put_bytes(cg.load(acc, acc, 8 * (ap + 4)));
+    put_bytes(cg.load_const(ca0, op));
     pad = (depth % 2) == 1; // стек хоста — по 16 байт
-    if(pad) emit("stack_alloc", array{"i64"}, array{8});
-    emit("call_reg", array{"i64"}, array{acc});
-    if(pad) emit("stack_free", array{"i64"}, array{8});
-    jump_to("jump_if", array{"bool"}, array{cret2}, fault(6, e));
-    if(carried == "f64") {
-      if(op == 2) emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
-    }
+    if(pad) put_bytes(cg.stack_alloc(8));
+    put_bytes(cg.call_reg(acc));
+    if(pad) put_bytes(cg.stack_free(8));
+    jump_if(cret2, trap(6, e));
+    if((carried == f64) && (op == 2)) put_bytes(cg.move_to_f64(acc_f, acc));
   };
   // перегрузка по типам аргументов (как склейка C++): expr-параметр — любой код
   choose(str name, xs) => {
@@ -928,18 +949,19 @@ jit_compile(str target, f, types, str result) {
     pick = array{};
     tie = false;
     for(g : functions_named(name)) {
-      ps = code_field(g, "params");
+      array{_, ps, ...rest} = code_fields(g);
       fits = ps.size == xs.size;
       score = 0;
       for(i : range(if(fits) ps.size else 0)) {
-        p = ps[i];
-        if(code_has(p, "type")) {
-          pt = code_field(p, "type");
-          if((code_kind(pt) != "ident") || (code_field(p, "mode") == 4)) fits = false;
-          else if((ty(xs[i]) != code_field(pt, "name")) && !((code_field(pt, "name") == "stream") && stream(ty(xs[i])))) fits = false;
+        array{_, pt, mode, pack, ...prest} = code_fields(ps[i]);
+        if(given(pt)) {
+          want = type_of_code(pt);
+          at = ty(xs[i]);
+          if(!given(want) || (mode == 4)) fits = false;
+          else if((want != at) && (want != type_family(at))) fits = false; // stream — семейство stream(i64)
           else score += 1;
         }
-        if(code_field(p, "pack") && (code_field(p, "mode") != 4)) fits = false; // хвост ...xs; пак клаузы (catch) — можно
+        if(pack && (mode != 4)) fits = false; // хвост ...xs; пак клаузы (catch) — можно
       }
       if(fits && (score > best)) {
         best = score;
@@ -951,33 +973,31 @@ jit_compile(str target, f, types, str result) {
   };
   gen_inline(e, str name, xs) => {
     g = choose(name, xs);
-    if((g.size == 1) && (code_id(g[0]) == code_id(f))) return call_self_with(e, xs); // рекурсия — настоящий вызов себя
+    if((g.size == 1) && (code_id(g[0]) == code_id(f))) return call_self_with(xs); // рекурсия — настоящий вызов себя
     rec = false;
     if(g.size == 1) {
       for(x : inlined) if(code_id(x) == code_id(g[0])) rec = true;
     }
-    if((g.size == 0) || (rec || code_field(g[0], "outline"))) bad("prelude.tz:803");
+    array{_, ps, _, body, is_outline, ...rest} = if(g.size == 1) code_fields(g[0]) else array{"", array{}, false, false, true};
+    if((g.size == 0) || (rec || is_outline)) bad(fmt"вызов {name}: нет встраиваемой перегрузки");
     else {
       fn = g[0];
-      ps = code_field(fn, "params");
-      // аргументы — в контексте вызывающего
       binds = array{};
       for(i : range(ps.size)) {
-        p = ps[i];
-        mode = code_field(p, "mode");
+        array{pname, _, mode, ...prest} = code_fields(ps[i]);
         a = xs[i];
         s = var_of(a);
-        if(mode == 4) binds.push(jc_var{code_field(p, "name"), "", 0, true, a, ctx, top, base, cur});
+        if(mode == 4) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur});
         else if((s >= 0) && ((mode != 2) && !env[s].thunk)) {
           w = env[s];
-          binds.push(jc_var{code_field(p, "name"), w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
+          binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
         } else {
-          t = if(is_range(a)) "range" else ty(a);
-          if(!scalar(t) && (t != "range")) bad(fmt"аргумент типа {t}: {code_text(a)}");
+          t = if(is_call_of(a, "range")) jc_range else ty(a);
+          if(!scalar(t) && (t != jc_range)) bad(fmt"аргумент {pname} типа {t}");
           gen(a);
           sl = alloc(1);
           store_slot(t, sl);
-          binds.push(jc_var{code_field(p, "name"), t, sl, false, f, 0, 0, 0, 0});
+          binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
         }
       }
       if(ok) {
@@ -985,17 +1005,16 @@ jit_compile(str target, f, types, str result) {
         old_top = top;
         old_base = base;
         old_ctx = ctx;
+        old_cur = cur;
         base = top;
         for(b : binds) put(b);
         ctx = inline_context(ctx, e);
-        old_cur = cur;
-        old_n = fr_fn.size;
         fr_fn.push(fn);
         fr_exit.push(exit);
         fr_parent.push(cur);
         cur = fr_fn.size - 1;
         inlined.push(fn);
-        gen(code_field(fn, "body"));
+        gen(body);
         bind(exit);
         inlined = drop_last(inlined);
         fr_fn = drop_last(fr_fn);
@@ -1008,57 +1027,55 @@ jit_compile(str target, f, types, str result) {
       }
     }
   };
-  drop_last(xs) => {
-    r = array{};
-    for(i : range(xs.size - 1)) r.push(xs[i]);
-    r
-  };
   // Вызов себя: область аргументов вызываемого — в своём кадре (область[j] — слот
-  // k0 + W - 1 - j: кадр растёт вниз), её адрес — в базу аргументов, call на своё
+  // k0 + w - 1 - j: кадр растёт вниз), её адрес — в базу аргументов, call на своё
   // начало; ошибка вызванного — в свои слоты и выход (как ловушка).
-  call_self_with(e, xs) => {
+  call_self_with(xs) => {
     ws = 0;
-    for(i : range(xs.size)) ws += if(arr(types[i])) 2 else 1;
+    for(i : range(xs.size)) ws += if(is_arr(types[i])) 2 else 1;
     w = ws + 4;
     k0 = alloc(w);
     area(i64 j) => off((k0 + w) - (1 + j));
     j = 0;
     for(i : range(xs.size)) {
-      if(arr(types[i])) {
+      if(is_arr(types[i])) {
         s = var_of(xs[i]);
-        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad(fmt"массив в рекурсивный вызов: {code_text(xs[i])}");
+        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в рекурсивный вызов");
         else {
-          emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(env[s].slot)});
-          emit("store", array{"i64", "i64", "i64"}, array{frame, area(j), acc});
-          emit("load", array{"i64", "i64", "i64"}, array{acc, frame, off(env[s].slot + 1)});
-          emit("store", array{"i64", "i64", "i64"}, array{frame, area(j + 1), acc});
+          put_bytes(cg.load(acc, frame, off(env[s].slot)));
+          put_bytes(cg.store(frame, area(j), acc));
+          put_bytes(cg.load(acc, frame, off(env[s].slot + 1)));
+          put_bytes(cg.store(frame, area(j + 1), acc));
         }
         j += 2;
       } else {
         t = ty(xs[i]);
         if(t != types[i]) bad(fmt"аргумент {t} вместо {types[i]}");
         gen(xs[i]);
-        if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
-        emit("store", array{"i64", "i64", "i64"}, array{frame, area(j), acc});
+        if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+        put_bytes(cg.store(frame, area(j), acc));
         j += 1;
       }
     }
-    emit("load_const", array{"i64", "i64"}, array{acc, 0});
-    emit("store", array{"i64", "i64", "i64"}, array{frame, area(ws), acc});
-    emit("address", array{"i64", "i64", "i64"}, array{argbase, frame, area(0)});
-    jump_to("call_self", array{}, array{}, entry);
-    emit("move", array{"i64", "i64"}, array{third, acc}); // результат — пока в стороне
-    emit("load", array{"i64", "i64", "i64"}, array{acc, frame, area(ws)});
+    put_bytes(cg.load_const(acc, 0));
+    put_bytes(cg.store(frame, area(ws), acc));
+    put_bytes(cg.address(argbase, frame, area(0)));
+    jump_to(entry, (i64 o) => {
+      target = o;
+      cg.call_self()
+    });
+    put_bytes(cg.move(third, acc)); // результат — пока в стороне
+    put_bytes(cg.load(acc, frame, area(ws)));
     l = label();
     faults.push(array{l, -1, area(ws)}); // -1 — перенос ошибки вызванного
-    jump_to("jump_if", array{"bool"}, array{acc}, l);
-    emit("move", array{"i64", "i64"}, array{acc, third});
-    if(result == "f64") emit("move_to_f64", array{"i64", "i64"}, array{acc_f, acc});
+    jump_if(acc, l);
+    put_bytes(cg.move(acc, third));
+    if(result == f64) put_bytes(cg.move_to_f64(acc_f, acc));
   };
   // throw: catch выбран при компиляции по типу — значение в его переменную и переход;
   // не пойман здесь — в слоты области (вид 5, узел, значение, тип) и выход
   gen_throw(e) => {
-    v = code_field(e, "value");
+    array{v} = code_fields(e);
     t = ty(v);
     if(!scalar(t)) bad(fmt"throw значения {t}");
     else {
@@ -1067,20 +1084,26 @@ jit_compile(str target, f, types, str result) {
       if(to.size == 1) {
         c = to[0];
         if(c.binds) store_slot(t, c.slot);
-        if(depth > c.depth) emit("stack_free", array{"i64"}, array{8 * (depth - c.depth)});
-        jump_to("jump", array{}, array{}, c.label);
+        if(depth > c.depth) put_bytes(cg.stack_free(8 * (depth - c.depth)));
+        jump(c.label);
         jumps += 1;
       } else {
-        if(t == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f});
-        emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(args_slot)});
-        emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 2), acc});
-        emit("load_const", array{"i64", "i64"}, array{acc, if(t == "i64") 1 else if(t == "f64") 2 else 3});
-        emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 3), acc});
+        if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+        put_bytes(cg.load(second, frame, off(args_slot)));
+        put_bytes(cg.store(second, 8 * (ap + 2), acc));
+        put_bytes(cg.load_const(acc, jt_code(t)));
+        put_bytes(cg.store(second, 8 * (ap + 3), acc));
         l = label();
         faults.push(array{l, 5, code_id(e)});
-        jump_to("jump", array{}, array{}, l);
+        jump(l);
       }
     }
+  };
+  // сколько раз имя встречается в коде (catch(e) без использования e)
+  uses(c, str name) => {
+    n = if(callee_name(c) == name) 1 else 0;
+    for(x : code_items(c)) n += uses(x, name);
+    n
   };
   // try { тело } catch(T e) { … } … = intercept(тело, блоки): 
 // catch — по типу, при компиляции
@@ -1090,18 +1113,22 @@ jit_compile(str target, f, types, str result) {
     if((b < 0) || ((h < 0) || (!env[b].thunk || !env[h].thunk))) bad("intercept не над expr-параметрами");
     else {
       hv = env[h];
-      hs = if(code_kind(hv.th) == "pack") code_field(hv.th, "items") else array{hv.th};
+      hs = if(code_kind(hv.th) == n_pack) {
+        array{items} = code_fields(hv.th);
+        items
+      } else array{hv.th};
       frame_c = array{};
+      lams = array{};
       for(l : hs) {
-        ps = if(code_kind(l) == "lambda") code_field(l, "params") else array{};
+        array{ps, body, _} = if(code_kind(l) == n_lambda) code_fields(l) else array{array{}, false, false};
         if(ps.size != 1) bad("catch не блок с параметром");
         else {
-          p = ps[0];
-          ctype = if(code_has(p, "type") && (code_kind(code_field(p, "type")) == "ident")) code_field(code_field(p, "type"), "name") else "";
-          pname = code_field(p, "name");
-          binds = (pname != "_") && (uses(code_field(l, "body"), pname) > 0);
-          if(binds && !scalar(ctype)) bad("catch использует значение, неизвестное машинному коду");
-          frame_c.push(jc_catch{ctype, label(), binds, pname, ctype, if(binds) alloc(1) else 0, depth});
+          array{pname, pt, ...prest} = code_fields(ps[0]);
+          cty = if(given(pt)) type_of_code(pt) else unit;
+          binds = (pname != "_") && (uses(body, pname) > 0);
+          if(binds && !scalar(cty)) bad("catch использует значение, неизвестное машинному коду");
+          frame_c.push(jc_catch{cty, label(), binds, pname, if(binds) alloc(1) else 0, depth});
+          lams.push(body);
         }
       }
       done = label();
@@ -1109,16 +1136,15 @@ jit_compile(str target, f, types, str result) {
       bv = env[b];
       in_view(bv.th_top, bv.th_base, bv.th_ctx, bv.th_ret, () => gen(bv.th));
       tries = drop_last(tries);
-      jump_to("jump", array{}, array{}, done);
+      jump(done);
       for(i : range(frame_c.size)) {
         c = frame_c[i];
-        l = hs[i];
         bind(c.label);
         in_view(hv.th_top, hv.th_base, hv.th_ctx, hv.th_ret, () => {
-          if(c.binds) put(jc_var{c.name, c.kind, c.slot, false, f, 0, 0, 0, 0});
-          gen(code_field(l, "body"));
+          if(c.binds) put(jc_var{c.name, c.ty, c.slot, false, f, 0, 0, 0, 0});
+          gen(lams[i]);
         });
-        jump_to("jump", array{}, array{}, done);
+        jump(done);
       }
       bind(done);
     }
@@ -1126,89 +1152,85 @@ jit_compile(str target, f, types, str result) {
   // body(v): аргументы — здесь, тело блока — в окружении и контексте вызывающего
   call_block(v, xs) => {
     l = v.th;
-    if((code_kind(l) != "lambda") || !code_field(l, "block")) bad("prelude.tz:862");
+    array{ps, body, block} = if(code_kind(l) == n_lambda) code_fields(l) else array{array{}, false, false};
+    if(!block) bad("вызов expr-параметра, который не блок");
+    else if(ps.size != xs.size) bad("арность блока");
     else {
-      ps = code_field(l, "params");
-      if(ps.size != xs.size) bad("prelude.tz:865");
-      else {
-        binds = array{};
-        for(i : range(xs.size)) {
-          t = ty(xs[i]);
-          if(!scalar(t)) bad("prelude.tz:870");
-          gen(xs[i]);
-          sl = alloc(1);
-          store_slot(t, sl);
-          binds.push(jc_var{code_field(ps[i], "name"), t, sl, false, f, 0, 0, 0, 0});
-        }
-        if(ok) in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => {
-          for(b : binds) put(b);
-          gen(code_field(l, "body"));
-        });
+      binds = array{};
+      for(i : range(xs.size)) {
+        t = ty(xs[i]);
+        if(!scalar(t)) bad(fmt"аргумент блока типа {t}");
+        gen(xs[i]);
+        sl = alloc(1);
+        store_slot(t, sl);
+        array{pname, ...prest} = code_fields(ps[i]);
+        binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
       }
+      if(ok) in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => {
+        for(b : binds) put(b);
+        gen(body);
+      });
     }
   };
   entry = label();
   bind(entry); // начало кода — цель call_self
   ret = label();
-  ret_to = ret;
   fr_fn.push(f);
   fr_exit.push(ret);
   fr_parent.push(-1);
   inlined.push(f);
-  emit("frame_enter", array{}, array{});
-  emit("move", array{"i64", "i64"}, array{frame, stack});
+  put_bytes(cg.frame_enter());
+  put_bytes(cg.move(frame, stack));
   frame_at = out.size;
-  emit("frame_alloc", array{"i64"}, array{0});
-  ps = code_field(f, "params");
+  frame_size = (i64 n) => cg.frame_alloc(n);
+  put_bytes(frame_size(0));
+  array{_, fps, _, fbody, ...frest} = code_fields(f);
   ap = 0; // слово в области аргументов
-  for(i : range(ps.size)) {
-    s = declare(code_field(ps[i], "name"), types[i]);
-    words = if(arr(types[i])) 2 else 1;
-    for(w : range(words)) {
-      emit("load", array{"i64", "i64", "i64"}, array{acc, argbase, 8 * ap});
-      emit("store", array{"i64", "i64", "i64"}, array{frame, off(s + w), acc});
+  for(i : range(fps.size)) {
+    array{pname, ...prest} = code_fields(fps[i]);
+    s = declare(pname, types[i]);
+    for(w : range(if(is_arr(types[i])) 2 else 1)) {
+      put_bytes(cg.load(acc, argbase, 8 * ap));
+      put_bytes(cg.store(frame, off(s + w), acc));
       ap += 1;
     }
   }
   args_slot = alloc(1); // база области аргументов — для ловушек
-  emit("store", array{"i64", "i64", "i64"}, array{frame, off(args_slot), argbase});
-  if(ok) gen(code_field(f, "body"));
+  put_bytes(cg.store(frame, off(args_slot), argbase));
+  if(ok) gen(fbody);
   bind(ret);
-  if(result == "f64") emit("move_from_f64", array{"i64", "i64"}, array{acc, acc_f}); // f64 — битами в аккумуляторе
-  emit("move", array{"i64", "i64"}, array{stack, frame});
-  emit("frame_leave", array{}, array{});
-  emit("ret", array{}, array{});
+  if(result == f64) put_bytes(cg.move_from_f64(acc, acc_f)); // f64 — битами в аккумуляторе
+  put_bytes(cg.move(stack, frame));
+  put_bytes(cg.frame_leave());
+  put_bytes(cg.ret());
   // заглушки ловушек: вид и узел — в слоты области аргументов, выход
   for(x : faults) {
     bind(x[0]);
     if(x[1] == -2) { // ошибка VM в try — в catch, сняв временные
-      if(x[3] > 0) emit("stack_free", array{"i64"}, array{8 * x[3]});
-      jump_to("jump", array{}, array{}, x[2]);
+      if(x[3] > 0) put_bytes(cg.stack_free(8 * x[3]));
+      jump(x[2]);
       continue;
     }
-    emit("load", array{"i64", "i64", "i64"}, array{second, frame, off(args_slot)});
-    if(x[1] < 0) { // ошибка вызванного: вид и узел из его области (смещение слота — x[2])
-      emit("load", array{"i64", "i64", "i64"}, array{acc, frame, x[2]});
-      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * ap, acc});
-      for(q : range(3)) { // узел, брошенное значение, его тип — следующие слова области
-        emit("load", array{"i64", "i64", "i64"}, array{acc, frame, x[2] + (8 * (q + 1))});
-        emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + (q + 1)), acc});
+    put_bytes(cg.load(second, frame, off(args_slot)));
+    if(x[1] < 0) { // ошибка вызванного: вид, узел, значение, тип — из его области (смещение слова — x[2])
+      for(q : range(4)) {
+        put_bytes(cg.load(acc, frame, x[2] + (8 * q)));
+        put_bytes(cg.store(second, 8 * (ap + q), acc));
       }
     } else {
-      emit("load_const", array{"i64", "i64"}, array{acc, x[1]});
-      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * ap, acc});
-      emit("load_const", array{"i64", "i64"}, array{acc, x[2]});
-      emit("store", array{"i64", "i64", "i64"}, array{second, 8 * (ap + 1), acc});
+      put_bytes(cg.load_const(acc, x[1]));
+      put_bytes(cg.store(second, 8 * ap, acc));
+      put_bytes(cg.load_const(acc, x[2]));
+      put_bytes(cg.store(second, 8 * (ap + 1), acc));
     }
-    jump_to("jump", array{}, array{}, ret);
+    jump(ret);
   }
   if(!ok) return why; // не умеет — причина (код даст склейка C++)
-  for(x : fixes) {
-    bytes = codegen(target, x.entity, x.types, x.args, labels[x.label] - x.at);
-    for(j : range(bytes.size)) out[x.at + j] = bytes[j];
+  for(i : range(fix_at.size)) {
+    bytes = fix_mk[i](labels[fix_label[i]] - fix_at[i]);
+    for(j : range(bytes.size)) out[fix_at[i] + j] = bytes[j];
   }
-  size = ((8 * nslots) + 15) & -16;
-  bytes = codegen(target, "frame_alloc", array{"i64"}, array{size}, 0);
+  bytes = frame_size(((8 * nslots) + 15) & -16);
   for(j : range(bytes.size)) out[frame_at + j] = bytes[j];
   if(jumps > 0) array{out, fmt"исключений переходом: {jumps}"} else out
 }

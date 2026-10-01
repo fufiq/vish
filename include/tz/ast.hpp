@@ -480,6 +480,15 @@ std::string render(diagnostic const & d, std::string_view file, ast_db const & d
   return out;
 }
 
+// The name of the type node is the name of its structure (n_op, n_if...): a tag of the
+// form node for code as a value (§7.4). Is there any alternative to node_kind?
+bool is_node_kind(std::string_view name) {
+  bool found = false;
+  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind))))
+    found = found || std::meta::identifier_of(t) == name;
+  return found;
+}
+
 // The name node is for debugging (through reflection, without manual tables).
 std::string_view kind_name(node const & n) {
   return std::visit([](auto const & k) -> std::string_view {

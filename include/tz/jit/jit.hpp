@@ -219,15 +219,18 @@ struct jit_machine {
         break;
       }
     if(!lc) return false;
-    std::vector<value> types;
-    for(jt t: out.params) types.push_back(value(std::string(jt_name(t))));
+    std::vector<value> types; // Types: Type-values, not strings
+    auto type_value = [&](interpreter & in, jt t) { return value(type_v{in.types.named(jt_name(t))}); };
     value r;
     try {
       interpreter comp(db, mod, {"jit"}, mode::run);
       comp.jit_analysis = an_for_lang;
-      r = comp.analyze_instance(lc, {value(std::string(A::target)), comp.code_value(fn), value(array_v::of(std::move(types))), value(std::string(jt_name(out.result)))});
+      for(jt t: out.params) types.push_back(type_value(comp, t));
+      // entity context (amd64, arm64), not a string
+      r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), type_value(comp, out.result)});
     } catch(diagnostic const & d) {
       out.lang_error = d.what();
+      if(std::getenv("TZ_LANG_DEBUG")) put(stderr, render(d, "?", db)); // compiler debugging
       return false;
     }
     if(r.is<std::string>()) out.lang_error = r.as<std::string>(); // Failure of the compiler in the language

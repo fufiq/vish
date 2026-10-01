@@ -1,7 +1,7 @@
-// out: op x += 2
-// out: call print(x)
+// out: n_op x += 2
+// out: n_call print(x)
 // out: 3
-// out: ident x
+// out: n_ident x
 // machine
 // fmt-stable
 // store-roundtrip
@@ -9,7 +9,7 @@
 //  
 // логика — на самом языке, не у хоста: 
 // code(x) — узел
-// выражения (у expr-параметра — код вызывающего), code_kind/items/name/text —
+// выражения (у expr-параметра — код вызывающего), code_kind (тег вида узла: n_op, n_if…)/items/name/text —
 // операции базового языка над ним. Не токены и не строка: 
 //.
 syntax traced {body} => {

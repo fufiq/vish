@@ -1264,6 +1264,8 @@ struct interpreter {
     if(str(x.name) == "false") return ok(value(false));
     if(auto t = types.builtin(str(x.name))) return ok(value(type_v{t}));
     if(structs.contains(x.name)) return ok(value(type_v{types.named(str(x.name))})); // entity struct - value
+    // Type node code - tag (n_op, n_if...):
+    if(str(x.name).starts_with("n_") && is_node_kind(str(x.name))) return ok(value(type_v{types.named(str(x.name))}));
     if(auto it = functions.find(x.name); it != functions.end()) {
       for(node_id f: it->second)
         if(inline_required(f))
@@ -3853,6 +3855,28 @@ struct interpreter {
     span where = db[n].where;
     if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
       auto const & m = db.as<n_member>(c.callee);
+      // entity .f(…) is a function declared in the body of the entity function:
+//  
+      if(db.is<n_ident>(m.object)) {
+        symbol owner;
+        if(value * cell = find(env, db.as<n_ident>(m.object).name)) {
+          if(cell->is<fn_v>() && cell->as<fn_v>().name && cell->as<fn_v>().set.empty() && !cell->as<fn_v>().lambda) owner = cell->as<fn_v>().name;
+        } else if(functions.contains(db.as<n_ident>(m.object).name)) owner = db.as<n_ident>(m.object).name;
+        if(owner) {
+          std::vector<node_id> set;
+          for(node_id f: functions[owner])
+            if(db.is<n_block>(db.as<n_fn>(f).body))
+              for(node_id s: db.as<n_block>(db.as<n_fn>(f).body).items)
+                if(db.is<n_fn>(s) && !db.as<n_fn>(s).scoped && db.as<n_fn>(s).name == m.name) set.push_back(s);
+          // on arity - one: a call by node (type of code generator parameter - operand tag, value -
+          // target register), otherwise - a set of overloads
+          std::vector<node_id> fit;
+          for(node_id s: set)
+            if(db.as<n_fn>(s).params.size() == c.args.size()) fit.push_back(s);
+          if(fit.size() == 1) return call_value(value(fn_v{{}, fit[0], globals, {}}), c.args, env, frame, where, n.value);
+          if(!set.empty()) return call_value(value(fn_v{m.name, {}, globals, set}), c.args, env, frame, where, n.value);
+        }
+      }
       node_list args{m.object};
       args.insert(args.end(), c.args.begin(), c.args.end());
       return call_named(m.name, args, env, frame, where, n.value);
@@ -3899,15 +3923,17 @@ struct interpreter {
   flow call_value(value const & fv, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
     if(!fv.is<fn_v>()) fail(cat("значение типа ", types.describe(fv), " нельзя вызвать"), where);
     fn_v const & f = fv.as<fn_v>();
-    if(f.name) return call_named(f.name, args, env, frame, where, node);
-    if(!f.set.empty()) { // local set of overloads: choice as functions, area - environment set
+    if(!f.set.empty()) { // a set of overloads (local or entity member): choice as a function, area as the set environment
       std::vector<node_id> fns = f.set;
       return call_overloaded(fns, args, env, frame, {where, std::string(str(db.as<n_fn>(fns[0]).name)), node, frame}, f.env);
     }
+    if(f.name) return call_named(f.name, args, env, frame, where, node);
     node_list const & params = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).params : db.as<n_fn>(f.lambda).params;
     node_id body = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).body : db.as<n_fn>(f.lambda).body;
     if(params.size() != args.size()) fail(cat("ожидалось ", params.size(), " аргументов, передано ", args.size()), where);
     scope * inner = new_scope(f.env);
+    inner->caller = env; // Call environment (O4): code generator sees acc, target...
+    if(db.is<n_fn>(f.lambda)) inner->fn = f.lambda;
     scope_hold hold{*this, inner};
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
@@ -4671,7 +4697,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_field", "(c, поле)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"code_has", "(c, поле)"}, {"codegen", "(цель, сущность, типы, аргументы, метка)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -4734,57 +4760,46 @@ struct interpreter {
       return value(array_v::of(std::move(vs)));
     }
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
-    // The node field of code by name is a reflection of AST (§7.4): node - code, list - code
-    // array, symbol - str, number and flag - value. code_has - Is there a node in the field?
-    if((n == "code_field" || n == "code_has") && a.size() == 2 && a[1].is<std::string>()) {
-      node_id c = code_node(a[0], where);
-      std::string const & want = a[1].as<std::string>();
-      value out;
-      bool found = false, has = false;
-      std::visit([&](auto const & k) {
-        template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
-          if(!found && std::meta::identifier_of(m) == want) {
-            found = true;
-            using field_t = [:std::meta::type_of(m):];
-            auto const & f = k.[:m:];
-            if constexpr(std::is_same_v<field_t, node_id>) {
-              has = bool(f);
-              if(f) out = code_value(f);
-            } else if constexpr(std::is_same_v<field_t, node_list>) {
-              std::vector<value> xs;
-              for(node_id x: f) xs.push_back(code_value(x));
-              out = value(array_v::of(std::move(xs)));
-              has = true;
-            } else if constexpr(std::is_same_v<field_t, symbol>) {
-              out = value(std::string(f ? str(f) : ""));
-              has = bool(f);
-            } else if constexpr(std::is_same_v<field_t, bool>) {
-              out = value(f);
-              has = true;
-            } else if constexpr(std::is_floating_point_v<field_t>) {
-              out = value(double(f));
-              has = true;
-            } else if constexpr(std::is_enum_v<field_t>) {
-              out = value(int64_t(f));
-              has = true;
-            } else if constexpr(std::is_integral_v<field_t>) {
-              out = value(int64_t(f));
-              has = true;
-            } else if constexpr(std::is_same_v<field_t, std::string>) {
-              out = value(f);
-              has = true;
-            }
-          }
-        }
-      },
-          db[c].kind);
-      if(!found) fail(cat("у узла ", kind_name(db[c]), " нет поля ", want), where);
-      if(n == "code_has") return value(has);
-      if(!has && out.is<unit_v>()) fail(cat("поле ", want, " пусто"), where);
-      return out;
-    }
     if(n == "f64_bits" && a.size() == 1 && types.describe(a[0]) == "f64") // bits f64 - i64 (constant in machine code)
       return a[0].known() ? value(std::bit_cast<int64_t>(a[0].as<double>())) : erase(value(int64_t(1)));
+    if(n == "given" && a.size() == 1) return value(!a[0].is<unit_v>()); // node field is (not)
+    // a type that names a code type (type name in a program); () is not a type
+    if(n == "type_of_code" && a.size() == 1) {
+      node_id c = code_node(a[0], where);
+      if(!db.is<n_ident>(c)) return value();
+      auto name = str(db.as<n_ident>(c).name);
+      if(auto t = types.builtin(name)) return value(type_v{t});
+      return value(type_v{types.named(name)}); // struct, VM error, family (stream)
+    }
+    // family of parameterized type: stream(i64) → stream
+    if(n == "type_family" && a.size() == 1) {
+      if(!a[0].is<type_v>()) return value();
+      auto name = types.name(a[0].as<type_v>().type);
+      return value(type_v{types.named(name.substr(0, name.find('<')))});
+    }
+    // parameterized type - function over types:
+//  
+    if((n == "array" || n == "stream_type") && a.size() == 1 && a[0].is<type_v>())
+      return value(type_v{types.named(cat(n == "array" ? "array" : "stream", "<", types.name(a[0].as<type_v>().type), ">"))});
+    // cogenerator of node operator e in the context of the targetcodegen::eval(a + b),
+    // author ): entity - operator of the node, operand types - values-types; () - no
+    if(n == "op_codegen" && a.size() == 3 && a[0].is<fn_v>() && a[2].is<array_v>()) {
+      node_id e = code_node(a[1], where);
+      if(!db.is<n_op>(e)) fail("op_codegen: ожидался узел оператора", where);
+      auto const & o = db.as<n_op>(e);
+      std::string sym(str(o.op));
+      if(sym == "+=" || sym == "-=" || sym == "*=" || sym == "/=") sym.pop_back(); // a op = b - cogenerator op
+      std::string entity = cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix" : "prefix", sym);
+      std::vector<std::string> names;
+      for(uint32_t k = 0; k < a[2].as<array_v>().size(); ++k) {
+        value t = a[2].as<array_v>().get(k);
+        if(!t.is<type_v>()) fail("op_codegen: типы — значения-типы", where);
+        names.push_back(std::string(types.name(t.as<type_v>().type)));
+      }
+      auto [s, ctx_fn] = find_codegen(db, str(a[0].as<fn_v>().name), entity, names);
+      if(!s) return value();
+      return value(fn_v{{}, s, globals, {}}); // node call: parameters - target registers
+    }
     // overload by name - code declarations (reflection as members_of)
     if(n == "functions_named" && a.size() == 1 && a[0].is<std::string>()) {
       std::vector<value> xs;
@@ -4795,11 +4810,13 @@ struct interpreter {
     // body context of a function embedded in a c node from the ctx context
     if(n == "inline_context" && a.size() == 2 && a[0].is<int64_t>())
       return value(int64_t(inline_context(uint64_t(a[0].as<int64_t>()), code_node(a[1], where).value)));
-    // node type in the context of parsing instance embedding ("?" - not executed)
+    // node type in the context of parsing instance embedding - value-type; () - not executed
     if(n == "jit_type" && a.size() == 2 && a[1].is<int64_t>()) {
-      if(!jit_analysis) return value(std::string("?"));
+      if(!jit_analysis) return value();
       observation const * o = jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>()));
-      return value(std::string(o && o->seen ? jit_analysis->types.describe(o->v) : "?"));
+      if(!o || !o->seen) return value();
+      std::string d = jit_analysis->types.describe(o->v);
+      return value(type_v{types.named(d)});
     }
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
@@ -4812,37 +4829,31 @@ struct interpreter {
       node_id t = jit_analysis ? jit_analysis->chain_tree(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : node_id{};
       return t ? value(array_v::of({code_value(t)})) : value(array_v::of({}));
     }
-    // codegen (purpose, essence, types, arguments, label) - bytes of the code generator in the language
-    // (§10.4), the same operation that JIT does: a compiler in the language glues the code with them.
-    if(n == "codegen" && a.size() == 5) {
-      if(!a[0].is<std::string>() || !a[1].is<std::string>() || !a[2].is<array_v>() || !a[3].is<array_v>() || !a[4].is<int64_t>())
-        fail("codegen(str цель, str сущность, array типы, array аргументы, i64 метка)", where);
-      std::vector<std::string> types;
-      for(uint32_t k = 0; k < a[2].as<array_v>().size(); ++k) types.push_back(a[2].as<array_v>().get(k).as<std::string>());
-      auto [s, ctx_fn] = find_codegen(db, a[0].as<std::string>(), a[1].as<std::string>(), types);
-      if(!s) return value(array_v::of({}));
-      scope * regs = new_scope(globals);
-      scope_hold hold{*this, regs};
-      // The register model of the target is model() of its context: acc, second, acc_f, second_f.
-      if(auto [m, _] = find_codegen(db, a[0].as<std::string>(), "model", {}); m) {
-        flow mv = eval(db.as<n_fn>(m).body, regs, 0);
-        static constexpr std::array<std::string_view, 4> names{"acc", "second", "acc_f", "second_f"};
-        for(uint32_t k = 0; k < names.size() && mv.v.is<array_v>() && k < mv.v.as<array_v>().size(); ++k) regs->declare(sym(names[k]), mv.v.as<array_v>().get(k));
-      }
-      regs->declare(sym("target"), a[4]);
-      regs->declare(sym("fault"), a[4]);
-      auto const & ps = db.as<n_fn>(s).params;
-      for(uint32_t k = 0; k < ps.size() && k < a[3].as<array_v>().size(); ++k) regs->declare(db.as<n_param>(ps[k]).name, a[3].as<array_v>().get(k));
-      flow r = eval(db.as<n_fn>(s).body, regs, 0);
-      if(!r.normal()) fail("codegen: кодогенератор не вернул байты", where);
-      return r.v;
-    }
     // Code bypass: type node, daughter node, name, text (projection)
     if(n.starts_with("code_") && a.size() == 1) {
       node_id c = code_node(a[0], where);
-      if(n == "code_kind") {
-        auto k = kind_name(db[c]);
-        return value(std::string(k.starts_with("n_") ? k.substr(2) : k));
+      if(n == "code_kind") return value(type_v{types.named(kind_name(db[c]))}); // tag
+      if(n == "code_fields") { // node fields in order - for unpacking with a sample; empty node - ()
+        std::vector<value> xs;
+        std::visit([&](auto const & k) {
+          template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
+            using field_t = [:std::meta::type_of(m):];
+            auto const & f = k.[:m:];
+            if constexpr(std::is_same_v<field_t, node_id>) xs.push_back(f ? code_value(f) : value());
+            else if constexpr(std::is_same_v<field_t, node_list>) {
+              std::vector<value> ys;
+              for(node_id y: f) ys.push_back(code_value(y));
+              xs.push_back(value(array_v::of(std::move(ys))));
+            } else if constexpr(std::is_same_v<field_t, symbol>) xs.push_back(value(std::string(f ? str(f) : "")));
+            else if constexpr(std::is_same_v<field_t, bool>) xs.push_back(value(f));
+            else if constexpr(std::is_floating_point_v<field_t>) xs.push_back(value(double(f)));
+            else if constexpr(std::is_enum_v<field_t> || std::is_integral_v<field_t>) xs.push_back(value(int64_t(f)));
+            else if constexpr(std::is_same_v<field_t, std::string>) xs.push_back(value(f));
+            else xs.push_back(value());
+          }
+        },
+            db[c].kind);
+        return value(array_v::of(std::move(xs)));
       }
       if(n == "code_items") {
         std::vector<value> xs;
