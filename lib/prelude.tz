@@ -81,6 +81,12 @@ try(expr body) catch(expr... handlers) => intercept(body, handlers);
 // что выполняется внутри блока, включая вызванные функции (их экземпляры —
 // свои для контекста): 
 //.
+// with_alloc(r) { … } — уровень памяти выбирает программа: значения, созданные в теле, —
+// в r (§12.2):  — «ну
+// да»; без контекста — уровень вызывающего (
+//). r = region — новый уровень.
+with_alloc(region r, expr body) => alloc_in(r, body);
+
 checked(expr body) {
   using operator (i64 a) + (i64 b) => add_checked(a, b);
   using operator (i64 a) - (i64 b) => sub_checked(a, b);

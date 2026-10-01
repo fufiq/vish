@@ -220,6 +220,7 @@ struct interpreter {
       : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)), types(parent ? parent->types : own_types),
         root(parent ? parent->root : this) {
     sym_intercept = sym("intercept");
+    sym_alloc_in = sym("alloc_in");
     sym_append = sym("append");
     sym_spawn = sym("fiber_start");
     sym_process = sym("process");
@@ -799,6 +800,7 @@ struct interpreter {
     uint32_t override_depth = 0;
     uint64_t ctx = 0;
     std::string path;
+    address_space * space = nullptr; // Context memory level with_alloc (§12.2)
   };
 
   struct fiber_rec {
@@ -2074,11 +2076,31 @@ struct interpreter {
     return flow{flow_kind::thr, std::move(v), n.value};
   }
 
-  // intercept(тело, блоки) is the exception kernel (§8.1), on it the library try { …
-  // } catch(E e) { … }: body and blocks are expr-arguments, blocks are pack pack
-  // catch. Catch the first block, whose parameter takes the type of value thrown
-  // (auto - any). Break/continue is no exception: they are caught by loop,
-  // catch(auto e) does not see them.
+  // intercept(тело, блоки) is the exception kernel (§8.1), on it the library try { … } catch(E e)
+  // { … }: body and blocks are expr-arguments, blocks are pack pack catch. Catch the first block,
+  // whose parameter takes the type of value thrown (auto - any). Break/continue is no exception:
+  // they are caught by loop, catch(auto e) does not see them. alloc_in(r, тело) is the core of
+  // with_alloc: values created in the body are in the memory level r
+  //
+  // 
+// 
+// 
+  flow alloc_in(node_list const & args, scope * env, uint32_t frame, span where) {
+    if(args.size() != 2) fail("alloc_in(уровень, тело)", where);
+    TZ_TRY(r, eval(args[0], env, frame));
+    value const * sh = shape_of(r);
+    if(!sh || !sh->is<agg_v>() || types.name(sh->as<agg_v>().type) != "region") fail(cat("with_alloc: ожидался уровень памяти region, получено ", types.describe(r)), where);
+    if(checking() || !r.known()) return eval(args[1], env, frame);
+    int64_t id = r.as<agg_v>().fields[0].second.as<int64_t>();
+    address_space * saved = current_space;
+    current_space = &root->regions[std::size_t(id)];
+    struct back {
+      address_space * s;
+      ~back() { current_space = s; }
+    } restore{saved};
+    return eval(args[1], env, frame);
+  }
+
   flow intercept(node_list const & args, scope * env, uint32_t frame, span where) {
     if(args.size() != 2) fail("intercept(тело, блоки)", where);
     thunk_v hs = thunk_arg(args[1], env, where);
@@ -2846,6 +2868,7 @@ struct interpreter {
     std::swap(override_depth, e.override_depth);
     std::swap(ctx, e.ctx);
     std::swap(path, e.path);
+    std::swap(current_space, e.space);
   }
 
   // fiber is now executable (in any VM process); the main root is the host stack.
@@ -3897,6 +3920,7 @@ struct interpreter {
 //.
       if(str(name) == "code" && c.args.size() == 1 && !functions.contains(name)) return ok(code_value(code_of(c.args[0], env)));
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
+      if(name == sym_alloc_in && !functions.contains(name)) return alloc_in(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
       if(name == sym_spawn && !functions.contains(name)) return spawn(c.args, env, frame, where);
       if(name == sym_process && !functions.contains(name)) return start_process(c.args, env, frame, where);
@@ -4845,6 +4869,11 @@ struct interpreter {
     }
     // Data offsets and the size of the dense array in the VM value cell (§12.2): machine code reads
     // them from memory
+    if(n == "region" && a.empty()) { // New Memory Level: Your Range of Addresses
+      if(checking()) return erase(value(agg_v{types.named("region"), {{sym("id"), value(int64_t(0))}}}));
+      root->regions.emplace_back();
+      return value(agg_v{types.named("region"), {{sym("id"), value(int64_t(root->regions.size() - 1))}}});
+    }
     if(n == "jit_agg_layout" && a.empty()) return value(array_v::of({value(int64_t(agg_layout().data)), value(int64_t(agg_layout().stride)), value(int64_t(agg_layout().scalar))}));
     // field number in type t aggregate (order of type fields: base, declaration, extensions); -1 - no
     if(n == "field_index" && a.size() == 2 && a[0].is<type_v>() && a[1].is<str_v>()) {
@@ -5117,6 +5146,8 @@ struct interpreter {
   std::vector<fact> facts;
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
+  symbol sym_alloc_in;
+  std::deque<address_space> regions; // region() memory levels (at VM root); live as long as the process is alive
   symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
   std::vector<std::string> instance_keys; // instance in the parsing chain
   std::map<std::string, std::map<std::string, std::pair<span, std::string>>> rt_checks; // instance → run-time - checks

@@ -86,15 +86,20 @@ struct address_space {
 };
 
 // not destroyed: values in global tables give away memory and after leaving the main
-address_space & space() {
+address_space & default_space() {
   alignas(address_space) static std::byte place[sizeof(address_space)];
   static address_space * s = new(place) address_space;
   return *s;
 }
+// The memory level in which values are now created: the context with_alloc(r) { … } (§12.2),
+// without it - the level of the caller; fiber - its own (VM changes when switching).
+address_space * current_space = nullptr;
+address_space & space() { return current_space ? *current_space : default_space(); }
 
 // 8-byte word vector (i64, f64 - bits): size and capacity - out of data.
 struct words {
   uint64_t * data = nullptr;
+  address_space * home = nullptr; // Data Memory Level: Growth and Return
   uint64_t n = 0; // word: machine code reads size from memory
   uint64_t cap = 0; // words: small - 2^k, growing - on connected pages
   bool big = false;
@@ -102,7 +107,7 @@ struct words {
   words() = default;
   words(words const & o) { *this = o; }
   words(words && o) noexcept { steal(o); }
-  words & operator=(words const & o) {
+  words & operator=(words const & o) { // copy at the level where it is made
     if(this == &o) return *this;
     clear();
     reserve(o.n);
@@ -142,12 +147,13 @@ struct words {
     uint64_t * old = data;
     uint64_t old_cap = cap;
     uint64_t grow = std::max(want, cap * 2); // petty
+    if(!home) home = &space();
     if(grow <= address_space::small_max) {
       uint32_t k = address_space::class_of(uint32_t(grow));
-      data = space().take_small(k);
+      data = home->take_small(k);
       cap = uint64_t(1) << k;
     } else {
-      data = space().take_big();
+      data = home->take_big();
       big = true;
       size_t need = (size_t(want) * 8 + address_space::page - 1) / address_space::page * address_space::page;
       address_space::commit(data, need);
@@ -155,12 +161,13 @@ struct words {
     }
     if(old) {
       if(n) std::memcpy(data, old, size_t(n) * 8);
-      space().give_small(old, address_space::class_of(uint32_t(old_cap)));
+      home->give_small(old, address_space::class_of(uint32_t(old_cap)));
     }
   }
 
   void steal(words & o) {
     data = o.data;
+    home = o.home;
     n = o.n;
     cap = o.cap;
     big = o.big;
@@ -170,9 +177,10 @@ struct words {
   }
   void release() {
     if(!data) return;
-    if(big) space().give_big(data, size_t(cap) * 8);
-    else space().give_small(data, address_space::class_of(uint32_t(cap)));
+    if(big) home->give_big(data, size_t(cap) * 8);
+    else home->give_small(data, address_space::class_of(uint32_t(cap)));
     data = nullptr;
+    home = nullptr;
     n = cap = 0;
     big = false;
   }
