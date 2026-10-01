@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ast.hpp"
+#include "pages.hpp"
 
 #include <deque>
 #include <unordered_map>
@@ -44,8 +45,7 @@ struct array_v {
     array_v const & src = o.borrowed ? *o.borrowed : o;
     repr = src.repr;
     items = src.items;
-    int_items = src.int_items;
-    float_items = src.float_items;
+    dense = src.dense;
     gen = src.gen;
     borrowed = nullptr;
     return *this;
@@ -66,15 +66,15 @@ struct array_v {
   void push(value v);
   layout kind() const { return r().repr; }
 
-  int64_t const * ints() const { return r().int_items.data(); }
-  double const * floats() const { return r().float_items.data(); }
+  int64_t const * ints() const { return reinterpret_cast<int64_t const *>(r().dense.data); }
+  double const * floats() const { return reinterpret_cast<double const *>(r().dense.data); }
   int64_t * ints_mut() {
     own();
-    return int_items.data();
+    return reinterpret_cast<int64_t *>(dense.data);
   }
   double * floats_mut() {
     own();
-    return float_items.data();
+    return reinterpret_cast<double *>(dense.data);
   }
   value * generic_cell(uint32_t i) {
     if(kind() != layout::generic) return nullptr;
@@ -89,8 +89,8 @@ struct array_v {
 
   layout repr = layout::generic;
   std::vector<value> items;
-  std::vector<int64_t> int_items;
-  std::vector<double> float_items;
+  // dense i64/f64 - words in VM pages (pages.hpp): the growing array does not move
+  words dense;
   array_v const * borrowed = nullptr;
   uint64_t gen = 0; // Buffer generation: changes with growth and replacement (element references, §12.1)
 };
@@ -265,8 +265,8 @@ array_v array_v::of(std::vector<value> items) {
 uint32_t array_v::size() const {
   array_v const & a = r();
   switch(a.repr) {
-    case layout::ints: return uint32_t(a.int_items.size());
-    case layout::floats: return uint32_t(a.float_items.size());
+    case layout::ints:
+    case layout::floats: return a.dense.size();
     default: return uint32_t(a.items.size());
   }
 }
@@ -274,8 +274,8 @@ uint32_t array_v::size() const {
 value array_v::get(uint32_t i) const {
   array_v const & a = r();
   switch(a.repr) {
-    case layout::ints: return value(a.int_items[i]);
-    case layout::floats: return value(a.float_items[i]);
+    case layout::ints: return value(int64_t(a.dense[i]));
+    case layout::floats: return value(std::bit_cast<double>(a.dense[i]));
     default: return a.items[i];
   }
 }
@@ -285,8 +285,7 @@ void array_v::to_generic() {
   if(repr == layout::generic) return;
   std::vector<value> all;
   for(uint32_t i = 0; i < size(); ++i) all.push_back(get(i));
-  int_items.clear();
-  float_items.clear();
+  dense.clear();
   items = std::move(all);
   repr = layout::generic;
 }
@@ -298,11 +297,11 @@ void array_v::push(value v) {
     else if(v.is<double>()) repr = layout::floats;
   }
   if(repr == layout::ints && v.is<int64_t>()) {
-    int_items.push_back(v.as<int64_t>());
+    dense.push_back(uint64_t(v.as<int64_t>()));
     return;
   }
   if(repr == layout::floats && v.is<double>()) {
-    float_items.push_back(v.as<double>());
+    dense.push_back(std::bit_cast<uint64_t>(v.as<double>()));
     return;
   }
   to_generic();
@@ -312,11 +311,11 @@ void array_v::push(value v) {
 void array_v::set(uint32_t i, value v) {
   own();
   if(repr == layout::ints && v.is<int64_t>()) {
-    int_items[i] = v.as<int64_t>();
+    dense[i] = uint64_t(v.as<int64_t>());
     return;
   }
   if(repr == layout::floats && v.is<double>()) {
-    float_items[i] = v.as<double>();
+    dense[i] = std::bit_cast<uint64_t>(v.as<double>());
     return;
   }
   to_generic();
