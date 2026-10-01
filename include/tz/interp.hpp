@@ -437,6 +437,7 @@ struct interpreter {
     bool diverted = false; // At least go back/break.
     bool effect = false; // The result was a runtime effect.
     bool present = false; // knot
+    bool throws = false; // run-time-check (boundary, requires...): can throw
   };
 
   // Observing node in One Embedding Context
@@ -1013,9 +1014,9 @@ struct interpreter {
     if(fuel && --*fuel == 0) fail("бюджет статического разбора исчерпан", db[n].where);
     // Check mode: observation - what value the node received and whether there was a
     // runtime effect (necessary for residual program, §13.2)
-    uint64_t effects_before = effects;
+    uint64_t effects_before = effects, checks_before = checks;
     flow f = std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
-    observe(n, f, effects != effects_before);
+    observe(n, f, effects != effects_before, checks != checks_before);
     return f;
   }
 
@@ -1057,11 +1058,12 @@ struct interpreter {
     // inside a call folded in compile-time: runtime doesn't have it (residual program
     // doesn't see it), but it's a context of use - types for editor
     bool folded = false;
+    bool throws = false; // run-time is still validated - it can throw
   };
 
-  void observe(node_id n, flow const & f, bool effect) {
-    if(!f.normal()) journal.push_back({n.value, {}, false, true, effect, ctx});
-    else journal.push_back({n.value, f.v, true, false, effect, ctx});
+  void observe(node_id n, flow const & f, bool effect, bool throws = false) {
+    if(!f.normal()) journal.push_back({n.value, {}, false, true, effect, ctx, false, throws});
+    else journal.push_back({n.value, f.v, true, false, effect, ctx, false, throws});
     observations_dirty = true;
   }
 
@@ -1076,6 +1078,7 @@ struct interpreter {
     observations_ctx.clear();
     auto add = [&](observation & o, obs_entry const & e) {
       o.effect |= e.effect;
+      o.throws |= e.throws;
       o.diverted |= e.diverted;
       o.present = true;
       if(e.seen) {
@@ -2029,6 +2032,7 @@ struct interpreter {
   // exclusion and static level string of all instances in the chain§12.3:).
   //
   void rt_check(std::string_view type, span where) {
+    ++checks; // can drop on execution: convolution JIT in constant would lose the exception
     record_throw(vm_error_shape(type));
     for(auto const & k: instance_keys) emit({report_event::rt_check, k, std::string(type), {}, where, {}});
   }
@@ -4650,6 +4654,19 @@ struct interpreter {
         str(o.op)));
   }
 
+  // call (at any depth of node) that changes position-argument: mut-parameter function
+  bool writes_args(node_id n) const {
+    if(!n) return false;
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee))
+      if(auto it = functions.find(db.as<n_ident>(db.as<n_call>(n).callee).name); it != functions.end())
+        for(node_id fn: it->second)
+          for(uint32_t i = 0; i < db.as<n_fn>(fn).params.size(); ++i)
+            if(writes_param(fn, i)) return true;
+    bool w = false;
+    db.for_each_child(n, [&](node_id c) { w = w || writes_args(c); });
+    return w;
+  }
+
   bool user_operator(node_id n) const { // node operator declared code (not primitive)
     if(!db.is<n_op>(n)) return false;
     auto const & o = db.as<n_op>(n);
@@ -4829,7 +4846,8 @@ struct interpreter {
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
       observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
-      if(!o || !o->seen || o->effect || o->diverted || !o->v.known() || !(o->v.is<int64_t>() || o->v.is<double>() || o->v.is<bool>())) return value(array_v::of({}));
+      if(!o || !o->seen || o->effect || o->throws || o->diverted || !o->v.known() || !(o->v.is<int64_t>() || o->v.is<double>() || o->v.is<bool>())) return value(array_v::of({}));
+      if(writes_args(code_node(a[0], where))) return value(array_v::of({})); // recording in the place of the caller is not a constant
       return value(array_v::of({o->v}));
     }
     // Operator chain tree selected by parsing (empty - path dependent)
@@ -5129,6 +5147,7 @@ struct interpreter {
   std::unordered_map<uint32_t, node_id> apply_nodes; // l op r for a sample
   std::deque<interpreter> probes; // parsing chains without side effects
   uint64_t effects = 0;
+  uint64_t checks = 0; // run-time - parsing check (observation: node can throw)
 };
 
 } // namespace tz
