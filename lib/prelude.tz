@@ -731,10 +731,6 @@ jit_compile(cg, f, types, type result) {
         if(depth > 0) put_bytes(cg.stack_free(8 * depth)); // временные незавершённых выражений
         jump(fr_exit[to]);
       }
-    } else if(k == n_require) {
-      array{c} = code_fields(e);
-      gen(c);
-      jump_unless(acc, trap(3, e));
     } else if(k == n_var) {
       array{name, vt, init, _, is_ct, is_ref, _} = code_fields(e);
       if(is_ref || is_ct) bad("ссылка или ct-переменная");
@@ -889,6 +885,10 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.to_i64(acc, acc_f));
     } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
+    else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
+      gen(xs[0]);
+      jump_unless(acc, trap(3, e));
+    }
     else if((name == "stream_new") || ((name == "stream_write") || ((name == "stream_read") || ((name == "stream_more") || ((name == "stream_close") || ((name == "yield") && (xs.size == 0))))))) gen_stream(e, name, xs);
     else if((name == "is_index") && (xs.size == 2)) {
       s = var_of(xs[1]);

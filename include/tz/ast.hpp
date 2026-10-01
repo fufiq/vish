@@ -143,9 +143,6 @@ struct n_return {
   node_id value;
   node_id target;
 }; // return(f) x is the output from the external function f; return(caller) x is the output from the calling function (§6.1)
-struct n_require {
-  node_id cond;
-};
 struct n_try_compile {
   node_id body;
 }; // SFINAE block (§5.4)
@@ -267,7 +264,7 @@ struct n_native {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_hide, n_return,
-    n_require, n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_template, n_use, n_native>;
+    n_try_compile, n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_pack, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_template, n_use, n_native>;
 
 struct node {
   node_kind kind;
@@ -333,6 +330,14 @@ struct ast_db {
   kind & as(node_id n) { return std::get<kind>(nodes[n].kind); }
   template<typename kind>
   kind const & as(node_id n) const { return std::get<kind>(nodes[n].kind); }
+
+  // require(c) is a normal kernel call, not node: condition c, otherwise empty
+  node_id require_cond(node_id n) const {
+    if(!is<n_call>(n)) return {};
+    auto const & c = as<n_call>(n);
+    if(c.args.size() != 1 || !c.words.empty() || !is<n_ident>(c.callee) || strings.text(as<n_ident>(c.callee).name) != "require") return {};
+    return c.args[0];
+  }
 
   void replace(node_id n, node_kind k) {
     ++revision;

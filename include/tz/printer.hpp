@@ -350,7 +350,7 @@ struct printer {
 
   // `;` after the instruction, unless it ends in a block and puts it itself.
   void terminate(node_id s) {
-    if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_require>(s) || db.is<n_return>(s)) return;
+    if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_return>(s)) return;
     if(db.is<n_hole>(s)) { // the hole prints the source code as is; the string of the set in the block - without `;`
       if(!db[s].parent || !db.is<n_block>(db[s].parent)) return;
       std::string_view t = db.as<n_hole>(s).text;
@@ -373,7 +373,7 @@ struct printer {
     node_id last = i.else_ ? i.else_ : i.then_;
     if(db.is<n_if>(last)) return ends_in_block(last);
     // Branch-instruction itself puts `;`
-    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_require>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
+    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
   }
 
   void print_node(node_id, n_return const & r) {
@@ -388,12 +388,6 @@ struct printer {
       item(r.value);
     }
     out += ';';
-  }
-
-  void print_node(node_id, n_require const & r) {
-    out += "require(";
-    item(r.cond);
-    out += ");";
   }
 
   void print_node(node_id, n_try_compile const & t) {

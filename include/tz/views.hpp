@@ -153,7 +153,7 @@ struct residual_view {
 
   // Do not replace: the purpose of assignment, called, announcements and parameters.
   bool foldable_position(node_id n) const {
-    if(db.is<n_var>(n) || db.is<n_fn>(n) || db.is<n_param>(n) || db.is<n_lambda>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.is<n_require>(n) || db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n) || db.is<n_pack>(n))
+    if(db.is<n_var>(n) || db.is<n_fn>(n) || db.is<n_param>(n) || db.is<n_lambda>(n) || db.is<n_block>(n) || db.is<n_return>(n) || db.require_cond(n) || db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n) || db.is<n_pack>(n))
       return false;
     node_id p = db[n].parent;
     if(!p) return false;

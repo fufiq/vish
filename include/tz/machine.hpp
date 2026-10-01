@@ -881,8 +881,8 @@ struct process_machine {
     // environment: captured names of the local function (parent) - transferred values
     node_list conds;
     for(node_id s: db.as<n_block>(fn.body).items) {
-      if(!db.is<n_require>(s)) break;
-      conds.push_back(db.as<n_require>(s).cond);
+      if(!db.require_cond(s)) break;
+      conds.push_back(db.require_cond(s));
     }
     scope * outer = helper_probe(conds, parent == m_none ? st.globals : parent);
     struct drop {
@@ -900,9 +900,9 @@ struct process_machine {
     helper.bind_values(fn.params, vals, {}, probe, probe); // And the samples and the tail. xx
     int n = 0;
     for(node_id s: db.as<n_block>(fn.body).items) {
-      if(!db.is<n_require>(s)) break;
+      if(!db.require_cond(s)) break;
       ++n;
-      auto c = helper.eval(db.as<n_require>(s).cond, probe, 0);
+      auto c = helper.eval(db.require_cond(s), probe, 0);
       if(!c.v.is<bool>()) throw diagnostic("require не bool", where);
       if(!c.v.as<bool>()) return -1;
     }
@@ -912,7 +912,7 @@ struct process_machine {
   bool has_leading_require(n_fn const & fn) const {
     if(!fn.body || !db.is<n_block>(fn.body)) return false;
     auto const & items = db.as<n_block>(fn.body).items;
-    return !items.empty() && db.is<n_require>(items[0]);
+    return !items.empty() && db.require_cond(items[0]);
   }
 
   void call_body_step() {
@@ -1527,6 +1527,7 @@ struct process_machine {
 
   // Challenge: arguments (expr-parameter - expression of the caller), then overload.
   void eval_node(node_id n, n_call const & c) {
+    if(node_id rc = db.require_cond(n)) return eval_require(n, rc);
     m_task & t = top();
     if(t.phase == 0) {
       if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
@@ -1933,13 +1934,13 @@ struct process_machine {
   }
 
   // require in the body - check in runtime (§5.4): violated - program error.
-  void eval_node(node_id n, n_require const & r) {
+  void eval_require(node_id n, node_id cond) {
     m_task & t = top();
     if(t.phase == 0) {
       t.phase = 1;
-      return push_eval(r.cond, t.scope, t.frame);
+      return push_eval(cond, t.scope, t.frame);
     }
-    if(!truthy(pop_val(), db[r.cond].where)) throw diagnostic("нарушено требование require", db[n].where);
+    if(!truthy(pop_val(), db[cond].where)) throw diagnostic("нарушено требование require", db[n].where);
     finish(mval{m_unit{}});
   }
 

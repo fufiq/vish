@@ -775,7 +775,8 @@ struct parser {
       node_id c = expression();
       expect_close(')');
       end_statement();
-      return db.add(n_require{c}, {start, toks[pos - 1].where.end});
+      node_id f = db.add(n_ident{db.strings.intern("require")}, {start, start + 7});
+      return db.add(n_call{f, {c}}, {start, toks[pos - 1].where.end});
     }
     if(is_word("try_compile") && is_open('{', 1)) {
       advance();
@@ -823,7 +824,7 @@ struct parser {
     auto const & i = db.as<n_if>(n);
     node_id last = i.else_ ? i.else_ : i.then_;
     if(db.is<n_if>(last)) return if_closed(last);
-    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_require>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
+    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
   }
 
   bool ends_with_block(node_id e) const {

@@ -1320,6 +1320,7 @@ struct jit_codegen {
 
   jt gen(node_id n, n_call const & c) {
     using namespace x64;
+    if(node_id rc = db.require_cond(n)) return gen_require(n, rc);
     if(!db.is<n_ident>(c.callee)) throw jit_unsupported{n, "вызов не по имени"};
     auto name = db.strings.text(db.as<n_ident>(c.callee).name);
     if(name == "f64" && c.args.size() == 1) {
@@ -1814,9 +1815,9 @@ struct jit_codegen {
     return jt::unit;
   }
 
-  jt gen(node_id n, n_require const & r) {
+  jt gen_require(node_id n, node_id cond) {
     using namespace x64;
-    if(gen_value(r.cond) != jt::bool_) throw jit_unsupported{r.cond, "require не bool"};
+    if(gen_value(cond) != jt::bool_) throw jit_unsupported{cond, "require не bool"};
     jmp_unless(fault(jit_fault_kind::require, n));
     return jt::unit;
   }
@@ -2091,7 +2092,7 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
-    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept" // pure: convolution or code generator
+    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept" || name == "require" // pure: convolution or code generator
         || name.starts_with("stream_") || name == "yield"; // Flow operations - VM call
     for(uint32_t i = 0; i < db.size() && !known; ++i) // functions of any database module (use)
       known = db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == name;

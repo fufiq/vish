@@ -14,7 +14,6 @@ import './statements/loop';
 import './statements/break';
 import './statements/continue';
 import './statements/return';
-import './statements/require';
 import './statements/throw';
 import './statements/hide';
 import './statements/ct';

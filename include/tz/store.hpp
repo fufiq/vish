@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0017"; // 0017: 0x-literal (n int.hex); 0016: native (n native); 0015: syntax (n fn.form, n call.form); 0014: explicit at the ad (n var.strict); 0013: modules (n use, sealed); 0012: template with the tag (n template); 0011: struct base (hierarchy); 0010: disclosure ...t (n spread); 0009: parameter (strict); 008:intric, from the interface:n000000000:infix, from the interface: n picking; n000000000;
+constexpr std::string_view tzdb_magic = "TZDB0018"; // 0018: require - kernel call (without n require); 0017: 0x-literal (n int.hex); 0016: native (n native); 0015: syntax (n fn.form, n call.form); 0014: explicit at the ad (n var.strict); 0013: modules (n use, sealed); 0012: template with tag (n template); 0011: struct base (hierarchy); 0010: disclosure ...t (n t) (nmidentry) (inkicking:9000000000:inkt); (picking of the interface:9000; n inkt; n inkt(n picking);
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;

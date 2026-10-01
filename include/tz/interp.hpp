@@ -1445,9 +1445,9 @@ struct interpreter {
     fail(cat("return(", str(name), "): нет такой внешней функции в цепочке вызовов"), where);
   }
 
-  flow eval_node(node_id n, n_require const & r, scope * env, uint32_t frame) {
-    TZ_TRY(c, eval(r.cond, env, frame));
-    auto b = known_bool(c, db[r.cond].where);
+  flow eval_require(node_id n, node_id cond, scope * env, uint32_t frame) {
+    TZ_TRY(c, eval(cond, env, frame));
+    auto b = known_bool(c, db[cond].where);
     if(b && !*b) {
       std::string why; // static_level - with a list of unproven
       for(auto const & d: level_details) why += cat("; ", d);
@@ -1463,7 +1463,7 @@ struct interpreter {
     for(uint32_t i = 0; i < db.size(); ++i) {
       if(!db.is<n_fn>(node_id(i)) || !db.is<n_block>(db.as<n_fn>(node_id(i)).body)) continue;
       for(node_id s: db.as<n_block>(db.as<n_fn>(node_id(i)).body).items) {
-        if(!db.is<n_require>(s)) break;
+        if(!db.require_cond(s)) break;
         if(s == n) return true;
       }
     }
@@ -1533,7 +1533,7 @@ struct interpreter {
     std::size_t from = ~std::size_t{0}; // length ≥ from
     for(auto const & c: cands) {
       auto const & fn = db.as<n_fn>(c.fn);
-      if(db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.is<n_require>(db.as<n_block>(fn.body).items[0])) return false;
+      if(db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.require_cond(db.as<n_block>(fn.body).items[0])) return false;
       int mine = -1;
       for(std::size_t i = 0; i < fn.params.size(); ++i)
         if(node_id t = db.as<n_param>(fn.params[i]).type; t && db.is<n_pat>(t)) {
@@ -3852,6 +3852,7 @@ struct interpreter {
   // --- challenge ---
 
   flow eval_node(node_id n, n_call const & c, scope * env, uint32_t frame) {
+    if(node_id rc = db.require_cond(n)) return eval_require(n, rc, env, frame);
     span where = db[n].where;
     if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
       auto const & m = db.as<n_member>(c.callee);
@@ -4332,9 +4333,9 @@ struct interpreter {
     int n = 0;
     bool unsure = false;
     for(node_id s: db.as<n_block>(fn.body).items) {
-      if(!db.is<n_require>(s)) break;
+      if(!db.require_cond(s)) break;
       ++n;
-      flow c = eval(db.as<n_require>(s).cond, probe, 0);
+      flow c = eval(db.require_cond(s), probe, 0);
       if(c.v.is<bool>() && !c.v.as<bool>()) return {false, n, "require не выполнено", false};
       if(!c.v.is<bool>() && c.v.known()) return {false, n, "require не bool", false};
       unsure = unsure || !c.v.is<bool>();
