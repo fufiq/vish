@@ -4812,14 +4812,65 @@ struct interpreter {
         str(o.op)));
   }
 
-  // call (at any depth of node) that changes position-argument: mut-parameter function
+  // call (at any depth of node) that changes the location-argument: the mut-parameter of the name
+  // closure function around node assigns (captured can change): local function or lambda in the
+  // variable, in the body - assignment; name not found as a function - too yes
+  bool local_writes(node_id n, symbol name) const {
+    auto assigns = [&](auto && self, node_id c) -> bool {
+      if(!c) return false;
+      if(db.is<n_op>(c)) {
+        auto op = db.strings.text(db.as<n_op>(c).op);
+        if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") return true;
+      }
+      if(db.is<n_call>(c) && writes_args(c)) return true;
+      bool w = false;
+      db.for_each_child(c, [&](node_id x) { w = w || self(self, x); });
+      return w;
+    };
+    for(node_id c = n, p = db[n].parent; p; c = p, p = db[p].parent) {
+      if(db.is<n_block>(p))
+        for(node_id s: db.as<n_block>(p).items) {
+          if(s == c) break;
+          if(db.is<n_fn>(s) && db.as<n_fn>(s).name == name) return assigns(assigns, db.as<n_fn>(s).body);
+          if(db.is<n_op>(s) && db.strings.text(db.as<n_op>(s).op) == "=" && db.is<n_ident>(db.as<n_op>(s).args[0]) && db.as<n_ident>(db.as<n_op>(s).args[0]).name == name)
+            return !db.is<n_lambda>(db.as<n_op>(s).args[1]) || assigns(assigns, db.as<n_lambda>(db.as<n_op>(s).args[1]).body);
+        }
+      if(db.is<n_module>(p)) break;
+    }
+    return local_name(n, name); // parameter-function and other - unknown: yes
+  }
+
+  // name declared lexically around node: variable, parameter, local function
+  bool local_name(node_id n, symbol name) const {
+    for(node_id c = n, p = db[n].parent; p; c = p, p = db[p].parent) {
+      if(db.is<n_block>(p))
+        for(node_id s: db.as<n_block>(p).items) {
+          if(s == c) break;
+          if(db.is<n_var>(s) && db.as<n_var>(s).name == name) return true;
+          if(db.is<n_fn>(s) && db.as<n_fn>(s).name == name) return true;
+          if(db.is<n_op>(s) && db.strings.text(db.as<n_op>(s).op) == "=" && db.is<n_ident>(db.as<n_op>(s).args[0]) && db.as<n_ident>(db.as<n_op>(s).args[0]).name == name) return true;
+        }
+      if(db.is<n_fn>(p) || db.is<n_lambda>(p)) {
+        node_list const & ps = db.is<n_fn>(p) ? db.as<n_fn>(p).params : db.as<n_lambda>(p).params;
+        for(node_id q: ps)
+          if(db.as<n_param>(q).name == name) return true;
+      }
+      if(db.is<n_module>(p)) break;
+    }
+    return false;
+  }
+
   bool writes_args(node_id n) const {
     if(!n) return false;
-    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee))
-      if(auto it = functions.find(db.as<n_ident>(db.as<n_call>(n).callee).name); it != functions.end())
+    if(db.is<n_call>(n) && !db.is<n_ident>(db.as<n_call>(n).callee)) return true; // Significance Challenge - Not Knowing What Changes
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
+      auto it = functions.find(db.as<n_ident>(db.as<n_call>(n).callee).name);
+      if(it == functions.end() && local_writes(n, db.as<n_ident>(db.as<n_call>(n).callee).name)) return true; // Circuit that assigns: changes the captured
+      if(it != functions.end())
         for(node_id fn: it->second)
           for(uint32_t i = 0; i < db.as<n_fn>(fn).params.size(); ++i)
             if(writes_param(fn, i)) return true;
+    }
     bool w = false;
     db.for_each_child(n, [&](node_id c) { w = w || writes_args(c); });
     return w;

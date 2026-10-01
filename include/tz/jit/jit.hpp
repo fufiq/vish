@@ -297,8 +297,8 @@ void finish(jit_fn & out, x64::assembler & a) {
 std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
   if(!n) return std::nullopt;
   // strings, aggregates and calls of kernel functions - VM values (service: node calculates
-  // VM, author's decision 2026-10-01); obviously not - value-function, unpacking, ct
-  if((db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.try_compile_body(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
+  // VM, author's decision 2026-10-01); obviously not - unpacking, ct
+  if(db.try_compile_body(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   // ct-variable module is read in place in canonical order (§7.3) - not the way of execution
