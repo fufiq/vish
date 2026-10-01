@@ -44,6 +44,7 @@ struct address_space {
 // 
 // Metadata in its pages at the beginning of the file.
   bool persistent = false;
+  bool banded = false; // one lo range (program state, machine process level)
   int fd = -1;
   std::byte * lo = nullptr; // beginning of the level range (header)
   std::byte * big_next = nullptr; // next-range
@@ -67,6 +68,11 @@ struct address_space {
   void commit(void * at, size_t n) {
     if(!persistent) {
       if(mprotect(at, n, PROT_READ | PROT_WRITE) != 0) throw std::bad_alloc();
+      if(banded) { // for the dump; adjacent parts - one
+        uint64_t off = uint64_t(static_cast<std::byte *>(at) - lo);
+        if(!pieces.empty() && pieces.back().addr + pieces.back().len == off) pieces.back().len += n;
+        else pieces.push_back({off, 0, n});
+      }
       return;
     }
     size_t off = size_t(static_cast<std::byte *>(at) - lo);
@@ -107,7 +113,7 @@ struct address_space {
       big_free.pop_back();
       return p;
     }
-    if(persistent) {
+    if(banded) {
       if(big_next + state_big > lo + state_range) throw std::bad_alloc();
       auto * p = reinterpret_cast<uint64_t *>(big_next);
       big_next += state_big;
@@ -115,16 +121,31 @@ struct address_space {
     }
     return reinterpret_cast<uint64_t *>(reserve(big_range));
   }
-  size_t big_limit() const { return persistent ? state_big : big_range; }
+  size_t big_limit() const { return banded ? state_big : big_range; }
   // pages to the system, addresses remain behind VM: the range will go to a new vector
   void give_big(uint64_t * p, size_t committed) {
-    if(!persistent) { // Non-volatile pages remain in the file
+    if(!persistent && !banded) { // Pages remain connected: the range goes as follows
       madvise(p, committed, MADV_DONTNEED);
       mprotect(p, committed, PROT_NONE);
     }
     big_free.push_back(p);
   }
+  // lane: how much is connected to each growing range (repeated - only the tail)
+  std::vector<std::pair<std::byte *, size_t>> big_have;
+  void commit_big(std::byte * p, size_t need) {
+    for(auto & [at, have]: big_have)
+      if(at == p) {
+        if(need > have) {
+          commit(p + have, need - have);
+          have = need;
+        }
+        return;
+      }
+    commit(p, need);
+    big_have.push_back({p, need});
+  }
   bool holds(void const * p) const { return persistent && p >= lo && p < lo + state_range; }
+  bool in_band(void const * p) const { return banded && p >= lo && p < lo + state_range; }
 };
 
 // not destroyed: values in global tables give away memory and after leaving the main
@@ -191,6 +212,7 @@ std::string open_state(address_space & a, std::string const & path, uint64_t bas
     return "адреса состояния программы заняты";
   }
   a.persistent = true;
+  a.banded = true;
   a.fd = fd;
   a.lo = static_cast<std::byte *>(r);
   a.small_base = a.lo + address_space::state_meta;
@@ -246,7 +268,76 @@ void close_state(address_space & a) {
   ::close(a.fd);
   a.fd = -1;
   a.persistent = false;
+  a.banded = false;
 }
+
+// Machine process address band (§12.2: dump - pages as is): level on base (0 - VM selects
+// free band). Lies - addresses are taken.
+std::vector<address_space *> & bands() {
+  alignas(std::vector<address_space *>) static std::byte place[sizeof(std::vector<address_space *>)];
+  static auto * v = new(place) std::vector<address_space *>;
+  return *v;
+}
+bool open_band(address_space & a, uint64_t base) {
+  for(uint64_t slot = 0; slot < 32; ++slot) {
+    uint64_t at = base ? base : 0x200000000000ull + slot * address_space::state_range;
+    void * r = mmap(reinterpret_cast<void *>(at), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if(r == reinterpret_cast<void *>(at)) {
+      a.banded = true;
+      a.lo = static_cast<std::byte *>(r);
+      a.small_base = a.lo + address_space::state_meta;
+      a.big_next = a.small_base + address_space::state_small;
+      bands().push_back(&a);
+      return true;
+    }
+    if(r != MAP_FAILED) munmap(r, address_space::state_range);
+    if(base) return false;
+  }
+  return false;
+}
+void close_band(address_space & a) {
+  munmap(a.lo, address_space::state_range);
+  std::erase(bands(), &a);
+  a.banded = false;
+}
+address_space * band_of(void const * p) {
+  for(address_space * a: bands())
+    if(a->in_band(p)) return a;
+  return nullptr;
+}
+
+// Memory of containers by class of pieces: the size knows the caller - no metadata in the data
+void * space_alloc(address_space & a, size_t bytes) {
+  uint64_t w = std::max<uint64_t>((bytes + 7) / 8, 2);
+  if(w <= address_space::small_max) return a.take_small(address_space::class_of(uint32_t(w)));
+  uint64_t * p = a.take_big();
+  a.commit_big(reinterpret_cast<std::byte *>(p), (bytes + address_space::page - 1) / address_space::page * address_space::page);
+  return p;
+}
+void space_free(void * p, size_t bytes) {
+  address_space * a = band_of(p);
+  if(!a) return std::free(p);
+  uint64_t w = std::max<uint64_t>((bytes + 7) / 8, 2);
+  if(w <= address_space::small_max) a->give_small(static_cast<uint64_t *>(p), address_space::class_of(uint32_t(w)));
+  else a->give_big(static_cast<uint64_t *>(p), (bytes + address_space::page - 1) / address_space::page * address_space::page);
+}
+
+// The level of the process the machine is currently building (the containers of the machine are its pages)
+address_space * machine_space = nullptr;
+// Distributor of process machine containers: pages of its level, dump - they are also. Template - because
+// that's how std containers are arranged (*mine*: an exception to "auto instead of template<>").
+template<typename T>
+struct pages_alloc {
+  using value_type = T;
+  pages_alloc() = default;
+  pages_alloc(auto const &) {}
+  T * allocate(size_t n) {
+    if(!machine_space) return static_cast<T *>(std::malloc(n * sizeof(T)));
+    return static_cast<T *>(space_alloc(*machine_space, n * sizeof(T)));
+  }
+  void deallocate(T * p, size_t n) { space_free(p, n * sizeof(T)); }
+  bool operator==(pages_alloc const &) const { return true; }
+};
 
 // 8-byte word vector (i64, f64 - bits): size and capacity - out of data.
 struct words {

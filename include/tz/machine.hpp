@@ -26,6 +26,11 @@ namespace tz {
 
 constexpr uint32_t m_none = ~uint32_t{0};
 
+// The state containers of the machine are the pages of its process level (§12.2): the dump is the same.
+template<typename T>
+using m_list = std::vector<T, pages_alloc<T>>;
+using m_str = std::basic_string<char, std::char_traits<char>, pages_alloc<char>>;
+
 struct mval;
 struct m_field;
 struct m_unit {};
@@ -33,19 +38,19 @@ struct m_type {
   type_id type;
 };
 struct m_arr {
-  std::vector<mval> items;
+  m_list<mval> items;
   uint64_t gen = 0; // Buffer generation: growth and replacement - new (links to elements, §12.1)
 };
 struct m_agg {
   type_id type;
-  std::vector<m_field> fields;
+  m_list<m_field> fields;
 };
 // Function as a value: overload by name or lambda by environment (area number).
 struct m_fn {
   symbol name;
   node_id lambda;
   uint32_t env = m_none;
-  std::vector<node_id> set; // Local set of overloads (block functions of the same name)
+  m_list<node_id> set; // Local set of overloads (block functions of the same name)
 };
 // expr-параметр: выражение вызывающего в его области и кадре (§6.1).
 struct m_thunk {
@@ -64,7 +69,13 @@ struct m_alias {
   uint64_t gen = 0;
 };
 struct mval {
-  std::variant<m_unit, bool, int64_t, double, std::string, m_type, m_arr, m_agg, m_fn, m_thunk, m_alias> v;
+  std::variant<m_unit, bool, int64_t, double, m_str, m_type, m_arr, m_agg, m_fn, m_thunk, m_alias> v;
+
+  mval() = default;
+  mval(auto x)
+    requires(!std::is_convertible_v<decltype(x), std::string_view>)
+      : v(std::move(x)) {}
+  mval(std::string_view s) : v(m_str(s)) {} // line - in process level pages
 
   template<typename T>
   bool is() const { return std::holds_alternative<T>(v); }
@@ -85,7 +96,7 @@ struct m_var {
 };
 struct m_scope {
   uint32_t parent = m_none;
-  std::vector<m_var> vars;
+  m_list<m_var> vars;
   bool captured = false; // Lambda environment - lives longer than its block
   bool live = true;
   uint32_t caller = m_none; // Body root function: call environment (O4)
@@ -136,26 +147,26 @@ struct m_signal {
 
 // Error fiber - data (pop up to main while waiting for fiber).
 struct m_trace {
-  std::string what;
+  m_str what;
   span where;
 };
 struct m_error {
   bool present = false;
-  std::string what;
+  m_str what;
   span where;
-  std::string type;
-  std::vector<m_trace> trace;
+  m_str type;
+  m_list<m_trace> trace;
 };
 
 enum : uint8_t { f_ready, f_blocked, f_done };
 
 // fiber - its stack of tasks and values, frames: switching - changing the number (§8.3).
 struct m_fiber {
-  std::vector<m_task> tasks;
-  std::vector<mval> vals;
-  std::vector<m_frame> frames;
+  m_list<m_task> tasks;
+  m_list<mval> vals;
+  m_list<m_frame> frames;
   m_signal pending;
-  std::vector<m_override> overrides;
+  m_list<m_override> overrides;
   uint8_t state = f_ready;
   bool direct = false; // In the queue first: awakened by exchange (direct transmission)
   m_error error;
@@ -164,35 +175,47 @@ struct m_fiber {
 // Write/read between fiber (§8.3): A buffer waiting to be read and written.
 struct m_stream {
   uint64_t cap = 16;
-  std::vector<mval> buf;
+  m_list<mval> buf;
   bool closed = false;
-  std::vector<uint32_t> readers, writers;
+  m_list<uint32_t> readers, writers;
 };
 
 // The state of the process is everything that Dump writes.
 struct m_state {
-  std::vector<m_scope> scopes;
-  std::vector<uint32_t> free_scopes;
-  std::vector<m_fiber> fibers;
+  m_list<m_scope> scopes;
+  m_list<uint32_t> free_scopes;
+  m_list<m_fiber> fibers;
   uint32_t frame_counter = 0;
   uint32_t globals = m_none;
   uint64_t steps = 0;
-  std::vector<std::string> type_names; // Numbers of value types - as in the register at the time of dump
+  m_list<m_str> type_names; // Numbers of value types - as in the register at the time of dump
   bool done = false;
   int64_t exit_code = 0;
   // Input: given strings (tests, session) or stdin host when the queue is not set
   bool queued_input = false;
-  std::vector<std::string> input;
+  m_list<m_str> input;
   // fiber : current, queue of ready, waiting for the end of fiber ; streams
   uint32_t current = 0;
-  std::vector<uint32_t> ready;
-  std::vector<uint32_t> joiners;
-  std::vector<m_stream> streams;
+  m_list<uint32_t> ready;
+  m_list<uint32_t> joiners;
+  m_list<m_stream> streams;
   bool deadlock = false; // Everyone is waiting for each other: the mistake will be the main one.
   uint32_t handoff_run = 0; // direct
   uint64_t array_gen = 0; // array-buffering
-  std::vector<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
-  std::vector<symbol> ct_vars; // ct-variable module (change - only ct-code)
+  m_list<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
+  m_list<symbol> ct_vars; // ct-variable module (change - only ct-code)
+};
+
+// Process dump header: everything except level pages.
+struct dump_head {
+  std::string magic = "TZPROC03";
+  std::string name;
+  uint32_t root = 0;
+  std::vector<journal_entry> journal;
+  uint64_t base = 0, small_used = 0, small_committed = 0, big_next = 0, state_at = 0, pages_at = 0;
+  std::vector<std::vector<uint64_t>> small_free = std::vector<std::vector<uint64_t>>(address_space::classes);
+  std::vector<uint64_t> big_free;
+  std::vector<address_space::piece> pieces;
 };
 
 enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept, m_elem_ref };
@@ -203,14 +226,61 @@ struct process_machine {
   node_id root;
   std::string name;
   interpreter helper; // Static Solutions and Primary Operations: No Process State
-  m_state st;
+  // Process Level (§12.2): The entire state of the machine is the page of its address band; the
+  // dump is the same as it is.
+//.
+  address_space band;
+  address_space * outer_space = machine_space; // level of the car that was before
+  m_state & st;
   std::string * captured = nullptr; // output - in line (tests), otherwise stdout
 
-  process_machine(ast_db & db, node_id root, std::string name)
-      : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run) {
-    for(node_id item: db.as<n_module>(root).items) // the state of the program - pages; the dump of the machine - while the values
+  process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {})
+      : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump)) {
+    for(node_id item: db.as<n_module>(root).items) // The state of the program the machine is not yet performing
       if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) throw diagnostic("машина процессов: пока не поддержано — состояние программы [[state]]", db[item].where);
     helper.elaborate();
+    if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
+  }
+  ~process_machine() {
+    st.~m_state();
+    close_band(band);
+    machine_space = outer_space;
+  }
+  process_machine(process_machine const &) = delete;
+
+  // The state is in the process lane: new or dump pages at the same addresses.
+  m_state & place_state(std::string_view dump) {
+    if(dump.empty()) {
+      if(!open_band(band, 0)) throw diagnostic("машина процессов: нет свободной полосы адресов", {});
+      machine_space = &band;
+      return *new(space_alloc(band, sizeof(m_state))) m_state;
+    }
+    reader r(dump);
+    dump_head h = r.get<dump_head>();
+    if(!open_band(band, h.base)) throw diagnostic("дамп процесса: его адреса заняты", {});
+    machine_space = &band;
+    std::size_t at = h.pages_at;
+    for(auto const & p: h.pieces) { // Pages - as they were, in the same addresses
+      band.commit(band.lo + p.addr, p.len);
+      std::memcpy(band.lo + p.addr, dump.data() + at, p.len);
+      at += p.len;
+    }
+    band.small_used = h.small_used;
+    band.small_committed = h.small_committed;
+    band.big_next = band.lo + h.big_next;
+    for(uint32_t k = 0; k < address_space::classes; ++k)
+      for(uint64_t o: h.small_free[k]) band.small_free[k].push_back(reinterpret_cast<uint64_t *>(band.lo + o));
+    for(uint64_t o: h.big_free) band.big_free.push_back(reinterpret_cast<uint64_t *>(band.lo + o));
+    uint64_t big_at = address_space::state_meta + address_space::state_small; // plug-in
+    for(auto const & p: h.pieces)
+      if(p.addr >= big_at) {
+        std::byte * slice = band.lo + big_at + (p.addr - big_at) / address_space::state_big * address_space::state_big;
+        size_t have = size_t(band.lo + p.addr + p.len - slice);
+        auto it = std::ranges::find_if(band.big_have, [&](auto const & x) { return x.first == slice; });
+        if(it == band.big_have.end()) band.big_have.push_back({slice, have});
+        else it->second = std::max(it->second, have);
+      }
+    return *reinterpret_cast<m_state *>(band.lo + h.state_at);
   }
 
   // --- memory ---
@@ -325,6 +395,7 @@ struct process_machine {
         return value(std::move(g));
       } else if constexpr(std::is_same_v<T, m_fn>) return value(fn_v{a.name, a.lambda, nullptr});
       else if constexpr(std::is_same_v<T, m_thunk> || std::is_same_v<T, m_alias>) return to_value(deref(x));
+      else if constexpr(std::is_same_v<T, m_str>) return value(std::string_view(a));
       else return value(a);
     },
         x.v);
@@ -369,7 +440,7 @@ struct process_machine {
       if constexpr(std::is_same_v<T, bool>) return "bool";
       else if constexpr(std::is_same_v<T, int64_t>) return "i64";
       else if constexpr(std::is_same_v<T, double>) return "f64";
-      else if constexpr(std::is_same_v<T, std::string>) return "str";
+      else if constexpr(std::is_same_v<T, m_str>) return "str";
       else if constexpr(std::is_same_v<T, m_unit>) return "unit";
       else if constexpr(std::is_same_v<T, m_type>) return "type";
       else if constexpr(std::is_same_v<T, m_arr>) {
@@ -472,16 +543,16 @@ struct process_machine {
     schedule();
   }
   static diagnostic restore_error(m_error const & e) {
-    diagnostic d(e.what, e.where, diag_kind::runtime);
-    d.type = e.type;
-    for(auto const & t: e.trace) d.trace.push_back({t.what, t.where});
+    diagnostic d(std::string(e.what), e.where, diag_kind::runtime);
+    d.type = std::string(e.type);
+    for(auto const & t: e.trace) d.trace.push_back({std::string(t.what), t.where});
     return d;
   }
   // The uncaught error fiber (not main) is its outcome; the program lives to wait in the main.
   void fiber_error(diagnostic const & d) {
     auto & f = fib();
-    f.error = {true, d.what(), d.where, d.type, {}};
-    for(auto const & t: d.trace) f.error.trace.push_back({t.what, t.where});
+    f.error = {true, m_str(d.what()), d.where, m_str(d.type), {}};
+    for(auto const & t: d.trace) f.error.trace.push_back({m_str(t.what), t.where});
     f.tasks.clear();
     f.vals.clear();
     f.state = f_done;
@@ -533,7 +604,7 @@ struct process_machine {
     st = {};
     if(input) {
       st.queued_input = true;
-      st.input = *input;
+      for(auto const & l: *input) st.input.emplace_back(l);
     }
     st.fibers.emplace_back();
     st.globals = new_scope(m_none);
@@ -1324,7 +1395,7 @@ struct process_machine {
     mval o = deref(pop_val());
     if(helper.str(m.name) == "size") {
       if(o.is<m_arr>()) return finish(mval{int64_t(o.as<m_arr>().items.size())});
-      if(o.is<std::string>()) return finish(mval{int64_t(o.as<std::string>().size())});
+      if(o.is<m_str>()) return finish(mval{int64_t(o.as<m_str>().size())});
     }
     if(o.is<m_agg>())
       for(auto const & f: o.as<m_agg>().fields)
@@ -1342,8 +1413,8 @@ struct process_machine {
     }
     mval o = deref(pop_val()), key = deref(pop_val());
     std::string name;
-    if(key.is<std::string>()) name = key.as<std::string>();
-    else if(key.is<m_agg>() && !key.as<m_agg>().fields.empty() && key.as<m_agg>().fields[0].v.is<std::string>()) name = key.as<m_agg>().fields[0].v.as<std::string>();
+    if(key.is<m_str>()) name = key.as<m_str>();
+    else if(key.is<m_agg>() && !key.as<m_agg>().fields.empty() && key.as<m_agg>().fields[0].v.is<m_str>()) name = key.as<m_agg>().fields[0].v.as<m_str>();
     else throw diagnostic(cat("v.[f]: дескриптор поля должен быть известен при компиляции, получено ", describe(key)), db[n].where);
     if(o.is<m_agg>())
       for(auto const & f: o.as<m_agg>().fields)
@@ -1369,8 +1440,8 @@ struct process_machine {
     mval i = deref(pop_val());
     mval o = deref(pop_val());
     if(!i.is<int64_t>()) throw diagnostic("индекс должен быть i64", db[n].where);
-    if(o.is<std::string>()) { // bytes: s[k] - i64
-      auto const & str = o.as<std::string>();
+    if(o.is<m_str>()) { // bytes: s[k] - i64
+      auto const & str = o.as<m_str>();
       int64_t k = i.as<int64_t>();
       if(k < 0 || uint64_t(k) >= str.size()) out_of_bounds(k, str.size(), db[n].where);
       return finish(mval{int64_t(uint8_t(str[std::size_t(k)]))});
@@ -1544,7 +1615,7 @@ struct process_machine {
         if(cv.is<m_thunk>() && db.is<n_lambda>(cv.as<m_thunk>().expr) && db.as<n_lambda>(cv.as<m_thunk>().expr).block)
           return call_block(n, cv.as<m_thunk>(), c.args);
         if(cv.is<m_fn>() && !cv.as<m_fn>().set.empty()) { // localization
-          std::vector<node_id> fns = cv.as<m_fn>().set;
+          std::vector<node_id> fns(cv.as<m_fn>().set.begin(), cv.as<m_fn>().set.end());
           return eval_call_args(n, fns, c.args, false);
         }
         if(cv.is<m_fn>() && cv.as<m_fn>().lambda) return call_closure(n, cv.as<m_fn>(), c.args);
@@ -1609,7 +1680,7 @@ struct process_machine {
       if(place p = find(scope, db.as<n_ident>(db.as<n_call>(n).callee).name); p.scope != m_none)
         if(mval & cv = cell(p); cv.is<m_fn>() && !cv.as<m_fn>().set.empty()) {
           if(env) *env = cv.as<m_fn>().env;
-          return cv.as<m_fn>().set;
+          return std::vector<node_id>(cv.as<m_fn>().set.begin(), cv.as<m_fn>().set.end());
         }
     return helper.functions.at(db.as<n_fn>(any).name);
   }
@@ -2157,14 +2228,32 @@ struct process_machine {
 
   // Process Dump: journal base (code, including node, generated during execution) and
   // state - arenas, task and value stacks, frames.
+  //
+  // Dump is the header (base journal, process level metadata, state location) and the level
+  // page as it is: values are not serialized.
   std::string dump() {
-    st.type_names = helper.types.names;
+    st.type_names.clear();
+    for(auto const & n: helper.types.names) st.type_names.emplace_back(n);
+    dump_head h;
+    h.name = name;
+    h.root = root.value;
+    h.journal = db.journal();
+    h.base = uint64_t(band.lo);
+    h.small_used = band.small_used;
+    h.small_committed = band.small_committed;
+    h.big_next = uint64_t(band.big_next - band.lo);
+    for(uint32_t k = 0; k < address_space::classes; ++k)
+      for(uint64_t * p: band.small_free[k]) h.small_free[k].push_back(uint64_t(reinterpret_cast<std::byte *>(p) - band.lo));
+    for(uint64_t * p: band.big_free) h.big_free.push_back(uint64_t(reinterpret_cast<std::byte *>(p) - band.lo));
+    h.state_at = uint64_t(reinterpret_cast<std::byte *>(&st) - band.lo);
+    h.pieces = band.pieces;
+    writer w0;
+    w0.put(h);
+    h.pages_at = w0.bytes.size() + 16; // Header size does not depend on pages_at
     writer w;
-    for(char c: std::string_view("TZPROC02")) w.put(c);
-    w.put(name);
-    w.put(root.value);
-    w.put(db.journal());
-    w.put(st);
+    w.put(h);
+    w.bytes.resize(h.pages_at, 0);
+    for(auto const & p: h.pieces) w.bytes.append(reinterpret_cast<char const *>(band.lo + p.addr), p.len);
     return std::move(w.bytes);
   }
 };
@@ -2176,14 +2265,10 @@ struct restored_process {
 
   explicit restored_process(std::string_view bytes) {
     reader r(bytes);
-    for(char c: std::string_view("TZPROC02"))
-      if(r.get<char>() != c) throw diagnostic("не дамп процесса tz", {});
-    std::string name = r.get<std::string>();
-    node_id root(r.get<uint32_t>());
-    db.replay(r.get<std::vector<journal_entry>>());
-    m.emplace(db, root, name);
-    m->st = r.get<m_state>();
-    m->helper.types.names = m->st.type_names;
+    dump_head h = r.get<dump_head>();
+    if(std::string_view(h.magic) != "TZPROC03") throw diagnostic("не дамп процесса tz", {});
+    db.replay(h.journal);
+    m.emplace(db, node_id(h.root), h.name, bytes);
   }
 };
 

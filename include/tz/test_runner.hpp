@@ -569,12 +569,15 @@ struct test_runner {
       std::from_chars(at.data(), at.data() + at.size(), n);
       std::string dout;
       try {
-        process_machine m(db, root, path.filename().string());
-        m.captured = &dout;
-        m.start(e.args, e.stdin_lines);
-        m.run(n);
-        if(m.st.done) why += cat("    машина: процесс закончился раньше шага дампа ", n, "\n");
-        std::string bytes = m.dump();
+        std::string bytes;
+        { // The original process goes away: the restored one has the same addresses (pages as is)
+          process_machine m(db, root, path.filename().string());
+          m.captured = &dout;
+          m.start(e.args, e.stdin_lines);
+          m.run(n);
+          if(m.st.done) why += cat("    машина: процесс закончился раньше шага дампа ", n, "\n");
+          bytes = m.dump();
+        }
         restored_process r(bytes); // New base from journal dump - "another VM"
         r.m->captured = &dout;
         r.m->run();
