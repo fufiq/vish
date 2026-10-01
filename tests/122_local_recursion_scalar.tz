@@ -1,0 +1,19 @@
+// out: 177063
+// out: 15013
+// jit-compiled: walk
+// Рекурсия локальных функций без узлов VM — проверяется и под AArch64 (подпрограмма:
+// bl/ret, кадр объемлющей — x19).
+walk(i64 n) {
+  count = 0;
+  fib(i64 k) => {
+    count += 1;
+    if(k < 2) return k;
+    fib(k - 1) + fib(k - 2)
+  };
+  half(f64 x, i64 k) => if(k == 0) x else half(x / 2.0, k - 1);
+  fib(n) + (count * 1000) + i64(half(64.0, 3))
+}
+main() {
+  print(walk(10));
+  print(walk(5));
+}
