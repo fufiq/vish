@@ -1510,8 +1510,9 @@ struct parser {
   node_id template_string() {
     uint32_t start = here().where.begin;
     symbol tag = ident();
-    n_template tp;
-    tp.tag = db.add(n_ident{tag}, {start, toks[pos - 1].where.end});
+    n_call tp;
+    tp.callee = db.add(n_ident{tag}, {start, toks[pos - 1].where.end});
+    tp.tagged = true;
     token s = here();
     advance();
     std::string_view raw = s.text.substr(1, s.text.size() - 2);
@@ -1523,7 +1524,7 @@ struct parser {
         if((chunk[i] == '{' || chunk[i] == '}') && i + 1 < chunk.size() && chunk[i + 1] == chunk[i]) ++i;
         lit += chunk[i];
       }
-      tp.parts.push_back(db.add(n_str{unescape(cat("\"", lit, "\""))}, {base, base}));
+      tp.args.push_back(db.add(n_str{unescape(cat("\"", lit, "\""))}, {base, base}));
       chunk.clear();
     };
     for(std::size_t i = 0; i < raw.size(); ++i) {
@@ -1550,7 +1551,7 @@ struct parser {
       }
       if(j >= raw.size()) throw diagnostic("шаблон: незакрытая {", {uint32_t(base + i), uint32_t(base + i + 1), source});
       text_part();
-      tp.parts.push_back(embedded(uint32_t(base + i + 1), uint32_t(base + j)));
+      tp.args.push_back(embedded(uint32_t(base + i + 1), uint32_t(base + j)));
       i = j;
     }
     text_part();

@@ -1710,15 +1710,6 @@ struct interpreter {
     return ok(std::move(r));
   }
 
-  flow eval_node(node_id n, n_template const & t, scope * env, uint32_t frame) {
-    symbol tag = db.as<n_ident>(t.tag).name;
-    if(value * cell = find(env, tag)) { // Local tag - value-function
-      TZ_TRY(fv, read(cell));
-      return call_value(fv, t.parts, env, frame, db[n].where, n.value);
-    }
-    return call_named(tag, t.parts, env, frame, db[n].where, n.value);
-  }
-
   flow eval_node(node_id n, n_spread const &, scope *, uint32_t) { fail("...раскрытие — только аргументом вызова", db[n].where); }
 
   flow eval_node(node_id n, n_subject const &, scope *, uint32_t) {

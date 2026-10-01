@@ -247,10 +247,11 @@ struct printer {
     out += cat("native ", in_quotes(str(x.lang)), " {", x.code, "}");
   }
 
-  void print_node(node_id, n_template const & t) {
-    item(t.tag);
+  // call tag(s) with template writing: tag "text {x} text"
+  void tagged(n_call const & t) {
+    item(t.callee);
     out += '"';
-    for(node_id p: t.parts) {
+    for(node_id p: t.args) {
       if(!db.is<n_str>(p)) {
         out += '{';
         item(p);
@@ -584,6 +585,7 @@ struct printer {
   // Challenge: head and clauses. The parameters of the construction block are printed in
   // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
   void print_node(node_id call, n_call const & c) {
+    if(c.tagged) return tagged(c);
     if(symbol h = db.hide_name(call)) { // projection hide(x) is the author form of `hide x`
       out += cat("hide ", str(h));
       return;

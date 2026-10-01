@@ -1241,16 +1241,6 @@ struct process_machine {
     finish(from_value(e->fn(helper, a, db[n].where), db[n].where));
   }
 
-  void eval_node(node_id n, n_template const & tp) {
-    m_task & t = top();
-    if(t.phase > 0) return resume_call(n);
-    symbol tag = db.as<n_ident>(tp.tag).name;
-    if(find(t.scope, tag).scope != m_none) unsupported("локальный тег шаблона", n);
-    auto it = helper.functions.find(tag);
-    if(it == helper.functions.end()) return builtin_call(n, tag, tp.parts);
-    return eval_call_args(n, it->second, tp.parts, false);
-  }
-
   // ...t in arguments: meaning in its entirety; in arguments it unfolds call_args_step
   void eval_node(node_id, n_spread const & s) {
     m_task & t = top();
@@ -1597,7 +1587,6 @@ struct process_machine {
 
   node_list call_args(node_id n) const {
     if(db.is<n_op>(n)) return db.as<n_op>(n).args;
-    if(db.is<n_template>(n)) return db.as<n_template>(n).parts; // tag {x} ..." - tag(s)
     auto const & c = db.as<n_call>(n);
     if(db.is<n_member>(c.callee)) {
       node_list args{db.as<n_member>(c.callee).object};
