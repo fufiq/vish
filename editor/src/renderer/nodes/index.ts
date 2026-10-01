@@ -24,8 +24,6 @@ import './expressions/str';
 import './expressions/call';
 import './expressions/op';
 import './expressions/chain';
-import './expressions/member';
-import './expressions/field';
 import './expressions/lambda';
 import './expressions/construct';
 import './expressions/quote';

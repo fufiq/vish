@@ -980,8 +980,8 @@ struct interpreter {
   void written(node_id target, scope * env) {
     if(!checking()) return;
     bool whole = db.is<n_ident>(target);
-    while(db.is_index(target) || db.is<n_member>(target))
-      target = db.is_index(target) ? db.index_of(target).object : db.as<n_member>(target).object;
+    while(db.is_index(target) || db.is_member(target))
+      target = db.is_index(target) ? db.index_of(target).object : db.member_of(target).object;
     if(!db.is<n_ident>(target)) return;
     value * cell = find(env, db.as<n_ident>(target).name);
     if(!cell || cell->is<thunk_v>()) return;
@@ -1958,8 +1958,8 @@ struct interpreter {
       auto op = str(o.op);
       if((op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") && !o.args.empty()) {
         node_id t = o.args[0];
-        while(db.is_index(t) || db.is<n_member>(t))
-          t = db.is_index(t) ? db.index_of(t).object : db.as<n_member>(t).object;
+        while(db.is_index(t) || db.is_member(t))
+          t = db.is_index(t) ? db.index_of(t).object : db.member_of(t).object;
         if(db.is<n_ident>(t) && db.as<n_ident>(t).name == name) return true;
       }
     }
@@ -1968,8 +1968,8 @@ struct interpreter {
       if(auto it = functions.find(callee); it != functions.end())
         for(uint32_t k = 0; k < args.size(); ++k) {
           node_id a = args[k];
-          while(db.is_index(a) || db.is<n_member>(a))
-            a = db.is_index(a) ? db.index_of(a).object : db.as<n_member>(a).object;
+          while(db.is_index(a) || db.is_member(a))
+            a = db.is_index(a) ? db.index_of(a).object : db.member_of(a).object;
           if(!db.is<n_ident>(a) || db.as<n_ident>(a).name != name) continue;
           for(node_id fn: it->second)
             if(writes_param(fn, k)) return true;
@@ -2301,7 +2301,7 @@ struct interpreter {
 
   // --- field access ---
 
-  flow eval_node(node_id n, n_member const & m, scope * env, uint32_t frame) {
+  flow eval_member(node_id n, member_view const & m, scope * env, uint32_t frame) {
     value r;
     if(value const * o = peek(m.object, env); o && o->is<array_v>()) r = member(*o, m.name, db[n].where);
     else {
@@ -2342,7 +2342,7 @@ struct interpreter {
 
   // v.[f] is a field by descriptor (from fields(T)) or by line name; the descriptor is
   // known when compiled: the field cycle is disclosed (§7.4).
-  flow eval_node(node_id n, n_field const & f, scope * env, uint32_t frame) {
+  flow eval_field(node_id n, field_view const & f, scope * env, uint32_t frame) {
     TZ_TRY(key, eval(f.key, env, frame));
     std::string name;
     if(key.is<std::string>()) name = key.as<std::string>();
@@ -3526,8 +3526,8 @@ struct interpreter {
       if(!arr || arr->is<rt_v>() || !idx.v.known()) return nullptr;
       return arr->as<array_v>().generic_cell(checked_index(*arr, idx.v, db[n].where));
     }
-    if(db.is<n_member>(n)) { // field
-      auto const & m = db.as<n_member>(n);
+    if(db.is_member(n)) { // field
+      auto const & m = db.member_of(n);
       value * obj = place(m.object, env, frame);
       if(obj && obj->is<rt_v>() && shape_of(*obj) && shape_of(*obj)->is<agg_v>()) *obj = *shape_of(*obj); // erased aggregate - sample fields
       if(!obj || !obj->is<agg_v>()) return nullptr;
@@ -3541,6 +3541,8 @@ struct interpreter {
   // --- operator ---
 
   flow eval_node(node_id n, n_op const & o, scope * env, uint32_t frame) {
+    if(db.is_member(n)) return eval_member(n, db.member_of(n), env, frame); // a.x is the kernel shape
+    if(db.is_field(n)) return eval_field(n, db.field_of(n), env, frame);
     // a[i]: kernel if [] is not overloaded with code (overload to its types, otherwise the kernel below)
     if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(sym("infix[]").value))) return eval_index(n, db.index_of(n), env, frame);
     auto op = str(o.op);
@@ -3850,8 +3852,8 @@ struct interpreter {
     if(symbol h = db.hide_name(n)) return eval_hide(n, h, env);
     if(node_id b = db.try_compile_body(n)) return eval_try_compile(n, b, env, frame);
     span where = db[n].where;
-    if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
-      auto const & m = db.as<n_member>(c.callee);
+    if(db.is_member(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
+      auto const & m = db.member_of(c.callee);
       // entity .f(…) is a function declared in the body of the entity function:
 //  
       if(db.is<n_ident>(m.object)) {
@@ -4652,7 +4654,7 @@ struct interpreter {
   bool user_operator(node_id n) const { // node operator declared code (not primitive)
     if(!db.is<n_op>(n)) return false;
     auto const & o = db.as<n_op>(n);
-    if(o.postfix) return true;
+    if(o.postfix) return !db.is_member(n);
     if(user_ops.empty()) return false;
     return user_ops.contains(db.strings.intern(cat(o.args.size() == 2 ? "infix" : "prefix", str(o.op))).value);
   }

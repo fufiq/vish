@@ -627,7 +627,8 @@ jit_compile(cg, f, types, type result) {
     else if(k == n_float) f64
     else if(k == n_op) {
       array{op, xs, _} = code_fields(e);
-      if(op == "[]") {
+      if(op == ".size") i64
+      else if(op == "[]") {
         a = ty(xs[0]);
         if(a == jc_range) i64 else elem(a)
       } else if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool
@@ -674,14 +675,7 @@ jit_compile(cg, f, types, type result) {
       if(t.size == 0) bad("цепочка: дерево зависит от пути");
       else gen(t[0]);
     } else if(k == n_call) gen_call(e);
-    else if(k == n_member) {
-      array{o, name} = code_fields(e);
-      s = var_of(o);
-      if((s < 0) || ((name != "size") || env[s].thunk)) bad("обращение .имя");
-      else if(is_arr(env[s].kind)) put_bytes(cg.load(acc, frame, off(env[s].slot + 1)));
-      else if(env[s].kind == jc_range) put_bytes(cg.load(acc, frame, off(env[s].slot)));
-      else bad(".size не массива");
-    } else if(k == n_block) {
+    else if(k == n_block) {
       array{items, ...rest} = code_fields(e);
       saved_top = top;
       for(x : items) if(ok) gen(x);
@@ -812,9 +806,18 @@ jit_compile(cg, f, types, type result) {
     r = regs(t);
     g(r[0], r[1])
   };
+  // xs.size — постфиксный оператор .size 
+  gen_size(xs) => {
+    s = var_of(xs[0]);
+    if((s < 0) || env[s].thunk) bad("обращение .size не к переменной");
+    else if(is_arr(env[s].kind)) put_bytes(cg.load(acc, frame, off(env[s].slot + 1)));
+    else if(env[s].kind == jc_range) put_bytes(cg.load(acc, frame, off(env[s].slot)));
+    else bad(".size не массива");
+  };
   gen_op(e) => {
     array{op, xs, _} = code_fields(e);
     if(op == "[]") gen_index(e);
+    else if(op == ".size") gen_size(xs);
     else if(xs.size == 1) {
       t = ty(xs[0]);
       gen(xs[0]);

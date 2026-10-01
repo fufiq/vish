@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0024"; // 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n auto); 0022: pack - array{blocks} (without n pack); 0021: template with tag - call (n call.tagged, without n template); 0020: compile - kernel call (without n try compile); 0019: seal - kernel (without n hide); 0018: kernel call (without 00: : 00: n complex; from : : 00: : 00000000: : : n n n
+constexpr std::string_view tzdb_magic = "TZDB0025"; // 0025: point - operators .x and .[] (without n member, n field); 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n auto); 0022: pack - array{blocks} (without n pack); 0021: syn call.tagged, without n template; 0020: seal compile - kernel call (without fix compile) (without 00: 00: 00:ntric, : 00: 00: 0000: 00: 00: 00: 0000: n n
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;

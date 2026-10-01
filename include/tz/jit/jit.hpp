@@ -699,7 +699,7 @@ struct jit_codegen {
     return *s;
   }
 
-  jt gen(node_id n, n_member const & m) {
+  jt gen_member(node_id n, member_view const & m) {
     if(db.strings.text(m.name) != "size") throw jit_unsupported{n, "поле"};
     if(slot const * r = range_slot(m.object)) {
       load_gpr(*r, x64::rax);
@@ -756,6 +756,8 @@ struct jit_codegen {
 
   jt gen(node_id n, n_op const & o) {
     using namespace x64;
+    if(db.is_member(n)) return gen_member(n, db.member_of(n));
+    if(db.is_field(n)) throw jit_unsupported{n, "поле по дескриптору"};
     auto op = db.strings.text(o.op);
     if(an.user_operator(n)) { // code operator: built-in operation if its overload is not accepted by these types
       std::vector<std::string> ts;

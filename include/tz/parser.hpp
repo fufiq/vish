@@ -1239,11 +1239,11 @@ struct parser {
         advance();
         node_id key = expression();
         expect_close(']');
-        e = db.add(n_field{e, key}, {start, toks[pos - 1].where.end});
+        e = db.add(n_op{db.strings.intern(".[]"), {e, key}}, {start, toks[pos - 1].where.end});
       } else if(is_op(".") && !is_op("..")) {
         advance();
         symbol name = ident();
-        e = db.add(n_member{e, name}, {start, toks[pos - 1].where.end});
+        e = db.add(n_op{db.strings.intern(cat(".", db.strings.text(name))), {e}, true}, {start, toks[pos - 1].where.end});
       } else {
         return e;
       }

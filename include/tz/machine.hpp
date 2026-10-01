@@ -1125,8 +1125,8 @@ struct process_machine {
   // (no field, border) - nullopt: not unpacked.
   std::optional<mval> access(node_id e, mval const & subject) {
     if(db.is<n_subject>(e)) return subject;
-    if(db.is<n_member>(e)) {
-      auto const & m = db.as<n_member>(e);
+    if(db.is_member(e)) {
+      auto const & m = db.member_of(e);
       auto o = access(m.object, subject);
       if(!o) return std::nullopt;
       mval x = deref(*o);
@@ -1312,7 +1312,7 @@ struct process_machine {
     raise({sig_return, std::move(v), target});
   }
 
-  void eval_node(node_id n, n_member const & m) {
+  void eval_member(node_id n, member_view const & m) {
     m_task & t = top();
     if(t.phase == 0) {
       t.phase = 1;
@@ -1330,7 +1330,7 @@ struct process_machine {
   }
 
   // v.[f] is a field by descriptor (from fields(T)) or by line name (§7.4).
-  void eval_node(node_id n, n_field const & fl) {
+  void eval_field(node_id n, field_view const & fl) {
     m_task & t = top();
     if(t.phase < 2) {
       node_id next = t.phase == 0 ? fl.key : fl.object;
@@ -1380,6 +1380,8 @@ struct process_machine {
   }
 
   void eval_node(node_id n, n_op const & o) {
+    if(db.is_member(n)) return eval_member(n, db.member_of(n));
+    if(db.is_field(n)) return eval_field(n, db.field_of(n));
     if(db.is_index(n) && !helper.user_ops.contains(helper.sym("infix[]").value)) return eval_index(n, db.index_of(n));
     m_task & t = top();
     std::string_view op = helper.str(o.op);
@@ -1457,12 +1459,12 @@ struct process_machine {
       return finish(mval{m_unit{}});
     }
     // a.b.c = e is the aggregate field in the variable (chain of fields on behalf)
-    if(db.is<n_member>(lhs)) {
+    if(db.is_member(lhs)) {
       std::vector<symbol> path;
       node_id x = lhs;
-      while(db.is<n_member>(x)) {
-        path.push_back(db.as<n_member>(x).name);
-        x = db.as<n_member>(x).object;
+      while(db.is_member(x)) {
+        path.push_back(db.member_of(x).name);
+        x = db.member_of(x).object;
       }
       if(db.is<n_ident>(x)) {
         mval rhs = deref(pop_val());
@@ -1523,8 +1525,8 @@ struct process_machine {
     if(node_id b = db.try_compile_body(n)) return eval_try_compile(b);
     m_task & t = top();
     if(t.phase == 0) {
-      if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
-        auto const & m = db.as<n_member>(c.callee);
+      if(db.is_member(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
+        auto const & m = db.member_of(c.callee);
         node_list args{m.object};
         args.insert(args.end(), c.args.begin(), c.args.end());
         auto it = helper.functions.find(m.name);
@@ -1589,8 +1591,8 @@ struct process_machine {
   node_list call_args(node_id n) const {
     if(db.is<n_op>(n)) return db.as<n_op>(n).args;
     auto const & c = db.as<n_call>(n);
-    if(db.is<n_member>(c.callee)) {
-      node_list args{db.as<n_member>(c.callee).object};
+    if(db.is_member(c.callee)) {
+      node_list args{db.member_of(c.callee).object};
       args.insert(args.end(), c.args.begin(), c.args.end());
       return args;
     }

@@ -281,7 +281,7 @@ struct printer {
   }
 
   void print_node(node_id n, n_unpack const & u) {
-    bool paren = (db.is<n_op>(db[n].parent) && !db.is_index(db[n].parent)) || db.is<n_chain>(db[n].parent); // operand: (p = e) &&...
+    bool paren = (db.is<n_op>(db[n].parent) && !db.is_index(db[n].parent) && !db.is_field(db[n].parent)) || db.is<n_chain>(db[n].parent); // operand: (p = e) &&...
     if(paren) out += '(';
     item(u.pattern);
     out += " = ";
@@ -528,6 +528,7 @@ struct printer {
 
   void print_node(node_id n, n_op const & o) {
     if(db.is_index(n)) return index(o);
+    if(db.is_field(n)) return field(o);
     auto op = str(o.op);
     if(o.args.size() == 1) {
       if(o.postfix) {
@@ -561,7 +562,7 @@ struct printer {
   // priorities, so around any nested infix except the left operand of the same
   // associative operator (a + b + c).
   void operand(node_id child, bool left, symbol parent_op) {
-    bool infix = (db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && !db.is_index(child)) || db.is<n_chain>(child);
+    bool infix = (db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && !db.is_index(child) && !db.is_field(child)) || db.is<n_chain>(child);
     bool paren = infix || db.is<n_if>(child);
     if(infix && left && db.is<n_op>(child) && db.as<n_op>(child).op == parent_op && associative(parent_op)) paren = false;
     if(paren) out += '(';
@@ -676,16 +677,10 @@ struct printer {
     if(!db.is<n_block>(b)) terminate(b);
   }
 
-  void print_node(node_id, n_member const & m) {
-    item(m.object);
-    out += '.';
-    out += str(m.name);
-  }
-
-  void print_node(node_id, n_field const & f) {
-    item(f.object);
+  void field(n_op const & f) { // v.[f]
+    operand(f.args[0], false, {});
     out += ".[";
-    item(f.key);
+    item(f.args[1]);
     out += ']';
   }
 

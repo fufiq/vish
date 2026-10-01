@@ -113,15 +113,6 @@ struct n_chain {
   node_list atoms;
   std::vector<symbol> ops; // ops[k] - between atoms[k] and atoms[k+1]
 };
-struct n_member {
-  node_id object;
-  symbol name;
-};
-// v.[f] is a descriptor field known in compilation (§7.4)
-struct n_field {
-  node_id object;
-  node_id key;
-};
 struct n_if {
   node_id cond;
   node_id then_;
@@ -244,7 +235,7 @@ struct n_native {
 };
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
-    n_call, n_op, n_member, n_field, n_if, n_loop, n_break, n_continue, n_return,
+    n_call, n_op, n_if, n_loop, n_break, n_continue, n_return,
     n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
 
 struct node {
@@ -288,6 +279,16 @@ struct journal_entry {
 struct index_view {
   node_id object;
   node_id index;
+};
+// a.x: object and name node postfix operator .x
+struct member_view {
+  node_id object;
+  symbol name;
+};
+// v.[f]: object and field descriptor node operator .[] (§7.4 ]
+struct field_view {
+  node_id object;
+  node_id key;
 };
 
 struct ast_db {
@@ -334,6 +335,33 @@ struct ast_db {
     return o.args.size() == 2 && !o.postfix && strings.text(o.op) == "[]";
   }
   index_view index_of(node_id n) const { return {as<n_op>(n).args[0], as<n_op>(n).args[1]}; }
+
+  // a.x is a post-fix operator .x:
+// name in the operator symbol
+  // (node doesn't have a baby name: rounds won't take a field for a variable)
+  bool is_member(node_id n) const {
+    if(!is<n_op>(n)) return false;
+    auto const & o = as<n_op>(n);
+    if(o.args.size() != 1 || !o.postfix) return false;
+    auto t = strings.text(o.op);
+    return t.size() > 1 && t[0] == '.' && (std::isalpha(static_cast<unsigned char>(t[1])) || t[1] == '_' || static_cast<unsigned char>(t[1]) >= 0x80);
+  }
+  member_view member_of(node_id n) const { return {as<n_op>(n).args[0], member_name(as<n_op>(n).op)}; }
+  // field name by operator symbol .x (parsing internees both)
+  symbol member_name(symbol op) const {
+    if(op.value >= member_names.size()) member_names.resize(strings.size());
+    symbol & s = member_names[op.value];
+    if(!s) s = strings.index.at(std::string(strings.text(op).substr(1)));
+    return s;
+  }
+  mutable std::vector<symbol> member_names;
+  // v.[f] is the operator .[] over the value and descriptor of the field
+  bool is_field(node_id n) const {
+    if(!is<n_op>(n)) return false;
+    auto const & o = as<n_op>(n);
+    return o.args.size() == 2 && !o.postfix && strings.text(o.op) == ".[]";
+  }
+  field_view field_of(node_id n) const { return {as<n_op>(n).args[0], as<n_op>(n).args[1]}; }
 
   // try_compile { … } - kernel call with tail unit:
 // 

@@ -377,8 +377,8 @@ struct editor_server {
   std::vector<std::string> object_types(editor_view const & v, uint32_t dot) {
     auto const & db = session.db;
     for(node_id n = v.places[dot].node; n; n = db[n].parent)
-      if(db.is<n_member>(n)) {
-        auto it = session.node_types.find(db.as<n_member>(n).object.value);
+      if(db.is_member(n)) {
+        auto it = session.node_types.find(db.member_of(n).object.value);
         return it == session.node_types.end() ? std::vector<std::string>{} : it->second;
       }
     uint32_t k = dot;
@@ -998,7 +998,7 @@ struct editor_server {
     node_id call;
     for(uint32_t k: {at, at > 0 ? at - 1 : at}) {
       for(node_id n = v.places[k].node; n && !call; n = db[n].parent)
-        if(db.is<n_call>(n) && (db.is<n_ident>(db.as<n_call>(n).callee) || db.is<n_member>(db.as<n_call>(n).callee))) call = n;
+        if(db.is<n_call>(n) && (db.is<n_ident>(db.as<n_call>(n).callee) || db.is_member(db.as<n_call>(n).callee))) call = n;
       if(call) break;
     }
     if(!call) return send(p, proto::s_error{"F12: курсор не на вызове функции"});
@@ -1007,8 +1007,8 @@ struct editor_server {
     symbol name;
     if(db.is<n_ident>(c.callee)) name = db.as<n_ident>(c.callee).name;
     else { // a.f(b) ≡ f(a, b) (§4.5)
-      name = db.as<n_member>(c.callee).name;
-      args.insert(args.begin(), db.as<n_member>(c.callee).object);
+      name = db.member_of(c.callee).name;
+      args.insert(args.begin(), db.member_of(c.callee).object);
     }
     std::string n(db.strings.text(name));
     auto chosen = session.call_targets.contains(call.value) ? session.call_targets.at(call.value) : std::vector<uint32_t>{};
