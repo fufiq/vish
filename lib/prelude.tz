@@ -35,6 +35,10 @@ operator -(a) => neg(a);
 operator (i64 a) << (i64 b) => shl(a, b);
 operator (i64 a) >> (i64 b) => shr(a, b);
 operator !(bool a) => not(a);
+// a[i] — парный оператор: 
+// перегрузка своим типам — 
+// Место (a[i] = v) — форма ядра.
+operator (a)[i] => index(a, i);
 // x? — try(x) вызывающего: «расто-макака try» без макроса;
 // кадр оператора прозрачен для return(caller) — выход из того, кто написал x?.
 operator (expr e)? => try(e);

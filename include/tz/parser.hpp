@@ -941,11 +941,19 @@ struct parser {
     std::string role, sym;
     if(is_open('(')) {
       f.params = param_list();
-      sym = symbol_run();
-      if(is_open('(')) {
+      if(is_open('[')) { // (a)[i] The pair operator:
+        advance();
+        f.params.push_back(param());
+        expect_close(']');
+        sym = "[]";
         role = "infix";
-        for(node_id pn: param_list()) f.params.push_back(pn);
-      } else role = "postfix";
+      } else {
+        sym = symbol_run();
+        if(is_open('(')) {
+          role = "infix";
+          for(node_id pn: param_list()) f.params.push_back(pn);
+        } else role = "postfix";
+      }
     } else {
       role = "prefix";
       sym = symbol_run();

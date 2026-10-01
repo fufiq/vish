@@ -146,7 +146,11 @@ struct printer {
         if(role == "prefix") out += sym;
         params({f.params[0]});
         if(role == "postfix") out += sym;
-        if(role == "infix") {
+        if(sym == "[]") { // (a)[i]
+          out += '[';
+          item(f.params[1]);
+          out += ']';
+        } else if(role == "infix") {
           out += cat(" ", sym, " ");
           params({f.params[1]});
         }

@@ -318,7 +318,7 @@ struct interpreter {
   bool intrinsic_operator(node_id f) const {
     auto const & fn = db.as<n_fn>(f);
     if(!fn.expr_body || !db.is<n_call>(fn.body) || !db.is<n_ident>(db.as<n_call>(fn.body).callee)) return false;
-    static constexpr std::array prims{"add", "sub", "mul", "div", "rem", "eq", "ne", "lt", "gt", "le", "ge", "and", "or", "neg", "not", "band", "bor", "bxor", "shl", "shr"};
+    static constexpr std::array prims{"index", "add", "sub", "mul", "div", "rem", "eq", "ne", "lt", "gt", "le", "ge", "and", "or", "neg", "not", "band", "bor", "bxor", "shl", "shr"};
     auto callee = str(db.as<n_ident>(db.as<n_call>(fn.body).callee).name);
     if(std::ranges::find(prims, callee) == prims.end()) return false;
     auto const & args = db.as<n_call>(fn.body).args;
@@ -330,7 +330,7 @@ struct interpreter {
 
   static bool operator_name(std::string_view n) {
     for(std::string_view role: {"infix", "prefix", "postfix"})
-      if(n.size() > role.size() && n.starts_with(role) && std::string_view("+-*/%<>=!&|^~?@$\\").contains(n[role.size()])) return true;
+      if(n.size() > role.size() && n.starts_with(role) && std::string_view("+-*/%<>=!&|^~?@$\\[").contains(n[role.size()])) return true;
     return false;
   }
 
@@ -3541,7 +3541,8 @@ struct interpreter {
   // --- operator ---
 
   flow eval_node(node_id n, n_op const & o, scope * env, uint32_t frame) {
-    if(db.is_index(n)) return eval_index(n, db.index_of(n), env, frame);
+    // a[i]: kernel if [] is not overloaded with code (overload to its types, otherwise the kernel below)
+    if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(sym("infix[]").value))) return eval_index(n, db.index_of(n), env, frame);
     auto op = str(o.op);
     span where = db[n].where;
     // Operator declared to be an unbuilt primitive code calls its entity (overload by
@@ -3564,6 +3565,7 @@ struct interpreter {
         if(std::ranges::any_of(vals, [](value const & v) { return v.is<split_v>(); }) || user_operator_applies(f, ts))
           return dispatch_split(user, vals, 0, o.args, env, frame, site);
         // Built-in operation: user overload of these types is not accepted
+        if(db.is_index(n)) return index_rt(n, db.index_of(n), vals[0], vals[1], env);
         if(o.args.size() == 1) return ok(lift(vals[0], [&](value const & a) { return unary(op, a, where); }));
         if(op == "&&" || op == "||") return ok(builtin(sym(op == "&&" ? "and" : "or"), vals, where));
         return ok(binary(op, vals[0], vals[1], where));
@@ -4923,6 +4925,17 @@ struct interpreter {
     if(n.starts_with("stream_")) return stream_op(n, a, where);
     if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
+    if(n == "index" && a.size() == 2) { // a[i] kernel (operator(a)[i] prelude): array element, byte string
+      if(!a[0].known() || !a[1].known()) return element_type(a[0], where);
+      if(a[0].is<std::string>() && a[1].is<int64_t>()) {
+        auto const & s = a[0].as<std::string>();
+        int64_t k = a[1].as<int64_t>();
+        if(k < 0 || uint64_t(k) >= s.size()) fail_rt("out_of_bounds", cat("индекс ", k, " вне строки длины ", s.size()), where);
+        return value(int64_t(uint8_t(s[std::size_t(k)])));
+      }
+      if(!a[0].is<array_v>()) fail(cat("индексация значения типа ", types.describe(a[0])), where);
+      return a[0].as<array_v>().get(checked_index(a[0], a[1], where));
+    }
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
       if(unknown(a[0]) || unknown(a[1])) return value(rt_v{}); // type
       if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
