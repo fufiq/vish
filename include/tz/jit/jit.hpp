@@ -54,6 +54,20 @@ uint64_t jit_array_size(array_v * a) { return a->size(); }
 interpreter * jit_vm = nullptr;
 uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node);
 
+// VM service for compiler code in language: address - in argument area (not in code), answer -
+// {значение, признак ошибки} in two ABI C registers; error - delayed exception of VM
+// (jit_pending), as in C++ gluing.
+struct jit_service_result {
+  uint64_t value, error;
+};
+jit_service_result jit_vm_service(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node) {
+  uint64_t saved = std::exchange(jit_fault, 0);
+  uint64_t v = jit_stream_call(op, id, bits, t_node);
+  uint64_t e = jit_fault;
+  jit_fault = saved;
+  return {v, e};
+}
+
 // clang-format off
 enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, other }; // range - range(n) : in the slot only n; stream is its number
 // clang-format on
@@ -2305,6 +2319,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     }
     std::size_t fault_at = area.size();
     area.insert(area.end(), 4, 0); // type of error, node, thrown value, its type
+    area.push_back(reinterpret_cast<uint64_t>(&jit_vm_service)); // VM service (flows)
     bits = entry(area.data());
     jit_fault = area[fault_at]; // Error - from slots given by VM (not the host address in the code)
     jit_fault_node = area[fault_at + 1];

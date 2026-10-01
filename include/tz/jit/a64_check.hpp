@@ -127,9 +127,9 @@ struct a64_check {
       d_args.push_back(data_word(0));
       if(lang && a.array) data_word(0);
     }
-    if(lang) { // type of error, node, thrown value, its type
+    if(lang) { // type of error, node, thrown value, its type, VM service
       d_lang_fault = data_word(0);
-      for(int k = 0; k < 3; ++k) data_word(0);
+      for(int k = 0; k < 4; ++k) data_word(0);
     }
     std::vector<uint64_t> d_headers;
     for(auto const & a: args) {
@@ -144,6 +144,7 @@ struct a64_check {
       for(uint64_t v: a.items) data_word(v);
     }
 
+    uint64_t service_at = 0; // VM service plug for compiler code in language
     // code: first dimensions, then addresses (two-pass layout)
     auto layout = [&](uint64_t data_addr, std::vector<uint64_t> & fn_addr, uint64_t & stubs) {
       c = a64::assembler{};
@@ -197,6 +198,17 @@ struct a64_check {
       c.word(0xD65F03C0); // ret
       c.word(0xD2800000); // ok: mov x0, #0
       c.word(0xD65F03C0); // ret
+      // VM service for compiler code in the language: {x0, x1} - value and error; new and
+      // close - without a trace, other - VM error (unverified)
+      service_at = c.here();
+      c.word(0xF100101F); // cmp x0, #4
+      c.word(0x54000080); // b.eq ok2 (+4)
+      c.word(0xB4000060); // cbz x0, ok2 (+3)
+      c.word(0xD2800021); // mov x1, #1
+      c.word(0xD65F03C0); // ret
+      c.word(0xD2800000); // ok2: mov x0, #0
+      c.word(0xD2800001); // mov x1, #0
+      c.word(0xD65F03C0); // ret
       fn_addr.clear();
       uint64_t pos = code_at + c.size();
       for(auto const & f: eng.fns) {
@@ -229,6 +241,7 @@ struct a64_check {
       for(int k = 0; k < 8; ++k) data[off + k] = uint8_t(v >> (8 * k));
     };
     for(std::size_t i = 0; i < eng.fns.size(); ++i) put(d_cells[i], base + fn_addr[i]);
+    if(lang) put(d_lang_fault + 32, base + code_at + service_at);
     for(std::size_t i = 0; i < args.size(); ++i) {
       if(!args[i].array) {
         put(d_args[i], args[i].bits);
