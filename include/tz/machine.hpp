@@ -236,6 +236,7 @@ struct process_machine {
 
   process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {}, int dump_fd = -1)
       : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump, dump_fd)) {
+    helper.owns_state = true;
     helper.elaborate(); // [[state]] - the assistant opens the state of the program (cell - it)
     if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
   }

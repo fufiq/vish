@@ -180,24 +180,6 @@ struct a64_check {
       imm(0, 0);
       imm(8, 93);
       c.word(0xD4000001); // exit(0)
-      stubs = c.here();
-      c.word(0xF8400000); // jit_array_data: ldur x0, [x0]
-      c.word(0xD65F03C0);
-      c.word(0xF8408000); // jit_array_size: ldur x0, [x0, #8]
-      c.word(0xD65F03C0);
-      // jit_stream_call: new (op 0) и close (op 4) следа не оставляют (свёрнутый
-      // generator: stream created and closed, number does not go anywhere) - nothing;
-      // other - tag vm_error (unchecked)
-      c.word(0xF100101F); // cmp x0, #4
-      c.word(0x540001A0); // b.eq ok (+13)
-      c.word(0xB4000180); // cbz x0, ok (+12)
-      imm(16, at(d_fault));
-      imm(17, uint64_t(jit_fault_kind::vm_error));
-      c.word(0xF8000211); // stur x17, [x16]
-      c.word(0xD2800000); // mov x0, #0
-      c.word(0xD65F03C0); // ret
-      c.word(0xD2800000); // ok: mov x0, #0
-      c.word(0xD65F03C0); // ret
       // VM service for compiler code in the language: {x0, x1} - value and error; new and
       // close - without a trace, other - VM error (unverified)
       service_at = c.here();
@@ -223,19 +205,6 @@ struct a64_check {
     uint64_t data_addr = layout(0, fn_addr, stubs);
     data_addr = layout(data_addr, fn_addr, stubs); // start with correct addresses (same size)
 
-    auto addr_of = [&](void const * p) -> uint64_t {
-      auto at = [&](uint64_t off) { return base + data_addr + off; };
-      if(p == &jit_fault) return at(d_fault);
-      if(p == &jit_fault_node) return at(d_node);
-      if(p == &jit_thrown) return at(d_thrown);
-      if(p == &jit_thrown_type) return at(d_thrown_type);
-      if(p == reinterpret_cast<void const *>(&jit_array_data)) return base + code_at + stubs;
-      if(p == reinterpret_cast<void const *>(&jit_array_size)) return base + code_at + stubs + 8;
-      if(p == reinterpret_cast<void const *>(&jit_stream_call)) return base + code_at + stubs + 16;
-      for(std::size_t i = 0; i < eng.fns.size(); ++i)
-        if(p == &eng.fns[i].entry) return at(d_cells[i]);
-      throw diagnostic("AArch64: адрес хоста без места в образе", {});
-    };
     // entry cells, arguments, array headings
     auto put = [&](uint64_t off, uint64_t v) {
       for(int k = 0; k < 8; ++k) data[off + k] = uint8_t(v >> (8 * k));
@@ -259,17 +228,7 @@ struct a64_check {
     out.insert(out.end(), c.buf.begin(), c.buf.end());
     for(std::size_t i = 0; i < eng.fns.size(); ++i) {
       out.resize(fn_addr[i], 0);
-      std::size_t start = out.size();
-      out.insert(out.end(), eng.fns[i].image.begin(), eng.fns[i].image.end());
-      for(auto const & [pos, host]: eng.fns[i].relocs) { // Moviz / Movik x4 - Image address
-        uint64_t v = addr_of(host);
-        for(uint32_t k = 0; k < 4; ++k) {
-          std::size_t w = start + pos + 4 * k;
-          uint32_t ins = uint32_t(out[w]) | uint32_t(out[w + 1]) << 8 | uint32_t(out[w + 2]) << 16 | uint32_t(out[w + 3]) << 24;
-          ins |= uint32_t(v >> (16 * k) & 0xFFFF) << 5;
-          for(int b = 0; b < 4; ++b) out[w + b] = uint8_t(ins >> (8 * b));
-        }
-      }
+      out.insert(out.end(), eng.fns[i].image.begin(), eng.fns[i].image.end()); // There are no host addresses in the code
     }
     out.resize(data_addr, 0);
     out.insert(out.end(), data.begin(), data.end());

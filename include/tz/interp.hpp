@@ -411,9 +411,8 @@ struct interpreter {
     if(r.state_level) return *r.state_level;
     std::string base_name = r.prog_path.substr(r.prog_path.find_last_of('/') + 1);
     std::string file = state_dir.empty() ? r.prog_path + ".state" : state_dir + "/" + base_name + ".state";
-    uint64_t slot = std::hash<std::string>{}(file) % 32;
     r.state_level.emplace();
-    std::string why = open_state(*r.state_level, file, 0x400000000000ull + slot * address_space::state_range);
+    std::string why = open_state(*r.state_level, file);
     if(!why.empty()) {
       r.state_level.reset();
       fail(cat("состояние программы: ", why, " (", file, ")"), where);
@@ -451,10 +450,10 @@ struct interpreter {
 
   void declare_state(node_id item) {
     auto const & v = db.as<n_var>(item);
-    if(checking()) { // Value from past launches: run-time
+    if(checking() || !root->owns_state) { // parsing - run-time (value from past launches); assistants (compiler in language) - without a file
       flow f = eval(v.init, globals, 0);
       if(f.kind == flow_kind::thr) uncaught(f);
-      globals->declare(v.name, erase(f.v));
+      globals->declare(v.name, checking() ? erase(f.v) : f.v);
       return;
     }
     address_space & lv = program_state(db[item].where);
@@ -535,6 +534,7 @@ struct interpreter {
     if(setup_error) throw *setup_error; // Modules: no module, sealed
     auto it = functions.find(sym("main"));
     if(it == functions.end()) throw diagnostic("нет функции main", {});
+    owns_state = true; // Execution of the program: it opens its state
     elaborate();
     // ct-state - in canonical order, not along the execution branches; for JIT - also the types of
     // thread elements at the place of creation (types - from parsing, not from statistics)
@@ -5282,6 +5282,7 @@ struct interpreter {
   node_id index_write; // This is the entry of this element.
   symbol sym_alloc_in;
   std::string prog_path; // Program path (args[0]): Nearby is its state
+  bool owns_state = false; // Executes the program (run_main, machine): opens its state
   std::optional<address_space> state_level; // non-volatile state level of the program (at the root VM)
   std::set<value const *> state_cells;
   std::deque<address_space> regions; // region() memory levels (at VM root); live as long as the process is alive

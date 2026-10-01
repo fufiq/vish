@@ -185,9 +185,10 @@ struct state_header {
 };
 static_assert(sizeof(state_header) <= address_space::state_meta);
 
-// Open the status level: the path file at the base address (the existing one has an address from the
-// file). Empty and text - it is impossible (occupied with another execution, the address is occupied).
-std::string open_state(address_space & a, std::string const & path, uint64_t base) {
+// Open the status level: the path file; the existing kernel selects the new address - the same ones recorded
+// in the file. Empty and text - it is impossible (occupied with another execution, the address is occupied).
+std::string open_state(address_space & a, std::string const & path) {
+  uint64_t base = 0;
   int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if(fd < 0) return "не открыть файл состояния";
   if(flock(fd, LOCK_EX | LOCK_NB) != 0) {
@@ -205,12 +206,13 @@ std::string open_state(address_space & a, std::string const & path, uint64_t bas
     }
     base = h.base;
   }
-  void * r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-  if(r != reinterpret_cast<void *>(base)) {
+  void * r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+  if(r == MAP_FAILED || (base && r != reinterpret_cast<void *>(base))) {
     if(r != MAP_FAILED) munmap(r, address_space::state_range);
     ::close(fd);
     return "адреса состояния программы заняты";
   }
+  base = uint64_t(r);
   a.persistent = true;
   a.banded = true;
   a.fd = fd;
@@ -271,32 +273,45 @@ void close_state(address_space & a) {
   a.banded = false;
 }
 
-// Machine process address band (§12.2: dump - pages as is): level on base (0 - VM selects
-// free band). Lies - addresses are taken.
+// Machine process address band (§12.2: dump - pages as is): level on base (0 - new: addresses
+// are selected by the kernel). Lies - addresses are taken.
 std::vector<address_space *> & bands() {
   alignas(std::vector<address_space *>) static std::byte place[sizeof(std::vector<address_space *>)];
   static auto * v = new(place) std::vector<address_space *>;
   return *v;
 }
+// closed bands remain behind VM (reserve without pages): their addresses will not be taken by
+// anyone else - the recovery of the dump in the same process will receive the same
+std::vector<std::byte *> & free_bands() {
+  alignas(std::vector<std::byte *>) static std::byte place[sizeof(std::vector<std::byte *>)];
+  static auto * v = new(place) std::vector<std::byte *>;
+  return *v;
+}
 bool open_band(address_space & a, uint64_t base) {
-  for(uint64_t slot = 0; slot < 32; ++slot) {
-    uint64_t at = base ? base : 0x200000000000ull + slot * address_space::state_range;
-    void * r = mmap(reinterpret_cast<void *>(at), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if(r == reinterpret_cast<void *>(at)) {
-      a.banded = true;
-      a.lo = static_cast<std::byte *>(r);
-      a.small_base = a.lo + address_space::state_meta;
-      a.big_next = a.small_base + address_space::state_small;
-      bands().push_back(&a);
-      return true;
+  void * r = MAP_FAILED;
+  auto & pool = free_bands();
+  auto it = base ? std::ranges::find(pool, reinterpret_cast<std::byte *>(base)) : pool.begin();
+  if(it != pool.end()) { // backstreet
+    r = *it;
+    pool.erase(it);
+  } else {
+    r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+    if(r == MAP_FAILED || (base && r != reinterpret_cast<void *>(base))) {
+      if(r != MAP_FAILED) munmap(r, address_space::state_range);
+      return false;
     }
-    if(r != MAP_FAILED) munmap(r, address_space::state_range);
-    if(base) return false;
   }
-  return false;
+  a.banded = true;
+  a.lo = static_cast<std::byte *>(r);
+  a.small_base = a.lo + address_space::state_meta;
+  a.big_next = a.small_base + address_space::state_small;
+  bands().push_back(&a);
+  return true;
 }
 void close_band(address_space & a) {
-  munmap(a.lo, address_space::state_range);
+  // pages to the system, addresses to the VM pool
+  mmap(a.lo, address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+  free_bands().push_back(a.lo);
   std::erase(bands(), &a);
   a.banded = false;
 }
