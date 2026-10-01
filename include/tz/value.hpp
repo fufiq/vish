@@ -95,9 +95,38 @@ struct array_v {
   uint64_t gen = 0; // Buffer generation: changes with growth and replacement (element references, §12.1)
 };
 
+// The aggregate fields are in VM pages (§12.2, author's decision 2026-10-01): the field number
+// is static (order of type fields), the machine code reads and writes the offset field that
+// informs the VM. Growth is the transfer of movement by the designer (values are not bytes).
+struct field_list {
+  words raw; // place: words of VM pages
+  uint32_t n = 0;
+
+  field_list() = default;
+  field_list(std::initializer_list<std::pair<symbol, value>> xs);
+  field_list(field_list const & o);
+  field_list(field_list && o) noexcept : raw(std::move(o.raw)), n(o.n) { o.n = 0; }
+  field_list & operator=(field_list const & o);
+  field_list & operator=(field_list && o) noexcept;
+  ~field_list();
+
+  std::pair<symbol, value> * begin() { return reinterpret_cast<std::pair<symbol, value> *>(raw.data); }
+  std::pair<symbol, value> * end();
+  std::pair<symbol, value> const * begin() const { return reinterpret_cast<std::pair<symbol, value> const *>(raw.data); }
+  std::pair<symbol, value> const * end() const;
+  uint32_t size() const { return n; }
+  bool empty() const { return n == 0; }
+  std::pair<symbol, value> & operator[](uint32_t i);
+  std::pair<symbol, value> const & operator[](uint32_t i) const;
+  std::pair<symbol, value> & back();
+  void push_back(std::pair<symbol, value> f);
+  void clear();
+  void grow(uint32_t want);
+};
+
 struct agg_v {
   type_id type;
-  std::vector<std::pair<symbol, value>> fields;
+  field_list fields;
 };
 
 // Function as value: a set of overloads by name or lambda with environment.
@@ -322,6 +351,57 @@ void array_v::set(uint32_t i, value v) {
   items[i] = std::move(v);
 }
 
+// --- field_list: definitions after value ---
+
+std::pair<symbol, value> * field_list::end() { return begin() + n; }
+std::pair<symbol, value> const * field_list::end() const { return begin() + n; }
+std::pair<symbol, value> & field_list::operator[](uint32_t i) { return begin()[i]; }
+std::pair<symbol, value> const & field_list::operator[](uint32_t i) const { return begin()[i]; }
+std::pair<symbol, value> & field_list::back() { return begin()[n - 1]; }
+
+void field_list::grow(uint32_t want) {
+  uint64_t w = (uint64_t(want) * sizeof(std::pair<symbol, value>) + 7) / 8;
+  if(w <= raw.cap) return;
+  words fresh;
+  fresh.reserve(std::max(w, raw.cap * 2));
+  auto * to = reinterpret_cast<std::pair<symbol, value> *>(fresh.data);
+  for(uint32_t i = 0; i < n; ++i) {
+    new(to + i) std::pair<symbol, value>(std::move(begin()[i]));
+    begin()[i].~pair();
+  }
+  raw = std::move(fresh);
+}
+void field_list::push_back(std::pair<symbol, value> f) {
+  grow(n + 1);
+  new(begin() + n) std::pair<symbol, value>(std::move(f));
+  ++n;
+}
+void field_list::clear() {
+  for(uint32_t i = 0; i < n; ++i) begin()[i].~pair();
+  n = 0;
+}
+field_list::field_list(std::initializer_list<std::pair<symbol, value>> xs) {
+  for(auto const & x: xs) push_back(x);
+}
+field_list::field_list(field_list const & o) {
+  for(auto const & x: o) push_back(x);
+}
+field_list & field_list::operator=(field_list const & o) {
+  if(this == &o) return *this;
+  clear();
+  for(auto const & x: o) push_back(x);
+  return *this;
+}
+field_list & field_list::operator=(field_list && o) noexcept {
+  if(this == &o) return *this;
+  clear();
+  raw = std::move(o.raw);
+  n = o.n;
+  o.n = 0;
+  return *this;
+}
+field_list::~field_list() { clear(); }
+
 // Dense array in the cell value: data offsets and size - machine code reads them from memory
 // (§12.2, without copies); cell array - loan indicates the array in the cell.
 struct array_offsets {
@@ -337,6 +417,24 @@ array_offsets const & array_layout() {
   }();
   return o;
 }
+// The aggregate in the value cell: displacement of data fields, field pitch, scalar in the field (§12.2)
+struct agg_offsets {
+  uint64_t data, stride, scalar;
+};
+agg_offsets const & agg_layout() {
+  static agg_offsets o = [] {
+    value v{agg_v{}};
+    auto const * b = reinterpret_cast<char const *>(&v);
+    std::pair<symbol, value> p{symbol{}, value(int64_t(0))};
+    auto const * q = reinterpret_cast<char const *>(&p);
+    std::pair<symbol, value> pf{symbol{}, value(0.5)};
+    contract_assert(reinterpret_cast<char const *>(&pf.second.as<double>()) - reinterpret_cast<char const *>(&pf) == reinterpret_cast<char const *>(&p.second.as<int64_t>()) - q);
+    return agg_offsets{uint64_t(reinterpret_cast<char const *>(&v.as<agg_v>().fields.raw.data) - b), sizeof(std::pair<symbol, value>),
+        uint64_t(reinterpret_cast<char const *>(&p.second.as<int64_t>()) - q)};
+  }();
+  return o;
+}
+
 value * cell_of(array_v const * a) { return reinterpret_cast<value *>(const_cast<char *>(reinterpret_cast<char const *>(a)) - array_layout().in_value); }
 
 // Whether the samples are the same types (structurally, without values).

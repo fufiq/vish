@@ -484,6 +484,8 @@ jit_compile(cg, f, types, type result) {
   // массив — адрес ячейки значения VM; данные и размер код читает из неё в момент обращения
   // (§12.2: память — у VM, без копий в кадре): смещения сообщает VM
   array{a_data, a_size} = jit_layout();
+  // агрегат — поля в памяти ячейки по номеру поля типа: данные полей, шаг, скаляр в поле
+  array{ag_data, ag_stride, ag_scalar} = jit_agg_layout();
   bad(str w) => {
     if(ok) why = w;
     ok = false;
@@ -906,10 +908,45 @@ jit_compile(cg, f, types, type result) {
     else if(env[s].kind == jc_range) put_bytes(cg.load(acc, frame, off(env[s].slot)));
     else bad(".size не массива");
   };
+  // p.x — поле агрегата-переменной p: номер поля типа k (статичен); пусто — не поле
+  field_slot(e) => if((code_kind(e) == n_op) && dotted(e)) {
+    array{_, ys, _} = code_fields(e);
+    s = var_of(ys[0]);
+    if((s < 0) || (env[s].thunk || (!is_handle(env[s].kind) || arr_like(env[s].kind)))) array{}
+    else {
+      k = field_index(env[s].kind, code_name(e));
+      if(k < 0) array{} else array{s, k}
+    }
+  } else array{};
+  // адрес данных полей агрегата fs[0] — в регистр r; поле k — по смещению k * шаг + скаляр
+  fields_to(i64 r, i64 s) => {
+    put_bytes(cg.load(r, frame, off(env[s].slot)));
+    put_bytes(cg.load(r, r, ag_data));
+  };
+  field_off(i64 k) => (k * ag_stride) + ag_scalar;
+  gen_field(e, fs) => {
+    t = ty(e);
+    if((t == i64) || (t == f64)) {
+      fields_to(acc, fs[0]);
+      put_bytes(cg.load(acc, acc, field_off(fs[1])));
+      if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
+    } else vm_or_bad(e, fmt"поле {t}");
+  };
+  gen_field_store(e, xs, fs) => {
+    t = ty(xs[0]);
+    if(((t == i64) || (t == f64)) && (ty(xs[1]) == t)) {
+      wrote(env[fs[0]].slot);
+      gen(xs[1]);
+      if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+      fields_to(second, fs[0]);
+      put_bytes(cg.store(second, field_off(fs[1]), acc));
+    } else vm_or_bad(e, fmt"запись поля {t}");
+  };
   gen_op(e) => {
     array{op, xs, _} = code_fields(e);
     if(op == "[]") gen_index_op(e, xs);
     else if(op == ".size") gen_size(xs);
+    else if(field_slot(e).size == 2) gen_field(e, field_slot(e));
     else if(xs.size == 1) {
       t = ty(xs[0]);
       g = op_codegen(cg, e, array{t});
@@ -924,7 +961,8 @@ jit_compile(cg, f, types, type result) {
     } else if((op == "=") && (code_kind(xs[0]) == n_ident)) {
       array{name} = code_fields(xs[0]);
       assign(name, xs[1], false);
-    } else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: значение — на стек, индекс, границы, запись
+    } else if((op == "=") && (field_slot(xs[0]).size == 2)) gen_field_store(e, xs, field_slot(xs[0]));
+    else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: значение — на стек, индекс, границы, запись
       array{o, ix} = index_parts(xs[0]);
       s = var_of(o);
       if((s < 0) || (env[s].thunk || !arr_like(env[s].kind))) bad("запись не в элемент массива-переменной");

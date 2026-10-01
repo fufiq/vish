@@ -4845,6 +4845,14 @@ struct interpreter {
     }
     // Data offsets and the size of the dense array in the VM value cell (§12.2): machine code reads
     // them from memory
+    if(n == "jit_agg_layout" && a.empty()) return value(array_v::of({value(int64_t(agg_layout().data)), value(int64_t(agg_layout().stride)), value(int64_t(agg_layout().scalar))}));
+    // field number in type t aggregate (order of type fields: base, declaration, extensions); -1 - no
+    if(n == "field_index" && a.size() == 2 && a[0].is<type_v>() && a[1].is<str_v>()) {
+      auto fs = fields_of_struct(sym(types.name(a[0].as<type_v>().type)));
+      for(uint32_t k = 0; k < fs.size(); ++k)
+        if(str(db.as<n_var>(fs[k]).name) == a[1].as<str_v>().view()) return value(int64_t(k));
+      return value(int64_t(-1));
+    }
     if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
