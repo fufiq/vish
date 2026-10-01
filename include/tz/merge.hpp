@@ -47,7 +47,7 @@ std::string item_key(ast_db const & db, node_id n) {
     }
     return k + ")";
   }
-  if(db.is<n_struct>(n)) return "struct " + str(db.as<n_struct>(n).name);
+  if(db.is_struct(n)) return "struct " + str(db.as<n_extend>(n).name);
   if(db.is<n_extend>(n) && db.as<n_extend>(n).target) return "&" + item_key(db, node_id(db.as<n_extend>(n).target)) + " { … }";
   if(db.is<n_extend>(n)) return str(db.as<n_extend>(n).name) + " { … }";
   if(db.is<n_var>(n)) return str(db.as<n_var>(n).name);

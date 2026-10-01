@@ -249,12 +249,12 @@ struct interpreter {
     for(node_id m: all) {
       registering = m;
       for(node_id item: db.as<n_module>(m).items)
-        if(!db.is<n_extend>(item) && visible_item(m, item)) register_item(item);
+        if((!db.is<n_extend>(item) || db.is_struct(item)) && visible_item(m, item)) register_item(item);
     }
     for(node_id m: all) { // Expansion - after announcements
       registering = m;
       for(node_id item: db.as<n_module>(m).items)
-        if(db.is<n_extend>(item) && m != db.prelude && visible_item(m, item)) register_item(item);
+        if(db.is<n_extend>(item) && !db.is_struct(item) && m != db.prelude && visible_item(m, item)) register_item(item);
     }
     registering = node_id{};
   }
@@ -285,7 +285,7 @@ struct interpreter {
   }
   bool visible_item(node_id m, node_id item) const {
     if(m == mod || m == db.prelude || whole_modules.contains(m.value)) return true;
-    symbol name = db.is<n_fn>(item) ? db.as<n_fn>(item).name : db.is<n_struct>(item) ? db.as<n_struct>(item).name
+    symbol name =  db.is<n_fn>(item) ? db.as<n_fn>(item).name
         : db.is<n_extend>(item)                                                        ? db.as<n_extend>(item).name
         : db.is<n_var>(item)                                                           ? db.as<n_var>(item).name
                                                                                        : symbol{};
@@ -337,14 +337,13 @@ struct interpreter {
   // Announcement in current elaboration: from a module or generated emit.
   void register_item(node_id item) {
     if(db.is<n_fn>(item)) check_sealed(db.as<n_fn>(item).name, item);
-    else if(db.is<n_struct>(item)) check_sealed(db.as<n_struct>(item).name, item);
     else if(db.is<n_extend>(item))
       check_sealed(db.as<n_extend>(item).target ? db.as<n_fn>(node_id(db.as<n_extend>(item).target)).name : db.as<n_extend>(item).name, item);
     if(db.is<n_fn>(item) && operator_name(str(db.as<n_fn>(item).name)) && !intrinsic_operator(item))
       user_ops.insert(db.as<n_fn>(item).name.value);
     if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
-    else if(db.is<n_struct>(item)) {
-      auto const & st = db.as<n_struct>(item);
+    else if(db.is_struct(item)) {
+      auto const & st = db.as<n_extend>(item);
       structs[st.name] = item;
       if(st.base) types.set_parent(types.named(str(st.name)), types.named(str(st.base)));
     }
@@ -399,8 +398,8 @@ struct interpreter {
   std::vector<node_id> fields_of_struct(symbol name) const {
     std::vector<node_id> out;
     if(auto it = structs.find(name); it != structs.end()) {
-      if(symbol b = db.as<n_struct>(it->second).base) out = fields_of_struct(b); // basefields - first
-      for(node_id f: db.as<n_struct>(it->second).fields) out.push_back(f);
+      if(symbol b = db.as<n_extend>(it->second).base) out = fields_of_struct(b); // basefields - first
+      for(node_id f: db.as<n_extend>(it->second).items) out.push_back(f);
     }
     if(auto it = ext_fields.find(name); it != ext_fields.end())
       for(node_id f: it->second) out.push_back(f);
@@ -2176,7 +2175,6 @@ struct interpreter {
     return r;
   }
 
-  flow eval_node(node_id, n_struct const &, scope *, uint32_t) { return ok(); } // declaration
   flow eval_node(node_id, n_extend const &, scope *, uint32_t) { return ok(); } // Expansion - when loading the module
 
   // --- code as a value (§7.4) ---
@@ -4731,7 +4729,7 @@ struct interpreter {
       } else if(a[0].is<type_v>()) {
         owner = sym(types.name(a[0].as<type_v>().type));
         if(auto it = structs.find(owner); it != structs.end())
-          for(node_id x: db.as<n_struct>(it->second).attrs) nodes.push_back(x);
+          for(node_id x: db.as<n_extend>(it->second).attrs) nodes.push_back(x);
       } else fail("attrs: ожидалась функция или тип", where);
       if(auto it = ext_attrs.find(owner); it != ext_attrs.end())
         for(node_id x: it->second) nodes.push_back(x);

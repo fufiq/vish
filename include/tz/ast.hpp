@@ -137,14 +137,6 @@ struct n_return {
 struct n_throw {
   node_id value;
 };
-// Named aggregate (§5.1): nominal type; fields - n_var (type, name, default value).
-// Created positionally: Name {a, b}.
-struct n_struct {
-  symbol name;
-  node_list fields;
-  node_list attrs;
-  symbol base; // struct e: base { … } - heir: base fields first, base substitution
-};
 // Extension of entity:
 //  
 // Fields (n_var), functions (n_fn), and attributes added to the Name.
@@ -157,6 +149,13 @@ struct n_extend {
 // 
   // Items is its overload; name is the current name of the target.
   uint32_t target = 0;
+  // Struct The name { поля } is the first extension to declare the name a struct instance:
+// 
+//.
+  // Named aggregate (§5.1): nominal type; items - n_var fields (type, name, default
+  // value); created positionally: Name {a, b}.
+  symbol of;
+  symbol base; // struct e: base { … } - heir: base fields first, base substitution
 };
 // Code as value (§7.4): quote { объявления } and insert #x.
 //
@@ -236,7 +235,7 @@ struct n_native {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_if, n_loop, n_break, n_continue, n_return,
-    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
+    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
 
 struct node {
   node_kind kind;
@@ -362,6 +361,9 @@ struct ast_db {
     return o.args.size() == 2 && !o.postfix && strings.text(o.op) == ".[]";
   }
   field_view field_of(node_id n) const { return {as<n_op>(n).args[0], as<n_op>(n).args[1]}; }
+
+  // Struct Name { … } - Extension Declaring Struct Instance
+  bool is_struct(node_id n) const { return is<n_extend>(n) && as<n_extend>(n).of && strings.text(as<n_extend>(n).of) == "struct"; }
 
   // try_compile { … } - kernel call with tail unit:
 // 

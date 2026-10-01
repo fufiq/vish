@@ -362,7 +362,7 @@ struct printer {
       while(!t.empty() && (t.back() == ' ' || t.back() == '\n' || t.back() == '\t')) t.remove_suffix(1);
       if(t.empty() || t.back() == ';' || t.back() == '}') return;
     }
-    if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
+    if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_break>(s) || db.is<n_continue>(s) ) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
@@ -395,7 +395,8 @@ struct printer {
     out += ';';
   }
 
-  void print_node(node_id, n_extend const & e) {
+  void print_node(node_id n, n_extend const & e) {
+    if(db.is_struct(n)) return struct_decl(e);
     if(e.target) { // &f(types) {overload } - name and signature - current at the target
       auto const & f = db.as<n_fn>(node_id(e.target));
       out += cat("&", str(f.name), "(");
@@ -436,10 +437,11 @@ struct printer {
     out += " }";
   }
 
-  void print_node(node_id, n_struct const & st) {
+  // struct Name [: base] { поля } - instance struct
+  void struct_decl(n_extend const & st) {
     attrs(st.attrs);
     out += cat("struct ", str(st.name), st.base ? cat(" : ", str(st.base)) : std::string(), " {");
-    for(node_id f: st.fields) {
+    for(node_id f: st.items) {
       auto const & v = db.as<n_var>(f);
       out += v.ct ? " ct " : " ";
       item(v.type);

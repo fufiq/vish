@@ -486,7 +486,8 @@ struct parser {
   node_id struct_decl(node_list attrs = {}) {
     uint32_t start = here().where.begin;
     advance();
-    n_struct st;
+    n_extend st; // instance
+    st.of = db.strings.intern("struct");
     st.attrs = std::move(attrs);
     st.name = ident();
     if(is_op(":")) { // struct method error : http { … }
@@ -509,7 +510,7 @@ struct parser {
         f.init = expression();
       }
       end_statement();
-      st.fields.push_back(db.add(std::move(f), {f0, toks[pos - 1].where.end}));
+      st.items.push_back(db.add(std::move(f), {f0, toks[pos - 1].where.end}));
     }
     expect_close('}');
     if(is_op(";")) eat_op(";");

@@ -56,7 +56,7 @@ std::vector<completion_item> context_identifiers(ast_db const & db, node_id at) 
     if(!module || !db.is<n_module>(module)) return;
     for(node_id item: db.as<n_module>(module).items) {
       if(db.is<n_fn>(item)) add(db.as<n_fn>(item).name, "функция", params(db.as<n_fn>(item).params), depth);
-      else if(db.is<n_struct>(item)) add(db.as<n_struct>(item).name, "тип", "struct", depth);
+      else if(db.is_struct(item)) add(db.as<n_extend>(item).name, "тип", "struct", depth);
       else if(db.is<n_var>(item)) add(db.as<n_var>(item).name, "переменная", "модуль", depth);
     }
   };
@@ -111,8 +111,6 @@ std::vector<completion_item> member_completions(ast_db const & db, node_id root,
     for(node_id module: {root, db.prelude}) {
       if(!module || !db.is<n_module>(module)) continue;
       for(node_id n: db.as<n_module>(module).items) {
-        if(db.is<n_struct>(n) && db.strings.text(db.as<n_struct>(n).name) == base)
-          for(node_id f: db.as<n_struct>(n).fields) field(f);
         if(db.is<n_extend>(n) && db.strings.text(db.as<n_extend>(n).name) == base)
           for(node_id x: db.as<n_extend>(n).items) {
             field(x);
