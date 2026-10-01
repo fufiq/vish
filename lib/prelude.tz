@@ -504,9 +504,11 @@ jit_compile(cg, f, types, type result) {
     ok = false;
   };
   out = array{};
-  fix_at = array{}; // переходы на метки: место, метка, кодогенератор от смещения
-  fix_label = array{};
-  fix_mk = array{};
+  // переходы на метки — данные с тегом:
+  // array{место, метка, вид, a, b}; вид: 0 jump, 1 jump_unless a, 2 jump_if a,
+  // 3 check_index a b, 4 деление (b — номер узла в fix_ops), 5 call_self
+  fixes = array{};
+  fix_ops = array{};
   labels = array{};
   faults = array{};
   loops = array{};
@@ -581,24 +583,24 @@ jit_compile(cg, f, types, type result) {
     labels[l] = out.size;
   };
   // переход на метку: кодогенератор от смещения (до привязки — 0, потом — настоящее)
-  jump_to(i64 l, mk) => {
-    fix_at.push(out.size);
-    fix_label.push(l);
-    fix_mk.push(mk);
-    put_bytes(mk(0));
+  // байты перехода вида k со смещением o до метки
+  fix_bytes(i64 k, i64 a, i64 b, i64 o) => {
+    target = o;
+    fault = o;
+    if(k == 0) cg.jump()
+    else if(k == 1) cg.jump_unless(a)
+    else if(k == 2) cg.jump_if(a)
+    else if(k == 3) cg.check_index(a, b)
+    else if(k == 4) apply_op(fix_ops[b], i64, op_codegen(cg, fix_ops[b], array{i64, i64}))
+    else cg.call_self()
   };
-  jump(i64 l) => jump_to(l, (i64 o) => {
-    target = o;
-    cg.jump()
-  });
-  jump_unless(i64 r, i64 l) => jump_to(l, (i64 o) => {
-    target = o;
-    cg.jump_unless(r)
-  });
-  jump_if(i64 r, i64 l) => jump_to(l, (i64 o) => {
-    target = o;
-    cg.jump_if(r)
-  });
+  jump_to(i64 l, i64 k, i64 a, i64 b) => {
+    fixes.push(array{out.size, l, k, a, b});
+    put_bytes(fix_bytes(k, a, b, 0));
+  };
+  jump(i64 l) => jump_to(l, 0, 0, 0);
+  jump_unless(i64 r, i64 l) => jump_to(l, 1, r, 0);
+  jump_if(i64 r, i64 l) => jump_to(l, 2, r, 0);
   off(i64 k) => 0 - (8 * (k + 1));
   alloc(i64 n) => if(gen_sub) {
     k = sub_n;
@@ -857,10 +859,7 @@ jit_compile(cg, f, types, type result) {
   // индекс в acc, проверка границ по размеру массива (запись s); данные — в second
   checked(i64 s, e) => {
     arr_size(second, env[s].slot);
-    jump_to(trap(1, e), (i64 o) => {
-      fault = o;
-      cg.check_index(acc, second)
-    });
+    jump_to(trap(1, e), 3, acc, second);
     arr_data(second, env[s].slot);
   };
   // размер и данные массива — из его ячейки (слот sl — её адрес)
@@ -1059,10 +1058,8 @@ jit_compile(cg, f, types, type result) {
       else if(ty(xs[1]) != t) bad("типы операндов");
       else if(((op == "/") || (op == "%")) && (ot == i64)) { // ловушка деления на ноль
         operands(xs[0], xs[1], ot);
-        jump_to(trap(2, e), (i64 o) => {
-          fault = o;
-          g(acc, second)
-        });
+        fix_ops.push(e);
+        jump_to(trap(2, e), 4, 0, fix_ops.size - 1);
       } else {
         operands(xs[0], xs[1], ot);
         put_bytes(apply_op(e, ot, g));
@@ -1329,10 +1326,7 @@ jit_compile(cg, f, types, type result) {
       if(!gen_sub) put_bytes(cg.move(outer_r, frame)); // кадр объемлющей — подпрограмме
       pad = (depth % 2) == 1;
       if(pad) put_bytes(cg.stack_alloc(8));
-      jump_to(subs[si].entry, (i64 o) => {
-        target = o;
-        cg.call_self()
-      });
+      jump_to(subs[si].entry, 5, 0, 0);
       if(pad) put_bytes(cg.stack_free(8));
     }
   };
@@ -1508,10 +1502,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.store(frame, area((ws + 4) + q), acc));
     }
     put_bytes(cg.address(argbase, frame, area(0)));
-    jump_to(entry, (i64 o) => {
-      target = o;
-      cg.call_self()
-    });
+    jump_to(entry, 5, 0, 0);
     put_bytes(cg.move(third, acc)); // результат — пока в стороне
     put_bytes(cg.load(acc, frame, area(ws)));
     l = label();
@@ -2028,9 +2019,9 @@ jit_compile(cg, f, types, type result) {
     jump(ret);
   }
   if(!ok) return why; // не умеет — причина (исполнит интерпретатор)
-  for(i : range(fix_at.size)) {
-    bytes = fix_mk[i](labels[fix_label[i]] - fix_at[i]);
-    for(j : range(bytes.size)) out[fix_at[i] + j] = bytes[j];
+  for(f : fixes) {
+    bytes = fix_bytes(f[2], f[3], f[4], labels[f[1]] - f[0]);
+    for(j : range(bytes.size)) out[f[0] + j] = bytes[j];
   }
   bytes = frame_size(((8 * nslots) + 15) & -16);
   for(j : range(bytes.size)) out[frame_at + j] = bytes[j];
