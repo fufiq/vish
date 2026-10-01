@@ -423,7 +423,7 @@ struct parser {
         if(!db.is<n_fn>(f) || db.as<n_fn>(f).name != r.name || db.as<n_fn>(f).params.size() != r.sig.size()) return false;
         for(std::size_t i = 0; i < r.sig.size(); ++i) {
           node_id t = db.as<n_param>(db.as<n_fn>(f).params[i]).type;
-          bool untyped = !t || db.is<n_auto>(t);
+          bool untyped = !t;
           if(r.sig[i] ? untyped || !db.is<n_ident>(t) || db.as<n_ident>(t).name != r.sig[i] : !untyped) return false;
         }
         return true;
@@ -704,11 +704,12 @@ struct parser {
     return db.add(n_unpack{p, v, test}, {start, toks[pos - 1].where.end});
   }
 
+  // Auto - no type, no node
   node_id type_expr() {
     uint32_t start = here().where.begin;
     if(is_word("auto")) {
       advance();
-      return db.add(n_auto{}, {start, toks[pos - 1].where.end});
+      return {};
     }
     symbol name = ident(); // to span: the order of calculation of arguments is not specified
     return db.add(n_ident{name}, {start, toks[pos - 1].where.end});

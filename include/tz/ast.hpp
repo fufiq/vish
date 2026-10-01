@@ -191,7 +191,6 @@ struct n_construct {
   node_id type;
   node_list items;
 }; // array{1, 2, 3}
-struct n_auto {}; // `auto` in type position
 struct n_hole {
   std::string text;
   std::string reason;
@@ -250,7 +249,7 @@ struct n_native {
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_member, n_field, n_index, n_if, n_loop, n_break, n_continue, n_return,
-    n_ct, n_lambda, n_construct, n_auto, n_hole, n_throw, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
+    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_struct, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
 
 struct node {
   node_kind kind;

@@ -31,7 +31,6 @@ import './expressions/lambda';
 import './expressions/construct';
 import './expressions/quote';
 import './expressions/splice';
-import './expressions/auto';
 import './expressions/hole';
 import './expressions/pat';
 import './expressions/pat_field';

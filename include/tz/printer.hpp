@@ -290,7 +290,7 @@ struct printer {
     if(p.type && db.is<n_pat>(p.type)) return item(p.type); // parameter-sample: names give unpacking
     out += modes[uint32_t(p.mode)];
     if(p.strict) out += "explicit ";
-    if(p.type && !db.is<n_auto>(p.type)) {
+    if(p.type) {
       item(p.type);
       out += p.pack ? "... " : " ";
     } else if(p.pack && p.mode == param_mode::let) { // xs - the tail of arguments
@@ -307,7 +307,7 @@ struct printer {
     if(v.ct) out += "ct ";
     if(v.ref) out += "&";
     if(v.strict) out += "explicit ";
-    if(v.type && !db.is<n_auto>(v.type)) {
+    if(v.type) {
       item(v.type);
       out += ' ';
     }
@@ -398,7 +398,7 @@ struct printer {
       for(std::size_t i = 0; i < f.params.size(); ++i) {
         node_id t = db.as<n_param>(f.params[i]).type;
         out += i ? ", " : "";
-        if(!t || db.is<n_auto>(t)) out += "auto";
+        if(!t) out += "auto";
         else item(t);
       }
       out += ") {";
@@ -489,7 +489,6 @@ struct printer {
   }
 
   void print_node(node_id, n_ident const & i) { out += str(i.name); }
-  void print_node(node_id, n_auto const &) { out += "auto"; }
   void print_node(node_id, n_int const & i) {
     if(i.hex) {
       char buf[24];
