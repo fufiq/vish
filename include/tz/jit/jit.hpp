@@ -484,6 +484,12 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       }
       return 0;
     }
+    if(op == 10) { // array {…} : an empty array of layout t with space under bits of elements - in id call memory
+      array_v a;
+      a.repr = t == jt::f64_ ? array_v::layout::floats : array_v::layout::ints;
+      a.dense.reserve(bits);
+      return reinterpret_cast<uint64_t>(reinterpret_cast<jit_call_mem *>(id)->add(value(std::move(a))));
+    }
     if(op == 9) { // push when there is no space in words: id is an array cell, bits is an element
       array_v & a = reinterpret_cast<value *>(id)->as<array_v>();
       a.push(jit_bits_value(uint64_t(t), bits));

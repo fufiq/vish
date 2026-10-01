@@ -853,7 +853,8 @@ jit_compile(cg, f, types, type result) {
       array{nm, ...frest} = code_fields(e);
       lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
     }
-    else if((k == n_construct) || (k == n_str)) vm_or_bad(e, fmt"узел {k}");
+    else if(k == n_construct) gen_construct(e);
+    else if(k == n_str) vm_or_bad(e, fmt"узел {k}");
     else bad(fmt"узел {k}");
   };
   // индекс в acc, проверка границ по размеру массива (запись s); данные — в second
@@ -872,34 +873,95 @@ jit_compile(cg, f, types, type result) {
     else {
       gen(x);
       if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
-      sl = env[s].slot;
-      slow = label();
-      done = label();
-      put_bytes(cg.load(second, sb(sl), so(sl)));
-      put_bytes(cg.load(third, second, a_size));
-      put_bytes(cg.load(second, second, a_cap));
-      put_bytes(cg.is_index(third, second));
-      jump_unless(third, slow);
-      put_bytes(cg.load(second, sb(sl), so(sl)));
-      put_bytes(cg.load(third, second, a_size));
-      put_bytes(cg.load(second, second, a_data));
-      put_bytes(cg.store_index(second, third, acc));
-      put_bytes(cg.address(third, third, 1));
-      put_bytes(cg.load(second, sb(sl), so(sl)));
-      put_bytes(cg.store(second, a_size, third));
-      // push инвалидирует опору всегда (§12.1, как у интерпретатора): новое поколение буфера
-      put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
-      put_bytes(cg.load(acc, acc, 8 * (ap + 6)));
-      put_bytes(cg.load(third, acc, 0));
-      put_bytes(cg.address(third, third, 1));
-      put_bytes(cg.store(acc, 0, third));
-      put_bytes(cg.store(second, a_gen, third));
-      jump(done);
-      bind(slow);
-      put_bytes(cg.move(ca2, acc));
-      put_bytes(cg.load(ca1, sb(sl), so(sl)));
-      vm_service(9, t, e);
-      bind(done);
+      push_into(env[s].slot, t, e);
+    }
+  };
+  // элемент (биты в acc) — в конец массива, адрес ячейки которого в слоте sl
+  push_into(i64 sl, type t, e) => {
+    slow = label();
+    done = label();
+    put_bytes(cg.load(second, sb(sl), so(sl)));
+    put_bytes(cg.load(third, second, a_size));
+    put_bytes(cg.load(second, second, a_cap));
+    put_bytes(cg.is_index(third, second));
+    jump_unless(third, slow);
+    put_bytes(cg.load(second, sb(sl), so(sl)));
+    put_bytes(cg.load(third, second, a_size));
+    put_bytes(cg.load(second, second, a_data));
+    put_bytes(cg.store_index(second, third, acc));
+    put_bytes(cg.address(third, third, 1));
+    put_bytes(cg.load(second, sb(sl), so(sl)));
+    put_bytes(cg.store(second, a_size, third));
+    // push инвалидирует опору всегда (§12.1, как у интерпретатора): новое поколение буфера
+    put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
+    put_bytes(cg.load(acc, acc, 8 * (ap + 6)));
+    put_bytes(cg.load(third, acc, 0));
+    put_bytes(cg.address(third, third, 1));
+    put_bytes(cg.store(acc, 0, third));
+    put_bytes(cg.store(second, a_gen, third));
+    jump(done);
+    bind(slow);
+    put_bytes(cg.move(ca2, acc));
+    put_bytes(cg.load(ca1, sb(sl), so(sl)));
+    vm_service(9, t, e);
+    bind(done);
+  };
+  // array{x, ...ys} над i64/f64: пустой массив нужной раскладки с местом под скаляры —
+  // VM в памяти вызова (op 10), элементы — push машинным кодом, ...ys — цикл по данным ys
+  gen_construct(e) => {
+    t = ty(e);
+    array{tn, items} = code_fields(e);
+    fits = is_arr(t) && (given(tn) && (code_name(tn) == "array"));
+    n = 0;
+    for(x : items) if(fits) {
+      if(code_kind(x) == n_spread) {
+        array{v} = code_fields(x);
+        if(ty(v) != t) fits = false;
+      } else if(ty(x) != elem(t)) fits = false;
+      else n += 1;
+    }
+    if(!fits) vm_or_bad(e, "узел n_construct");
+    else {
+      et = elem(t);
+      c = alloc(1);
+      mem_to(ca1);
+      put_bytes(cg.load_const(ca2, n));
+      vm_service(10, et, e);
+      put_bytes(cg.store(sb(c), so(c), acc));
+      for(x : items) {
+        if(code_kind(x) == n_spread) {
+          array{v} = code_fields(x);
+          src = alloc(1);
+          j = alloc(1);
+          gen(v);
+          put_bytes(cg.store(sb(src), so(src), acc));
+          put_bytes(cg.load_const(acc, 0));
+          put_bytes(cg.store(sb(j), so(j), acc));
+          top_l = label();
+          end_l = label();
+          bind(top_l);
+          put_bytes(cg.load(acc, sb(j), so(j)));
+          put_bytes(cg.load(second, sb(src), so(src)));
+          put_bytes(cg.load(second, second, a_size));
+          put_bytes(cg.is_index(acc, second));
+          jump_unless(acc, end_l);
+          put_bytes(cg.load(second, sb(src), so(src)));
+          put_bytes(cg.load(second, second, a_data));
+          put_bytes(cg.load(third, sb(j), so(j)));
+          put_bytes(cg.load_index(acc, second, third));
+          push_into(c, et, e);
+          put_bytes(cg.load(acc, sb(j), so(j)));
+          put_bytes(cg.address(acc, acc, 1));
+          put_bytes(cg.store(sb(j), so(j), acc));
+          jump(top_l);
+          bind(end_l);
+        } else {
+          gen(x);
+          if(et == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+          push_into(c, et, e);
+        }
+      }
+      put_bytes(cg.load(acc, sb(c), so(c)));
     }
   };
   // размер и данные массива — из его ячейки (слот sl — её адрес)
