@@ -789,9 +789,12 @@ struct parser {
     }
     if(is_word("hide") && ahead(1).kind == tok::ident) {
       advance();
+      uint32_t at = here().where.begin;
       symbol name = ident();
+      node_id x = db.add(n_ident{name}, {at, toks[pos - 1].where.end});
       end_statement();
-      return db.add(n_hide{name}, {start, toks[pos - 1].where.end});
+      node_id f = db.add(n_ident{db.strings.intern("hide")}, {start, start + 4});
+      return db.add(n_call{f, {x}}, {start, toks[pos - 1].where.end});
     }
     if(is_word("break") || is_word("continue")) {
       bool brk = is_word("break");

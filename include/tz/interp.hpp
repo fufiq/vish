@@ -1943,7 +1943,7 @@ struct interpreter {
   // or transferring to a parameter that changes the function being called? Shadow, stop.
   bool writes_name(node_id n, symbol name) const {
     if(!n || db.is<n_fn>(n)) return false;
-    if(db.is<n_hide>(n)) return db.as<n_hide>(n).name == name; // Hide Self - Changing the location of the caller
+    if(symbol h = db.hide_name(n)) return h == name; // Hide Self - Changing the location of the caller
     if(db.is<n_var>(n) && db.as<n_var>(n).ref) { // auto&e = name[i] - the entry in e changes the name
       node_id t = db.as<n_var>(n).init;
       while(db.is<n_index>(t)) t = db.as<n_index>(t).object;
@@ -3744,10 +3744,10 @@ struct interpreter {
     cell->hidden = at.value + 1;
   }
 
-  flow eval_node(node_id n, n_hide const & h, scope * env, uint32_t) {
-    value * cell = find(env, h.name);
-    if(!cell || cell->is<thunk_v>()) fail(cat("hide: нет переменной ", str(h.name)), db[n].where);
-    not_hidden(*cell, h.name, db[n].where);
+  flow eval_hide(node_id n, symbol name, scope * env) {
+    value * cell = find(env, name);
+    if(!cell || cell->is<thunk_v>()) fail(cat("hide: нет переменной ", str(name)), db[n].where);
+    not_hidden(*cell, name, db[n].where);
     hide_cell(cell, n);
     return ok();
   }
@@ -3853,6 +3853,7 @@ struct interpreter {
 
   flow eval_node(node_id n, n_call const & c, scope * env, uint32_t frame) {
     if(node_id rc = db.require_cond(n)) return eval_require(n, rc, env, frame);
+    if(symbol h = db.hide_name(n)) return eval_hide(n, h, env);
     span where = db[n].where;
     if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
       auto const & m = db.as<n_member>(c.callee);

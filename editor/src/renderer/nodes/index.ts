@@ -15,7 +15,6 @@ import './statements/break';
 import './statements/continue';
 import './statements/return';
 import './statements/throw';
-import './statements/hide';
 import './statements/ct';
 import './statements/try_compile';
 import './statements/unpack';

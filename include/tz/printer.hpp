@@ -358,7 +358,7 @@ struct printer {
       if(t.empty() || t.back() == ';' || t.back() == '}') return;
     }
     if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
-    if(db.is<n_break>(s) || db.is<n_continue>(s) || db.is<n_hide>(s)) return;
+    if(db.is<n_break>(s) || db.is<n_continue>(s) ) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
     if(db.is<n_call>(s)) {
@@ -476,7 +476,6 @@ struct printer {
   }
 
   void print_node(node_id, n_break const &) { out += "break;"; }
-  void print_node(node_id, n_hide const & h) { out += cat("hide ", str(h.name), ";"); }
   void print_node(node_id, n_continue const &) { out += "continue;"; }
 
   void print_node(node_id, n_pack const & p) { // PAC outside the call (not in the text)
@@ -589,7 +588,11 @@ struct printer {
 
   // Challenge: head and clauses. The parameters of the construction block are printed in
   // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
-  void print_node(node_id, n_call const & c) {
+  void print_node(node_id call, n_call const & c) {
+    if(symbol h = db.hide_name(call)) { // projection hide(x) is the author form of `hide x`
+      out += cat("hide ", str(h));
+      return;
+    }
     if(c.form && c.form - 1 < db.size() && db.is<n_fn>(node_id(c.form - 1)) && !db.as<n_fn>(node_id(c.form - 1)).form.empty()) {
       auto const & pieces = db.as<n_fn>(node_id(c.form - 1)).form;
       std::size_t shown = 0;

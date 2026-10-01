@@ -1528,6 +1528,7 @@ struct process_machine {
   // Challenge: arguments (expr-parameter - expression of the caller), then overload.
   void eval_node(node_id n, n_call const & c) {
     if(node_id rc = db.require_cond(n)) return eval_require(n, rc);
+    if(symbol h = db.hide_name(n)) return eval_hide(n, h);
     m_task & t = top();
     if(t.phase == 0) {
       if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
@@ -1925,10 +1926,10 @@ struct process_machine {
   }
 
   // Hide x: Name no longer available (§5.6).
-  void eval_node(node_id n, n_hide const & h) {
-    place p = find(top().scope, h.name);
-    if(p.scope == m_none || cell(p).is<m_thunk>()) throw diagnostic(cat("hide: нет переменной ", helper.str(h.name)), db[n].where);
-    not_hidden(p, h.name, db[n].where);
+  void eval_hide(node_id n, symbol name) {
+    place p = find(top().scope, name);
+    if(p.scope == m_none || cell(p).is<m_thunk>()) throw diagnostic(cat("hide: нет переменной ", helper.str(name)), db[n].where);
+    not_hidden(p, name, db[n].where);
     var_of(p).hidden = n.value + 1;
     finish(mval{m_unit{}});
   }

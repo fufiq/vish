@@ -745,7 +745,6 @@ jit_compile(cg, f, types, type result) {
           store_slot(f64, env[top - 1].slot);
         } else bad(fmt"объявление {want} из {t}");
       } else assign(name, init, true);
-    } else if(k == n_hide) {
     } else if(k == n_throw) gen_throw(e);
     else bad(fmt"узел {k}");
   };
@@ -885,6 +884,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.to_i64(acc, acc_f));
     } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
+    else if(name == "hide") {} // скрытие имени — только при компиляции
     else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
       gen(xs[0]);
       jump_unless(acc, trap(3, e));
