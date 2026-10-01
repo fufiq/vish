@@ -227,6 +227,7 @@ struct interpreter {
     sym_yield = sym("yield");
     sym_is_index = sym("is_index");
     globals = new_scope(nullptr);
+    if(!args.empty()) prog_path = args[0];
     array_v a;
     for(auto & s: args) a.push(value(s));
     value args_v(std::move(a));
@@ -391,8 +392,130 @@ struct interpreter {
           ct_cells.insert(globals->declare(v.name, f.v));
           ct_names.push_back(v.name);
         }
+        if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) declare_state(item); // [[state]] x = e
       }
     }
+  }
+
+  // --- Program status (§12.2) ---
+  // 
+// 
+// [[state]] x = e —
+  // The root is in the non-volatile level: the file holds the VM (the program has no paths), the
+  // pages are in the same addresses. Author's decision 2026-10-01. *My:* file - next to the program
+  // (.state), roots - by name, repair at opening (memory level, type numbers and field names),
+  // level - 1 TB of addresses.
+
+  address_space & program_state(span where) {
+    interpreter & r = *root;
+    if(r.state_level) return *r.state_level;
+    std::string base_name = r.prog_path.substr(r.prog_path.find_last_of('/') + 1);
+    std::string file = state_dir.empty() ? r.prog_path + ".state" : state_dir + "/" + base_name + ".state";
+    uint64_t slot = std::hash<std::string>{}(file) % 32;
+    r.state_level.emplace();
+    std::string why = open_state(*r.state_level, file, 0x400000000000ull + slot * address_space::state_range);
+    if(!why.empty()) {
+      r.state_level.reset();
+      fail(cat("состояние программы: ", why, " (", file, ")"), where);
+    }
+    auto * h = reinterpret_cast<state_header *>(r.state_level->lo);
+    if(h->nroots) { // level from the previous launch: numbers to this
+      std::map<uint64_t, type_id> tmap;
+      std::map<uint64_t, symbol> smap;
+      for(uint64_t i = 0; i < h->ntypes; ++i) tmap[h->types[i].id] = types.named(h->types[i].name);
+      for(uint64_t i = 0; i < h->nsyms; ++i) smap[h->syms[i].id] = sym(h->syms[i].name);
+      for(uint64_t i = 0; i < h->nroots; ++i) fix_state(*reinterpret_cast<value *>(r.state_level->lo + h->roots[i].id), &*r.state_level, tmap, smap);
+    }
+    return *r.state_level;
+  }
+
+  void fix_state(value & x, address_space * lv, std::map<uint64_t, type_id> const & tmap, std::map<uint64_t, symbol> const & smap) {
+    auto home = [&](words & w) { w.home = lv; };
+    if(x.is<str_v>()) home(x.as<str_v>().w);
+    else if(x.is<type_v>()) x.as<type_v>().type = tmap.at(x.as<type_v>().type.value);
+    else if(x.is<array_v>()) {
+      array_v & a = x.as<array_v>();
+      home(a.dense);
+      home(a.items.raw);
+      for(auto & e: a.items) fix_state(e, lv, tmap, smap);
+    } else if(x.is<agg_v>()) {
+      agg_v & a = x.as<agg_v>();
+      a.type = tmap.at(a.type.value);
+      home(a.fields.raw);
+      for(auto & [k, f]: a.fields) {
+        k = smap.at(k.value);
+        fix_state(f, lv, tmap, smap);
+      }
+    }
+  }
+
+  void declare_state(node_id item) {
+    auto const & v = db.as<n_var>(item);
+    if(checking()) { // Value from past launches: run-time
+      flow f = eval(v.init, globals, 0);
+      if(f.kind == flow_kind::thr) uncaught(f);
+      globals->declare(v.name, erase(f.v));
+      return;
+    }
+    address_space & lv = program_state(db[item].where);
+    auto * h = reinterpret_cast<state_header *>(lv.lo);
+    value * cell = nullptr;
+    for(uint64_t i = 0; i < h->nroots && !cell; ++i)
+      if(str(v.name) == h->roots[i].name) cell = reinterpret_cast<value *>(lv.lo + h->roots[i].id);
+    if(!cell) { // first run: initializer, cell - in level pages
+      if(h->nroots >= 256 || str(v.name).size() >= 64) fail("состояние программы: не больше 256 переменных, имя — до 63 байт", db[item].where);
+      flow f = eval(v.init, globals, 0);
+      if(f.kind == flow_kind::thr) uncaught(f);
+      value x;
+      try {
+        x = adopt_into(std::move(f.v), &lv);
+      } catch(diagnostic const & d) {
+        fail(d.what(), db[item].where);
+      }
+      cell = new(lv.take_small(address_space::class_of(uint32_t((sizeof(value) + 7) / 8)))) value(std::move(x));
+      auto & r = h->roots[h->nroots++];
+      r.id = uint64_t(reinterpret_cast<std::byte *>(cell) - lv.lo);
+      std::memcpy(r.name, str(v.name).data(), str(v.name).size());
+      r.name[str(v.name).size()] = 0;
+    }
+    globals->alias(v.name, cell);
+    root->state_cells.insert(cell);
+  }
+
+  // Number → name tables for root field types and names; metadata per disk
+  void save_program_state() {
+    if(!state_level) return;
+    auto * h = reinterpret_cast<state_header *>(state_level->lo);
+    std::set<uint32_t> ts, ss;
+    auto walk = [&](auto && self, value const & x) -> void {
+      if(x.is<type_v>()) ts.insert(x.as<type_v>().type.value);
+      else if(x.is<array_v>())
+        for(auto const & e: x.as<array_v>().r().items) self(self, e);
+      else if(x.is<agg_v>()) {
+        ts.insert(x.as<agg_v>().type.value);
+        for(auto const & [k, f]: x.as<agg_v>().fields) {
+          ss.insert(k.value);
+          self(self, f);
+        }
+      }
+    };
+    for(uint64_t i = 0; i < h->nroots; ++i) walk(walk, *reinterpret_cast<value const *>(state_level->lo + h->roots[i].id));
+    auto put = [](state_header::named & n, uint32_t id, std::string_view name) {
+      n.id = id;
+      size_t len = std::min<size_t>(name.size(), 63);
+      std::memcpy(n.name, name.data(), len);
+      n.name[len] = 0;
+    };
+    h->ntypes = 0;
+    for(uint32_t t: ts)
+      if(h->ntypes < 1024) put(h->types[h->ntypes++], t, types.name(type_id(t)));
+    h->nsyms = 0;
+    for(uint32_t k: ss)
+      if(h->nsyms < 4096) put(h->syms[h->nsyms++], k, str(symbol(k)));
+    save_state(*state_level);
+    close_state(*state_level);
+    state_level.reset();
+    state_cells.clear();
   }
 
   // Unit fields: declaration + extension (in module order).
@@ -419,6 +542,10 @@ struct interpreter {
     it = functions.find(sym("main"));
     call_site site{db[it->second.front()].where, "main"};
     flow r;
+    struct save_on_exit { // Program state on disk and in case of error
+      interpreter & vm;
+      ~save_on_exit() { vm.save_program_state(); }
+    } saving{*this};
     try {
       r = call_overloaded(it->second, {}, globals, 0, site);
       if(r.kind == flow_kind::thr) uncaught(r);
@@ -3707,8 +3834,15 @@ struct interpreter {
       fail("ct-переменная меняется только кодом при компиляции (ct { … })", where);
     bool pinned = target->pinned;
     if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
-    if(op == "=") *target = std::move(rhs);
-    else *target = binary(std::string_view(op).substr(0, 1), *target, rhs, where);
+    value result = op == "=" ? std::move(rhs) : binary(std::string_view(op).substr(0, 1), *target, rhs, where);
+    if(root->state_level && root->state_level->holds(target)) { // place - state of the program: value in its level
+      try {
+        result = adopt_into(std::move(result), &*root->state_level);
+      } catch(diagnostic const & d) {
+        fail(d.what(), where);
+      }
+    }
+    *target = std::move(result);
     if(pinned) pin(*target, {}, where); // The ct field remains a state during compilation
     if(target->is<array_v>() && db.is<n_ident>(lhs)) target->as<array_v>().gen = ++array_gen; // New buffer - old links are invalid
     return ok();
@@ -5147,6 +5281,9 @@ struct interpreter {
   std::map<fact, uint32_t> fact_ids;
   node_id index_write; // This is the entry of this element.
   symbol sym_alloc_in;
+  std::string prog_path; // Program path (args[0]): Nearby is its state
+  std::optional<address_space> state_level; // non-volatile state level of the program (at the root VM)
+  std::set<value const *> state_cells;
   std::deque<address_space> regions; // region() memory levels (at VM root); live as long as the process is alive
   symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
   std::vector<std::string> instance_keys; // instance in the parsing chain

@@ -317,7 +317,16 @@ struct parser {
     if(is_word("operator")) return operator_decl(std::move(attrs));
     if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl(std::move(attrs));
     if(auto f = try_fn_decl(false, attrs)) return *f;
-    if(!attrs.empty()) throw diagnostic("атрибуты [[…]] — только перед функцией или struct", db[attrs.front()].where);
+    if(!attrs.empty()) { // [[state]] x = e is the state of the program (§12.2): the variable of the module
+      node_id s = statement();
+      bool assign = db.is<n_op>(s) && db.strings.text(db.as<n_op>(s).op) == "=" && db.is<n_ident>(db.as<n_op>(s).args[0]);
+      if(!assign && !(db.is<n_var>(s) && !db.as<n_var>(s).ct)) throw diagnostic("атрибуты [[…]] — перед функцией, struct или переменной состояния [[state]] x = …", db[attrs.front()].where);
+      n_var v = assign ? n_var{db.as<n_ident>(db.as<n_op>(s).args[0]).name, {}, db.as<n_op>(s).args[1]} : db.as<n_var>(s);
+      v.attrs = std::move(attrs);
+      for(node_id a: v.attrs)
+        if(!db.is<n_ident>(a) || db.strings.text(db.as<n_ident>(a).name) != "state") throw diagnostic("у переменной модуля — только [[state]]", db[a].where);
+      return db.add(std::move(v), db[s].where);
+    }
     // Name { … } - extension of entity
     if(ahead(0).kind == tok::ident && !is_keyword(ahead(0).text) && is_open('{', 1)) return extension(start);
     if(is_op("&") && ahead(1).kind == tok::ident && is_open('(', 2)) return fn_extension(start);

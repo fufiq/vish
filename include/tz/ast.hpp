@@ -72,6 +72,7 @@ struct n_var {
   bool ct = false; // Compilation field state: struct file { ct bool open = true; }
   bool ref = false; // auto&e = v[i] - reference to place (§12.1)
   bool strict = false; // explicit T x = e - type exactly T (§5.8)
+  node_list attrs; // [[state]] x = e is the state of the program (§12.2)
 };
 struct n_block {
   node_list items;

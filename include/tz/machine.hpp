@@ -208,6 +208,8 @@ struct process_machine {
 
   process_machine(ast_db & db, node_id root, std::string name)
       : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run) {
+    for(node_id item: db.as<n_module>(root).items) // the state of the program - pages; the dump of the machine - while the values
+      if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) throw diagnostic("машина процессов: пока не поддержано — состояние программы [[state]]", db[item].where);
     helper.elaborate();
   }
 

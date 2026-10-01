@@ -30,8 +30,34 @@ struct type_v {
 // No reference counters. "" There's no copying where it's thrown out by parsing: the
 // argument-place is transmitted by the borrowed view of the caller's cell. The loan does
 // not own and lives no longer than the call; a copy or record of the loan array makes its
-// own copy.
+// own copy. Elements of the general array (rows, aggregates, arrays) - in the pages of VM,
+// as the field of the aggregate (§12.2): growth - transfer by the designer of movement.
 //
+//
+struct value_list {
+  words raw;
+  uint32_t n = 0;
+
+  value_list() = default;
+  value_list(value_list const & o);
+  value_list(value_list && o) noexcept : raw(std::move(o.raw)), n(o.n) { o.n = 0; }
+  value_list & operator=(value_list const & o);
+  value_list & operator=(value_list && o) noexcept;
+  ~value_list();
+
+  value * begin() { return reinterpret_cast<value *>(raw.data); }
+  value * end();
+  value const * begin() const { return reinterpret_cast<value const *>(raw.data); }
+  value const * end() const;
+  uint32_t size() const { return n; }
+  bool empty() const { return n == 0; }
+  value & operator[](uint32_t i);
+  value const & operator[](uint32_t i) const;
+  void push_back(value v);
+  void clear();
+  void grow(uint32_t want);
+};
+
 struct array_v {
   // clang-format off
   enum class layout : uint8_t { generic, ints, floats };
@@ -88,7 +114,7 @@ struct array_v {
   void to_generic();
 
   layout repr = layout::generic;
-  std::vector<value> items;
+  value_list items;
   // dense i64/f64 - words in VM pages (pages.hpp): the growing array does not move
   words dense;
   array_v const * borrowed = nullptr;
@@ -283,6 +309,8 @@ struct shape_table {
 
 shape_table shapes; // one on VM: Sample numbers common to all parsing
 
+value adopt_into(value v, address_space * lv);
+
 // --- array_v: definitions after value ---
 
 array_v array_v::of(std::vector<value> items) {
@@ -312,7 +340,7 @@ value array_v::get(uint32_t i) const {
 void array_v::to_generic() {
   own();
   if(repr == layout::generic) return;
-  std::vector<value> all;
+  value_list all;
   for(uint32_t i = 0; i < size(); ++i) all.push_back(get(i));
   dense.clear();
   items = std::move(all);
@@ -348,8 +376,90 @@ void array_v::set(uint32_t i, value v) {
     return;
   }
   to_generic();
-  items[i] = std::move(v);
+  items[i] = adopt_into(std::move(v), items.raw.home);
 }
+
+// Program status file directory (§12.2): by default, next to the program; test runner, its
+// temporary.
+std::string state_dir;
+
+// The value is in the memory level of the container, if it is non-volatile (program state): the
+// copy is made where it will live; otherwise - as is. In the state - only data: numbers, lines,
+// arrays, aggregates.
+bool persistable(value const & v) {
+  if(v.is<unit_v>() || v.is<bool>() || v.is<int64_t>() || v.is<double>() || v.is<str_v>() || v.is<type_v>()) return true;
+  if(v.is<array_v>()) {
+    array_v const & a = v.as<array_v>().r();
+    if(a.kind() != array_v::layout::generic) return true;
+    for(auto const & x: a.items)
+      if(!persistable(x)) return false;
+    return true;
+  }
+  if(v.is<agg_v>()) {
+    for(auto const & [k, x]: v.as<agg_v>().fields)
+      if(!persistable(x)) return false;
+    return true;
+  }
+  return false;
+}
+value adopt_into(value v, address_space * lv) {
+  if(!lv || !lv->persistent) return v;
+  if(!persistable(v)) throw diagnostic("в состояние программы — только данные (числа, строки, массивы, агрегаты)", {});
+  address_space * saved = current_space;
+  current_space = lv;
+  value c = v; // copy - in level pages
+  current_space = saved;
+  return c;
+}
+
+// --- value_list: definitions after value ---
+
+value * value_list::end() { return begin() + n; }
+value const * value_list::end() const { return begin() + n; }
+value & value_list::operator[](uint32_t i) { return begin()[i]; }
+value const & value_list::operator[](uint32_t i) const { return begin()[i]; }
+void value_list::grow(uint32_t want) {
+  uint64_t w = (uint64_t(want) * sizeof(value) + 7) / 8;
+  if(w <= raw.cap) return;
+  words fresh;
+  fresh.home = raw.home; // memory level - former
+  fresh.reserve(std::max(w, raw.cap * 2));
+  auto * to = reinterpret_cast<value *>(fresh.data);
+  for(uint32_t i = 0; i < n; ++i) {
+    new(to + i) value(std::move(begin()[i]));
+    begin()[i].~value();
+  }
+  raw = std::move(fresh);
+}
+void value_list::push_back(value v) {
+  grow(n + 1);
+  new(begin() + n) value(adopt_into(std::move(v), raw.home));
+  ++n;
+}
+void value_list::clear() {
+  for(uint32_t i = 0; i < n; ++i) begin()[i].~value();
+  n = 0;
+}
+value_list::value_list(value_list const & o) {
+  raw.home = &space(); // copy at the level where it is made
+  for(auto const & x: o) push_back(x);
+}
+value_list & value_list::operator=(value_list const & o) {
+  if(this == &o) return *this;
+  clear();
+  if(!raw.data) raw.home = &space();
+  for(auto const & x: o) push_back(x);
+  return *this;
+}
+value_list & value_list::operator=(value_list && o) noexcept {
+  if(this == &o) return *this;
+  clear();
+  raw = std::move(o.raw);
+  n = o.n;
+  o.n = 0;
+  return *this;
+}
+value_list::~value_list() { clear(); }
 
 // --- field_list: definitions after value ---
 
@@ -363,6 +473,7 @@ void field_list::grow(uint32_t want) {
   uint64_t w = (uint64_t(want) * sizeof(std::pair<symbol, value>) + 7) / 8;
   if(w <= raw.cap) return;
   words fresh;
+  fresh.home = raw.home; // memory level - former
   fresh.reserve(std::max(w, raw.cap * 2));
   auto * to = reinterpret_cast<std::pair<symbol, value> *>(fresh.data);
   for(uint32_t i = 0; i < n; ++i) {
@@ -373,6 +484,7 @@ void field_list::grow(uint32_t want) {
 }
 void field_list::push_back(std::pair<symbol, value> f) {
   grow(n + 1);
+  f.second = adopt_into(std::move(f.second), raw.home);
   new(begin() + n) std::pair<symbol, value>(std::move(f));
   ++n;
 }
@@ -384,11 +496,13 @@ field_list::field_list(std::initializer_list<std::pair<symbol, value>> xs) {
   for(auto const & x: xs) push_back(x);
 }
 field_list::field_list(field_list const & o) {
+  raw.home = &space(); // copy at the level where it is made
   for(auto const & x: o) push_back(x);
 }
 field_list & field_list::operator=(field_list const & o) {
   if(this == &o) return *this;
   clear();
+  if(!raw.data) raw.home = &space();
   for(auto const & x: o) push_back(x);
   return *this;
 }

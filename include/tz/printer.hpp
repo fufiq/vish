@@ -307,6 +307,7 @@ struct printer {
   }
 
   void print_node(node_id, n_var const & v) {
+    attrs(v.attrs);
     if(v.is_const) out += "const ";
     if(v.ct) out += "ct ";
     if(v.ref) out += "&";

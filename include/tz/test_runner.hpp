@@ -61,7 +61,7 @@ struct test_runner {
     return passed == files.size() ? 0 : 1;
   }
   struct expect {
-    std::vector<std::string> args, stdin_lines, out, errors, instances, check, check_lacks, check_errors;
+    std::vector<std::string> args, stdin_lines, out, out2, errors, instances, check, check_lacks, check_errors;
     std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, unknown;
     bool fmt_stable = false;
     bool machine = false; // The same program is a process machine: the same output
@@ -88,7 +88,7 @@ struct test_runner {
       std::vector<std::string> args_line;
       if(take("args:", args_line)) {
         for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
-      } else if(take("stdin:", e.stdin_lines) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats)) {
+      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats)) {
       } else if(take("machine-dump:", e.machine_dump)) {
         e.machine = true;
       } else if(body == "machine") {
@@ -375,6 +375,22 @@ struct test_runner {
     // stdin - queue of interpreter lines (as in a session), output - in a row
     auto input = [&] { return interpreter::known_inputs{e.stdin_lines}; };
 
+    // Program state (§12.2) in its temporary directory for each execution
+    // out2: — вывод второго запуска с тем же состоянием
+    struct state_dirs {
+      std::vector<std::filesystem::path> made;
+      void fresh() {
+        std::string t = (std::filesystem::temp_directory_path() / "tz-state-XXXXXX").string();
+        if(!mkdtemp(t.data())) throw diagnostic("раннер: нет временного каталога состояния", {});
+        made.emplace_back(t);
+        state_dir = t;
+      }
+      ~state_dirs() {
+        for(auto const & d: made) std::filesystem::remove_all(d);
+        state_dir.clear();
+      }
+    } states;
+    states.fresh();
     std::string out;
     std::string instances;
     if(errors.empty()) {
@@ -389,6 +405,25 @@ struct test_runner {
       }
       instances = vm.instances();
     }
+    std::string why_state;
+    if(!e.out2.empty() && errors.empty()) { // second launch - state from the first
+      std::string again;
+      std::vector<std::string> args{path.filename().string()};
+      interpreter vm(db, root, args, mode::run, input());
+      vm.capture_output(&again);
+      try {
+        vm.run_main();
+      } catch(diagnostic const & d) {
+        why_state += render(d, path.filename().string(), db);
+      }
+      uint32_t k = 0;
+      for(std::string_view line: lines_of(again)) {
+        if(k >= e.out2.size() || line != e.out2[k]) why_state += cat("    второй запуск, строка ", k + 1, ": ", in_quotes(line), "\n");
+        ++k;
+      }
+      if(k < e.out2.size()) why_state += "    второй запуск: не всё выведено\n";
+    }
+    states.fresh();
 
     std::string why;
     for(auto & d: e.unknown) why += cat("    неизвестная директива теста: ", d, "\n");
@@ -475,6 +510,7 @@ struct test_runner {
       std::string out2;
       std::vector<std::string> args{path.filename().string()};
       args.insert(args.end(), e.args.begin(), e.args.end());
+      states.fresh();
       interpreter vm2(db2, root2, args, mode::run, input());
       vm2.capture_output(&out2);
       try {
@@ -483,6 +519,8 @@ struct test_runner {
       }
       if(out2 != out) why += cat("    вывод из базы отличается: ", in_quotes(out2), " против ", in_quotes(out), "\n");
     }
+    why += why_state;
+    states.fresh();
     if(e.machine && p.errors().empty()) why += machine_check(db, root, path, e, out, errors);
     uint32_t i = 0;
     for(std::string_view line: lines_of(out)) {

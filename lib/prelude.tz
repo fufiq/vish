@@ -799,7 +799,7 @@ jit_compile(cg, f, types, type result) {
         jump(fr_exit[to]);
       }
     } else if(k == n_var) {
-      array{name, vt, init, _, is_ct, is_ref, _} = code_fields(e);
+      array{name, vt, init, _, is_ct, is_ref, _, _} = code_fields(e);
       if(is_ref || is_ct) bad("ссылка или ct-переменная");
       else if(given(vt) && (code_kind(vt) == n_ident)) { // T x = e: значение — в тип T (§5.8)
         want = type_of_code(vt);
