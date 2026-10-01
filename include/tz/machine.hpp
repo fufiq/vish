@@ -1382,7 +1382,7 @@ struct process_machine {
   void eval_node(node_id n, n_op const & o) {
     if(db.is_member(n)) return eval_member(n, db.member_of(n));
     if(db.is_field(n)) return eval_field(n, db.field_of(n));
-    if(db.is_index(n) && !helper.user_ops.contains(helper.sym("infix[]").value)) return eval_index(n, db.index_of(n));
+    if(db.is_index(n) && (!helper.user_ops.contains(helper.sym("infix[]").value) || db.in_prelude(n))) return eval_index(n, db.index_of(n));
     m_task & t = top();
     std::string_view op = helper.str(o.op);
     bool assign = op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=";

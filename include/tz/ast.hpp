@@ -7,6 +7,7 @@
 #pragma once
 
 #include "base.hpp"
+#include "lexer.hpp"
 
 #include <deque>
 #include <variant>
@@ -333,6 +334,12 @@ struct ast_db {
     auto const & o = as<n_op>(n);
     return o.args.size() == 2 && !o.postfix && strings.text(o.op) == "[]";
   }
+  // node in the code prelude : modules are included, prelude does not
+  // include a program module - overload [] programs are not visible in it
+  bool in_prelude(node_id n) const {
+    while(n && !is<n_module>(n)) n = nodes[n].parent;
+    return n && n == prelude;
+  }
   index_view index_of(node_id n) const { return {as<n_op>(n).args[0], as<n_op>(n).args[1]}; }
 
   // a.x is a post-fix operator .x:
@@ -343,7 +350,7 @@ struct ast_db {
     auto const & o = as<n_op>(n);
     if(o.args.size() != 1 || !o.postfix) return false;
     auto t = strings.text(o.op);
-    return t.size() > 1 && t[0] == '.' && (std::isalpha(static_cast<unsigned char>(t[1])) || t[1] == '_' || static_cast<unsigned char>(t[1]) >= 0x80);
+    return t.size() > 1 && t[0] == '.' && lexer::is_ident_start(t[1]);
   }
   member_view member_of(node_id n) const { return {as<n_op>(n).args[0], member_name(as<n_op>(n).op)}; }
   // field name by operator symbol .x (parsing internees both)

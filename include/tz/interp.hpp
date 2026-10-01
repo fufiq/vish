@@ -3542,7 +3542,7 @@ struct interpreter {
     if(db.is_member(n)) return eval_member(n, db.member_of(n), env, frame); // a.x is the kernel shape
     if(db.is_field(n)) return eval_field(n, db.field_of(n), env, frame);
     // a[i]: kernel if [] is not overloaded with code (overload to its types, otherwise the kernel below)
-    if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(sym("infix[]").value))) return eval_index(n, db.index_of(n), env, frame);
+    if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(sym("infix[]").value) || db.in_prelude(n))) return eval_index(n, db.index_of(n), env, frame);
     auto op = str(o.op);
     span where = db[n].where;
     // Operator declared to be an unbuilt primitive code calls its entity (overload by
@@ -4636,7 +4636,8 @@ struct interpreter {
       bool fits = ps.size() == ts.size();
       for(std::size_t k = 0; fits && k < ps.size(); ++k) {
         auto const & p = db.as<n_param>(ps[k]);
-        if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != ts[k]) fits = false;
+        // Type or family: array accepts array<i64 >>
+        if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != ts[k] && str(db.as<n_ident>(p.type).name) != std::string_view(ts[k]).substr(0, ts[k].find('<'))) fits = false;
       }
       if(fits) return true;
     }

@@ -336,7 +336,7 @@ struct editor_server {
 
   // --- complement ---
 
-  static bool ident_char(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+  static bool ident_char(char c) { return lexer::is_ident(c); }
 
   // Live addition to the word in front of the cursor; forced (Ctrl + Space) - and without a word.
   void complete(peer & p, editor_view & v, bool forced) {

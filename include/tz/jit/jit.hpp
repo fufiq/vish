@@ -761,7 +761,12 @@ struct jit_codegen {
     auto op = db.strings.text(o.op);
     if(an.user_operator(n)) { // code operator: built-in operation if its overload is not accepted by these types
       std::vector<std::string> ts;
-      for(node_id a: o.args) ts.push_back(std::string(jt_name(type_of(a))));
+      for(node_id a: o.args) { // parsing does not observe (reads without a copy)
+        jt t = type_of(a);
+        if(t == jt::other && db.is<n_ident>(a))
+          if(slot const * sl = find(db.as<n_ident>(a).name); sl && !sl->thunk) t = sl->type;
+        ts.push_back(std::string(jt_name(t)));
+      }
       if(o.postfix || an.user_operator_applies(an.entity_of(o), ts)) throw jit_unsupported{n, cat("оператор ", op, ", объявленный кодом")};
     }
     if(db.is_index(n)) return gen_index(n, db.index_of(n));

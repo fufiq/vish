@@ -623,7 +623,11 @@ jit_compile(cg, f, types, type result) {
       w = env[v];
       if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else w.kind
     } else if(given(t)) t
-    else if(k == n_int) i64
+    else if(is_call_of(e, "index")) { // примитив ядра a[i] — тип элемента
+      array{_, ys, ...rest} = code_fields(e);
+      a = ty(ys[0]);
+      if(a == jc_range) i64 else elem(a)
+    } else if(k == n_int) i64
     else if(k == n_float) f64
     else if(k == n_op) {
       array{op, xs, _} = code_fields(e);
@@ -764,6 +768,24 @@ jit_compile(cg, f, types, type result) {
   } else array{};
   gen_index(e) => {
     array{o, ix} = index_parts(e);
+    gen_index_of(e, o, ix);
+  };
+  // перегрузка [] кодом с типами (operator (T a)[U i]), подошедшая к операндам — встраивается
+  typed_overload(g) => {
+    array{_, ps, ...rest} = code_fields(g);
+    n = 0;
+    for(p : ps) {
+      array{_, pt, ...prest} = code_fields(p);
+      if(given(pt)) n += 1;
+    }
+    n > 0
+  };
+  gen_index_op(e, xs) => {
+    g = choose("infix[]", xs);
+    if((g.size == 1) && typed_overload(g[0])) gen_inline(e, "infix[]", xs);
+    else gen_index(e);
+  };
+  gen_index_of(e, o, ix) => {
     s = var_of(o);
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
     else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
@@ -816,7 +838,7 @@ jit_compile(cg, f, types, type result) {
   };
   gen_op(e) => {
     array{op, xs, _} = code_fields(e);
-    if(op == "[]") gen_index(e);
+    if(op == "[]") gen_index_op(e, xs);
     else if(op == ".size") gen_size(xs);
     else if(xs.size == 1) {
       t = ty(xs[0]);
@@ -899,6 +921,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.to_i64(acc, acc_f));
     } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
+    else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // примитив ядра a[i]
     else if(name == "hide") {} // скрытие имени — только при компиляции
     else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
       gen(xs[0]);

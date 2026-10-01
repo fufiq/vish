@@ -93,7 +93,8 @@ struct lexer {
   }
   static bool is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
   static bool is_digit(char c) { return c >= '0' && c <= '9'; }
-  static bool is_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+  // UTF-8 bytes ≥ 0x80 - letters of the name (Cyrillic, etc.); *my *
+  static bool is_ident_start(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || static_cast<unsigned char>(c) >= 0x80; }
   static bool is_ident(char c) { return is_ident_start(c) || is_digit(c); }
   static bool is_op(char c) { return std::string_view("+-*/%<>=!&|^~?:.,;@#$\\").contains(c); }
 

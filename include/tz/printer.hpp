@@ -140,7 +140,7 @@ struct printer {
     }
     auto name = str(f.name);
     for(std::string_view role: {"infix", "prefix", "postfix"})
-      if(name.size() > role.size() && name.starts_with(role) && !std::isalnum(static_cast<unsigned char>(name[role.size()])) && name[role.size()] != '_') {
+      if(name.size() > role.size() && name.starts_with(role) && !lexer::is_ident(name[role.size()])) {
         auto sym = name.substr(role.size());
         out += f.scoped ? "using operator " : "operator ";
         if(role == "prefix") out += sym;
@@ -192,7 +192,7 @@ struct printer {
     for(std::size_t i = 0; i < pieces.size(); ++i) {
       auto p = str(pieces[i]);
       bool paren = p == "(";
-      bool after_word = i && std::isalpha(static_cast<unsigned char>(str(pieces[i - 1])[0])) != 0;
+      bool after_word = i && lexer::is_ident_start(str(pieces[i - 1])[0]);
       if(i && !(paren && after_word)) out += ' ';
       if(paren || p == "{") hole(k++, !paren);
       else out += p;
