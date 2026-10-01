@@ -300,7 +300,6 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   // VM, author's decision 2026-10-01); obviously not - value-function, unpacking, ct
   if((db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.try_compile_body(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
-  if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   // ct-variable module is read in place in canonical order (§7.3) - not the way of execution
   if(db.is<n_ident>(n) && module && db.is<n_module>(module))
@@ -522,6 +521,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
 // 
   // 
   if(db[f].parent == mod && db.strings.text(db.as<n_fn>(f).name) == "main") return std::nullopt;
+  if(db.is<n_block>(db[f].parent)) return std::nullopt; // Local function - closure: built into the enclosing code
   // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
   // variable array possible: machine code receives an array of caller
   for(auto const & v: vals)

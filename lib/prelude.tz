@@ -476,6 +476,9 @@ struct jc_range {} // тег: значение range(n) — в слоте гра
 // граница) или expr-параметр (код, контекст, окружение и функция вызывающего)
 struct jc_var { str name; type kind; i64 slot; bool thunk; code th; i64 th_ctx; i64 th_top; i64 th_base; i64 th_ret; }
 
+// локальная функция блока: код и лексический вид объявления (что было видно на её месте)
+struct jc_lfn { str name; code f; i64 top; i64 base; i64 ctx; i64 ret; }
+
 // генератор, ждущий своего for: тело spawn (expr) и его вид, область, слоты, которые
 // тело читает снаружи, узел spawn
 struct jc_gen { code w; i64 w_ctx; i64 w_top; i64 w_base; i64 w_ret; i64 region; array caps; code at; }
@@ -520,6 +523,7 @@ jit_compile(cg, f, types, type result) {
 // Условия — как у
   // бывшей склейки C++ (*моё*): наблюдаемое не меняется.
   gens = array{}; // jc_gen, ждущие for
+  lfns = array{}; // jc_lfn: локальные функции блоков (семантический инлайн, захват — места объемлющей)
   region = 0; // область управления: ветка или тело цикла
   regions = 0;
   fusing = false; // идёт свёртка: генерируется W
@@ -619,6 +623,11 @@ jit_compile(cg, f, types, type result) {
     store_bytes(kind, s);
   };
   store_bytes(type kind, i64 s) => put_bytes(if(kind == f64) cg.store_f64(frame, off(s), acc_f) else cg.store(frame, off(s), acc));
+  take_first(xs, i64 n) => {
+    r = array{};
+    for(i : range(n)) r.push(xs[i]);
+    r
+  };
   drop_last(xs) => {
     r = array{};
     for(i : range(xs.size - 1)) r.push(xs[i]);
@@ -745,8 +754,10 @@ jit_compile(cg, f, types, type result) {
     else if(k == n_block) {
       array{items, ...rest} = code_fields(e);
       saved_top = top;
+      saved_lf = lfns.size;
       for(x : items) if(ok) gen(x);
       top = saved_top;
+      lfns = take_first(lfns, saved_lf);
     } else if(k == n_if) {
       array{c, t, el} = code_fields(e);
       l_else = label();
@@ -813,6 +824,10 @@ jit_compile(cg, f, types, type result) {
         } else bad(fmt"объявление {want} из {t}");
       } else assign(name, init, true);
     } else if(k == n_throw) gen_throw(e);
+    else if(k == n_fn) { // локальная функция: кода на месте нет — встраивается в вызовы
+      array{nm, ...frest} = code_fields(e);
+      lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
+    }
     else if((k == n_construct) || (k == n_str)) vm_or_bad(e, fmt"узел {k}");
     else bad(fmt"узел {k}");
   };
@@ -890,15 +905,22 @@ jit_compile(cg, f, types, type result) {
     }
   };
   // второй операнд: вычислить, на стек, первый, второй — в second
+  // слева направо, как интерпретатор (у операндов бывают эффекты): первый — на стек,
+  // второй — в second, первый — обратно в acc
   operands(e0, e1, type t) => {
-    gen(e1);
+    gen(e0);
     if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
     put_bytes(cg.push_tmp(acc));
     depth += 1;
-    gen(e0);
-    put_bytes(cg.pop_tmp(second));
+    gen(e1);
+    if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+    put_bytes(cg.move(second, acc));
+    put_bytes(cg.pop_tmp(acc));
     depth -= 1;
-    if(t == f64) put_bytes(cg.move_to_f64(second_f, second));
+    if(t == f64) {
+      put_bytes(cg.move_to_f64(second_f, second));
+      put_bytes(cg.move_to_f64(acc_f, acc));
+    }
   };
   regs(type t) => if(t == f64) array{acc_f, second_f} else array{acc, second};
   // операция узла программы — её кодогенератор в цели (codegen::eval)
@@ -1046,6 +1068,7 @@ jit_compile(cg, f, types, type result) {
     v = find(name);
     if(kc.size == 1) gen_const(kc[0]);
     else if(name == "") bad("вызов значения");
+    else if((v < 0) && (local_fns(name).size > 0)) gen_local_call(e, name, xs);
     else if((v >= 0) && env[v].thunk) call_block(env[v], xs);
     else if(v >= 0) bad("значение-функция");
     else if((name == "f64") && ((xs.size == 1) && (ty(xs[0]) == i64))) {
@@ -1163,12 +1186,89 @@ jit_compile(cg, f, types, type result) {
     jump_if(cret2, trap(6, e));
     if(((code & 255) == 2) && (op == 2)) put_bytes(cg.move_to_f64(acc_f, acc)); // read потока f64
   };
+  // параметры встраиваемой функции: expr — код вызывающего, место — алиас, иначе — значение в слот
+  bind_args(ps, xs) => {
+    binds = array{};
+    for(i : range(ps.size)) {
+      array{pname, _, mode, ...prest} = code_fields(ps[i]);
+      a = xs[i];
+      s = var_of(a);
+      if(mode == 4) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur});
+      else if((s >= 0) && ((mode != 2) && !env[s].thunk)) {
+        w = env[s];
+        binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
+      } else {
+        t = if(is_call_of(a, "range")) jc_range else ty(a);
+        if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");
+        gen(a);
+        sl = alloc(1);
+        store_slot(t, sl);
+        binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
+      }
+    }
+    binds
+  };
+  // Вызов локальной функции — семантический инлайн в лексическом виде её объявления:
+  // захваченные имена — места объемлющей функции 
+// рекурсия — следующий шаг.
+  local_fns(str nm) => {
+    gs = array{};
+    for(l : lfns) if(l.name == nm) gs.push(l.f);
+    gs
+  };
+  gen_local_call(e, str name, xs) => {
+    g = choose_from(local_fns(name), xs);
+    rec = false;
+    if(g.size == 1) {
+      k = cur;
+      while(k >= 0) {
+        if(code_id(fr_fn[k]) == code_id(g[0])) rec = true;
+        k = fr_parent[k];
+      }
+    }
+    if(g.size != 1) bad(fmt"локальная функция {name}: нет перегрузки");
+    else if(rec) bad(fmt"рекурсия локальной функции {name}");
+    else {
+      lf = lfns[0];
+      for(l : lfns) if(code_id(l.f) == code_id(g[0])) lf = l;
+      array{_, ps, _, body, ...rest} = code_fields(g[0]);
+      binds = bind_args(ps, xs); // аргументы — в виде вызывающего
+      if(ok) {
+        exit = label();
+        saved = array{};
+        for(i : range(top)) saved.push(env[i]);
+        old_top = top;
+        old_base = base;
+        old_ctx = ctx;
+        old_cur = cur;
+        top = lf.top; // вид объявления: что было видно на её месте
+        base = lf.base;
+        for(b : binds) put(b);
+        ctx = inline_context(old_ctx, e);
+        fr_fn.push(g[0]);
+        fr_exit.push(exit);
+        fr_parent.push(old_cur);
+        cur = fr_fn.size - 1;
+        gen(body);
+        bind(exit);
+        fr_fn = drop_last(fr_fn);
+        fr_exit = drop_last(fr_exit);
+        fr_parent = drop_last(fr_parent);
+        for(i : range(saved.size)) env[i] = saved[i];
+        top = old_top;
+        base = old_base;
+        ctx = old_ctx;
+        cur = old_cur;
+      }
+    }
+  };
   // перегрузка по типам аргументов: expr-параметр — любой код
-  choose(str name, xs) => {
+  choose(str name, xs) => choose_from(functions_named(name), xs);
+  choose_from(gs, xs) => {
     best = -1;
     pick = array{};
     tie = false;
-    for(g : functions_named(name)) {
+    for(g : gs) {
       array{_, ps, ...rest} = code_fields(g);
       fits = ps.size == xs.size;
       score = 0;
@@ -1211,24 +1311,7 @@ jit_compile(cg, f, types, type result) {
     else if(leading_require(body)) vm_or_bad(e, fmt"вызов {name}: ведущий require — выбор перегрузки по значениям");
     else {
       fn = g[0];
-      binds = array{};
-      for(i : range(ps.size)) {
-        array{pname, _, mode, ...prest} = code_fields(ps[i]);
-        a = xs[i];
-        s = var_of(a);
-        if(mode == 4) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur});
-        else if((s >= 0) && ((mode != 2) && !env[s].thunk)) {
-          w = env[s];
-          binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
-        } else {
-          t = if(is_call_of(a, "range")) jc_range else ty(a);
-          if(!scalar(t) && (t != jc_range)) bad(fmt"аргумент {pname} типа {t}");
-          gen(a);
-          sl = alloc(1);
-          store_slot(t, sl);
-          binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
-        }
-      }
+      binds = bind_args(ps, xs);
       if(ok) {
         exit = label();
         old_top = top;

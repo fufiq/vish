@@ -1,0 +1,20 @@
+// out: 198
+// machine
+// jit-compiled: work
+// Локальные функции в машинном коде — семантический инлайн в лексическом виде
+// объявления: захваченные имена — места объемлющей функции 
+// Операнды — слева направо, как у
+// интерпретатора: add меняет total в обоих.
+work(i64 n) {
+  total = 0;
+  step = 3;
+  add(i64 x) => {
+    total = total + (x * step);
+    total
+  };
+  twice(i64 x) => add(x) + add(x + 1);
+  s = 0;
+  for(i : range(n)) s = s + twice(i);
+  s + total
+}
+main() { print(work(4)); }
