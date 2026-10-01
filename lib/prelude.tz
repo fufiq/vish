@@ -965,6 +965,7 @@ jit_compile(cg, f, types, type result) {
     } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
     else if((name == "fiber_start") && (xs.size == 1)) gen_spawn(e, xs[0]);
+    else if(name == "print") gen_print(e, xs);
     else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // примитив ядра a[i]
     else if(name == "hide") {} // скрытие имени — только при компиляции
     else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
@@ -1016,6 +1017,34 @@ jit_compile(cg, f, types, type result) {
       }
     }
     if(ok && !(fusing && !in_b)) vm_service(op, carried, e);
+  };
+  // print(x, …) — служба VM (память и вывод — у VM, решение автора 2026-10-01):
+  // скаляр — op 6 со значением и типом, строковый литерал — op 7 по узлу; ca1 & 1 — последний
+  gen_print(e, xs) => {
+    if(tries.size > 0) bad("print внутри try");
+    else if(fusing && !in_b) bad("генератор: print");
+    else if(xs.size == 0) {
+      put_bytes(cg.load_const(ca1, 1));
+      vm_service(6, unit, e);
+    } else {
+      for(i : range(xs.size)) if(ok) gen_print_arg(e, xs[i], if((i + 1) == xs.size) 1 else 0);
+    }
+  };
+  gen_print_arg(e, x, i64 last) => {
+    if(code_kind(x) == n_str) {
+      put_bytes(cg.load_const(ca1, last));
+      vm_service(7, unit, x);
+    } else {
+      t = ty(x);
+      if((t != i64) && ((t != f64) && (t != bool))) bad(fmt"print значения {t}");
+      else {
+        gen(x);
+        if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+        put_bytes(cg.move(ca2, acc));
+        put_bytes(cg.load_const(ca1, last));
+        vm_service(6, t, e);
+      }
+    }
   };
   vm_service(i64 op, type carried, e) => {
     put_bytes(cg.load_const(ca3, (jt_code(carried) << 32) | code_id(e)));
@@ -1533,6 +1562,11 @@ jit_compile(cg, f, types, type result) {
       if(x[3] > 0) put_bytes(cg.stack_free(8 * x[3]));
       jump(x[2]);
       continue;
+    }
+    if(x[1] == 1) { // границы: индекс (acc) и размер (second) — в слова значения, сообщение как у интерпретатора
+      put_bytes(cg.load(third, frame, off(args_slot)));
+      put_bytes(cg.store(third, 8 * (ap + 2), acc));
+      put_bytes(cg.store(third, 8 * (ap + 3), second));
     }
     put_bytes(cg.load(second, frame, off(args_slot)));
     if(x[1] < 0) { // ошибка вызванного: вид, узел, значение, тип — из его области (смещение слова — x[2])

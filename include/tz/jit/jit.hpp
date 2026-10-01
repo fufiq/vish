@@ -38,6 +38,8 @@ uint64_t jit_thrown_type = 0; // jt
 // Error or cancellation of fiber within the VM operation: The C++ exception does not go
 // through the machine code - it waits here, the code comes out with the vm_error label.
 std::exception_ptr jit_pending;
+// print from machine code: line arguments are accumulated in VM to the last (service, op 6/7)
+std::vector<value> jit_print_args;
 
 // Pointer to a dense array buffer of the desired layout; nullptr - layout is not the
 // same (deoptimization: the interpreter will perform).
@@ -2097,13 +2099,14 @@ struct jit_codegen {
 // disassembling (parsing can calculate a lot with compile-time).
 std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
   if(!n) return std::nullopt;
-  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.try_compile_body(n) || (db.is<n_construct>(n) && !db.clause_pack(n)) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
+  bool printed = db.is<n_str>(n) && db[n].parent && db.is<n_call>(db[n].parent) && db.is<n_ident>(db.as<n_call>(db[n].parent).callee) && db.strings.text(db.as<n_ident>(db.as<n_call>(db[n].parent).callee).name) == "print"; // literal print - VM service
+  if((db.is<n_str>(n) && !printed) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.try_compile_body(n) || (db.is<n_construct>(n) && !db.clause_pack(n)) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) {
     auto name = db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name);
-    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept" || name == "require" || name == "hide" // pure: convolution or code generator
+    bool known = name == "f64" || name == "i64" || name == "range" || name == "zero" || name == "typeof" || name == "is_index" || name == "intercept" || name == "require" || name == "hide" || name == "print" // clean; print - VM service: convolution or code generator
         || name.starts_with("stream_") || name == "yield"; // Flow operations - VM call
     for(uint32_t i = 0; i < db.size() && !known; ++i) // functions of any database module (use)
       known = db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == name;
@@ -2225,6 +2228,20 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
     span where; // place - only if the error (below): on each exchange it is not necessary
     if(op == 5) {
       vm.yield();
+      return 0;
+    }
+    // print (author's decision 2026-10-01: memory and output - at VM, through the service): 6 -
+    // value (bits, type), 7 - line literal node; id & 1 - the last argument
+    if(op == 6 || op == 7) {
+      if(op == 7) jit_print_args.push_back(value(vm.db.as<n_str>(at).value));
+      else if(t == jt::f64_) jit_print_args.push_back(value(std::bit_cast<double>(bits)));
+      else if(t == jt::bool_) jit_print_args.push_back(value(bits != 0));
+      else if(t == jt::i64_) jit_print_args.push_back(value(int64_t(bits)));
+      if(id & 1) {
+        std::vector<value> a = std::move(jit_print_args);
+        jit_print_args.clear();
+        vm.builtin(vm.sym("print"), a, vm.db[at].where);
+      }
       return 0;
     }
     if(op == 0) {
@@ -2361,6 +2378,9 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   if(fault != jit_fault_kind::none) {
     node_id at{uint32_t(jit_fault_node)};
     jit_fault = 0;
+    // The compiler code on the language puts the index and size in the words of the value - the message as the interpreter
+    if(fault == jit_fault_kind::bounds && code->by_lang)
+      fail_rt("out_of_bounds", cat("индекс ", int64_t(jit_thrown), " вне границ массива размера ", jit_thrown_type), db[at].where);
     if(fault == jit_fault_kind::layout)
       throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[at].where);
     char const * what = fault == jit_fault_kind::bounds ? "индекс вне границ массива (машинный код)"
