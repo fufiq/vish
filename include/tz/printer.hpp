@@ -474,13 +474,6 @@ struct printer {
   void print_node(node_id, n_break const &) { out += "break;"; }
   void print_node(node_id, n_continue const &) { out += "continue;"; }
 
-  void print_node(node_id, n_pack const & p) { // PAC outside the call (not in the text)
-    for(uint32_t i = 0; i < p.items.size(); ++i) {
-      if(i) out += ' ';
-      item(p.items[i]);
-    }
-  }
-
   // --- expression ---
 
   void print_node(node_id, n_if const & i) {
@@ -610,15 +603,15 @@ struct printer {
     while(head_end < n && !word(head_end)) ++head_end;
     group(c, 0, head_end, c.tail, !c.words.empty() || db.try_compile_body(call)); // try_compile { … } - without brackets
     for(i = head_end; i < n; ++i) {
-      if(db.is<n_pack>(c.args[i])) {
-        for(node_id x: db.as<n_pack>(c.args[i]).items) {
+      if(auto pack = db.clause_pack(c.args[i])) {
+        for(node_id x: *pack) {
           out += cat(" ", str(word(i)));
           clause(x, {});
         }
         continue;
       }
       uint32_t from = i;
-      while(i + 1 < n && word(i + 1) == word(from) && !db.is<n_pack>(c.args[i + 1])) ++i;
+      while(i + 1 < n && word(i + 1) == word(from) && !db.clause_pack(c.args[i + 1])) ++i;
       out += cat(" ", str(word(from)));
       group(c, from, i + 1, true, true);
     }

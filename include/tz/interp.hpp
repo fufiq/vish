@@ -2072,14 +2072,14 @@ struct interpreter {
   }
 
   // intercept(тело, блоки) is the exception kernel (§8.1), on it the library try { …
-  // } catch(E e) { … }: body and blocks are expr-arguments, blocks are n_pack pack
-  // from catch clauses. Catch the first block, whose parameter takes the type of
-  // value thrown (auto - any). Break/continue is no exception: they are caught by
-  // loop, catch(auto e) does not see them.
+  // } catch(E e) { … }: body and blocks are expr-arguments, blocks are pack pack
+  // catch. Catch the first block, whose parameter takes the type of value thrown
+  // (auto - any). Break/continue is no exception: they are caught by loop,
+  // catch(auto e) does not see them.
   flow intercept(node_list const & args, scope * env, uint32_t frame, span where) {
     if(args.size() != 2) fail("intercept(тело, блоки)", where);
     thunk_v hs = thunk_arg(args[1], env, where);
-    node_list handlers = db.is<n_pack>(hs.expr) ? db.as<n_pack>(hs.expr).items : node_list{hs.expr};
+    node_list handlers = db.handlers_of(hs.expr);
     std::vector<value> thrown; // throws on the run-time-branches of the body (check mode)
     throw_sinks.push_back(&thrown);
     flow r;
@@ -4605,7 +4605,7 @@ struct interpreter {
       if(!db.is<n_call>(p)) continue;
       auto const & call = db.as<n_call>(p);
       if(!db.is<n_ident>(call.callee) || db.as<n_ident>(call.callee).name != g) continue;
-      bool block = db.is<n_block>(c) || (db.is<n_lambda>(c) && db.as<n_lambda>(c).block) || db.is<n_pack>(c) || (call.tail && call.args.back() == c);
+      bool block = db.is<n_block>(c) || (db.is<n_lambda>(c) && db.as<n_lambda>(c).block) || db.clause_pack(c) || (call.tail && call.args.back() == c);
       if(block && std::ranges::find(call.args, c) != call.args.end()) return true;
     }
     return false;

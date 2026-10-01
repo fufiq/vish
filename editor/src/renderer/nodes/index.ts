@@ -29,7 +29,6 @@ import './expressions/field';
 import './expressions/index';
 import './expressions/lambda';
 import './expressions/construct';
-import './expressions/pack';
 import './expressions/quote';
 import './expressions/splice';
 import './expressions/auto';

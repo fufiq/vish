@@ -1939,7 +1939,7 @@ struct jit_codegen {
     return jt::unit;
   }
 
-  // intercept(тело, блоки) is the core of the library try/catch: blocks are n_pack
+  // intercept(тело, блоки) is the core of the library try/catch: blocks are array {…}
   // packs from catch(E e) { … } clauses.
   jt gen_intercept(node_id n, n_call const & c) {
     using namespace x64;
@@ -1947,7 +1947,7 @@ struct jit_codegen {
     slot const * hs0 = find(db.as<n_ident>(c.args[1]).name);
     if(!hs0 || !hs0->thunk) throw jit_unsupported{n, "intercept: блоки не expr-параметр"};
     slot hs = resolve_thunk(*hs0);
-    node_list handlers = db.is<n_pack>(hs.thunk) ? db.as<n_pack>(hs.thunk).items : node_list{hs.thunk};
+    node_list handlers = db.handlers_of(hs.thunk);
     interpreter::observation const * o = obs(n);
     jt result = o && o->seen ? jt_of(o->v, &an) : jt::unit;
     if(result == jt::other || is_array(result)) throw jit_unsupported{n, "тип try"};
@@ -2086,7 +2086,7 @@ struct jit_codegen {
 // disassembling (parsing can calculate a lot with compile-time).
 std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
   if(!n) return std::nullopt;
-  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.try_compile_body(n) || db.is<n_construct>(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
+  if(db.is<n_str>(n) || (db.is<n_lambda>(n) && !db.as<n_lambda>(n).block) || db.try_compile_body(n) || (db.is<n_construct>(n) && !db.clause_pack(n)) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_fn>(n) && db[n].parent && !db.is<n_module>(db[n].parent)) return std::pair{n, std::string("локальная функция")};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};

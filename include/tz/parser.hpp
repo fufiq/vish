@@ -1262,7 +1262,7 @@ struct parser {
     if(con)
       for(auto [word, pack]: con->clauses) {
         if(!pack) continue;
-        n_pack pk;
+        n_construct pk; // pack
         uint32_t at = ~uint32_t{0};
         span w{};
         for(uint32_t i = 0; i < c.args.size();)
@@ -1274,6 +1274,7 @@ struct parser {
             c.words.erase(c.words.begin() + i);
           } else ++i;
         if(at == ~uint32_t{0}) continue;
+        pk.type = db.add(n_ident{db.strings.intern("array")}, {w.begin, w.begin});
         c.args.insert(c.args.begin() + at, db.add(std::move(pk), w));
         c.words.insert(c.words.begin() + at, word);
       }

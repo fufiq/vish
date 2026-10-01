@@ -1113,8 +1113,8 @@ jit_compile(cg, f, types, type result) {
     if((b < 0) || ((h < 0) || (!env[b].thunk || !env[h].thunk))) bad("intercept не над expr-параметрами");
     else {
       hv = env[h];
-      hs = if(code_kind(hv.th) == n_pack) {
-        array{items} = code_fields(hv.th);
+      hs = if(code_kind(hv.th) == n_construct) { // пак клауз — кортеж блоков
+        array{_, items} = code_fields(hv.th);
         items
       } else array{hv.th};
       frame_c = array{};

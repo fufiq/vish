@@ -1799,7 +1799,7 @@ struct process_machine {
   bool catch_into(m_task & t) {
     auto & f = fib();
     m_thunk hs = f.vals[t.base].as<m_thunk>();
-    node_list handlers = db.is<n_pack>(hs.expr) ? db.as<n_pack>(hs.expr).items : node_list{hs.expr};
+    node_list handlers = db.handlers_of(hs.expr);
     std::string type = exception_type(f.pending.v);
     for(node_id h: handlers) {
       if(!db.is<n_lambda>(h) || db.as<n_lambda>(h).params.size() != 1) throw diagnostic("catch: блок с одним параметром — catch(E e) { … }", db[h].where);
