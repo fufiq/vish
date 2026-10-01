@@ -14,8 +14,11 @@
 #include <sys/mman.h>
 
 #include <algorithm>
+#include <new>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace tz {
@@ -82,9 +85,11 @@ struct address_space {
   }
 };
 
+// not destroyed: values in global tables give away memory and after leaving the main
 address_space & space() {
-  static address_space s;
-  return s;
+  alignas(address_space) static std::byte place[sizeof(address_space)];
+  static address_space * s = new(place) address_space;
+  return *s;
 }
 
 // 8-byte word vector (i64, f64 - bits): size and capacity - out of data.
@@ -170,6 +175,38 @@ struct words {
     data = nullptr;
     n = cap = 0;
     big = false;
+  }
+};
+
+// VM string - bytes in the same pages (line - bytes, §4.0): length - out of data.
+struct str_v {
+  words w;
+  uint32_t len = 0;
+
+  str_v() = default;
+  str_v(std::string_view s) { append(s); }
+  str_v(std::string const & s) : str_v(std::string_view(s)) {}
+  str_v(char const * s) : str_v(std::string_view(s)) {}
+
+  std::string_view view() const { return {reinterpret_cast<char const *>(w.data), len}; }
+  operator std::string_view() const { return view(); }
+  std::string str() const { return std::string(view()); }
+  uint32_t size() const { return len; }
+  bool empty() const { return len == 0; }
+  char operator[](uint32_t i) const { return reinterpret_cast<char const *>(w.data)[i]; }
+  void append(std::string_view s) {
+    if(s.empty()) return;
+    uint32_t need = uint32_t((len + s.size() + 7) / 8);
+    w.reserve(need);
+    std::memcpy(reinterpret_cast<char *>(w.data) + len, s.data(), s.size());
+    len += uint32_t(s.size());
+    w.n = need;
+  }
+  bool operator==(str_v const & o) const { return view() == o.view(); }
+  str_v operator+(str_v const & o) const {
+    str_v r = *this;
+    r.append(o.view());
+    return r;
   }
 };
 

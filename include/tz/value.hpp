@@ -152,7 +152,7 @@ struct ref_v {
 };
 
 struct value {
-  std::variant<unit_v, bool, int64_t, double, std::string, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v, ref_v> v;
+  std::variant<unit_v, bool, int64_t, double, str_v, type_v, array_v, agg_v, fn_v, thunk_v, rt_v, split_v, ref_v> v;
   // Proof of meaning (check mode): fact number +1 -
 // , "r - range(xs.size)." A copy of the meaning carries a fact.
   // The new value (i + 1) is not.
@@ -198,7 +198,7 @@ struct shape_table {
       if(x.is<bool>()) out += x.as<bool>() ? '1' : '0';
       else if(x.is<int64_t>()) out += std::to_string(x.as<int64_t>());
       else if(x.is<double>()) out += cat(x.as<double>());
-      else if(x.is<std::string>()) out += x.as<std::string>();
+      else if(x.is<str_v>()) out += x.as<str_v>();
     }
     std::visit([&](auto const & a) {
       using T = std::remove_cvref_t<decltype(a)>;
@@ -206,7 +206,7 @@ struct shape_table {
       else if constexpr(std::is_same_v<T, bool>) out += 'b';
       else if constexpr(std::is_same_v<T, int64_t>) out += 'i';
       else if constexpr(std::is_same_v<T, double>) out += 'f';
-      else if constexpr(std::is_same_v<T, std::string>) out += 's';
+      else if constexpr(std::is_same_v<T, str_v>) out += 's';
       else if constexpr(std::is_same_v<T, type_v>) {
         out += 'T';
         out += std::to_string(a.type.value);
@@ -344,7 +344,7 @@ value erase(value const & x) {
   if(x.is<int64_t>()) shape = value(int64_t(1));
   else if(x.is<double>()) shape = value(double(1));
   else if(x.is<bool>()) shape = value(true);
-  else if(x.is<std::string>()) shape = value(std::string("x"));
+  else if(x.is<str_v>()) shape = value(std::string("x"));
   else if(x.is<array_v>()) { // Array - a sample of one element; tuple - samples of all
     auto const & src = x.as<array_v>();
     array_v a;
@@ -440,7 +440,7 @@ struct type_registry {
       else if constexpr(std::is_same_v<T, bool>) return type_id(1);
       else if constexpr(std::is_same_v<T, int64_t>) return type_id(2);
       else if constexpr(std::is_same_v<T, double>) return type_id(3);
-      else if constexpr(std::is_same_v<T, std::string>) return type_id(4);
+      else if constexpr(std::is_same_v<T, str_v>) return type_id(4);
       else if constexpr(std::is_same_v<T, type_v>) return type_id(5);
       else if constexpr(std::is_same_v<T, array_v>) return type_id(is_tuple(a) ? 9 : 6);
       else if constexpr(std::is_same_v<T, fn_v>) return type_id(7);
@@ -489,7 +489,7 @@ std::string show(value const & x, type_registry const & types, interner const & 
       auto s = cat(a);
       if(!s.contains('.') && !s.contains('e') && !s.contains('n')) s += ".0";
       return s;
-    } else if constexpr(std::is_same_v<T, std::string>) return a;
+    } else if constexpr(std::is_same_v<T, str_v>) return a.str();
     else if constexpr(std::is_same_v<T, type_v>) return std::string(types.name(a.type));
     else if constexpr(std::is_same_v<T, array_v>) {
       std::string s = "[";

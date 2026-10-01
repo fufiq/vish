@@ -530,7 +530,7 @@ struct interpreter {
   std::optional<std::string> literal(value const & v) const {
     if(!v.known()) return std::nullopt;
     if(v.is<int64_t>() || v.is<double>() || v.is<bool>()) return show_v(v);
-    if(v.is<std::string>()) return cat(in_quotes(v.as<std::string>()));
+    if(v.is<str_v>()) return cat(in_quotes(v.as<str_v>()));
     if(v.is<array_v>()) {
       std::string s = "array{";
       for(uint32_t i = 0; i < v.as<array_v>().size(); ++i) {
@@ -2209,7 +2209,7 @@ struct interpreter {
   node_id value_node(value const & v, span where) {
     if(v.is<int64_t>()) return db.add(n_int{v.as<int64_t>()}, where);
     if(v.is<double>()) return db.add(n_float{v.as<double>()}, where);
-    if(v.is<std::string>()) return db.add(n_str{v.as<std::string>()}, where);
+    if(v.is<str_v>()) return db.add(n_str{v.as<str_v>().str()}, where);
     if(v.is<bool>()) return db.add(n_ident{sym(v.as<bool>() ? "true" : "false")}, where);
     if(v.is<type_v>()) return db.add(n_ident{sym(types.name(v.as<type_v>().type))}, where);
     if(v.is<fn_v>() && v.as<fn_v>().name) return db.add(n_ident{v.as<fn_v>().name}, where);
@@ -2325,7 +2325,7 @@ struct interpreter {
     }
     if(str(name) == "size") {
       if(obj.is<array_v>()) return value(int64_t(obj.as<array_v>().size()));
-      if(obj.is<std::string>()) return value(int64_t(obj.as<std::string>().size()));
+      if(obj.is<str_v>()) return value(int64_t(obj.as<str_v>().size()));
     }
     if(obj.is<agg_v>())
       for(auto & [k, v]: obj.as<agg_v>().fields)
@@ -2347,9 +2347,9 @@ struct interpreter {
   flow eval_field(node_id n, field_view const & f, scope * env, uint32_t frame) {
     TZ_TRY(key, eval(f.key, env, frame));
     std::string name;
-    if(key.is<std::string>()) name = key.as<std::string>();
-    else if(key.is<agg_v>() && !key.as<agg_v>().fields.empty() && key.as<agg_v>().fields[0].second.is<std::string>())
-      name = key.as<agg_v>().fields[0].second.as<std::string>();
+    if(key.is<str_v>()) name = key.as<str_v>();
+    else if(key.is<agg_v>() && !key.as<agg_v>().fields.empty() && key.as<agg_v>().fields[0].second.is<str_v>())
+      name = key.as<agg_v>().fields[0].second.as<str_v>();
     else fail(cat("v.[f]: дескриптор поля должен быть известен при компиляции, получено ", types.describe(key)), db[n].where);
     TZ_TRY(obj, eval(f.object, env, frame));
     return ok(lift(obj, [&](value const & o) { return member(o, sym(name), db[n].where); }));
@@ -2383,9 +2383,9 @@ struct interpreter {
     else index_type(idx);
     bool proven_here = checking() && index_holds(i, idx, env);
     return ok(lift(obj, [&](value const & o) {
-      if(value const * sh = shape_of(o); sh && sh->is<std::string>()) { // string - bytes (§4.0): s[k] - byte, i64
+      if(value const * sh = shape_of(o); sh && sh->is<str_v>()) { // string - bytes (§4.0): s[k] - byte, i64
         if(o.known() && idx.known()) {
-          auto const & str = o.as<std::string>();
+          auto const & str = o.as<str_v>();
           int64_t k = idx.as<int64_t>();
           if(k < 0 || uint64_t(k) >= str.size()) fail_rt("out_of_bounds", cat("индекс ", k, " вне строки длины ", str.size()), where);
           return value(int64_t(uint8_t(str[std::size_t(k)])));
@@ -3341,11 +3341,11 @@ struct interpreter {
       return stream_value(ss.size() - 1);
     }
     if(n == "net_connect") {
-      if(a.size() != 2 || !a[0].is<std::string>() || !a[1].is<int64_t>()) fail("connect(адрес, порт)", where);
+      if(a.size() != 2 || !a[0].is<str_v>() || !a[1].is<int64_t>()) fail("connect(адрес, порт)", where);
       ss.emplace_back();
       stream_rec & s = ss.back();
       s.net = true;
-      if(!os::ipv4(a[0].as<std::string>(), int(a[1].as<int64_t>()), s.addr)) fail_rt("io_error", "connect: неверный адрес", where);
+      if(!os::ipv4(a[0].as<str_v>().str(), int(a[1].as<int64_t>()), s.addr)) fail_rt("io_error", "connect: неверный адрес", where);
       int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
       if(fd < 0) fail_rt("io_error", cat("connect: ", std::strerror(errno)), where);
       s.peers.push_back({fd});
@@ -3354,10 +3354,10 @@ struct interpreter {
       return stream_value(ss.size() - 1);
     }
     if(n == "file_open" || n == "file_create") {
-      if(a.size() != 1 || !a[0].is<std::string>()) fail(cat(n == "file_open" ? "open" : "create", "(путь)"), where);
-      int fd = n == "file_open" ? ::open(a[0].as<std::string>().c_str(), O_RDONLY | O_CLOEXEC)
-                                : ::open(a[0].as<std::string>().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-      if(fd < 0) fail_rt("io_error", cat(a[0].as<std::string>(), ": ", std::strerror(errno)), where);
+      if(a.size() != 1 || !a[0].is<str_v>()) fail(cat(n == "file_open" ? "open" : "create", "(путь)"), where);
+      int fd = n == "file_open" ? ::open(a[0].as<str_v>().str().c_str(), O_RDONLY | O_CLOEXEC)
+                                : ::open(a[0].as<str_v>().str().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+      if(fd < 0) fail_rt("io_error", cat(a[0].as<str_v>(), ": ", std::strerror(errno)), where);
       ss.emplace_back();
       ss.back().file_fd = fd;
       ss.back().file_write = n == "file_create";
@@ -3368,11 +3368,11 @@ struct interpreter {
     stream_rec & s = ss[sid];
     if(n == "net_port") return value(int64_t(s.listen_fd >= 0 ? os::bound_port(s.listen_fd) : 0));
     if(n == "net_send") { // In the outgoing stream: does not wait (the core will send)
-      if(a.size() != 3 || !a[1].is<int64_t>() || !a[2].is<std::string>()) fail("send(сеть, peer, байты)", where);
+      if(a.size() != 3 || !a[1].is<int64_t>() || !a[2].is<str_v>()) fail("send(сеть, peer, байты)", where);
       auto p = std::size_t(a[1].as<int64_t>());
       if(!s.net || p >= s.peers.size()) fail_rt("io_error", cat("send: нет соединения ", p), where);
       if(!s.peers[p].open) return value(false);
-      s.peers[p].out.push_back(std::move(a[2].as<std::string>()));
+      s.peers[p].out.push_back(a[2].as<str_v>().str());
       if(s.connected || s.listen_fd >= 0) send_next(sid, p);
       return value(true);
     }
@@ -3465,8 +3465,8 @@ struct interpreter {
       if(s.net) fail("в сеть — send(сеть, peer, байты)", where);
       if(s.file_fd >= 0) {
         if(!s.file_write) fail("файл открыт на чтение", where);
-        if(!x.is<std::string>()) fail(cat("в файл — байты (str), получено ", types.describe(x)), where);
-        s.peers[0].out.push_back(std::move(x.as<std::string>()));
+        if(!x.is<str_v>()) fail(cat("в файл — байты (str), получено ", types.describe(x)), where);
+        s.peers[0].out.push_back(x.as<str_v>().str());
         file_write_next(sid);
         return value();
       }
@@ -3781,10 +3781,10 @@ struct interpreter {
     // Strictly: without implicit i64 <-> f64 (§5.8)
     if(a.is<int64_t>() && b.is<int64_t>()) return int_op(op, a.as<int64_t>(), b.as<int64_t>(), where);
     if(a.is<double>() && b.is<double>()) return float_op(op, a.as<double>(), b.as<double>(), where);
-    if(a.is<std::string>() && b.is<std::string>()) {
-      if(op == "+") return value(a.as<std::string>() + b.as<std::string>());
-      if(op == "==") return value(a.as<std::string>() == b.as<std::string>());
-      if(op == "!=") return value(a.as<std::string>() != b.as<std::string>());
+    if(a.is<str_v>() && b.is<str_v>()) {
+      if(op == "+") return value(a.as<str_v>() + b.as<str_v>());
+      if(op == "==") return value(a.as<str_v>() == b.as<str_v>());
+      if(op == "!=") return value(a.as<str_v>() != b.as<str_v>());
     }
     if(a.is<type_v>() && b.is<type_v>()) { // Types - values: tag = number (§5.1)
       if(op == "==") return value(a.as<type_v>().type == b.as<type_v>().type);
@@ -4816,9 +4816,9 @@ struct interpreter {
       return value(fn_v{{}, s, globals, {}}); // node call: parameters - target registers
     }
     // overload by name - code declarations (reflection as members_of)
-    if(n == "functions_named" && a.size() == 1 && a[0].is<std::string>()) {
+    if(n == "functions_named" && a.size() == 1 && a[0].is<str_v>()) {
       std::vector<value> xs;
-      if(auto it = functions.find(sym(a[0].as<std::string>())); it != functions.end())
+      if(auto it = functions.find(sym(a[0].as<str_v>())); it != functions.end())
         for(node_id f: it->second) xs.push_back(code_value(f));
       return value(array_v::of(std::move(xs)));
     }
@@ -4956,8 +4956,8 @@ struct interpreter {
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
     if(n == "index" && a.size() == 2) { // a[i] kernel (operator(a)[i] prelude): array element, byte string
       if(!a[0].known() || !a[1].known()) return element_type(a[0], where);
-      if(a[0].is<std::string>() && a[1].is<int64_t>()) {
-        auto const & s = a[0].as<std::string>();
+      if(a[0].is<str_v>() && a[1].is<int64_t>()) {
+        auto const & s = a[0].as<str_v>();
         int64_t k = a[1].as<int64_t>();
         if(k < 0 || uint64_t(k) >= s.size()) fail_rt("out_of_bounds", cat("индекс ", k, " вне строки длины ", s.size()), where);
         return value(int64_t(uint8_t(s[std::size_t(k)])));

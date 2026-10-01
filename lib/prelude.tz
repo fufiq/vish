@@ -415,7 +415,7 @@ parse_int(str s) => native "cpp" {
     return value(std::move(r));
   };
   if(!#s.known()) return erase(make(true, 0, ""));
-  auto const & text = #s.as<std::string>();
+  auto text = #s.as<str_v>().view();
   int64_t v = 0;
   bool good = !text.empty();
   for(char ch: text) {
@@ -431,7 +431,7 @@ parse_int(str s) => native "cpp" {
 // text(x) — текст значения (байты): число — десятичная запись.
 text(x) => native "cpp" {
   if(!#x.known()) return erase(value(std::string("x")));
-  return value(#x.is<std::string>() ? #x.as<std::string>() : vm.show_v(#x));
+  return #x.is<str_v>() ? value(#x.as<str_v>()) : value(vm.show_v(#x));
 };
 
 // fill(n, x) — массив из n копий x.

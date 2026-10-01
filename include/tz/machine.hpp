@@ -332,7 +332,8 @@ struct process_machine {
     return std::visit([&](auto const & a) -> mval {
       using T = std::remove_cvref_t<decltype(a)>;
       if constexpr(std::is_same_v<T, unit_v>) return mval{m_unit{}};
-      else if constexpr(std::is_same_v<T, bool> || std::is_same_v<T, int64_t> || std::is_same_v<T, double> || std::is_same_v<T, std::string>) return mval{a};
+      else if constexpr(std::is_same_v<T, bool> || std::is_same_v<T, int64_t> || std::is_same_v<T, double>) return mval{a};
+      else if constexpr(std::is_same_v<T, str_v>) return mval{a.str()};
       else if constexpr(std::is_same_v<T, type_v>) return mval{m_type{a.type}};
       else if constexpr(std::is_same_v<T, array_v>) {
         m_arr r;
