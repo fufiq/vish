@@ -570,7 +570,7 @@ jit_compile(cg, f, types, type result) {
   is_handle(type t) => (t != unit) && (!((t == i64) || ((t == bool) || ((t == f64) || is_stream(t)))) && (t != jc_range));
   scalar(type t) => (t == i64) || ((t == bool) || ((t == f64) || is_stream(t))); // поток — его номер
   elem(type t) => if((t == array(f64)) || (t == stream(f64))) f64 else if(t == stream(bool)) bool else i64;
-  if(!scalar(result) && (result != unit)) bad("тип результата");
+  if(!scalar(result) && ((result != unit) && !is_arr(result))) bad("тип результата"); // массив — адрес ячейки в acc
   for(t : types) if(!scalar(t) && !is_arr(t)) bad("тип параметра");
   put_bytes(bytes) => {
     for(b : bytes) out.push(b);
@@ -749,7 +749,7 @@ jit_compile(cg, f, types, type result) {
       else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
     } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
     else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
-    else if(is_handle(env[k].kind)) bad("значение VM в выражении");
+    else if(is_handle(env[k].kind)) put_bytes(cg.load(acc, sb(env[k].slot), so(env[k].slot))); // значение VM — адрес его ячейки
     else load_slot(env[k].kind, env[k].slot);
   };
   gen_const(v) => {

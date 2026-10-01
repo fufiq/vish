@@ -143,6 +143,10 @@ jt jt_of(value const & v, interpreter const * in = nullptr) {
     auto const & a = x->as<array_v>();
     if(a.kind() == array_v::layout::ints) return jt::arr_i64;
     if(a.kind() == array_v::layout::floats) return jt::arr_f64;
+    if(a.size() == 1 && a.get(0).is<rt_v>()) { // sample parsing : erased element
+      jt e = jt_of(a.get(0));
+      return e == jt::i64_ ? jt::arr_i64 : e == jt::f64_ ? jt::arr_f64 : jt::other;
+    }
     return jt::other;
   }
   return jt::other;
@@ -248,6 +252,8 @@ struct jit_machine {
     try {
       interpreter comp(db, mod, {"jit"}, mode::run);
       comp.jit_analysis = an_for_lang;
+      if constexpr(std::is_same_v<A, x64::assembler>) // The compiler in the language is executed by its own code (bootstrapping).
+        if(std::getenv("TZ_JIT_SELF")) comp.use_jit(static_cast<jit_engine *>(this));
       for(jt t: out.params) types.push_back(type_value(comp, t));
       // entity context (amd64, arm64), not a string
       r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), type_value(comp, out.result)});
@@ -298,7 +304,7 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(!n) return std::nullopt;
   // strings, aggregates and calls of kernel functions - VM values (service: node calculates
   // VM, author's decision 2026-10-01); obviously not - unpacking, ct
-  if(db.try_compile_body(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || db.is<n_spread>(n))
+  if(db.try_compile_body(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || (db.is<n_spread>(n) && !db.is<n_construct>(db[n].parent))) // ... in array {…}, the value of VM
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   // ct-variable module is read in place in canonical order (§7.3) - not the way of execution
@@ -381,10 +387,6 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   try {
     value r = an.analyze_instance(fn, shapes);
     out.result = jt_of(r);
-    if(out.result == jt::arr_i64 || out.result == jt::arr_f64) {
-      out.reason = "результат — массив (пока интерпретатор)";
-      return;
-    }
     if(out.result == jt::other) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
@@ -560,7 +562,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   // AArch64 verification: same call to qemu before execution to host (inputs - as is)
   std::optional<a64_check::outcome> shadow;
   std::vector<a64_check::arg> sargs;
-  if(a64 && a64->calls[key]++ < 3) {
+  if(a64 && code->result != jt::arr_i64 && code->result != jt::arr_f64 && a64->calls[key]++ < 3) { // array-result is the address of the cell host : qemu does not compare
     bool ok = true;
     for(uint32_t i = 0; i < vals.size() && ok; ++i) {
       a64_check::arg a;
@@ -654,6 +656,8 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
       std::memcpy(&x, &bits, 8);
       return ok(value(x));
     }
+    case jt::arr_i64:
+    case jt::arr_f64: return ok(*reinterpret_cast<value const *>(bits)); // array - address of the cell (argument or memory of the call)
     default: return ok(value());
   }
 }

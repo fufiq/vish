@@ -1,0 +1,22 @@
+// out: [0, 1, 4, 9, 16] [0, 1, 4] [7, 8] [] [5] [1, 2, 3]
+// jit-compiled: squares
+// jit-compiled: same
+// jit-compiled: pair
+// jit-compiled: maybe
+// jit-compiled: glue
+// Массив-результат в машинном коде — адрес ячейки значения VM (аргумента или памяти
+// вызова), значение VM берёт из неё. Пустой массив — тип элементов поздний:
+// array<?> ⊔ array<i64> = array<i64>, ветки не расщепляют результат. ... в array{…} —
+// значение VM. Так компилятор на языке компилирует свои кодировщики (x64_rex, x64_mem).
+squares(i64 n) {
+  a = array{};
+  for(i : range(n)) a.push(i * i);
+  a
+}
+same(xs) => xs;
+pair(i64 x) => array{x, x + 1};
+maybe(i64 v) => if(v == 0) array{} else array{v};
+glue(i64 x) => array{x, ...pair(x + 1)};
+main() {
+  print(squares(5), same(squares(3)), pair(7), maybe(0), maybe(5), glue(1));
+}

@@ -1269,6 +1269,20 @@ struct interpreter {
       alts[0] = x;
       return;
     }
+    // Empty array - late element type: array<?> й array<T> = array<T> (run-time)
+    auto late = [&](value const & v) { return types.describe(v) == "array<?>"; };
+    auto arr = [&](value const & v) { return types.describe(v).starts_with("array<"); };
+    for(auto & y: alts) {
+      if(state_of(y) != state_of(x)) continue;
+      if(late(x) && arr(y)) {
+        y = erase(y);
+        return;
+      }
+      if(late(y) && arr(x)) {
+        y = erase(x);
+        return;
+      }
+    }
     for(auto & y: alts) {
       if(types.describe(y) != types.describe(x)) continue;
       if(state_of(y) != state_of(x)) continue; // Another state (ct field, hide) - another alternative
