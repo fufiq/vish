@@ -781,7 +781,10 @@ struct parser {
     if(is_word("try_compile") && is_open('{', 1)) {
       advance();
       node_id body = block();
-      return db.add(n_try_compile{body}, {start, toks[pos - 1].where.end});
+      node_id f = db.add(n_ident{db.strings.intern("try_compile")}, {start, start + 11});
+      n_call c{f, {body}};
+      c.tail = true;
+      return db.add(std::move(c), {start, toks[pos - 1].where.end});
     }
     if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
       advance();

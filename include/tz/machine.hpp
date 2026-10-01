@@ -665,7 +665,7 @@ struct process_machine {
   // it are removed, the execution goes on. runtime doesn't silence errors.
   bool sfinae_cut() {
     auto & f = fib();
-    auto at = std::ranges::find_if(f.tasks.rbegin(), f.tasks.rend(), [&](m_task const & x) { return x.kind == m_eval && x.phase == 1 && db.is<n_try_compile>(x.node); });
+    auto at = std::ranges::find_if(f.tasks.rbegin(), f.tasks.rend(), [&](m_task const & x) { return x.kind == m_eval && x.phase == 1 && db.try_compile_body(x.node); });
     if(at == f.tasks.rend()) return false;
     std::size_t keep = f.tasks.size() - std::size_t(at - f.tasks.rbegin());
     while(f.tasks.size() > keep) {
@@ -1529,6 +1529,7 @@ struct process_machine {
   void eval_node(node_id n, n_call const & c) {
     if(node_id rc = db.require_cond(n)) return eval_require(n, rc);
     if(symbol h = db.hide_name(n)) return eval_hide(n, h);
+    if(node_id b = db.try_compile_body(n)) return eval_try_compile(b);
     m_task & t = top();
     if(t.phase == 0) {
       if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
@@ -2108,11 +2109,11 @@ struct process_machine {
   }
 
   // try_compile { … } - SFINAE block: the instantiation error in it removes sfinae_cut.
-  void eval_node(node_id, n_try_compile const & c) {
+  void eval_try_compile(node_id body) {
     m_task & t = top();
     if(t.phase == 0) {
       t.phase = 1;
-      return push_eval(c.body, t.scope, t.frame);
+      return push_eval(body, t.scope, t.frame);
     }
     finish(deref(pop_val()));
   }

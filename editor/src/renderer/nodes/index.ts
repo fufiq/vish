@@ -16,7 +16,6 @@ import './statements/continue';
 import './statements/return';
 import './statements/throw';
 import './statements/ct';
-import './statements/try_compile';
 import './statements/unpack';
 import './expressions/ident';
 import './expressions/int';

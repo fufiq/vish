@@ -2249,10 +2249,10 @@ struct interpreter {
 
   flow eval_node(node_id n, n_splice const & s, scope *, uint32_t) { fail(cat("#", str(s.name), " вне quote"), db[n].where); }
 
-  flow eval_node(node_id n, n_try_compile const & t, scope * env, uint32_t frame) {
+  flow eval_try_compile(node_id n, node_id body, scope * env, uint32_t frame) {
     auto saved_may = may_return;
     try {
-      return eval(t.body, env, frame);
+      return eval(body, env, frame);
     } catch(diagnostic const & d) {
       if(d.kind != diag_kind::instantiation) throw;
       may_return = std::move(saved_may);
@@ -3854,6 +3854,7 @@ struct interpreter {
   flow eval_node(node_id n, n_call const & c, scope * env, uint32_t frame) {
     if(node_id rc = db.require_cond(n)) return eval_require(n, rc, env, frame);
     if(symbol h = db.hide_name(n)) return eval_hide(n, h, env);
+    if(node_id b = db.try_compile_body(n)) return eval_try_compile(n, b, env, frame);
     span where = db[n].where;
     if(db.is<n_member>(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
       auto const & m = db.as<n_member>(c.callee);

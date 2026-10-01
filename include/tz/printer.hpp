@@ -357,7 +357,7 @@ struct printer {
       while(!t.empty() && (t.back() == ' ' || t.back() == '\n' || t.back() == '\t')) t.remove_suffix(1);
       if(t.empty() || t.back() == ';' || t.back() == '}') return;
     }
-    if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_try_compile>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
+    if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_struct>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_break>(s) || db.is<n_continue>(s) ) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(db.is<n_if>(s) && ends_in_block(s)) return;
@@ -388,11 +388,6 @@ struct printer {
       item(r.value);
     }
     out += ';';
-  }
-
-  void print_node(node_id, n_try_compile const & t) {
-    out += "try_compile ";
-    item(t.body);
   }
 
   void print_node(node_id, n_extend const & e) {
@@ -611,7 +606,7 @@ struct printer {
     uint32_t i = 0;
     uint32_t head_end = 0;
     while(head_end < n && !word(head_end)) ++head_end;
-    group(c, 0, head_end, c.tail, !c.words.empty());
+    group(c, 0, head_end, c.tail, !c.words.empty() || db.try_compile_body(call)); // try_compile { … } - without brackets
     for(i = head_end; i < n; ++i) {
       if(db.is<n_pack>(c.args[i])) {
         for(node_id x: db.as<n_pack>(c.args[i]).items) {

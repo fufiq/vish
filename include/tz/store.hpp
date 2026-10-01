@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0019"; // 0019: hide - kernel call (without n hide); 0018: require - kernel call (without n require); 0017: 0x-literal (n int.hex); 0016: native (n native); 0015: syntax (n fn.form, n call.form); 0014: explicit at the ad (n var.strict); 0013: modules (n use, sealed); 0012: template with the tag (n template); 0011: base (un inerarchite) (un:9000000; empty line: n npatrl=n000);
+constexpr std::string_view tzdb_magic = "TZDB0020"; // 0020: try compile - kernel call (without n try compile); 0019: hide - kernel call (without n hide); 0018: require - kernel call (without n require); 0017: 0x-literal (n int.hex); 0016: native (n native); 0015: syntax (n fn.form, n call.form); 0014: explicit at the announcement (n var.strict); 0013: modules (n use, sealed); 00:1000000:npattric, from the baseline (00:n:n000:n; :n000000000:n)
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;
