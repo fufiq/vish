@@ -11,15 +11,16 @@ set -e
 cd "$(dirname "$0")"
 
 CXX=${CXX:-g++-16}
+OUT=${OUT:-out/tz} # свой выход — сборки режимов параллельно (full.sh)
 FLAGS="-std=c++26 -freflection -fcontracts -Iinclude -Iout -Wall -Wextra -Wno-unused-parameter ${EXTRA:-}"
 mkdir -p out
 [ -f out/native.hpp ] || printf '#pragma once\nnamespace tz {\nstd::span<native_entry const> native_table() { return {}; }\n}\n' > out/native.hpp
 
 build() {
     case "$1" in
-        release) $CXX $FLAGS -O2 -DNDEBUG -fcontract-evaluation-semantic=ignore src/tz.cpp -o out/tz -luring ;;
-        debug)   $CXX $FLAGS -O0 -g src/tz.cpp -o out/tz -luring ;;
-        asan)    $CXX $FLAGS -O1 -g -fsanitize=address,undefined src/tz.cpp -o out/tz -luring ;;
+        release) $CXX $FLAGS -O2 -DNDEBUG -fcontract-evaluation-semantic=ignore src/tz.cpp -o "$OUT" -luring ;;
+        debug)   $CXX $FLAGS -O0 -g src/tz.cpp -o "$OUT" -luring ;;
+        asan)    $CXX $FLAGS -O1 -g -fsanitize=address,undefined src/tz.cpp -o "$OUT" -luring ;;
         *) echo "неизвестный режим: $1" >&2; exit 2 ;;
     esac
 }
@@ -27,11 +28,11 @@ build() {
 mode=${1:-release}
 build "$mode"
 rc=0
-out/tz native out/native.hpp || rc=$?
+"$OUT" native out/native.hpp || rc=$?
 if [ $rc = 3 ]; then
     echo "out/native.hpp обновлён — пересборка"
     build "$mode"
 elif [ $rc != 0 ]; then
     exit $rc
 fi
-echo "out/tz ($mode)"
+echo "$OUT ($mode)"

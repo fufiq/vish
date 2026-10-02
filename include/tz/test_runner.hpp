@@ -489,7 +489,7 @@ struct test_runner {
         if(text.contains(bad)) why += cat("    лишнее в срезе: ", in_quotes(bad), "\n", text);
     }
     if(e.store_roundtrip) {
-      auto tmp = std::filesystem::temp_directory_path() / cat("tz-test-", path.stem().string(), ".tzdb");
+      auto tmp = std::filesystem::temp_directory_path() / cat("tz-test-", path.stem().string(), "-", getpid(), ".tzdb");
       save_db(db, root, tmp.string());
       ast_db db2;
       node_id root2 = load_db(db2, tmp.string());
