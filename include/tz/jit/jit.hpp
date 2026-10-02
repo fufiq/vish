@@ -276,7 +276,11 @@ struct jit_machine {
     try {
       interpreter comp(db, mod, {"jit"}, mode::run);
       comp.jit_analysis = an_for_lang;
-      if constexpr(std::is_same_v<A, x64::assembler>) // The compiler in the language is executed by its own code (bootstrapping).
+      // bootstrapping: static compiler functions (encoders, functions over node-struct) compiles
+      // itself; bypassing AST is dynamics in the form of node, it has VM: , without dispatch in
+      // runtime and boxing
+      //
+      if constexpr(std::is_same_v<A, x64::assembler>)
         if(std::getenv("TZ_JIT_SELF")) comp.use_jit(static_cast<jit_engine *>(this));
       for(std::size_t i = 0; i < out.params.size(); ++i) { // The value of VM is its type; compile-time is unit (not transmitted)
         jt t = out.params[i];
@@ -286,11 +290,7 @@ struct jit_machine {
       }
       // entity context (amd64, arm64), not a string
       value rt = out.result == jt::handle ? value(type_v{comp.types.of(port_value(out.result_shape, an_for_lang->types, comp.types))}) : type_value(comp, out.result);
-      std::vector<value> args{value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), rt};
-      std::optional<interpreter::flow> self; // bootstrapping : jit_compile - machine code (instance on purpose, types, result)
-      if(comp.jit && std::getenv("TZ_JIT_SELF_COMPILE")) self = comp.try_jit(lc, args, {}, comp.globals, "jit_compile");
-      if(self && self->normal()) r = self->v;
-      else r = comp.analyze_instance(lc, std::move(args));
+      r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), rt});
     } catch(diagnostic const & d) {
       out.lang_error = d.what();
       if(std::getenv("TZ_LANG_DEBUG")) put(stderr, render(d, "?", db)); // compiler debugging
