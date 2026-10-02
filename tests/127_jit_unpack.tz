@@ -1,0 +1,24 @@
+// out: 28 12 9
+// jit-compiled: sumpair
+// jit-compiled: fields
+// jit-compiled: tup
+// Распаковка-инструкция в машинном коде (P12): распаковывает VM — её семантика целиком
+// (длина, ...остаток, типы, unpack_failed), имена — в слоты: скаляр битами, значение VM —
+// копией в памяти вызова; тип имени — наблюдение разбора. Кортеж с рт-элементом остаётся
+// кортежем и при разборе: длина и типы элементов — часть его типа 
+//.
+struct pt { i64 x; i64 y; };
+sumpair(i64 n) {
+  array{a, b} = array{n, n + 1};
+  array{c, _, ...r} = array{1, 2, 3, 4};
+  a + b + c + r.size + r[1]
+}
+fields(pt p) {
+  array{u, s} = array{p.x, p.y};
+  u * s
+}
+tup(i64 k) {
+  array{s, x, ys} = array{"a", k, array{1, 2}};
+  x + ys[1] + ys.size
+}
+main() { print(sumpair(10), fields(pt{3, 4}), tup(5)); }

@@ -286,7 +286,11 @@ struct jit_machine {
       }
       // entity context (amd64, arm64), not a string
       value rt = out.result == jt::handle ? value(type_v{comp.types.of(port_value(out.result_shape, an_for_lang->types, comp.types))}) : type_value(comp, out.result);
-      r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), rt});
+      std::vector<value> args{value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), rt};
+      std::optional<interpreter::flow> self; // bootstrapping : jit_compile - machine code (instance on purpose, types, result)
+      if(comp.jit && std::getenv("TZ_JIT_SELF_COMPILE")) self = comp.try_jit(lc, args, {}, comp.globals, "jit_compile");
+      if(self && self->normal()) r = self->v;
+      else r = comp.analyze_instance(lc, std::move(args));
     } catch(diagnostic const & d) {
       out.lang_error = d.what();
       if(std::getenv("TZ_LANG_DEBUG")) put(stderr, render(d, "?", db)); // compiler debugging
@@ -334,7 +338,7 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(!n) return std::nullopt;
   // strings, aggregates and calls of kernel functions - VM values (service: node calculates
   // VM, author's decision 2026-10-01); obviously not - unpacking, ct
-  if(db.try_compile_body(n) || db.is<n_hole>(n) || db.is<n_unpack>(n) || db.is<n_pat>(n) || (db.is<n_spread>(n) && !db.is<n_construct>(db[n].parent))) // ... in array {…}, the value of VM
+  if(db.try_compile_body(n) || db.is<n_hole>(n) || (db.is<n_unpack>(n) && db.as<n_unpack>(n).test) || (db.is<n_pat>(n) && !db.is<n_unpack>(db[n].parent)) || (db.is<n_spread>(n) && !db.is<n_construct>(db[n].parent))) // ... in array {…}, the value of VM
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   // ct-variable module is read in place in canonical order (§7.3) - not the way of execution
@@ -521,6 +525,28 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
         pa.clear();
         vm.builtin(vm.sym("print"), a, vm.db[at].where);
       }
+      return 0;
+    }
+    if(op == 11) { // unpacking-instruction node at: VM unpacks (its whole semantics), names - in buffer
+      auto * buf = reinterpret_cast<uint64_t *>(id); // {call memory, value cell, (view, bits) to name}
+      auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
+      value const & v = *reinterpret_cast<value const *>(buf[1]);
+      auto const & u = vm.db.as<n_unpack>(at);
+      scope * s = vm.new_scope(vm.globals);
+      auto r = vm.unpack_into(u.pattern, v, s, s, 0, vm.db[at].where);
+      if(r == interpreter::unpacked::no) {
+        vm.drop_scope(s);
+        vm.fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(vm.db).print(u.pattern), " ← ", vm.show_v(v)), vm.db[at].where);
+      }
+      uint64_t k = 0;
+      for(node_id it: vm.db.as<n_pat>(u.pattern).items) {
+        if(!vm.db.is<n_param>(it) || vm.db.strings.text(vm.db.as<n_param>(it).name) == "_") continue;
+        value const & x = *s->find(vm.db.as<n_param>(it).name);
+        uint64_t kind = buf[2 + 2 * k];
+        buf[3 + 2 * k] = kind == 9 ? reinterpret_cast<uint64_t>(mem.add(x)) : jit_value_bits(x, kind);
+        ++k;
+      }
+      vm.drop_scope(s);
       return 0;
     }
     if(op == 10) { // array {…} : an empty array of layout t with space under bits of elements - in id call memory

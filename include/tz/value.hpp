@@ -240,7 +240,11 @@ struct shape_table {
     std::string key;
     key_of(v, key);
     if(auto it = index.find(key); it != index.end()) return it->second;
-    items.push_back(std::move(v));
+    // the sample lives the entire program - the copy is in the default level (not in the
+    // process lane and not in the state of the program that closes earlier)
+    address_space * saved = std::exchange(current_space, nullptr);
+    items.push_back(value(v));
+    current_space = saved;
     index.emplace(std::move(key), uint32_t(items.size() - 1));
     return uint32_t(items.size() - 1);
   }

@@ -1740,6 +1740,7 @@ struct interpreter {
           if(r == fit::no) return unpacked::no;
         }
         if(str(b.name) != "_") into->declare(b.name, got);
+        if(checking()) observe(item, ok(got), false); // Name type for machine code (jit_type)
         return r == fit::maybe ? unpacked::maybe : unpacked::yes;
       }
       flow f = eval(item, env, frame); // Equality of the element
@@ -1785,7 +1786,10 @@ struct interpreter {
         }
       bool open = rest < pos.size() || (pos.empty() && !fields.empty()); // Interface only - any length
       std::size_t fixed = pos.size() - (rest < pos.size() ? 1 : 0);
-      bool sized = v.known() || !v.is<rt_v>(); // length known: value (not erased array)
+      // length known: value (not erased array) or erased tuple - its length and element types - part
+      // of the type
+      bool tuple_shape = v.is<rt_v>() && is_tuple(a);
+      bool sized = v.known() || !v.is<rt_v>() || tuple_shape;
       if(sized && (open ? a.size() < fixed : a.size() != fixed)) return unpacked::no;
       unpacked r = sized ? unpacked::yes : unpacked::maybe;
       value any = sized ? value() : element_type(v, where);
@@ -1798,8 +1802,10 @@ struct interpreter {
             std::vector<value> xs;
             for(std::size_t j = k; j + tail < a.size(); ++j) xs.push_back(a.get(uint32_t(j)));
             part = value(array_v::of(std::move(xs)));
+            if(tuple_shape) part = erase(part);
           }
           if(str(b.name) != "_") into->declare(b.name, part);
+          if(checking()) observe(pos[k], ok(part), false);
           continue;
         }
         std::size_t at = k < rest ? k : a.size() - (pos.size() - k);
@@ -2460,7 +2466,11 @@ struct interpreter {
     }
     if(tname != "array") fail(cat("конструктор ", tname, "{} пока не поддержан"), db[n].where);
     for(auto const & x: items)
-      if(!x.known() || open) return ok(erase(value(array_v::of({x})))); // At least one run-time element is an array of run-time
+      if(!x.known() || open) { // at least one run-time element is an array of run-time; tuple is the length and types of elements in its type
+        array_v all = array_v::of(items);
+        if(!open && is_tuple(all)) return ok(erase(value(std::move(all))));
+        return ok(erase(value(array_v::of({x}))));
+      }
     return ok(value(array_v::of(std::move(items))));
   }
 

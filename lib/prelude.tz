@@ -459,8 +459,8 @@ is_err(result r) => !r.ok;
 // Цель —
 // сущность (amd64, arm64): её члены (cg.load, cg.jump…) и переопределённые в ней
 // операции (op_codegen: оператор узла программы с типами операндов) — байты.
-// Без строк: 
-//  — вид узла — тег (n_op, n_if…), узел — распаковкой образцом,
+// Без строк:
+// — вид узла — тег (n_op, n_if…), узел — распаковкой образцом,
 // типы — значения (i64, array(i64), stream(f64)). Типы узлов и деревья цепочек — у
 // разбора экземпляра: 
 //. Регистры модели (acc, second…) и смещения меток (target, fault)
@@ -504,7 +504,8 @@ jit_compile(cg, f, types, type result) {
     ok = false;
   };
   out = array{};
-  // переходы на метки — данные с тегом:
+  // переходы на метки — данные с видом, а не замыкания в массиве 
+//:
   // array{место, метка, вид, a, b}; вид: 0 jump, 1 jump_unless a, 2 jump_if a,
   // 3 check_index a b, 4 деление (b — номер узла в fix_ops), 5 call_self
   fixes = array{};
@@ -883,6 +884,7 @@ jit_compile(cg, f, types, type result) {
       lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
     }
     else if(k == n_construct) gen_construct(e);
+    else if(k == n_unpack) gen_unpack(e);
     else if(k == n_str) vm_or_bad(e, fmt"узел {k}");
     else bad(fmt"узел {k}");
   };
@@ -934,6 +936,53 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.load(ca1, sb(sl), so(sl)));
     vm_service(9, t, e);
     bind(done);
+  };
+  // распаковка-инструкция array{a, _, ...r} = v (P12): распаковывает VM — её семантика
+  // целиком (длина, остаток, типы, unpack_failed), служба op 11; имена — в слоты: скаляр
+  // битами, значение VM — копией в памяти вызова. Тип имени — из разбора (его наблюдение)
+  gen_unpack(e) => {
+    array{pat, val, test} = code_fields(e);
+    array{_, items} = code_fields(pat);
+    names = array{};
+    for(it : items) {
+      if(code_kind(it) != n_param) bad("образец: вложенный или значение");
+      else {
+        array{pname, ...prest} = code_fields(it);
+        if(pname != "_") names.push(it);
+      }
+    }
+    vt = ty(val);
+    if(test) bad("распаковка-предикат");
+    else if(!is_handle(vt)) bad(fmt"распаковка {vt}");
+    else if(ok) {
+      n = names.size;
+      w = 2 + (2 * n);
+      k0 = alloc(w);
+      bsl(i64 j) => (k0 + w) - (1 + j);
+      gen(val);
+      put_bytes(cg.store(sb(bsl(1)), so(bsl(1)), acc));
+      mem_to(acc);
+      put_bytes(cg.store(sb(bsl(0)), so(bsl(0)), acc));
+      kinds = array{};
+      for(i : range(n)) {
+        t = ty(names[i]);
+        if(!given(t) || (t == unit) || ((t == jc_range) || is_stream(t))) bad(fmt"распаковка: тип имени {t}");
+        kinds.push(t);
+        put_bytes(cg.load_const(acc, vm_kind(t)));
+        put_bytes(cg.store(sb(bsl(2 + (2 * i))), so(bsl(2 + (2 * i))), acc));
+      }
+      put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
+      vm_service(11, unit, e);
+      for(i : range(n)) if(ok) {
+        array{pname, ...prest} = code_fields(names[i]);
+        t = kinds[i];
+        sl = declare(pname, t);
+        wrote(sl);
+        put_bytes(cg.load(acc, sb(bsl(3 + (2 * i))), so(bsl(3 + (2 * i)))));
+        if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
+        store_bytes(t, sl);
+      }
+    }
   };
   // array{x, ...ys} над i64/f64: пустой массив нужной раскладки с местом под скаляры —
   // VM в памяти вызова (op 10), элементы — push машинным кодом, ...ys — цикл по данным ys
