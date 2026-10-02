@@ -1675,6 +1675,7 @@ struct parser {
           advance();
           expect_open('{');
           n_quote q;
+          context_scope scope(*this); // workpiece - its context
           while(!is_close('}') && !at_end()) q.items.push_back(recover_statement([&] { return item(); }));
           expect_close('}');
           return db.add(std::move(q), {start, toks[pos - 1].where.end});

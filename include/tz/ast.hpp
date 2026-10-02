@@ -171,7 +171,7 @@ struct n_extend {
 };
 // Code as value (§7.4): quote { объявления } and insert #x.
 //
-struct n_quote {
+struct n_quote : n_context { // context: declared in the workpiece does not change parsing from the outside (author's decision 2026-10-02)
   node_list items;
 };
 struct n_splice {
@@ -497,7 +497,7 @@ struct ast_db {
     return n && std::visit([](auto const & k) { return std::is_base_of_v<n_context, std::remove_cvref_t<decltype(k)>>; }, nodes[n].kind);
   }
   // contextual elements
-  node_list const & context_items(node_id n) const { return is<n_block>(n) ? as<n_block>(n).items : as<n_module>(n).items; }
+  node_list const & context_items(node_id n) const { return is<n_block>(n) ? as<n_block>(n).items : is<n_quote>(n) ? as<n_quote>(n).items : as<n_module>(n).items; }
 
   // All daughter node_id node: One realization for all species through reflection.
   void for_each_child(node_id n, auto && f) const {

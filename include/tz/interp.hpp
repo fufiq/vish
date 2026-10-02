@@ -1818,15 +1818,19 @@ struct interpreter {
       }
       return interface(r);
     }
-    // AST node - struct of the program: the sample n_op {…} above the code - checking the type node
-    // and its field; in parsing, the node run-time - the field on the samples of the structure node
-    if(is_node_kind(kind) && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code") {
+    // AST node - struct of the program: a sample of n_op {…} above the code - checking the type node
+    // and its field; in parsing, the node run-time - fields on the samples of the structure node base
+    // node (n_context - block, module, quote) - a sample of the base: the type node - its successor,
+    // the field - the base (first; the author's decision 2026-10-02)
+    bool node_base = kind == std::meta::identifier_of(^^n_context);
+    if((is_node_kind(kind) || node_base) && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code") {
       std::vector<value> fs;
       unpacked r = unpacked::yes;
       if(v.known()) {
         node_id c = code_node(v, where);
-        if(!c || kind_name(db[c]) != kind) return unpacked::no;
+        if(!c || (kind_name(db[c]) != kind && !types.is_a(std::string(kind_name(db[c])), kind))) return unpacked::no;
         fs = node_fields(c);
+        fs.resize(std::min(fs.size(), node_samples(kind).size())); // sample fields - base fields
       } else {
         fs = node_samples(kind);
         r = unpacked::maybe;

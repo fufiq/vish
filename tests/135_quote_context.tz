@@ -1,0 +1,21 @@
+// out: да да нет
+// out: 3
+// fmt-stable
+// quote { … } — контекст: объявленное в заготовке (syntax, operator) видно только в ней
+// и не меняет разбор окружающего текста; образец базы n_context{} = код — истина для
+// любого узла-наследника (блок, quote), как у struct с базой (решения пользователя 2026-10-02).
+is_ctx(c) => if(n_context{} = c) "да" else "нет";
+
+main() {
+  q = quote {
+    syntax twice {b} => {
+      b;
+      b;
+    };
+  };
+  n_quote{items} = quote { { 1; } };
+  n_quote{ops} = quote { 1 + 2; };
+  print(is_ctx(q), is_ctx(items[0]), is_ctx(ops[0]));
+  twice = 3; // twice снаружи — просто имя: форма из заготовки не видна
+  print(twice);
+}
