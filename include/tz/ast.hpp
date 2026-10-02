@@ -563,6 +563,32 @@ bool is_node_kind(std::string_view name) {
   return found;
 }
 
+// node field type in the program: node - code, list node and names - array, name and text - str.
+template<typename F>
+consteval char const * node_field_type() {
+  if constexpr(std::is_same_v<F, node_id>) return "code";
+  else if constexpr(std::is_same_v<F, node_list> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>>) return "array";
+  else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string>) return "str";
+  else if constexpr(std::is_same_v<F, bool>) return "bool";
+  else if constexpr(std::is_floating_point_v<F>) return "f64";
+  else return "i64";
+}
+
+// node AST - struct programs:
+// 
+// Ads are generated from node C++ structures (one source) and parsed together
+// with prelude.
+std::string ast_structs_text() {
+  std::string out = "// узлы АСТ (порождено из структур узлов VM)\n";
+  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+    out += cat("struct ", std::meta::identifier_of(t), " {");
+    template for(constexpr auto m: fields_of<typename[:t:]>())
+      out += cat(" ", node_field_type<typename[:std::meta::type_of(m):]>(), " ", std::meta::identifier_of(m), ";");
+    out += " }\n";
+  }
+  return out;
+}
+
 // The name node is for debugging (through reflection, without manual tables).
 std::string_view kind_name(node const & n) {
   return std::visit([](auto const & k) -> std::string_view {

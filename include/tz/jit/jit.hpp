@@ -338,7 +338,7 @@ std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, 
   if(!n) return std::nullopt;
   // strings, aggregates and calls of kernel functions - VM values (service: node calculates
   // VM, author's decision 2026-10-01); obviously not - unpacking, ct
-  if(db.try_compile_body(n) || db.is<n_hole>(n) || (db.is<n_unpack>(n) && db.as<n_unpack>(n).test) || (db.is<n_pat>(n) && !db.is<n_unpack>(db[n].parent)) || (db.is<n_spread>(n) && !db.is<n_construct>(db[n].parent))) // ... in array {…}, the value of VM
+  if(db.try_compile_body(n) || db.is<n_hole>(n) || (db.is<n_pat>(n) && !db.is<n_unpack>(db[n].parent)) || (db.is<n_spread>(n) && !db.is<n_construct>(db[n].parent))) // ... in array {…}, the value of VM
     return std::pair{n, cat("узел ", kind_name(db[n]))};
   if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
   // ct-variable module is read in place in canonical order (§7.3) - not the way of execution
@@ -527,13 +527,17 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       }
       return 0;
     }
-    if(op == 11) { // unpacking-instruction node at: VM unpacks (its whole semantics), names - in buffer
+    if(op == 11 || op == 12) { // unpacking node at (11 - instruction, 12 - predicate): VM unpacks (its semantics in its entirety), names - in a buffer
       auto * buf = reinterpret_cast<uint64_t *>(id); // {call memory, value cell, (view, bits) to name}
       auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
       value const & v = *reinterpret_cast<value const *>(buf[1]);
       auto const & u = vm.db.as<n_unpack>(at);
       scope * s = vm.new_scope(vm.globals);
       auto r = vm.unpack_into(u.pattern, v, s, s, 0, vm.db[at].where);
+      if(r == interpreter::unpacked::no && op == 12) { // Predicate: not unpacked - lie, no names
+        vm.drop_scope(s);
+        return 0;
+      }
       if(r == interpreter::unpacked::no) {
         vm.drop_scope(s);
         vm.fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(vm.db).print(u.pattern), " ← ", vm.show_v(v)), vm.db[at].where);
@@ -547,7 +551,7 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
         ++k;
       }
       vm.drop_scope(s);
-      return 0;
+      return op == 12;
     }
     if(op == 10) { // array {…} : an empty array of layout t with space under bits of elements - in id call memory
       array_v a;

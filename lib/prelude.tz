@@ -496,7 +496,7 @@ jit_compile(cg, f, types, type result) {
   why = "";
   // массив — адрес ячейки значения VM; данные и размер код читает из неё в момент обращения
   // (§12.2: память — у VM, без копий в кадре): смещения сообщает VM
-  array{a_data, a_size, a_cap, a_gen} = jit_layout();
+  array{a_data, a_size, a_cap, a_gen, a_items_n} = jit_layout(); // размер общей раскладки — a_items_n
   // агрегат — поля в памяти ячейки по номеру поля типа: данные полей, шаг, скаляр в поле
   array{ag_data, ag_stride, ag_scalar} = jit_agg_layout();
   bad(str w) => {
@@ -561,6 +561,7 @@ jit_compile(cg, f, types, type result) {
   is_arr(type t) => (t == array(i64)) || (t == array(f64));
   // массив с типом элементов, известным позже (array{} до push): в слоте всё равно адрес ячейки
   arr_like(type t) => is_arr(t) || (type_family(t) == type_family(array(i64)));
+  late_arr = typeof(array{}); // array<?>: элементы ещё неизвестны
   // тип массива переменной s по месту o: у разбора — по месту использования
   arr_type(i64 s, o) => if(is_arr(env[s].kind)) env[s].kind else {
     u = jit_type(o, ctx);
@@ -695,15 +696,15 @@ jit_compile(cg, f, types, type result) {
     r
   };
   var_of(e) => if(code_kind(e) == n_ident) {
-    array{name} = code_fields(e);
+    n_ident{name} = e;
     find(name)
   } else -1;
   callee_name(e) => if(code_kind(e) == n_ident) {
-    array{name} = code_fields(e);
+    n_ident{name} = e;
     name
   } else "";
   is_call_of(e, str name) => (code_kind(e) == n_call) && {
-    array{c, ...rest} = code_fields(e);
+    n_call{c, _, _, _, _, _} = e;
     callee_name(c) == name
   };
   // тип узла: имя — по окружению компилятора, иначе — у разбора, иначе — по виду узла
@@ -720,13 +721,13 @@ jit_compile(cg, f, types, type result) {
       for(x : local_fns(callee_name(code_items(e)[0]))) for(lr : lres) if(lr[0] == code_id(x)) r = lr[1];
       r
     } else if(is_call_of(e, "index")) { // примитив ядра a[i] — тип элемента
-      array{_, ys, ...rest} = code_fields(e);
+      n_call{_, ys, _, _, _, _} = e;
       a = ty(ys[0]);
       if(a == jc_range) i64 else elem(a)
     } else if(k == n_int) i64
     else if(k == n_float) f64
     else if(k == n_op) {
-      array{op, xs, _} = code_fields(e);
+      n_op{op, xs, _} = e;
       if(op == ".size") i64
       else if(op == "[]") {
         a = ty(xs[0]);
@@ -739,7 +740,7 @@ jit_compile(cg, f, types, type result) {
     } else unit
   };
   gen_name(e) => {
-    array{name} = code_fields(e);
+    n_ident{name} = e;
     k = find(name);
     if(name == "true") put_bytes(cg.load_const(acc, 1));
     else if(name == "false") put_bytes(cg.load_const(acc, 0));
@@ -765,7 +766,7 @@ jit_compile(cg, f, types, type result) {
     name_nodes(e, names);
     pure = true;
     for(c : names) {
-      array{nm} = code_fields(c);
+      n_ident{nm} = c;
       k = find(nm);
       if((k >= 0) && (env[k].thunk || (env[k].kind != unit))) pure = false;
     }
@@ -783,10 +784,10 @@ jit_compile(cg, f, types, type result) {
     k = code_kind(e);
     if(!ok) {
     } else if(k == n_int) {
-      array{v, ...rest} = code_fields(e);
+      n_int{v, _, _} = e;
       put_bytes(cg.load_const(acc, v));
     } else if(k == n_float) {
-      array{v} = code_fields(e);
+      n_float{v} = e;
       gen_const(v);
     } else if(k == n_ident) gen_name(e);
     else if(k == n_op) {
@@ -799,14 +800,14 @@ jit_compile(cg, f, types, type result) {
       else gen(t[0]);
     } else if(k == n_call) gen_call(e);
     else if(k == n_block) {
-      array{items, ...rest} = code_fields(e);
+      n_block{items, _, _} = e;
       saved_top = top;
       saved_lf = lfns.size;
       for(x : items) if(ok) gen(x);
       top = saved_top;
       lfns = take_first(lfns, saved_lf);
     } else if(k == n_if) {
-      array{c, t, el} = code_fields(e);
+      n_if{c, t, el} = e;
       // условие известно разбору экземпляра (кт-параметр) — только живая ветка; подпрограмма
       // исполняется на всех глубинах рекурсии, а разбор видел её в контексте первого встраивания
       kc = ct_const(c);
@@ -825,7 +826,7 @@ jit_compile(cg, f, types, type result) {
         bind(l_done);
       }
     } else if(k == n_loop) {
-      array{body} = code_fields(e);
+      n_loop{body} = e;
       t = label();
       done = label();
       bind(t);
@@ -842,7 +843,7 @@ jit_compile(cg, f, types, type result) {
       if(loops.size == 0) bad("continue вне цикла");
       else jump(loops[loops.size - 2]);
     } else if(k == n_return) {
-      array{v, tg} = code_fields(e);
+      n_return{v, tg} = e;
       to = cur;
       if(given(tg)) { // return(f) — из внешней функции f, return(caller) — из вызывающей (§6.1)
         tn = callee_name(tg);
@@ -852,7 +853,7 @@ jit_compile(cg, f, types, type result) {
           i = cur;
           loop {
             if(i < 0) break;
-            array{fname, ...rest} = code_fields(fr_fn[i]);
+            fname = code_name(fr_fn[i]); // у лямбды — ""
             if((to < 0) && (fname == tn)) to = i;
             i = fr_parent[i];
           }
@@ -865,7 +866,7 @@ jit_compile(cg, f, types, type result) {
         jump(fr_exit[to]);
       }
     } else if(k == n_var) {
-      array{name, vt, init, _, is_ct, is_ref, _, _} = code_fields(e);
+      n_var{name, vt, init, _, is_ct, is_ref, _, _} = e;
       if(is_ref || is_ct) bad("ссылка или ct-переменная");
       else if(given(vt) && (code_kind(vt) == n_ident)) { // T x = e: значение — в тип T (§5.8)
         want = type_of_code(vt);
@@ -880,7 +881,7 @@ jit_compile(cg, f, types, type result) {
       } else assign(name, init, true);
     } else if(k == n_throw) gen_throw(e);
     else if(k == n_fn) { // локальная функция: кода на месте нет — встраивается в вызовы
-      array{nm, ...frest} = code_fields(e);
+      n_fn{nm, _, _, _, _, _, _, _, _} = e;
       lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
     }
     else if(k == n_construct) gen_construct(e);
@@ -937,23 +938,22 @@ jit_compile(cg, f, types, type result) {
     vm_service(9, t, e);
     bind(done);
   };
-  // распаковка-инструкция array{a, _, ...r} = v (P12): распаковывает VM — её семантика
+  // распаковка array{a, _, ...r} = v (P12; инструкция или предикат if(образец = v)): распаковывает VM — её семантика
   // целиком (длина, остаток, типы, unpack_failed), служба op 11; имена — в слоты: скаляр
   // битами, значение VM — копией в памяти вызова. Тип имени — из разбора (его наблюдение)
   gen_unpack(e) => {
-    array{pat, val, test} = code_fields(e);
-    array{_, items} = code_fields(pat);
+    n_unpack{pat, val, test} = e;
+    n_pat{_, items} = pat;
     names = array{};
     for(it : items) {
       if(code_kind(it) != n_param) bad("образец: вложенный или значение");
       else {
-        array{pname, ...prest} = code_fields(it);
+        n_param{pname, _, _, _, _, _, _} = it;
         if(pname != "_") names.push(it);
       }
     }
     vt = ty(val);
-    if(test) bad("распаковка-предикат");
-    else if(!is_handle(vt)) bad(fmt"распаковка {vt}");
+    if(!is_handle(vt)) bad(fmt"распаковка {vt}");
     else if(ok) {
       n = names.size;
       w = 2 + (2 * n);
@@ -972,9 +972,11 @@ jit_compile(cg, f, types, type result) {
         put_bytes(cg.store(sb(bsl(2 + (2 * i))), so(bsl(2 + (2 * i))), acc));
       }
       put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
-      vm_service(11, unit, e);
+      vm_service(if(test) 12 else 11, unit, e); // предикат — истина/ложь в acc, имена — при успехе
+      res = alloc(1);
+      put_bytes(cg.store(sb(res), so(res), acc));
       for(i : range(n)) if(ok) {
-        array{pname, ...prest} = code_fields(names[i]);
+        n_param{pname, _, _, _, _, _, _} = names[i];
         t = kinds[i];
         sl = declare(pname, t);
         wrote(sl);
@@ -982,18 +984,19 @@ jit_compile(cg, f, types, type result) {
         if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
         store_bytes(t, sl);
       }
+      put_bytes(cg.load(acc, sb(res), so(res)));
     }
   };
   // array{x, ...ys} над i64/f64: пустой массив нужной раскладки с местом под скаляры —
   // VM в памяти вызова (op 10), элементы — push машинным кодом, ...ys — цикл по данным ys
   gen_construct(e) => {
     t = ty(e);
-    array{tn, items} = code_fields(e);
+    n_construct{tn, items} = e;
     fits = is_arr(t) && (given(tn) && (code_name(tn) == "array"));
     n = 0;
     for(x : items) if(fits) {
       if(code_kind(x) == n_spread) {
-        array{v} = code_fields(x);
+        n_spread{v} = x;
         if(ty(v) != t) fits = false;
       } else if(ty(x) != elem(t)) fits = false;
       else n += 1;
@@ -1008,7 +1011,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.store(sb(c), so(c), acc));
       for(x : items) {
         if(code_kind(x) == n_spread) {
-          array{v} = code_fields(x);
+          n_spread{v} = x;
           src = alloc(1);
           j = alloc(1);
           gen(v);
@@ -1047,13 +1050,23 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.load(r, sb(sl), so(sl)));
     put_bytes(cg.load(r, r, a_size));
   };
+  // размер массива переменной s в месте o: числовой — плотные слова, иначе (код, строки,
+  // кортежи — значения VM) — список значений; массив без известных элементов — слова
+  arr_size_of(i64 r, i64 s, o) => {
+    t = arr_type(s, o);
+    if(is_arr(t) || (t == late_arr)) arr_size(r, env[s].slot)
+    else {
+      put_bytes(cg.load(r, sb(env[s].slot), so(env[s].slot)));
+      put_bytes(cg.load(r, r, a_items_n));
+    }
+  };
   arr_data(i64 r, i64 sl) => {
     put_bytes(cg.load(r, sb(sl), so(sl)));
     put_bytes(cg.load(r, r, a_data));
   };
   // a[i] — парный оператор [] (узел n_op "[]")
   index_parts(e) => if(code_kind(e) == n_op) {
-    array{op, xs, _} = code_fields(e);
+    n_op{op, xs, _} = e;
     if((op == "[]") && (xs.size == 2)) xs else array{}
   } else array{};
   gen_index(e) => {
@@ -1062,10 +1075,10 @@ jit_compile(cg, f, types, type result) {
   };
   // перегрузка [] кодом с типами (operator (T a)[U i]), подошедшая к операндам — встраивается
   typed_overload(g) => {
-    array{_, ps, ...rest} = code_fields(g);
+    n_fn{_, ps, _, _, _, _, _, _, _} = g;
     n = 0;
     for(p : ps) {
-      array{_, pt, ...prest} = code_fields(p);
+      n_param{_, pt, _, _, _, _, _} = p;
       if(given(pt)) n += 1;
     }
     n > 0
@@ -1080,6 +1093,7 @@ jit_compile(cg, f, types, type result) {
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
     else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
     else if(!arr_like(env[s].kind)) bad("индекс не массива");
+    else if(!is_arr(arr_type(s, o)) && (arr_type(s, o) != late_arr)) vm_or_bad(e, "элемент — значение VM"); // копия в памяти вызова
     else if(!is_arr(arr_type(s, o))) bad("тип элементов массива неизвестен");
     else {
       gen(ix);
@@ -1135,13 +1149,13 @@ jit_compile(cg, f, types, type result) {
   gen_size(xs) => {
     s = var_of(xs[0]);
     if((s < 0) || env[s].thunk) bad("обращение .size не к переменной");
-    else if(arr_like(env[s].kind)) arr_size(acc, env[s].slot);
+    else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]);
     else if(env[s].kind == jc_range) put_bytes(cg.load(acc, sb(env[s].slot), so(env[s].slot)));
     else bad(".size не массива");
   };
   // p.x — поле агрегата-переменной p: номер поля типа k (статичен); пусто — не поле
   field_slot(e) => if((code_kind(e) == n_op) && dotted(e)) {
-    array{_, ys, _} = code_fields(e);
+    n_op{_, ys, _} = e;
     s = var_of(ys[0]);
     if((s < 0) || (env[s].thunk || (!is_handle(env[s].kind) || arr_like(env[s].kind)))) array{}
     else {
@@ -1174,7 +1188,7 @@ jit_compile(cg, f, types, type result) {
     } else vm_or_bad(e, fmt"запись поля {t}");
   };
   gen_op(e) => {
-    array{op, xs, _} = code_fields(e);
+    n_op{op, xs, _} = e;
     if(op == "[]") gen_index_op(e, xs);
     else if(op == ".size") gen_size(xs);
     else if(field_slot(e).size == 2) gen_field(e, field_slot(e));
@@ -1190,7 +1204,7 @@ jit_compile(cg, f, types, type result) {
         put_bytes(g(if(t == f64) acc_f else acc));
       }
     } else if((op == "=") && (code_kind(xs[0]) == n_ident)) {
-      array{name} = code_fields(xs[0]);
+      n_ident{name} = xs[0];
       assign(name, xs[1], false);
     } else if((op == "=") && (field_slot(xs[0]).size == 2)) gen_field_store(e, xs, field_slot(xs[0]));
     else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: значение — на стек, индекс, границы, запись
@@ -1249,13 +1263,13 @@ jit_compile(cg, f, types, type result) {
   // a.f(b) ≡ f(a, b), если у a нет поля f 
 // вызов с первым аргументом a; агрегат — у VM (поле-функция)
   dotted(callee) => (code_kind(callee) == n_op) && {
-    array{op, ys, post} = code_fields(callee);
+    n_op{op, ys, post} = callee;
     post && ((ys.size == 1) && (code_name(callee) != ""))
   };
   gen_call(e) => {
-    array{callee, xs0, ...rest} = code_fields(e);
+    n_call{callee, xs0, _, _, _, _} = e;
     if(dotted(callee)) {
-      array{_, ys, _} = code_fields(callee);
+      n_op{_, ys, _} = callee;
       if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
       else {
         args = array{ys[0]};
@@ -1296,7 +1310,7 @@ jit_compile(cg, f, types, type result) {
       else {
         gen(xs[0]);
         if(env[s].kind == jc_range) put_bytes(cg.load(second, sb(env[s].slot), so(env[s].slot)));
-        else arr_size(second, env[s].slot);
+        else arr_size_of(second, s, xs[1]);
         put_bytes(cg.is_index(acc, second));
       }
     } else gen_inline(e, name, xs);
@@ -1392,7 +1406,7 @@ jit_compile(cg, f, types, type result) {
   bind_args(ps, xs) => {
     binds = array{};
     for(i : range(ps.size)) {
-      array{pname, _, mode, ...prest} = code_fields(ps[i]);
+      n_param{pname, _, mode, _, _, _, _} = ps[i];
       a = xs[i];
       s = var_of(a);
       if((mode == 4) || (code_kind(a) == n_lambda)) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur}); // лямбда — код определения
@@ -1437,7 +1451,7 @@ jit_compile(cg, f, types, type result) {
       lf = lfns[0];
       for(l : lfns) if(code_id(l.f) == code_id(g[0])) lf = l;
       lres.push(array{code_id(g[0]), ty(e)});
-      array{_, ps, _, body, ...rest} = code_fields(g[0]);
+      n_fn{_, ps, _, body, _, _, _, _, _} = g[0];
       binds = bind_args(ps, xs); // аргументы — в виде вызывающего
       if(ok) {
         exit = label();
@@ -1471,7 +1485,7 @@ jit_compile(cg, f, types, type result) {
   // Рекурсия локальной функции — настоящий вызов подпрограммы (свой кадр; захват — кадр
   // объемлющей через регистр): аргументы — в регистрах C ABI, результат — в аккумуляторе
   call_sub(e, str name, fc, xs) => {
-    array{_, ps, ...rest} = code_fields(fc);
+    n_fn{_, ps, _, _, _, _, _, _, _} = fc;
     kinds = array{};
     for(x : xs) kinds.push(ty(x));
     lf = lfns[0];
@@ -1484,7 +1498,7 @@ jit_compile(cg, f, types, type result) {
     else {
       for(k : kinds) if(!scalar(k) && !is_handle(k)) bad(fmt"рекурсия {name}: параметр {k}");
       for(p : ps) {
-        array{_, _, mode, ...prest} = code_fields(p);
+        n_param{_, _, mode, _, _, _, _} = p;
         if(mode != 0) bad(fmt"рекурсия {name}: параметр не по значению");
       }
       if(si < 0) {
@@ -1517,7 +1531,7 @@ jit_compile(cg, f, types, type result) {
     r
   };
   gen_subroutine(sub) => {
-    array{_, ps, _, body, ...rest} = code_fields(sub.f);
+    n_fn{_, ps, _, body, _, _, _, _, _} = sub.f;
     regs4 = array{ca0, ca1, ca2, ca3};
     w_env = env;
     w_top = top;
@@ -1542,7 +1556,7 @@ jit_compile(cg, f, types, type result) {
     for(v : sub.envsnap) put(v);
     base = sub.base;
     for(i : range(ps.size)) {
-      array{pname, ...prest} = code_fields(ps[i]);
+      n_param{pname, _, _, _, _, _, _} = ps[i];
       sl = alloc(1);
       put_bytes(cg.store(sb(sl), so(sl), regs4[i])); // биты (f64 — тоже)
       put(jc_var{pname, sub.kinds[i], sl, false, f, 0, 0, 0, 0});
@@ -1577,11 +1591,11 @@ jit_compile(cg, f, types, type result) {
     pick = array{};
     tie = false;
     for(g : gs) {
-      array{_, ps, ...rest} = code_fields(g);
+      n_fn{_, ps, _, _, _, _, _, _, _} = g;
       fits = ps.size == xs.size;
       score = 0;
       for(i : range(if(fits) ps.size else 0)) {
-        array{_, pt, mode, pack, ...prest} = code_fields(ps[i]);
+        n_param{_, pt, mode, pack, _, _, _} = ps[i];
         if(given(pt)) {
           want = type_of_code(pt);
           at = ty(xs[i]);
@@ -1614,7 +1628,15 @@ jit_compile(cg, f, types, type result) {
         k = fr_parent[k];
       }
     }
-    array{_, ps, _, body, is_outline, ...rest} = if(g.size == 1) code_fields(g[0]) else array{"", array{}, false, false, true};
+    ps = array{};
+    body = e;
+    is_outline = true;
+    if(g.size == 1) {
+      n_fn{_, gps, _, gbody, g_outline, _, _, _, _} = g[0];
+      ps = gps;
+      body = gbody;
+      is_outline = g_outline;
+    }
     if((g.size == 0) || (rec || is_outline)) vm_or_bad(e, fmt"вызов {name}: нет встраиваемой перегрузки");
     else if(leading_require(body)) vm_or_bad(e, fmt"вызов {name}: ведущий require — выбор перегрузки по значениям");
     else {
@@ -1695,7 +1717,7 @@ jit_compile(cg, f, types, type result) {
   // throw: catch выбран при компиляции по типу — значение в его переменную и переход;
   // не пойман здесь — в слоты области (вид 5, узел, значение, тип) и выход
   gen_throw(e) => {
-    array{v} = code_fields(e);
+    n_throw{v} = e;
     t = ty(v);
     if(!scalar(t)) bad(fmt"throw значения {t}");
     else {
@@ -1734,16 +1756,21 @@ jit_compile(cg, f, types, type result) {
     else {
       hv = env[h];
       hs = if(code_kind(hv.th) == n_construct) { // пак клауз — кортеж блоков
-        array{_, items} = code_fields(hv.th);
+        n_construct{_, items} = hv.th;
         items
       } else array{hv.th};
       frame_c = array{};
       lams = array{};
       for(l : hs) {
-        array{ps, body, _} = if(code_kind(l) == n_lambda) code_fields(l) else array{array{}, false, false};
+        ps = array{};
+        body = l;
+        if(n_lambda{lps, lbody, _} = l) {
+          ps = lps;
+          body = lbody;
+        }
         if(ps.size != 1) bad("catch не блок с параметром");
         else {
-          array{pname, pt, ...prest} = code_fields(ps[0]);
+          n_param{pname, pt, _, _, _, _, _} = ps[0];
           cty = if(given(pt)) type_of_code(pt) else unit;
           binds = (pname != "_") && (uses(body, pname) > 0);
           if(binds && !scalar(cty)) bad("catch использует значение, неизвестное машинному коду");
@@ -1772,7 +1799,14 @@ jit_compile(cg, f, types, type result) {
   // body(v): аргументы — здесь, тело блока — в окружении и контексте вызывающего
   call_block(v, xs) => {
     l = v.th;
-    array{ps, body, block} = if(code_kind(l) == n_lambda) code_fields(l) else array{array{}, false, false};
+    ps = array{};
+    body = l;
+    block = false;
+    if(n_lambda{lps, lbody, lblock} = l) {
+      ps = lps;
+      body = lbody;
+      block = lblock;
+    }
     if(code_kind(l) != n_lambda) bad("вызов expr-параметра, который не блок и не лямбда");
     else if(ps.size != xs.size) bad("арность блока");
     else {
@@ -1783,7 +1817,7 @@ jit_compile(cg, f, types, type result) {
         gen(xs[i]);
         sl = alloc(1);
         store_slot(t, sl);
-        array{pname, ...prest} = code_fields(ps[i]);
+        n_param{pname, _, _, _, _, _, _} = ps[i];
         binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
       }
       if(ok && block) in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => {
@@ -1819,7 +1853,7 @@ jit_compile(cg, f, types, type result) {
   // имена в коде (для того, что W читает снаружи)
   idents(c, found) => {
     if(code_kind(c) == n_ident) {
-      array{nm} = code_fields(c);
+      n_ident{nm} = c;
       found.push(nm);
     }
     for(x : code_items(c)) idents(x, found);
@@ -1860,7 +1894,7 @@ jit_compile(cg, f, types, type result) {
     k
   };
   is_block(c) => (code_kind(c) == n_lambda) && {
-    array{_, _, block} = code_fields(c);
+    n_lambda{_, _, block} = c;
     block
   };
   // B не выходит из цикла for: нет return, break/continue — только своих циклов
@@ -1878,7 +1912,7 @@ jit_compile(cg, f, types, type result) {
   arity_fns(str nm, i64 n) => {
     fs = array{};
     for(g : functions_named(nm)) {
-      array{_, ps, ...rest} = code_fields(g);
+      n_fn{_, ps, _, _, _, _, _, _, _} = g;
       if(ps.size == n) fs.push(g);
     }
     fs
@@ -1889,13 +1923,13 @@ jit_compile(cg, f, types, type result) {
     r = false;
     if((k == n_return) || (k == n_throw)) r = true;
     else if(k == n_call) {
-      array{cal, cxs, ...rest} = code_fields(c);
+      n_call{cal, cxs, _, _, _, _} = c;
       nm = callee_name(cal);
       if(nm == "close") r = true;
       else if(nm != "") {
         for(g : arity_fns(nm, cxs.size)) if(!r && !has(seen, code_id(g))) {
           seen.push(code_id(g));
-          array{_, _, _, gb, ...grest} = code_fields(g);
+          n_fn{_, _, _, gb, _, _, _, _, _} = g;
           if(gen_escapes(gb, seen)) r = true;
         }
       }
@@ -1907,10 +1941,10 @@ jit_compile(cg, f, types, type result) {
   pick_fn(str nm, cxs, i64 cc) => {
     fs = array{};
     for(g : arity_fns(nm, cxs.size)) {
-      array{_, ps, ...rest} = code_fields(g);
+      n_fn{_, ps, _, _, _, _, _, _, _} = g;
       fits = true;
       for(i : range(ps.size)) {
-        array{_, pt, ...prest} = code_fields(ps[i]);
+        n_param{_, pt, _, _, _, _, _} = ps[i];
         if(given(pt)) {
           want = type_of_code(pt);
           at = jit_type(cxs[i], cc);
@@ -1926,16 +1960,16 @@ jit_compile(cg, f, types, type result) {
   gen_tail(c, seen, i64 cc) => {
     k = code_kind(c);
     if(k == n_lambda) {
-      array{_, lb, _} = code_fields(c);
+      n_lambda{_, lb, _} = c;
       gen_tail(lb, seen, cc)
     } else if(k == n_block) {
-      array{items, ...rest} = code_fields(c);
+      n_block{items, _, _} = c;
       r = items.size > 0;
       for(i : range(items.size)) if(r && (((i + 1) < items.size) && gen_escapes(items[i], seen))) r = false;
       r && gen_tail(items[items.size - 1], seen, cc)
     } else if(k != n_call) false
     else {
-      array{cal, cxs, ...rest} = code_fields(c);
+      n_call{cal, cxs, _, _, _, _} = c;
       nm = callee_name(cal);
       if(nm == "") false
       else if(nm == "close") true
@@ -1946,7 +1980,7 @@ jit_compile(cg, f, types, type result) {
         if(!r || ((fs.size != 1) || has(seen, code_id(fs[0])))) false
         else {
           seen.push(code_id(fs[0]));
-          array{_, _, _, fb, ...frest} = code_fields(fs[0]);
+          n_fn{_, _, _, fb, _, _, _, _, _} = fs[0];
           gen_tail(fb, seen, inline_context(cc, c))
         }
       }
@@ -1963,7 +1997,7 @@ jit_compile(cg, f, types, type result) {
     else if(others) bad("поток видят несколько spawn");
     else if(!is_block(body)) bad("тело for");
     else {
-      array{bps, bb, _} = code_fields(body);
+      n_lambda{bps, bb, _} = body;
       if(bps.size != 1) bad("тело for");
       else if(!consumer_stays(bb, 0)) bad("тело for выходит из цикла");
       else if(!gen_tail(g.w, array{}, g.w_ctx)) bad("генератор: close(s) — не последнее действие, или return/throw");
@@ -1987,7 +2021,7 @@ jit_compile(cg, f, types, type result) {
         in_view(g.w_top, g.w_base, g.w_ctx, g.w_ret, () => {
           wb = g.w;
           if(code_kind(wb) == n_lambda) {
-            array{_, lb, _} = code_fields(wb);
+            n_lambda{_, lb, _} = wb;
             wb = lb;
           }
           gen(wb);
@@ -2013,8 +2047,8 @@ jit_compile(cg, f, types, type result) {
         gen(xs[1]);
         p = alloc(1);
         store_bytes(t, p);
-        array{bps, bb, _} = code_fields(f_body);
-        array{pname, ...prest} = code_fields(bps[0]);
+        n_lambda{bps, bb, _} = f_body;
+        n_param{pname, _, _, _, _, _, _} = bps[0];
         w_env = env;
         w_top = top;
         w_base = base;
@@ -2051,7 +2085,7 @@ jit_compile(cg, f, types, type result) {
     vs = array{};
     seen = array{};
     for(c : nodes) {
-      array{nm} = code_fields(c);
+      n_ident{nm} = c;
       k = find(nm);
       if((k >= 0) && !has(seen, k)) {
         seen.push(k);
@@ -2073,7 +2107,7 @@ jit_compile(cg, f, types, type result) {
   vm_kind(type t) => if(is_handle(t)) 9 else jt_code(t);
   // тело начинается с require — условие выбора перегрузки (неудача — unpack_failed у вызова)
   leading_require(body) => (code_kind(body) == n_block) && {
-    array{items, ...rest} = code_fields(body);
+    n_block{items, _, _} = body;
     (items.size > 0) && is_call_of(items[0], "require")
   };
   // результат — в acc (f64 — в acc_f), значение VM — адрес ячейки в acc
@@ -2145,10 +2179,10 @@ jit_compile(cg, f, types, type result) {
   frame_at = out.size;
   frame_size = (i64 n) => cg.frame_alloc(n);
   put_bytes(frame_size(0));
-  array{_, fps, _, fbody, ...frest} = code_fields(f);
+  n_fn{_, fps, _, fbody, _, _, _, _, _} = f;
   ap = 0; // слово в области аргументов
   for(i : range(fps.size)) {
-    array{pname, ...prest} = code_fields(fps[i]);
+    n_param{pname, _, _, _, _, _, _} = fps[i];
     s = declare(pname, types[i]);
     if(types[i] != unit) {
       put_bytes(cg.load(acc, argbase, 8 * ap));

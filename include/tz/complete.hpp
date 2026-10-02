@@ -181,8 +181,12 @@ std::vector<completion_item> filter_completions(std::vector<completion_item> ite
     return k == w.size() ? 2 : -1;
   };
   std::vector<std::pair<int, completion_item>> scored;
-  for(auto & x: items)
+  for(auto & x: items) {
+    // node AST (struct programs generated from VM) - only on the typed prefix: they are needed by
+    // the code that works with the code, the rest - noise (*mine*)
+    if(x.kind == "тип" && is_node_kind(x.name) && (w.empty() || !lower(x.name).starts_with(w))) continue;
     if(int r = rank(x.name); r >= 0) scored.push_back({r, std::move(x)});
+  }
   std::ranges::sort(scored, [](auto const & a, auto const & b) {
     if(a.first != b.first) return a.first < b.first;
     if(a.second.depth != b.second.depth) return a.second.depth < b.second.depth;

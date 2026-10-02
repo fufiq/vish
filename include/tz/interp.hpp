@@ -1814,6 +1814,26 @@ struct interpreter {
       }
       return interface(r);
     }
+    // AST node - struct of the program: the sample n_op {…} above the code - checking the type node
+    // and its field; in parsing, the node run-time - the field on the samples of the structure node
+    if(is_node_kind(kind) && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code") {
+      std::vector<value> fs;
+      unpacked r = unpacked::yes;
+      if(v.known()) {
+        node_id c = code_node(v, where);
+        if(!c || kind_name(db[c]) != kind) return unpacked::no;
+        fs = node_fields(c);
+      } else {
+        fs = node_samples(kind);
+        r = unpacked::maybe;
+      }
+      if(!pos.empty() && pos.size() != fs.size()) fail(cat("образец ", kind, "{…}: полей ", fs.size(), ", элементов ", pos.size()), where);
+      for(std::size_t k = 0; k < pos.size() && r != unpacked::no; ++k) {
+        if(db.is<n_param>(pos[k]) && db.as<n_param>(pos[k]).pack) fail("...остаток — только в array{…}", db[pos[k]].where);
+        r = both(r, elem(pos[k], fs[k]));
+      }
+      return interface(r);
+    }
     if(structs.contains(db.as<n_ident>(p.type).name)) {
       if(!x->is<agg_v>() || !types.is_a(types.name(x->as<agg_v>().type), kind)) return unpacked::no; // heir
       auto const & fs = x->as<agg_v>().fields;
@@ -2369,9 +2389,62 @@ struct interpreter {
     return e;
   }
 
+  // node fields in order (as in its struct program): node - code (empty - code without node,
+  // given - lie), list node and names - array, name and text - string.
+  std::vector<value> node_fields(node_id c) {
+    std::vector<value> xs;
+    std::visit([&](auto const & k) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        auto const & f = k.[:m:];
+        if constexpr(std::is_same_v<field_t, node_id>) xs.push_back(code_value(f));
+        else if constexpr(std::is_same_v<field_t, node_list>) {
+          std::vector<value> ys;
+          for(node_id y: f) ys.push_back(code_value(y));
+          xs.push_back(value(array_v::of(std::move(ys))));
+        } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
+          std::vector<value> ys;
+          for(symbol y: f) ys.push_back(value(std::string(str(y))));
+          xs.push_back(value(array_v::of(std::move(ys))));
+        } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) { // layout
+          std::vector<value> ys;
+          for(uint32_t y: f) ys.push_back(value(int64_t(y)));
+          xs.push_back(value(array_v::of(std::move(ys))));
+        } else if constexpr(std::is_same_v<field_t, symbol>) xs.push_back(value(std::string(f ? str(f) : "")));
+        else if constexpr(std::is_same_v<field_t, bool>) xs.push_back(value(f));
+        else if constexpr(std::is_floating_point_v<field_t>) xs.push_back(value(double(f)));
+        else if constexpr(std::is_same_v<field_t, std::string>) xs.push_back(value(f));
+        else xs.push_back(value(int64_t(f)));
+      }
+    },
+        db[c].kind);
+    return xs;
+  }
+  // Samples of node fields of the kind type - for parsing (node - run-time): types from the structure of node
+  std::vector<value> node_samples(std::string_view kind) {
+    std::vector<value> xs;
+    template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+      if(std::meta::identifier_of(t) == kind)
+        template for(constexpr auto m: fields_of<typename[:t:]>()) {
+          using field_t = [:std::meta::type_of(m):];
+          value code = code_value(node_id(1));
+          if constexpr(std::is_same_v<field_t, node_id>) xs.push_back(erase(code));
+          else if constexpr(std::is_same_v<field_t, node_list>) xs.push_back(erase(value(array_v::of({code}))));
+          else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) xs.push_back(erase(value(array_v::of({value(std::string("x"))}))));
+          else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) xs.push_back(erase(value(array_v::of({value(int64_t(1))}))));
+          else if constexpr(std::is_same_v<field_t, symbol> || std::is_same_v<field_t, std::string>) xs.push_back(erase(value(std::string("x"))));
+          else if constexpr(std::is_same_v<field_t, bool>) xs.push_back(erase(value(true)));
+          else if constexpr(std::is_floating_point_v<field_t>) xs.push_back(erase(value(1.0)));
+          else xs.push_back(erase(value(int64_t(1))));
+        }
+    }
+    return xs;
+  }
+
   node_id code_node(value const & v, span where) {
-    if(v.is<agg_v>() && types.name(v.as<agg_v>().type) == "code") return node_id(uint32_t(v.as<agg_v>().fields[0].second.as<int64_t>()));
-    fail("ожидался код (quote)", where);
+    if(v.is<agg_v>() && types.name(v.as<agg_v>().type) == "code" && v.as<agg_v>().fields[0].second.is<int64_t>())
+      if(node_id c(uint32_t(v.as<agg_v>().fields[0].second.as<int64_t>())); c) return c;
+    fail(v.is<agg_v>() ? "пустой узел (поле узла без значения: проверьте given)" : "ожидался код (quote)", where);
   }
 
   // The value > node for inserting #x.
@@ -5010,7 +5083,15 @@ struct interpreter {
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
     if(n == "f64_bits" && a.size() == 1 && types.describe(a[0]) == "f64") // bits f64 - i64 (constant in machine code)
       return a[0].known() ? value(std::bit_cast<int64_t>(a[0].as<double>())) : erase(value(int64_t(1)));
-    if(n == "given" && a.size() == 1) return value(!a[0].is<unit_v>()); // node field is (not)
+    if(n == "given" && a.size() == 1) { // node field is not () and is not an empty node
+      value const * x = shape_of(a[0]);
+      if(x && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code" && !x->as<agg_v>().fields.empty()) {
+        value const & nd = x->as<agg_v>().fields[0].second;
+        if(!a[0].known() || !nd.known()) return erase(value(true));
+        return value(node_id(uint32_t(nd.as<int64_t>())).valid());
+      }
+      return value(!a[0].is<unit_v>());
+    }
     // a type that names a code type (type name in a program); () is not a type
     if(n == "type_of_code" && a.size() == 1) {
       node_id c = code_node(a[0], where);
@@ -5091,7 +5172,7 @@ struct interpreter {
         if(str(db.as<n_var>(fs[k]).name) == a[1].as<str_v>().view()) return value(int64_t(k));
       return value(int64_t(-1));
     }
-    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().gen))}));
+    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().gen)), value(int64_t(array_layout().items_n))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
       observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
@@ -5108,28 +5189,7 @@ struct interpreter {
     if(n.starts_with("code_") && a.size() == 1) {
       node_id c = code_node(a[0], where);
       if(n == "code_kind") return value(type_v{types.named(kind_name(db[c]))}); // tag
-      if(n == "code_fields") { // node fields in order - for unpacking with a sample; empty node - ()
-        std::vector<value> xs;
-        std::visit([&](auto const & k) {
-          template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
-            using field_t = [:std::meta::type_of(m):];
-            auto const & f = k.[:m:];
-            if constexpr(std::is_same_v<field_t, node_id>) xs.push_back(f ? code_value(f) : value());
-            else if constexpr(std::is_same_v<field_t, node_list>) {
-              std::vector<value> ys;
-              for(node_id y: f) ys.push_back(code_value(y));
-              xs.push_back(value(array_v::of(std::move(ys))));
-            } else if constexpr(std::is_same_v<field_t, symbol>) xs.push_back(value(std::string(f ? str(f) : "")));
-            else if constexpr(std::is_same_v<field_t, bool>) xs.push_back(value(f));
-            else if constexpr(std::is_floating_point_v<field_t>) xs.push_back(value(double(f)));
-            else if constexpr(std::is_enum_v<field_t> || std::is_integral_v<field_t>) xs.push_back(value(int64_t(f)));
-            else if constexpr(std::is_same_v<field_t, std::string>) xs.push_back(value(f));
-            else xs.push_back(value());
-          }
-        },
-            db[c].kind);
-        return value(array_v::of(std::move(xs)));
-      }
+      if(n == "code_fields") return value(array_v::of(node_fields(c))); // node fields in order for sample unpacking
       if(n == "code_items") {
         std::vector<value> xs;
         db.for_each_child(c, [&](node_id x) { xs.push_back(code_value(x)); });

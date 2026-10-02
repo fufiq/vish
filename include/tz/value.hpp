@@ -36,7 +36,7 @@ struct type_v {
 //
 struct value_list {
   words raw;
-  uint32_t n = 0;
+  uint64_t n = 0; // word: machine code reads the size of the total layout array from memory
 
   value_list() = default;
   value_list(value_list const & o);
@@ -525,7 +525,7 @@ field_list::~field_list() { clear(); }
 // Dense array in the cell value: data offsets and size - machine code reads them from memory
 // (§12.2, without copies); cell array - loan indicates the array in the cell.
 struct array_offsets {
-  uint64_t data, size, cap, gen, in_value;
+  uint64_t data, size, cap, gen, items_n, in_value;
 };
 array_offsets const & array_layout() {
   static array_offsets o = [] {
@@ -533,7 +533,8 @@ array_offsets const & array_layout() {
     auto const * b = reinterpret_cast<char const *>(&v);
     auto const & a = v.as<array_v>();
     return array_offsets{uint64_t(reinterpret_cast<char const *>(&a.dense.data) - b), uint64_t(reinterpret_cast<char const *>(&a.dense.n) - b),
-        uint64_t(reinterpret_cast<char const *>(&a.dense.cap) - b), uint64_t(reinterpret_cast<char const *>(&a.gen) - b), uint64_t(reinterpret_cast<char const *>(&a) - b)};
+        uint64_t(reinterpret_cast<char const *>(&a.dense.cap) - b), uint64_t(reinterpret_cast<char const *>(&a.gen) - b),
+        uint64_t(reinterpret_cast<char const *>(&a.items.n) - b), uint64_t(reinterpret_cast<char const *>(&a) - b)};
   }();
   return o;
 }

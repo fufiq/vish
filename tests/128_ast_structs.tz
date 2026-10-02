@@ -1,0 +1,41 @@
+// out: [field{name: cond, type: code}, field{name: then_, type: code}, field{name: else_, type: code}]
+// out: + 2 false
+// out: a
+// out: 12
+// out: 2 100 0
+// jit-compiled: show
+// jit-compiled: pairsum
+// jit-compiled: kind_of
+// Узлы АСТ — struct программы: 
+// 
+// Объявления порождены из структур
+// узлов VM; образец n_op{op, xs, post} = c — проверка вида узла и его поля (пустой узел —
+// code без узла, given — ложь); предикат if(образец = v) — и в машинном коде; размер
+// массива значений VM (код, строки) машинный код читает из списка значений.
+show(c) {
+  n_op{op, xs, post} = c;
+  print(op, xs.size, post);
+  n_ident{nm} = xs[0];
+  print(nm);
+}
+pairsum(i64 k) {
+  s = 0;
+  if(array{a, b} = array{k, k * 2}) s = a + b;
+  if(array{c} = array{k, 1}) s += 1000;
+  s
+}
+kind_of(c) {
+  r = 0;
+  if(n_op{op, xs, _} = c) r = xs.size;
+  if(n_if{_, _, el} = c) r = if(given(el)) 100 else 50;
+  r
+}
+main() {
+  print(fields(n_if));
+  n_quote{items} = quote { a + 2 };
+  show(items[0]);
+  print(pairsum(4));
+  n_quote{ifs} = quote { if(a) 1 else 2 };
+  n_quote{lits} = quote { 7 };
+  print(kind_of(items[0]), kind_of(ifs[0]), kind_of(lits[0]));
+}
