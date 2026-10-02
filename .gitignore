@@ -1,1 +1,3 @@
 out/
+*.tz.state
+qemu_*.core
