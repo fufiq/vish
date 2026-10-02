@@ -64,12 +64,6 @@ struct cell_book {
     auto it = cells.find(c);
     return it == cells.end() ? 0 : it->second.second;
   }
-  std::unordered_map<value const *, uint32_t> changed_at; // last disability support (node +1)
-
-  void invalidated(value * c, node_id at) {
-    written(c, true);
-    changed_at[c] = at.value + 1;
-  }
   void written(value * c, bool whole) {
     auto & e = cells[c];
     if(whole) e.second = ++clock;
@@ -222,6 +216,7 @@ struct interpreter {
     sym_intercept = sym("intercept");
     sym_alloc_in = sym("alloc_in");
     sym_append = sym("append");
+    sym_set_ct_state = sym("set_ct_state");
     sym_spawn = sym("fiber_start");
     sym_process = sym("process");
     sym_yield = sym("yield");
@@ -1196,6 +1191,8 @@ struct interpreter {
   // All changes to the report go through emit: so they can be written to the
   // instance cache and reproduced when hit.
   void emit(report_event ev) {
+    // parsing Hooks - Library Ct Code: Only their run-time Checks and Exclusions
+    if(hook_depth && ev.kind != report_event::rt_check && ev.kind != report_event::throws) return;
     for(auto * rec: recording) rec->push_back(ev);
     switch(ev.kind) {
       case report_event::instance: ++instance_counts[ev.a]; break;
@@ -1665,13 +1662,40 @@ struct interpreter {
     fail(cat("return(", str(name), "): нет такой внешней функции в цепочке вызовов"), where);
   }
 
+  // require(c, "сообщение", "пометка", место, …): the condition is known when compiling and false
+  // (at least in one way) is the parsing error with a trace: place in the program, markings at
+  // places (code values), path, calls; otherwise, check in runtime.
+// 
+// Message and notes are calculated only in case of violation.
   flow eval_require(node_id n, node_id cond, scope * env, uint32_t frame) {
     TZ_TRY(c, eval(cond, env, frame));
-    auto b = known_bool(c, db[cond].where);
+    bool in_path = checking() && c.is<split_v>() && std::ranges::any_of(c.as<split_v>().alts, [](value const & a) { return a.is<bool>() && !a.as<bool>(); });
+    auto b = in_path ? std::optional<bool>(false) : known_bool(c, db[cond].where);
     if(b && !*b) {
-      std::string why; // static_level - with a list of unproven
-      for(auto const & d: level_details) why += cat("; ", d);
-      fail_rt("require_failed", cat("нарушено требование require", why), db[n].where);
+      auto const & args = db.as<n_call>(n).args;
+      std::string msg = "нарушено требование require";
+      if(args.size() > 1) {
+        TZ_TRY(m, eval(args[1], env, frame));
+        msg = m.is<str_v>() ? std::string(m.as<str_v>().str()) : show_v(m);
+      }
+      for(auto const & d: level_details) msg += cat("; ", d); // static_level - with a list of unproven
+      if(!checking()) fail_rt("require_failed", msg, db[n].where);
+      span where = program_where(n);
+      diagnostic d(msg, where, diag_kind::runtime);
+      d.type = "require_failed";
+      d.fixed = true; // known when compiling - error parsing, not the exception of the program
+      if(in_path) d.note("в одном из путей", where);
+      for(std::size_t k = 2; k + 1 < args.size(); k += 2) {
+        TZ_TRY(text, eval(args[k], env, frame));
+        TZ_TRY(at, eval(args[k + 1], env, frame));
+        std::string t = text.is<str_v>() ? std::string(text.as<str_v>().str()) : show_v(text);
+        for(auto const & x: at.is<split_v>() ? at.as<split_v>().alts : std::vector<value>{at})
+          if(x.is<agg_v>() && types.name(x.as<agg_v>().type) == "code" && !x.as<agg_v>().fields.empty() && x.as<agg_v>().fields[0].second.is<int64_t>())
+            if(node_id p(uint32_t(x.as<agg_v>().fields[0].second.as<int64_t>())); p) d.note(t, db[p].where);
+      }
+      if(!path.empty()) d.note(cat("в продолжении ", path), where);
+      for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+      throw d;
     }
     // lead demand - overload selection condition: its failure runtime tells at the call
     // (unpack_failed), the body is not executed
@@ -1845,7 +1869,7 @@ struct interpreter {
           got = eval(f.access, env, frame);
         } catch(diagnostic const & d) {
           subjects.pop_back();
-          if(d.kind != diag_kind::runtime) throw;
+          if(d.kind != diag_kind::runtime || d.fixed) throw;
           return unpacked::no;
         } catch(...) {
           subjects.pop_back();
@@ -2364,7 +2388,7 @@ struct interpreter {
     try {
       r = eval(args[0], env, frame);
     } catch(diagnostic const & d) {
-      if(d.kind != diag_kind::runtime) {
+      if(d.kind != diag_kind::runtime || d.fixed) {
         throw_sinks.pop_back();
         throw;
       }
@@ -3242,19 +3266,28 @@ struct interpreter {
   //
   //
 //  
-// The link is tied to a support - an array buffer. Operations,
-  // Disabled support (append, [[invalidates(xs)]]), change its version; the link with the
-  // old version is "dangerous-dangerous": in parsing - an error (in the way where
-  // disabled), in execution - the exception of invalidated_alias. Recording in other
+// The link is tied to a support - an array buffer. Meaning of verification
+  // parsing is the code prelude over the ct state (hacks below): the support is the ct
+  // state of the array, the link remembers it when taking, the use checks requires;
+  // “dangerous-dangerous” is the parsing error with the track. When executed - VM buffer
+  // generation: obsolete link - exception of invalidated_alias. Recording in other
   // elements and values of elements - "dangerous-safe", allowed.
+
+  // Array or erased array (including all splitting paths).
+  bool array_like(value const & v) const {
+    if(v.is<split_v>()) return std::ranges::all_of(v.as<split_v>().alts, [&](value const & a) { return array_like(a); });
+    value const * s = shape_of(v);
+    return s && s->is<array_v>();
+  }
 
   // auto&e = v[i] / place-argument of the variable parameter: reference to the element.
   std::optional<value> element_ref(node_id place_node, scope * env, uint32_t frame, node_id born) {
     if(!db.is_index(place_node) || !db.is<n_ident>(db.index_of(place_node).object)) return std::nullopt;
     auto const & i = db.index_of(place_node);
-    value * cell = find(env, db.as<n_ident>(i.object).name);
+    symbol name = db.as<n_ident>(i.object).name;
+    value * cell = find(env, name);
     if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) return std::nullopt;
-    not_hidden(*cell, db.as<n_ident>(i.object).name, db[place_node].where);
+    not_hidden(*cell, name, db[place_node].where);
     flow fi = eval(i.index, env, frame);
     if(!fi.normal()) return std::nullopt;
     value idx = fi.v;
@@ -3262,13 +3295,14 @@ struct interpreter {
     ref_v r;
     r.cell = cell;
     r.born = born.value + 1;
+    r.name = name;
     if(!checking()) {
       if(!cell->is<array_v>()) return std::nullopt;
       r.index = checked_index(*cell, idx, where);
       r.gen = cell->as<array_v>().gen;
       return value(r);
     }
-    if(!cell->is<array_v>() && !(shape_of(*cell) && shape_of(*cell)->is<array_v>())) return std::nullopt;
+    if(!array_like(*cell)) return std::nullopt;
     if(cell->is<array_v>() && idx.known()) r.index = checked_index(*cell, idx, where);
     else {
       r.rt_index = true;
@@ -3276,7 +3310,7 @@ struct interpreter {
       note_index(place_node, proven_here);
       if(!proven_here) rt_check("out_of_bounds", where);
     }
-    r.gen = book.version(cell);
+    r.memo = hook_ref_taken(cell, name, born, where, frame);
     return value(r);
   }
 
@@ -3295,15 +3329,7 @@ struct interpreter {
   }
 
   void ref_valid(ref_v const & r, span where) {
-    if(checking()) {
-      if(book.version(r.cell) == r.gen) return;
-      diagnostic d("ссылка на элемент использована после инвалидации опоры (опасное-опасное)", where);
-      d.note("ссылка взята здесь", db[node_id(r.born - 1)].where);
-      if(auto it = book.changed_at.find(r.cell); it != book.changed_at.end() && it->second) d.note("опора инвалидирована здесь", db[node_id(it->second - 1)].where);
-      if(!path.empty()) d.note(cat("в продолжении ", path), where);
-      for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
-      throw d;
-    }
+    if(checking()) return hook_ref_used(r, where);
     if(!r.cell->is<array_v>() || r.cell->as<array_v>().gen != r.gen)
       fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
   }
@@ -3312,7 +3338,7 @@ struct interpreter {
     ref_valid(r, where);
     value const & a = *r.cell;
     if(!r.rt_index && a.is<array_v>()) return a.as<array_v>().get(checked_index(a, value(r.index), where));
-    return element_type(a, where);
+    return lift(a, [&](value const & x) { return element_type(x, where); });
   }
 
   flow ref_assign(ref_v const & r, std::string_view op, value const & rhs, span where) {
@@ -3331,7 +3357,8 @@ struct interpreter {
     return ok();
   }
 
-  // append(xs, x) is the growth of the array, the core push; the support xs is disabled.
+  // append(xs, x) is the growth of the array, the core push. What growth means for links,
+  // the library declares: [[invalidates(xs)]] by push (parsing hook on the language).
   flow append(node_list const & args, scope * env, uint32_t frame, node_id n) {
     span where = db[n].where;
     if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("append(массив, значение)", where);
@@ -3345,39 +3372,196 @@ struct interpreter {
       cell->as<array_v>().gen = ++array_gen;
       return ok();
     }
-    invalidate(cell, n);
-    value const * shape = shape_of(*cell);
-    if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
-    if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
-      fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(*cell)), where);
-    if(cell->is<array_v>() && x.known()) cell->as<array_v>().push(x);
-    else *cell = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
+    book.written(cell, true);
+    on_alternatives(cell, [&] {
+      value const * shape = shape_of(*cell);
+      if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
+      if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
+        fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(*cell)), where);
+      if(cell->is<array_v>() && x.known()) cell->as<array_v>().push(x);
+      else {
+        uint32_t keep = cell->ct; // ct-state of place - same
+        *cell = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
+        cell->ct = keep;
+      }
+    });
     return ok();
   }
 
-  // The place of disability for the track is in the program code, not inside prelude.
-  void invalidate(value * cell, node_id at) {
-    bool lib = db.prelude && at && db[at].where.source == db[db.prelude].where.source;
-    uint32_t keep = book.changed_at[cell];
-    book.invalidated(cell, at);
-    if(lib && keep) book.changed_at[cell] = keep;
+  // --- ct state and hooks parsing (§5.6, §12.1) ---
+  //
+  // 
+// 
+// 
+// 
+//.
+  // ct-state - at the value (value::ct): ct_state(x, иначе) reads, set_ct_state(x, s) changes
+  // place; different paths - splitting (§5.5), error - on the way. Hookie (my): the kernel in
+  // parsing calls prelude functions, if they are declared - the meaning of the check is written in
+  // the language; they are not in the executable code.
+
+  uint32_t intern_ct(value const & v) { return ct_states.intern(v, cat(types.describe(v), "=", show_v(v))); }
+
+  // Location of value in the program: the nearest call outside prelude
+//.
+  node_id program_site() const {
+    for(auto it = stack.rbegin(); it != stack.rend(); ++it)
+      if(it->node && !db.in_prelude(node_id(it->node))) return node_id(it->node);
+    return {};
+  }
+  span program_where(node_id n) const {
+    if(!db.in_prelude(n)) return db[n].where;
+    for(auto it = stack.rbegin(); it != stack.rend(); ++it)
+      if(!db.prelude || it->where.source != db[db.prelude].where.source) return it->where;
+    return db[n].where;
   }
 
-  // [[invalidates(p)]] - An operation declares that it disables the support of the
-  // parameter p (semantics is an attribute of the library, not a compiler rule).
-  void declared_invalidations(node_id f, node_list const & args, scope * env, uint32_t site) {
+  // set_ct_state(x, s): The ct-state of the place x is the compile value.
+  flow set_ct_state(node_list const & args, scope * env, uint32_t frame, span where) {
+    if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("set_ct_state(переменная, состояние)", where);
+    value * cell = find(env, db.as<n_ident>(args[0]).name);
+    if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("set_ct_state: первый аргумент — переменная", where);
+    TZ_TRY(s, eval(args[1], env, frame));
+    if(!s.known()) fail(cat("ct-состояние — значение при компиляции, получено рт ", types.describe(s)), where);
+    uint32_t id = intern_ct(s);
+    if(checking()) book.written(cell, false); // Branches and cycles see the previous state
+    if(cell->is<split_v>())
+      for(auto & a: cell->as<split_v>().alts) a.ct = id;
+    else cell->ct = id;
+    return ok();
+  }
+
+  // Code above place by alternatives: the cell is split - the body sees each
+  // alternative separately, the result is again alternatives (§5.5).
+  void on_alternatives(value * cell, auto && body) {
+    if(!cell->is<split_v>()) return body();
+    std::vector<value> alts = cell->as<split_v>().alts;
+    value out;
+    for(std::size_t k = 0; k < alts.size(); ++k) {
+      *cell = alts[k];
+      body();
+      out = k ? merge(out, *cell) : *cell;
+    }
+    *cell = std::move(out);
+  }
+
+  // Calling the prelude function from the kernel: arguments - places (alias) and values.
+  flow call_hook(symbol fn, std::vector<std::pair<symbol, value *>> const & places, std::vector<std::pair<symbol, value>> const & vals, span where, uint32_t node, uint32_t frame) {
+    scope * s = new_scope(globals);
+    scope_hold hold{*this, s};
+    node_list args;
+    auto ident = [&](symbol n) {
+      auto & id = hook_idents[n.value];
+      if(!id) id = db.add(n_ident{n}, {});
+      args.push_back(id);
+    };
+    for(auto const & [n, c]: places) {
+      s->alias(n, c);
+      ident(n);
+    }
+    for(auto const & [n, v]: vals) {
+      s->declare(n, v);
+      ident(n);
+    }
+    hook_hold hh{*this};
+    return call_named(fn, args, s, frame, where, node);
+  }
+  struct hook_hold {
+    interpreter & vm;
+    hook_hold(interpreter & vm) : vm(vm) { ++vm.hook_depth; }
+    ~hook_hold() { --vm.hook_depth; }
+  };
+
+  // Taking a link to an item: ref_taken(опора) prelude, the result remembers the link.
+  uint32_t hook_ref_taken(value * cell, symbol name, node_id born, span where, uint32_t frame) {
+    symbol h = sym("ref_taken");
+    if(!functions.contains(h)) return 0;
+    if(cell->is<split_v>()) { // The state of support is different in ways: the new link begins with a clean
+      book.written(cell, false);
+      std::vector<value> alts = cell->as<split_v>().alts;
+      value out;
+      for(std::size_t k = 0; k < alts.size(); ++k) {
+        alts[k].ct = 0;
+        out = k ? merge(out, alts[k]) : alts[k];
+      }
+      *cell = std::move(out);
+    }
+    value memo;
+    bool first = true;
+    on_alternatives(cell, [&] {
+      flow f = call_hook(h, {{name, cell}}, {}, where, born.value, frame);
+      memo = first ? f.v : merge(memo, f.v);
+      first = false;
+    });
+    if(!memo.known()) fail(cat("ref_taken: ссылка запоминает значение при компиляции, получено ", types.describe(memo)), where);
+    return intern_ct(memo);
+  }
+
+  // Use of reference: ref_used(опора, что запомнила) prelude.
+  void hook_ref_used(ref_v const & r, span where) {
+    symbol h = sym("ref_used");
+    if(!r.memo || !functions.contains(h)) return;
+    call_hook(h, {{r.name, r.cell}}, {{sym("ссылка"), ct_states.at(r.memo)}}, where, 0, 0);
+  }
+
+  // [[g(…)]] for a function where g is a function of the language: ct-hook of the call - for parsing
+  // each call is executed with the parameters of the function associated with arguments (place -
+  // alias). [[invalidates(xs)]] for push is the code prelude, not the rule of the compiler. The
+  // argument is split - the call goes on each alternative (dispatch_split), the hook changes it.
+  void attribute_hooks(node_id f, std::vector<value> const & vals, node_list const & args, scope * env, call_site const & site) {
     if(!checking()) return;
     auto const & fn = db.as<n_fn>(f);
     for(node_id a: fn.attrs) {
-      if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "invalidates") continue;
-      for(node_id pn: db.as<n_call>(a).args) {
-        if(!db.is<n_ident>(pn)) continue;
-        for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
-          if(db.as<n_param>(fn.params[k]).name == db.as<n_ident>(pn).name && db.is<n_ident>(args[k]))
-            if(value * cell = find(env, db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>())
-              invalidate(cell->is<ref_v>() ? cell->as<ref_v>().cell : cell, node_id(site));
+      if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || !functions.contains(db.as<n_ident>(db.as<n_call>(a).callee).name)) continue;
+      scope * s = new_scope(globals);
+      scope_hold hold{*this, s};
+      struct alt_place {
+        value * cell;
+        value saved;
+        std::size_t k;
+      };
+      std::vector<alt_place> alts;
+      for(uint32_t k = 0; k < fn.params.size() && k < vals.size(); ++k) {
+        symbol p = db.as<n_param>(fn.params[k]).name;
+        value * cell = k < args.size() ? place_or_null(args[k], env) : nullptr;
+        if(cell && cell->is<ref_v>()) cell = cell->as<ref_v>().cell;
+        if(!cell) {
+          s->declare(p, vals[k]);
+          continue;
+        }
+        if(cell->is<split_v>() && !vals[k].is<split_v>()) { // This alternative is for hook time.
+          auto const & as = cell->as<split_v>().alts;
+          for(std::size_t j = 0; j < as.size(); ++j)
+            if(same_alt(as[j], vals[k])) {
+              book.written(cell, false);
+              alts.push_back({cell, *cell, j});
+              *cell = as[j];
+              break;
+            }
+        }
+        s->alias(p, cell);
+      }
+      stack.push_back(site); // place of call - in the Trace and for call_site()
+      hook_hold hh{*this};
+      try {
+        eval(a, s, site.frame);
+      } catch(...) {
+        stack.pop_back();
+        for(auto & x: alts) *x.cell = std::move(x.saved);
+        throw;
+      }
+      stack.pop_back();
+      for(auto it = alts.rbegin(); it != alts.rend(); ++it) {
+        value now = std::move(*it->cell);
+        *it->cell = std::move(it->saved);
+        it->cell->as<split_v>().alts[it->k] = std::move(now);
       }
     }
+  }
+
+  bool same_alt(value const & a, value const & b) const {
+    if(state_of(a) != state_of(b) || types.describe(a) != types.describe(b)) return false;
+    return !a.known() || !b.known() || show_v(a) == show_v(b);
   }
 
   // --- fiber and streams (§8.3, M3a) ---
@@ -4335,6 +4519,7 @@ struct interpreter {
   std::string state_of(value const & x) const {
     std::string s;
     if(x.hidden) s += "H";
+    if(x.ct) s += cat("C", x.ct);
     if(x.pinned) s += "P" + show_v(x);
     value const * v = shape_of(x);
     if(v && v->is<agg_v>())
@@ -4478,11 +4663,13 @@ struct interpreter {
       // code(x) - AST expression value: the expr-parameter - the code of the caller
       // (bypass and build node, §7.4):
 //.
-      if(str(name) == "code" && c.args.size() == 1 && !functions.contains(name)) return ok(code_value(code_of(c.args[0], env)));
+      if(str(name) == "code" && c.args.size() <= 1 && !functions.contains(name)) // code() is an empty node
+        return ok(code_value(c.args.empty() ? node_id() : code_of(c.args[0], env)));
       if(str(name) == "ref" && c.args.size() == 1 && !functions.contains(name)) return eval_ref(c.args[0], env, frame, where);
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
       if(name == sym_alloc_in && !functions.contains(name)) return alloc_in(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
+      if(name == sym_set_ct_state && !functions.contains(name)) return set_ct_state(c.args, env, frame, where);
       if(name == sym_spawn && !functions.contains(name)) return spawn(c.args, env, frame, where);
       if(name == sym_process && !functions.contains(name)) return start_process(c.args, env, frame, where);
       if(name == sym_yield && !functions.contains(name) && c.args.empty()) {
@@ -4731,7 +4918,7 @@ struct interpreter {
           r = dispatch_split(fns, copy, i + 1, args, env, frame, site, base);
         } catch(diagnostic & d) { // Trace - the way: what is the argument in what state
           d.note(cat("в пути [", i < args.size() && db.is<n_ident>(args[i]) ? cat(str(db.as<n_ident>(args[i]).name), ": ") : std::string(),
-                     alt.known() ? show_v(alt) : types.describe(alt), "]"),
+                     alt.known() ? show_v(alt) : types.describe(alt), alt.ct ? cat(", ct ", show_v(ct_states.at(alt.ct))) : std::string(), "]"),
               site.where);
           throw;
         }
@@ -4933,14 +5120,14 @@ struct interpreter {
     scope * parent = std::exchange(invoke_parent, nullptr);
     bool open = std::exchange(invoke_open, false);
     check_inside(f, site);
-    declared_invalidations(f, args, env, site.node);
+    attribute_hooks(f, vals, args, env, site);
     // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
     for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
       if(db.as<n_param>(fn.params[k]).mode == param_mode::own && db.is<n_ident>(args[k]) && !scalar(vals[k])) // scalar moves around
         if(value * cell = find(env, db.as<n_ident>(args[k]).name); cell && !cell->is<thunk_v>()) hide_cell(cell, node_id(site.node));
     if(fn.outline && inline_required(f))
       fail(cat(site.what, " помечена outline, но использует семантику инлайна"), db[f].where);
-    if(checking() && param_writes_checked.insert(f.value).second)
+    if(checking() && !hook_depth && param_writes_checked.insert(f.value).second)
       for(uint32_t k = 0; k < fn.params.size(); ++k)
         if(db.as<n_param>(fn.params[k]).mode != param_mode::expr && writes_param(f, k))
           param_writes.push_back(cat(describe_fn(f), ": меняет ", str(db.as<n_param>(fn.params[k]).name)));
@@ -5349,7 +5536,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -5653,6 +5840,10 @@ struct interpreter {
       }
       return value(std::move(r));
     }
+    // ct-state of value (§5.6): ct_state(x, иначе) - it is not - otherwise
+    if(n == "ct_state" && a.size() == 2) return a[0].ct ? ct_states.at(a[0].ct) : a[1];
+    // Location of value in the program - the nearest call outside prelude (Library Check Track)
+    if(n == "call_site" && a.empty()) return code_value(program_site());
     fail(cat("неизвестная функция ", n, "(", [&] {
             std::string s;
             for (uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + types.describe(a[i]);
@@ -5760,6 +5951,9 @@ struct interpreter {
   std::set<value const *> state_cells;
   std::deque<address_space> regions; // region() memory levels (at VM root); live as long as the process is alive
   symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
+  symbol sym_set_ct_state; // ct-state of place (disassembled in place as append)
+  uint32_t hook_depth = 0; // Executed by hook parsing (call_hook, attribute_hooks)
+  std::unordered_map<uint32_t, node_id> hook_idents; // Names of hook arguments parsing (call_hook)
   std::vector<std::string> instance_keys; // instance in the parsing chain
   std::map<std::string, std::map<std::string, std::pair<span, std::string>>> rt_checks; // instance → run-time - checks
   bool level_probe = false; // This is parsing for static_level.

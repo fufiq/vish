@@ -1,0 +1,28 @@
+// check-error: чтение закрытого файла
+// check-error: закрыт здесь
+// check-error: в read
+// out: 30
+// error: чтение закрытого файла
+// fmt-stable
+// store-roundtrip
+// Пользовательский typestate на ct-состоянии (§5.6): дескриптор — i64, «закрыт» —
+// ct-состояние значения; close меняет его, read проверяет require с сообщением и
+// местом, где закрыт. 
+// 
+// 
+//.
+struct fstate { bool open; code at; }
+
+close(mut fd) => set_ct_state(fd, fstate{false, call_site()});
+read(fd) {
+  s = ct_state(fd, fstate{true, code()});
+  require(s.open, "чтение закрытого файла", "закрыт здесь", s.at);
+  fd * 10
+}
+
+main() {
+  f = 3;
+  print(read(f));
+  close(f);
+  print(read(f));
+}

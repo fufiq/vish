@@ -352,11 +352,12 @@ struct ast_db {
   template<typename kind>
   kind const & as(node_id n) const { return std::get<kind>(nodes[n].kind); }
 
-  // require(c) is a normal kernel call, not node: condition c, otherwise empty
+  // require(c)/require(c, "сообщение", "пометка", место, …) is a normal kernel call, not a form
+  // of node : condition c, otherwise empty
   node_id require_cond(node_id n) const {
     if(!is<n_call>(n)) return {};
     auto const & c = as<n_call>(n);
-    if(c.args.size() != 1 || !c.words.empty() || !is<n_ident>(c.callee) || strings.text(as<n_ident>(c.callee).name) != "require") return {};
+    if(c.args.empty() || !c.words.empty() || !is<n_ident>(c.callee) || strings.text(as<n_ident>(c.callee).name) != "require") return {};
     return c.args[0];
   }
 

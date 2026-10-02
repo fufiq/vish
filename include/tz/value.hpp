@@ -199,12 +199,14 @@ struct split_v {
 // Reference to the array element (§12.1): the support is the array buffer in the
 // cell. Lives only in the auto& variable and in the parameter; when reading, check
 // the generation (execution) or cell version (parsing), then the element.
-struct ref_v {
+struct ref_v { // The order of fields is tight: the value does not grow
   value * cell = nullptr;
   int64_t index = 0;
-  bool rt_index = false; // The index is known only in runtime (parsing).
-  uint64_t gen = 0; // Buffer generation (execution) / cell version (parsing)
+  uint64_t gen = 0; // buffer generation (performance)
   uint32_t born = 0; // node where (+1) is taken
+  symbol name; // The name of the array-support: hooks parsing get its place
+  uint32_t memo = 0; // parsing: what the link remembered when taking (ref_taken), the number in ct_states +1
+  bool rt_index = false; // The index is known only in runtime (parsing).
 };
 
 struct value {
@@ -218,6 +220,11 @@ struct value {
   // patterns (splitting continuation).
   bool pinned = false;
   uint32_t hidden = 0; // Name hidden (hide / own): seat node +1
+  // ct-state of value (§5.6, §12.1):
+// 
+  // The language code reads and changes it (ct_state/set_ct_state); the number in
+  // ct_states+1. A copy of the meaning carries it, the new meaning does not.
+  uint32_t ct = 0;
 
   value() : v(unit_v{}) {}
   value(auto x) : v(std::move(x)) {}
@@ -253,6 +260,7 @@ struct shape_table {
   // Canonical text of the sample: only types and structure, without meaning.
   static void key_of(value const & x, std::string & out) {
     if(x.hidden) out += "H" + std::to_string(x.hidden);
+    if(x.ct) out += "C" + std::to_string(x.ct);
     if(x.pinned) { // condition
       out += 'P';
       if(x.is<bool>()) out += x.as<bool>() ? '1' : '0';
@@ -313,6 +321,25 @@ struct shape_table {
 };
 
 shape_table shapes; // one on VM: Sample numbers common to all parsing
+
+// ct-states of values (value::ct): interned - equal states - one number. The key is given by
+// the interpreter (type and text of the meaning).
+struct ct_state_table {
+  std::deque<value> items;
+  std::unordered_map<std::string, uint32_t> index;
+
+  uint32_t intern(value v, std::string key) {
+    if(auto it = index.find(key); it != index.end()) return it->second;
+    address_space * saved = std::exchange(current_space, nullptr); // live-in
+    items.push_back(value(v));
+    current_space = saved;
+    index.emplace(std::move(key), uint32_t(items.size()));
+    return uint32_t(items.size());
+  }
+  value const & at(uint32_t id) const { return items[id - 1]; }
+};
+
+ct_state_table ct_states;
 
 value adopt_into(value v, address_space * lv);
 
@@ -596,7 +623,9 @@ value erase(value const & x) {
   } else {
     return x; // Types, functions - always known
   }
-  return value(rt_v{shapes.intern(std::move(shape))});
+  value r(rt_v{shapes.intern(std::move(shape))});
+  r.ct = x.ct; // ct-state erasure does not affect
+  return r;
 }
 
 // Sample type of erased value (for operations on run-time).

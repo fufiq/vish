@@ -1,0 +1,23 @@
+// args: 2
+// out: 30
+// check-error: чтение закрытого файла
+// check-error: закрыт здесь
+// check-error: в пути [f:
+// Состояние разное по веткам рт-if — расщепление (§5.5): ct-состояние — часть
+// состояния значения, как ct-поле; ошибка — в пути, где файл закрыт, с этим путём в
+// трейсе. При исполнении закрывает только ветка n > 5.
+struct fstate { bool open; code at; }
+
+close(mut fd) => set_ct_state(fd, fstate{false, call_site()});
+read(fd) {
+  s = ct_state(fd, fstate{true, code()});
+  require(s.open, "чтение закрытого файла", "закрыт здесь", s.at);
+  fd * 10
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  f = 3;
+  if(n > 5) close(f);
+  print(read(f));
+}

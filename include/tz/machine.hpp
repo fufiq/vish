@@ -2066,7 +2066,10 @@ struct process_machine {
       t.phase = 1;
       return push_eval(cond, t.scope, t.frame);
     }
-    if(!truthy(pop_val(), db[cond].where)) throw diagnostic("нарушено требование require", db[n].where);
+    if(!truthy(pop_val(), db[cond].where)) { // require(c, "сообщение", …): Notes only at parsing
+      auto const & args = db.as<n_call>(n).args;
+      throw diagnostic(args.size() > 1 && db.is<n_str>(args[1]) ? db.as<n_str>(args[1]).value : std::string("нарушено требование require"), db[n].where);
+    }
     finish(mval{m_unit{}});
   }
 

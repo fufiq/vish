@@ -109,6 +109,30 @@ try(expr body) catch(expr... handlers) => intercept(body, handlers);
 //). Семантика — атрибутом библиотеки.
 [[invalidates(xs)]] push(mut xs, x) => append(xs, x);
 
+// Опоры ссылок (§12.1) — анализ кодом на языке: ct-состояние + require. 
+// 
+// 
+// Опора —
+// ct-состояние массива: поколение буфера и где оно сменилось; ссылка запоминает
+// поколение и где взята. Хуки разбора (моё): ядро при разборе вызывает ref_taken при
+// взятии &e = xs[i] (и элемента в изменяемый параметр), ref_used — при каждом
+// использовании; [[g(…)]] у функции, где g — функция, — хук её вызова. В исполняемом
+// коде их нет: при исполнении ссылку проверяет поколение буфера VM (invalidated_alias).
+struct ref_anchor { i64 gen; code at; }
+// опора массива; gen -1 — ссылок на него не брали или массив заменён целиком
+anchor_of(xs) => ct_state(xs, ref_anchor{-1, code()});
+// [[invalidates(xs)]] — новое поколение опоры (если на неё брали ссылки)
+invalidates(mut xs) {
+  if(anchor_of(xs).gen >= 0) set_ct_state(xs, ref_anchor{anchor_of(xs).gen + 1, call_site()});
+}
+ref_taken(mut xs) {
+  if(anchor_of(xs).gen < 0) set_ct_state(xs, ref_anchor{0, call_site()});
+  ref_anchor{anchor_of(xs).gen, call_site()}
+}
+ref_used(xs, ref_anchor r) => require(anchor_of(xs).gen == r.gen,
+  "ссылка на элемент использована после инвалидации опоры (опасное-опасное)",
+  "ссылка взята здесь", r.at, "опора инвалидирована здесь", anchor_of(xs).at);
+
 // checked { … } — контекст: арифметика i64 с проверкой переполнения для всего,
 // что выполняется внутри блока, включая вызванные функции (их экземпляры —
 // свои для контекста): 
@@ -739,6 +763,16 @@ jit_compile(cg, f, types, type result) {
     n_call{c, _, _, _, _, _} = e;
     callee_name(c) == name
   };
+  // ct-состояние значения (§5.6) машинный код не несёт: код с ним исполняет интерпретатор
+  ct_state_op(str name) => (name == "ct_state") || ((name == "set_ct_state") || (name == "call_site"));
+  uses_ct_state(e) => {
+    found = (code_kind(e) == n_call) && {
+      n_call{c, _, _, _, _, _} = e;
+      ct_state_op(callee_name(c))
+    };
+    for(x : code_items(e)) if(!found) found = uses_ct_state(x);
+    found
+  };
   // тип узла: имя — по окружению компилятора, иначе — у разбора, иначе — по виду узла
   ty(e) => {
     k = code_kind(e);
@@ -1332,6 +1366,7 @@ jit_compile(cg, f, types, type result) {
     else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // примитив ядра a[i]
     else if((name == "append") && (xs.size == 2)) gen_append(e, xs[0], xs[1]);
     else if(name == "hide") {} // скрытие имени — только при компиляции
+    else if(ct_state_op(name)) bad(fmt"{name}: ct-состояние — интерпретатор");
     else if((name == "require") && (xs.size == 1)) { // require(c) — вызов ядра: нарушено — ошибка 3
       gen(xs[0]);
       jump_unless(acc, trap(3, e));
@@ -2134,7 +2169,8 @@ jit_compile(cg, f, types, type result) {
   };
   vm_or_bad(e, str why) => {
     t = ty(e);
-    if(fusing && !in_b) bad(fmt"генератор: {why}");
+    if(uses_ct_state(e)) bad("ct-состояние — интерпретатор");
+    else if(fusing && !in_b) bad(fmt"генератор: {why}");
     else if(tries.size > 0) bad(fmt"{why} (внутри try)");
     else if((t == jc_range) || is_stream(t)) bad(why);
     else vm_eval(e, t);

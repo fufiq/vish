@@ -1,0 +1,24 @@
+// args: 2
+// out: 30 -1
+// check: require_failed
+// check-lacks: ошибка
+// Условие require не известно при компиляции (ct-состояние «закрыт» и рт-флаг force) —
+// проверка остаётся в рантайме (§5.4): исключение require_failed с сообщением
+// пользователя; разбор не падает, в уровне статичности — рт-проверка.
+struct fstate { bool open; code at; }
+
+close(mut fd) => set_ct_state(fd, fstate{false, call_site()});
+read(fd, bool force) {
+  s = ct_state(fd, fstate{true, code()});
+  require(s.open || force, "чтение закрытого файла", "закрыт здесь", s.at);
+  fd * 10
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  f = 3;
+  a = read(f, n > 100);
+  close(f);
+  b = try { read(f, n > 100) } catch(require_failed e) { -1 };
+  print(a, b);
+}

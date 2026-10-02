@@ -163,8 +163,9 @@ void add_dot_functions(ast_db const & db, node_id root, std::vector<std::string>
 }
 
 // Live filter: prefix, then substring, then subsequence (without taking into account the
-// register); with equality - near, then by name. That's all.
-std::vector<completion_item> filter_completions(std::vector<completion_item> items, std::string_view word, std::size_t limit = 100) {
+// register); with equality - near, then by name. Empty word - everything (to limit: prelude
+// grows - 200 to "all visible" to the built-in VM).
+std::vector<completion_item> filter_completions(std::vector<completion_item> items, std::string_view word, std::size_t limit = 200) {
   auto lower = [](std::string_view s) {
     std::string r(s);
     for(char & c: r)
