@@ -16,6 +16,7 @@
 #include <array>
 #include <map>
 #include <optional>
+#include <set>
 
 namespace tz {
 
@@ -52,7 +53,11 @@ struct parser {
   void learn(n_fn const & f, node_id id = {}) {
     if(!f.name) return;
     if(!f.form.empty()) { // Syntax - a form of recording, not a call design
-      if(id) syntaxes[f.name.value].push_back(id);
+      if(!id) return;
+      syntaxes[f.name.value].push_back(id);
+      if(record_of(db, id)) // Write words are not names: `if(c) { … }` does not declare an if function
+        for(symbol w: f.form)
+          if(lexer::is_ident_start(db.strings.text(w)[0])) record_words.insert(std::string(db.strings.text(w)));
       return;
     }
     learn_operator(f);
@@ -260,22 +265,29 @@ struct parser {
   bool is_close(char c) const { return here().kind == tok::close && here().ch() == c; }
 
   // The operator in position k is the longest matching of glued symbols (`==` is
-  // not read as `=` `=`, `=>` is not read as `=` `>`).
+  // not read as `=` `=`, `=>` is not read as `=` `>`). Sluices - from statements
+  // of operators in the area (operator (a) ==(b) - prelude) and signs parsing of
+  // the core (`...`, `=>`, assignment):
+//.
   bool is_op(std::string_view op, uint32_t k = 0) const { return longest_op(k) == op; }
 
   std::string_view longest_op(uint32_t k) const {
-    static constexpr std::array ops{"...", "==", "!=", "<=", ">=", "&&", "||", "=>", "+=", "-=", "*=", "/=",
-        "..", "=", "<", ">", "+", "-", "*", "/", "%", "!", "~", "?", ":",
-        ".", ",", ";", "&", "|", "^", "@", "#", "$", "\\"};
-    for(std::string_view o: ops) {
-      bool ok = true;
-      for(uint32_t i = 0; i < o.size() && ok; ++i) {
+    static constexpr std::array core{"...", "=>", "+=", "-=", "*=", "/=", ".."};
+    token const & t0 = ahead(k);
+    if(t0.kind != tok::op) return {};
+    std::string_view best = t0.text.substr(0, 1);
+    auto glued_as = [&](std::string_view o) {
+      for(uint32_t i = 0; i < o.size(); ++i) {
         token const & t = ahead(k + i);
-        ok = t.kind == tok::op && t.ch() == o[i] && (i == 0 || t.glued);
+        if(t.kind != tok::op || t.ch() != o[i] || (i && !t.glued)) return false;
       }
-      if(ok) return o;
-    }
-    return {};
+      return true;
+    };
+    for(std::string_view o: core)
+      if(o.size() > best.size() && glued_as(o)) best = o;
+    for(auto const & [o, forms]: operators)
+      if(o.size() > best.size() && glued_as(o)) best = o;
+    return best;
   }
 
   void eat_op(std::string_view op) {
@@ -370,9 +382,13 @@ struct parser {
     uint32_t start = here().where.begin;
     node_list attrs = attributes();
     // Attributes enter the node before being added to the database, otherwise journal will not see them.
-    if(is_word("struct") && ahead(1).kind == tok::ident && (is_open('{', 2) || is_op(":", 2))) return struct_decl(std::move(attrs));
     if(is_word("operator")) return operator_decl(std::move(attrs));
     if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl(std::move(attrs));
+    // T Name { … } - Name is instance T:
+// 
+// What T is - knows VM (struct).
+    if(ahead(0).kind == tok::ident && !is_keyword(ahead(0).text) && ahead(1).kind == tok::ident && (is_open('{', 2) || (is_op(":", 2) && ahead(3).kind == tok::ident && is_open('{', 4))))
+      return instance_decl(std::move(attrs));
     if(auto f = try_fn_decl(false, attrs)) return *f;
     if(!attrs.empty()) { // [[state]] x = e is the state of the program (§12.2): the variable of the module
       node_id s = statement();
@@ -548,12 +564,11 @@ struct parser {
     return db.add(std::move(e), {start, toks[pos - 1].where.end});
   }
 
-  // struct Name { T поле [= значение]; … } [;]
-  node_id struct_decl(node_list attrs = {}) {
+  // T Name [: base] { [ct] T поле [= значение]; … } [;] - extension Name, instance T
+  node_id instance_decl(node_list attrs = {}) {
     uint32_t start = here().where.begin;
-    advance();
-    n_extend st; // instance
-    st.of = db.strings.intern("struct");
+    n_extend st;
+    st.of = ident();
     st.attrs = std::move(attrs);
     st.name = ident();
     if(is_op(":")) { // struct method error : http { … }
@@ -634,8 +649,17 @@ struct parser {
     return db.add(std::move(f), {start, toks[pos - 1].where.end});
   }
 
-  static bool is_keyword(std::string_view w) {
-    return w == "if" || w == "loop" || w == "break" || w == "continue" || w == "return" || w == "require" || w == "try_compile" || w == "ct" || w == "else" || w == "auto" || w == "const" || w == "outline" || w == "module" || w == "throw" || w == "struct" || w == "operator";
+  // Words that are not names: kernel parsing (ads) and words of syntax entries from ads in
+  // the area (if, else, loop, return... - prelude):
+// 
+//.
+  bool is_keyword(std::string_view w) const {
+    return w == "ct" || w == "const" || w == "outline" || w == "module" || w == "operator" || record_words.contains(std::string(w));
+  }
+  // w is the first word of the declared syntax record (begins the expression)
+  bool heads_syntax(std::string_view w) const {
+    auto it = db.strings.index.find(std::string(w));
+    return it != db.strings.index.end() && syntaxes.contains(it->second.value);
   }
 
   node_list param_list(symbol clause = {}) {
@@ -684,7 +708,6 @@ struct parser {
       return db.add(std::move(p), {start, toks[pos - 1].where.end});
     }
     // [type] [...] name | name
-    if(is_word("auto") && ahead(1).kind == tok::ident) throw diagnostic("auto не нужен: параметр без типа принимает всё", here().where);
     if(here().kind == tok::ident && (ahead(1).kind == tok::ident || is_op("...", 1))) {
       p.type = type_expr();
       if(is_op("...")) {
@@ -771,13 +794,12 @@ struct parser {
     return db.add(n_unpack{p, v, test}, {start, toks[pos - 1].where.end});
   }
 
-  // Auto - no type, no node
+  // Type is name. auto no (author's decision 2026-09-28):
+// Tag with
+  // any name is a value (§5.1), so the prohibition is here, one place.
   node_id type_expr() {
     uint32_t start = here().where.begin;
-    if(is_word("auto")) {
-      advance();
-      return {};
-    }
+    if(is_word("auto")) throw diagnostic("auto не нужен: без типа имя принимает всё, x = … выводит тип", here().where);
     symbol name = ident(); // to span: the order of calculation of arguments is not specified
     return db.add(n_ident{name}, {start, toks[pos - 1].where.end});
   }
@@ -814,64 +836,17 @@ struct parser {
     return db.add(std::move(b), {start, toks[pos - 1].where.end});
   }
 
-  // Instructions. last_was_value_ is an expression without `;`.
+  // Instructions. Assigns last_was_value_ , if it is an expression without `;` . return,
+  // break, continue, hide, try_compile - syntax prelude (§4.4 ): disassembled as
+  // expressions, the record with `;` itself ends the instruction.
   node_id statement() {
     last_was_value = false;
-    uint32_t start = here().where.begin;
 
     if(auto f = try_fn_decl(true)) return *f;
 
-    if(is_word("return")) {
-      advance();
-      // return(цель) value - close; return (x) with space - value
-      node_id target;
-      if(is_open('(') && here().glued) {
-        advance();
-        uint32_t t0 = here().where.begin;
-        symbol tn = ident();
-        target = db.add(n_ident{tn}, {t0, toks[pos - 1].where.end});
-        expect_close(')');
-      }
-      node_id v;
-      if(!is_op(";") && !is_close('}') && !(line_mode && at_end())) v = expression();
-      end_statement();
-      return db.add(n_return{v, target}, {start, toks[pos - 1].where.end});
-    }
-    if(is_word("require") && is_open('(', 1)) {
-      advance();
-      expect_open('(');
-      node_id c = expression();
-      expect_close(')');
-      end_statement();
-      node_id f = db.add(n_ident{db.strings.intern("require")}, {start, start + 7});
-      return db.add(n_call{f, {c}}, {start, toks[pos - 1].where.end});
-    }
-    if(is_word("try_compile") && is_open('{', 1)) {
-      advance();
-      node_id body = block();
-      node_id f = db.add(n_ident{db.strings.intern("try_compile")}, {start, start + 11});
-      n_call c{f, {body}};
-      c.tail = true;
-      return db.add(std::move(c), {start, toks[pos - 1].where.end});
-    }
     if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
       advance();
       return operator_decl({}, true);
-    }
-    if(is_word("hide") && ahead(1).kind == tok::ident) {
-      advance();
-      uint32_t at = here().where.begin;
-      symbol name = ident();
-      node_id x = db.add(n_ident{name}, {at, toks[pos - 1].where.end});
-      end_statement();
-      node_id f = db.add(n_ident{db.strings.intern("hide")}, {start, start + 4});
-      return db.add(n_call{f, {x}}, {start, toks[pos - 1].where.end});
-    }
-    if(is_word("break") || is_word("continue")) {
-      bool brk = is_word("break");
-      advance();
-      end_statement();
-      return brk ? db.add(n_break{}, {start, toks[pos - 1].where.end}) : db.add(n_continue{}, {start, toks[pos - 1].where.end});
     }
     if(pattern_ahead()) { // sample = value;
       node_id u = unpack();
@@ -898,7 +873,7 @@ struct parser {
     auto const & i = db.as<n_if>(n);
     node_id last = i.else_ ? i.else_ : i.then_;
     if(db.is<n_if>(last)) return if_closed(last);
-    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
+    return db.is<n_block>(last); // Write branch with `;` (return x;) closes through tail_statement
   }
 
   bool ends_with_block(node_id e) const {
@@ -930,7 +905,7 @@ struct parser {
     // derived); &e = v[i] is a reference; x = e without a sign is an announcement if
     // there is no name (interpreter parses):
     //
-    bool typed = ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_op("=", k + 2);
+    bool typed = ahead(k).kind == tok::ident && !is_keyword(ahead(k).text) && ahead(k + 1).kind == tok::ident && is_op("=", k + 2); // return x = e - not an announcement
     bool qualified = is_const && ahead(k).kind == tok::ident && is_op("=", k + 1);
     if(k == 0 && is_word("ct") && ahead(1).kind == tok::ident && is_op("=", 2)) { // ct x = e is the compile variable (§7.3)
       uint32_t start = here().where.begin;
@@ -946,7 +921,6 @@ struct parser {
     bool ref = k == 0 && is_op("&") && ahead(1).kind == tok::ident && is_op("=", 2);
     if(!typed && !qualified && !ref) return std::nullopt;
     if(strict && !typed) throw diagnostic("explicit — перед типом: explicit T x = e", here().where);
-    if(typed && is_word("auto", k)) throw diagnostic("auto не нужен: x = … объявляет с выводом типа", ahead(k).where);
     uint32_t start = here().where.begin;
     if(is_const) advance();
     if(strict) advance();
@@ -980,7 +954,7 @@ struct parser {
   void learn_operator(n_fn const & f) {
     auto name = db.strings.text(f.name);
     for(std::string_view role: {"infix", "prefix", "postfix"})
-      if(name.size() > role.size() && name.starts_with(role) && op_char(name[role.size()])) {
+      if(name.size() > role.size() && name.starts_with(role) && (op_char(name[role.size()]) || name.substr(role.size()) == "[]")) {
         op_forms & o = operators[std::string(name.substr(role.size()))];
         (role == "infix" ? o.infix : role == "prefix" ? o.prefix
                                                       : o.postfix) = true;
@@ -1058,10 +1032,14 @@ struct parser {
     f.form.push_back(f.name);
     while(!is_op("=>") && !at_end()) {
       if(is_open('(')) {
+        bool glued = here().glued; // return(цель) vs. return (x)
         advance();
         f.params.push_back(param());
         expect_close(')');
-        f.form.push_back(db.strings.intern("("));
+        f.form.push_back(db.strings.intern(glued ? "()" : "("));
+      } else if(is_op(";")) { // end of instruction: ; (or before )
+        advance();
+        f.form.push_back(db.strings.intern(";"));
       } else if(is_open('{')) {
         uint32_t p0 = here().where.begin;
         advance();
@@ -1076,7 +1054,7 @@ struct parser {
         advance();
       } else if(here().kind == tok::op) {
         f.form.push_back(db.strings.intern(symbol_run()));
-      } else throw diagnostic("в записи syntax — слова, символы, (параметр) и {блок}", here().where);
+      } else throw diagnostic("в записи syntax — слова, символы, ;, (параметр) и {тело}", here().where);
     }
     expect_op("=>");
     f.body = is_open('{') ? block() : expression();
@@ -1087,44 +1065,130 @@ struct parser {
     return id;
   }
 
-  // Sign up for syntax ads with that first word (last ad is first). None came up -
+  // Record syntax ads with this first word. Forms with a common beginning are parsed
+  // together once; on branch, the text in front decides: matching words and symbols
+  // (longer row - first), then (parameter) in brackets, then {тело}, then the end of the
+  // form. Of equals, the last announcement. Write node kernel (if, loop, return... -
+  // prelude) after the start of parsing of its parts does not roll back: the error inside
+  // is a hole, like any instruction. Otherwise (form-challenge) did not fit any -
   // nullopt, the position is not shifted.
   std::optional<node_id> syntax_use(uint32_t start) {
     auto it = syntaxes.find(db.strings.intern(here().text).value);
     if(it == syntaxes.end()) return std::nullopt;
+    std::vector<node_id> live(it->second.rbegin(), it->second.rend());
+    auto piece = [&](node_id d, std::size_t k) -> std::string_view {
+      auto const & form = db.as<n_fn>(d).form;
+      return k < form.size() ? db.strings.text(form[k]) : std::string_view();
+    };
+    auto is_param = [](std::string_view p) { return p == "(" || p == "()" || p == "{"; };
+    bool records = std::ranges::all_of(live, [&](node_id d) { auto r = record_of(db, d); return r && r->kind >= 0; });
     uint32_t saved = pos;
-    for(auto d = it->second.rbegin(); d != it->second.rend(); ++d) {
-      pos = saved;
-      auto const & form = db.as<n_fn>(*d).form;
-      try {
-        uint32_t h0 = here().where.begin;
-        advance();
-        n_call c;
-        c.callee = db.add(n_ident{form[0]}, {h0, toks[pos - 1].where.end});
-        c.form = d->value + 1;
-        for(std::size_t k = 1; k < form.size(); ++k) {
-          auto piece = db.strings.text(form[k]);
-          if(piece == "(") {
-            expect_open('(');
-            c.args.push_back(expression());
-            expect_close(')');
-          } else if(piece == "{") {
-            if(!is_open('{')) throw diagnostic("ожидался блок", here().where);
-            c.args.push_back(block());
-          } else if(op_char(piece[0])) {
-            if(symbol_run() != piece) throw diagnostic(cat("ожидалось ", piece), here().where);
-          } else {
-            if(!is_word(piece)) throw diagnostic(cat("ожидалось ", piece), here().where);
-            advance();
+    bool committed = false;
+    try {
+      uint32_t h0 = here().where.begin, h1 = here().where.end;
+      advance();
+      node_id callee;
+      if(std::ranges::any_of(live, [&](node_id d) { return !record_of(db, d); })) callee = db.add(n_ident{db.strings.intern(toks[pos - 1].text)}, {h0, h1});
+      node_list args;
+      std::size_t k = 1;
+      for(;;) {
+        // words and symbols ahead: the longest matching row
+        uint32_t best_len = 0, best_toks = 0;
+        node_id best;
+        for(node_id d: live) {
+          uint32_t len = 0, off = 0;
+          for(std::string_view p = piece(d, k); !p.empty() && !is_param(p); p = piece(d, k + ++len)) {
+            uint32_t n = literal_at(p, off);
+            if(n == ~uint32_t{0}) {
+              len = 0;
+              break;
+            }
+            off += n;
           }
+          if(len > best_len) best_len = len, best_toks = off, best = d;
         }
-        c.tail = db.strings.text(form.back()) == "{";
-        return db.add(std::move(c), {start, toks[pos - 1].where.end});
-      } catch(diagnostic const &) {
+        if(best_len) {
+          std::erase_if(live, [&](node_id d) {
+            for(uint32_t i = 0; i < best_len; ++i)
+              if(piece(d, k + i) != piece(best, k + i)) return true;
+            return false;
+          });
+          for(uint32_t i = 0; i < best_toks; ++i) advance();
+          tail_statement = piece(best, k + best_len - 1) == ";"; // ; completed the instruction
+          k += best_len;
+          continue;
+        }
+        auto with = [&](auto && fits) {
+          std::vector<node_id> v;
+          for(node_id d: live)
+            if(fits(piece(d, k))) v.push_back(d);
+          return v;
+        };
+        if(auto v = with([&](std::string_view p) { return (p == "(" || p == "()") && is_open('(') && (p == "(" || here().glued); }); !v.empty()) {
+          live = std::move(v);
+          committed = records;
+          tail_statement = false;
+          advance();
+          args.push_back(expression());
+          expect_close(')');
+          ++k;
+          continue;
+        }
+        if(auto v = with([](std::string_view p) { return p == "{"; }); !v.empty()) {
+          live = std::move(v);
+          committed = records;
+          tail_statement = false;
+          args.push_back(is_open('{') ? block() : expression()); // body: block or expression (branch)
+          ++k;
+          continue;
+        }
+        auto v = with([](std::string_view p) { return p.empty(); });
+        if(v.empty()) throw diagnostic(cat("ожидалось ", piece(live.front(), k)), here().where);
+        node_id d = v.front();
+        auto const & form = db.as<n_fn>(d).form;
+        bool tail = db.strings.text(form.back()) == "{" && !args.empty() && db.is<n_block>(args.back());
+        span w{start, toks[pos - 1].where.end};
+        if(auto r = record_of(db, d)) {
+          std::vector<node_id> places(r->places);
+          for(std::size_t i = 0; i < args.size(); ++i) places[r->slot[i]] = args[i];
+          if(r->kind >= 0) return db.add(make_node(r->kind, places), w);
+          n_call c; // kernel call recording: try_compile { … }, hide x
+          c.args = std::move(places);
+          c.callee = db.add(n_ident{form[0]}, {h0, h1});
+          c.tail = tail;
+          return db.add(std::move(c), w);
+        }
+        n_call c;
+        c.callee = callee;
+        c.form = d.value + 1;
+        c.args = std::move(args);
+        c.tail = tail;
+        return db.add(std::move(c), w);
       }
+    } catch(diagnostic const &) {
+      if(committed) throw;
     }
     pos = saved;
+    tail_statement = false;
     return std::nullopt;
+  }
+
+  // Word or glued symbols p at a distance off in front: how many lexemes it occupies
+  // (~0 is not the same). `;` is the end of the instruction: `;`, and before `}` and
+  // at the end of the line of the set - without the token.
+  uint32_t literal_at(std::string_view p, uint32_t off) const {
+    if(p == ";") {
+      if(is_op(";", off)) return 1;
+      bool closes = ahead(off).kind == tok::close && ahead(off).ch() == '}';
+      return closes || (line_mode && ahead(off).kind == tok::end) ? 0 : ~uint32_t{0};
+    }
+    if(lexer::is_ident_start(p[0])) return is_word(p, off) ? 1 : ~uint32_t{0};
+    uint32_t n = run_length(off);
+    if(n < p.size()) return ~uint32_t{0};
+    for(uint32_t i = 0; i < p.size(); ++i)
+      if(ahead(off + i).ch() != p[i] || (i && !ahead(off + i).glued)) return ~uint32_t{0};
+    if(n > p.size() && ahead(off + uint32_t(p.size())).glued) return ~uint32_t{0}; // glued on - another row
+    return uint32_t(p.size());
   }
 
   std::string symbol_run() { // carrier
@@ -1190,7 +1254,7 @@ struct parser {
 
   bool starts_operand(uint32_t k) const {
     token const & t = ahead(k);
-    if(t.kind == tok::ident) return !is_keyword(t.text) || t.text == "if" || t.text == "throw" || t.text == "ct";
+    if(t.kind == tok::ident) return !is_keyword(t.text) || heads_syntax(t.text) || t.text == "ct"; // (if, throw, return...) - operand
     if(t.kind == tok::int_lit || t.kind == tok::float_lit || t.kind == tok::str_lit || t.kind == tok::char_lit) return true;
     if(t.kind == tok::open) return t.ch() == '(' || t.ch() == '{';
     return t.kind == tok::op && t.ch() == '#';
@@ -1277,23 +1341,19 @@ struct parser {
       symbol name = ident();
       return db.add(n_splice{name}, {start, toks[pos - 1].where.end});
     }
-    if(is_word("throw")) { // throw
-      advance();
-      node_id x = expression();
-      return db.add(n_throw{x}, {start, db[x].where.end});
-    }
     return postfix(primary());
   }
 
   node_id postfix(node_id e) {
     for(;;) {
       uint32_t start = db[e].where.begin;
+      if(tail_statement) return e; // recording with `;` (return x;) finished the instruction
       if(is_open('(') && here().glued) {
         e = call(e, start);
         if(tail_statement) return e; // Instruction-tail completed the instruction
       } else if(is_open('{') && !here().glued && construct_of(e) && construct_of(e)->bare) { // try { … }
         e = call(e, start);
-      } else if(is_open('[') && here().glued) {
+      } else if(is_open('[') && here().glued && is_role("[]", 1)) { // Pair operator - by declaration of operator (a)[i]
         advance();
         node_id i = expression();
         expect_close(']');
@@ -1398,7 +1458,7 @@ struct parser {
       throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только имена: ", db.strings.text(word), "(e)"), db[c.args[first]].where);
     node_id body;
     if(is_open('{')) body = block();
-    else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && !is_word("else")) {
+    else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && (!record_words.contains(std::string(here().text)) || heads_syntax(here().text))) {
       body = statement();
       tail_statement = true;
     }
@@ -1429,7 +1489,6 @@ struct parser {
     bool typed = ahead(1).kind == tok::ident && (is_op(":", 2) || closes(2));
     bool bare = is_op(":", 1) || (packed && closes(1));
     if(!typed && !bare) return std::nullopt;
-    if(is_word("auto")) throw diagnostic("auto не нужен: тип выводится (x : xs)", here().where);
     uint32_t start = here().where.begin;
     n_param p;
     if(typed) p.type = type_expr();
@@ -1479,13 +1538,7 @@ struct parser {
       }
       case tok::ident: {
         if(ahead(1).kind == tok::str_lit && ahead(1).glued) return template_string();
-        if(auto u = syntax_use(start)) return *u;
-        if(t.text == "if" && is_open('(', 1)) return if_expression();
-        if(t.text == "loop" && is_open('{', 1)) {
-          advance();
-          node_id body = block();
-          return db.add(n_loop{body}, {start, toks[pos - 1].where.end});
-        }
+        if(auto u = syntax_use(start)) return *u; // If, loop, return, throw... - prelude
         if(t.text == "native" && ahead(1).kind == tok::str_lit && is_open('{', 2)) { // native "cpp" {code as is }
           advance();
           symbol lang = db.strings.intern(unescape(here().text));
@@ -1535,29 +1588,6 @@ struct parser {
       default: break;
     }
     throw diagnostic("ожидалось выражение", t.where);
-  }
-
-  node_id if_expression() {
-    uint32_t start = here().where.begin;
-    advance();
-    expect_open('(');
-    node_id c = expression(); // if(образец = значение) is the predicate of unpacking (primary)
-    expect_close(')');
-    node_id then_ = branch();
-    node_id else_;
-    if(is_op(";") && is_word("else", 1)) eat_op(";"); // if(c) x = 1; else x = 2;
-    if(is_word("else")) {
-      advance();
-      else_ = branch();
-    }
-    return db.add(n_if{c, then_, else_}, {start, toks[pos - 1].where.end});
-  }
-
-  // Branch if: Block, nested if or expression/instruction.
-  node_id branch() {
-    if(is_open('{')) return block();
-    if(is_word("return") || is_word("require") || is_word("break") || is_word("continue")) return statement();
-    return expression();
   }
 
   // --- literary ---
@@ -1702,6 +1732,7 @@ struct parser {
   bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
   std::unordered_map<uint32_t, construct> constructs; // head-name
   std::unordered_map<uint32_t, std::vector<node_id>> syntaxes; // Syntax announcements by first word
+  std::set<std::string> record_words; // words of records (heads and words of forms)
   struct op_forms {
     bool prefix = false, infix = false, postfix = false, assoc = false;
   };

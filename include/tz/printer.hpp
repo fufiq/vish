@@ -89,7 +89,20 @@ struct printer {
         return;
       }
     }
+    if(auto rec = record_for(n)) return print_record(n, *rec);
     std::visit([&](auto const & k) { print_node(n, k); }, db[n].kind);
+  }
+
+  // A node without a record (if, loop... without prelude) is a kernel record: type {поля}.
+  void print_node(node_id n, auto const &) {
+    out += cat(kind_name(db[n]), "{");
+    bool first = true;
+    db.for_each_child(n, [&](node_id c) {
+      out += first ? "" : ", ";
+      first = false;
+      item(c);
+    });
+    out += '}';
   }
 
   // --- instruction ---
@@ -127,7 +140,7 @@ struct printer {
         auto const & p = db.as<n_param>(f.params[k]);
         if(block) out += cat("{", str(p.name), "}");
         else params({f.params[k]});
-      });
+      }, true);
       out += " => ";
       item(f.body);
       if(!db.is<n_block>(f.body)) out += ';';
@@ -185,19 +198,68 @@ struct printer {
     }
   }
 
-  // Syntax form: word through space, (...) close to word, {…} through space;
-  // hole(k, блок) prints k hole.
-  void form(std::vector<symbol> const & pieces, auto && hole) {
+  // Syntax form: word through space, (...) - close to word, {…} - through space, `;` -
+  // close; hole(k, блок) prints k-th hole. In the announcement (decl) brackets - as
+  // written: "()" close, "(" through the space.
+  void form(std::vector<symbol> const & pieces, auto && hole, bool decl = false) {
     std::size_t k = 0;
     for(std::size_t i = 0; i < pieces.size(); ++i) {
       auto p = str(pieces[i]);
-      bool paren = p == "(";
+      bool paren = p == "(" || p == "()";
       bool after_word = i && lexer::is_ident_start(str(pieces[i - 1])[0]);
-      if(i && !(paren && after_word)) out += ' ';
+      bool glued = p == "()" || (!decl && p == "(" && after_word);
+      if(i && !glued && p != ";") out += ' ';
       if(paren || p == "{") hole(k++, !paren);
       else out += p;
     }
   }
+
+  // prelude entries (§4.4): kernel node and kernel call are printed on the first
+  // suitable record -, the record - in prelude.
+  std::vector<std::pair<node_id, record_info>> const & records() {
+    if(!records_built) {
+      records_built = true;
+      if(db.prelude)
+        for(node_id f: db.as<n_module>(db.prelude).items)
+          if(auto r = record_of(db, f)) record_list.push_back({f, *r});
+    }
+    return record_list;
+  }
+  // Write node n: Body locations а node field (call arguments); empty no.
+  std::pair<node_id, record_info> const * record_for(node_id n) {
+    node_id up = db[n].parent; // hide(x) in syntax hide {x} => hide(x) - as written
+    if(up && db.is<n_fn>(up) && !db.as<n_fn>(up).form.empty() && db.as<n_fn>(up).body == n) return nullptr;
+    for(auto const & rec: records()) {
+      auto const & [f, r] = rec;
+      if(r.kind >= 0) {
+        if(int(db[n].kind.index()) != r.kind) continue;
+        bool fits = true;
+        for(uint32_t p = 0; p < r.places && fits; ++p)
+          fits = bool(node_place(db[n].kind, p)) == std::ranges::contains(r.slot, p);
+        if(fits) return &rec;
+      } else if(db.is<n_call>(n)) {
+        auto const & c = db.as<n_call>(n);
+        if(db.is<n_ident>(c.callee) && db.as<n_ident>(c.callee).name == db.as<n_fn>(f).name && c.words.empty() && !c.tagged && !c.form && c.args.size() == r.places) return &rec;
+      }
+    }
+    return nullptr;
+  }
+  void print_record(node_id n, std::pair<node_id, record_info> const & rec) {
+    auto const & [f, r] = rec;
+    form(db.as<n_fn>(f).form, [&](std::size_t k, bool block) {
+      node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]];
+      if(!block) out += '(';
+      item(x);
+      if(!block) out += ')';
+    });
+  }
+  // node itself sets `;` (return x; break;)
+  bool self_terminated(node_id n) {
+    auto rec = record_for(n);
+    return rec && str(db.as<n_fn>(rec->first).form.back()) == ";";
+  }
+  bool records_built = false;
+  std::vector<std::pair<node_id, record_info>> record_list;
 
   void params(node_list const & ps) {
     out += '(';
@@ -356,17 +418,16 @@ struct printer {
 
   // `;` after the instruction, unless it ends in a block and puts it itself.
   void terminate(node_id s) {
-    if(db.is<n_var>(s) || db.is<n_fn>(s) || db.is<n_return>(s)) return;
+    if(db.is<n_var>(s) || db.is<n_fn>(s)) return;
     if(db.is<n_hole>(s)) { // the hole prints the source code as is; the string of the set in the block - without `;`
       if(!db[s].parent || !db.is<n_block>(db[s].parent)) return;
       std::string_view t = db.as<n_hole>(s).text;
       while(!t.empty() && (t.back() == ' ' || t.back() == '\n' || t.back() == '\t')) t.remove_suffix(1);
       if(t.empty() || t.back() == ';' || t.back() == '}') return;
     }
-    if(db.is<n_loop>(s) || db.is<n_block>(s) || db.is<n_extend>(s)) return;
-    if(db.is<n_break>(s) || db.is<n_continue>(s) ) return;
+    if(db.is<n_block>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
-    if(db.is<n_if>(s) && ends_in_block(s)) return;
+    if(closed(s)) return;
     if(db.is<n_call>(s)) {
       auto const & c = db.as<n_call>(s);
       if(!c.words.empty() || c.tail) return; // Block or tail instruction sets `;` itself
@@ -374,30 +435,21 @@ struct printer {
     out += ';';
   }
 
-  bool ends_in_block(node_id n) const {
-    auto const & i = db.as<n_if>(n);
-    node_id last = i.else_ ? i.else_ : i.then_;
-    if(db.is<n_if>(last)) return ends_in_block(last);
-    // Branch-instruction itself puts `;`
-    return db.is<n_block>(last) || db.is<n_return>(last) || db.is<n_break>(last) || db.is<n_continue>(last);
-  }
-
-  void print_node(node_id, n_return const & r) {
-    out += "return";
-    if(r.target) {
-      out += '(';
-      item(r.target);
-      out += ')';
-    }
-    if(r.value) {
-      out += ' ';
-      item(r.value);
-    }
-    out += ';';
+  // Write node ends with `;` (return x;) or body block (loop { }, if(c) { } else { }) -
+  // `;` is not needed after it.
+  bool closed(node_id n) {
+    auto rec = record_for(n);
+    if(!rec) return false;
+    auto const & [f, r] = *rec;
+    auto last = str(db.as<n_fn>(f).form.back());
+    if(last == ";") return true;
+    if(last != "{" || r.slot.empty()) return false;
+    node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot.back()) : db.as<n_call>(n).args[r.slot.back()];
+    return db.is<n_block>(x) || closed(x);
   }
 
   void print_node(node_id n, n_extend const & e) {
-    if(db.is_struct(n)) return struct_decl(e);
+    if(e.of) return instance_decl(n, e);
     if(e.target) { // &f(types) {overload } - name and signature - current at the target
       auto const & f = db.as<n_fn>(node_id(e.target));
       out += cat("&", str(f.name), "(");
@@ -438,10 +490,10 @@ struct printer {
     out += " }";
   }
 
-  // struct Name [: base] { поля } - instance struct
-  void struct_decl(n_extend const & st) {
+  // T Name [: base] { поля } - instance T (struct)
+  void instance_decl(node_id, n_extend const & st) {
     attrs(st.attrs);
-    out += cat("struct ", str(st.name), st.base ? cat(" : ", str(st.base)) : std::string(), " {");
+    out += cat(str(st.of), " ", str(st.name), st.base ? cat(" : ", str(st.base)) : std::string(), " {");
     for(node_id f: st.items) {
       auto const & v = db.as<n_var>(f);
       out += v.ct ? " ct " : " ";
@@ -468,32 +520,8 @@ struct printer {
 
   void print_node(node_id, n_splice const & s) { out += cat("#", str(s.name)); }
 
-  void print_node(node_id, n_throw const & t) {
-    out += "throw ";
-    item(t.value);
-  }
-
-  void print_node(node_id, n_loop const & l) {
-    out += "loop ";
-    item(l.body);
-  }
-
-  void print_node(node_id, n_break const &) { out += "break;"; }
-  void print_node(node_id, n_continue const &) { out += "continue;"; }
-
-  // --- expression ---
-
-  void print_node(node_id, n_if const & i) {
-    out += "if(";
-    item(i.cond);
-    out += ") ";
-    item(i.then_);
-    if(i.else_) {
-      if(db.is<n_block>(i.then_)) out += " else ";
-      else out += " else ";
-      item(i.else_);
-    }
-  }
+  // --- If, loop, return, break, continue, throw - from prelude (record_for)
+  //
 
   void print_node(node_id, n_ident const & i) { out += str(i.name); }
   void print_node(node_id, n_int const & i) {
@@ -586,11 +614,7 @@ struct printer {
   // Challenge: head and clauses. The parameters of the construction block are printed in
   // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
   void print_node(node_id call, n_call const & c) {
-    if(c.tagged) return tagged(c);
-    if(symbol h = db.hide_name(call)) { // projection hide(x) is the author form of `hide x`
-      out += cat("hide ", str(h));
-      return;
-    }
+    if(c.tagged) return tagged(c); // hide x, try_compile { … } - prelude records (record_for)
     if(c.form && c.form - 1 < db.size() && db.is<n_fn>(node_id(c.form - 1)) && !db.as<n_fn>(node_id(c.form - 1)).form.empty()) {
       auto const & pieces = db.as<n_fn>(node_id(c.form - 1)).form;
       std::size_t shown = 0;
@@ -609,7 +633,7 @@ struct printer {
     uint32_t i = 0;
     uint32_t head_end = 0;
     while(head_end < n && !word(head_end)) ++head_end;
-    group(c, 0, head_end, c.tail, !c.words.empty() || db.try_compile_body(call)); // try_compile { … } - without brackets
+    group(c, 0, head_end, c.tail, !c.words.empty());
     for(i = head_end; i < n; ++i) {
       if(auto pack = db.clause_pack(c.args[i])) {
         for(node_id x: *pack) {

@@ -55,6 +55,7 @@ std::vector<completion_item> context_identifiers(ast_db const & db, node_id at) 
   auto entities = [&](node_id module, uint32_t depth) {
     if(!module || !db.is<n_module>(module)) return;
     for(node_id item: db.as<n_module>(module).items) {
+      if(record_of(db, item)) continue; // Syntax (if, return...) not entity
       if(db.is<n_fn>(item)) add(db.as<n_fn>(item).name, "функция", params(db.as<n_fn>(item).params), depth);
       else if(db.is_struct(item)) add(db.as<n_extend>(item).name, "тип", "struct", depth);
       else if(db.is<n_var>(item)) add(db.as<n_var>(item).name, "переменная", "модуль", depth);
@@ -137,7 +138,7 @@ void add_dot_functions(ast_db const & db, node_id root, std::vector<std::string>
   for(node_id module: {root, db.prelude}) {
     if(!module || !db.is<n_module>(module)) continue;
     for(node_id item: db.as<n_module>(module).items) {
-      if(!db.is<n_fn>(item)) continue;
+      if(!db.is<n_fn>(item) || record_of(db, item)) continue;
       auto const & f = db.as<n_fn>(item);
       std::string name(db.strings.text(f.name));
       if(f.params.empty() || name.starts_with("infix") || name.starts_with("prefix") || name.starts_with("postfix")) continue;

@@ -7,6 +7,38 @@ module prelude;
 // 
 //.
 
+// Записи ядра (§4.4): как писать узлы ядра и вызовы ядра — объявления, не парсер.
+// 
+// 
+// 
+// 
+// 
+// Тело записи — сам узел над её
+// частями: n_if{c, t, e} — узел ядра (struct программы, §7.4), hide(x) — вызов
+// ядра; разбор строит этот узел, печать узла идёт по первой подходящей записи.
+// Части: (x) — в скобках (вплотную к слову — только вплотную), {x} — тело: блок
+// или выражение, ; — конец инструкции (или перед }). Из форм с общим началом
+// выбирает текст впереди. Узлы те же — интерпретатор, машина, JIT, редактор их
+// не различают; *моё:* запись узла и вызова ядра — не функция.
+syntax if (c) {then_} => n_if{c, then_};
+syntax if (c) {then_} else {else_} => n_if{c, then_, else_};
+syntax if (c) {then_}; else {else_} => n_if{c, then_, else_}; // if(c) x = 1; else x = 2;
+syntax loop {body} => n_loop{body};
+syntax break; => n_break{};
+syntax continue; => n_continue{};
+syntax return; => n_return{};
+syntax return {value}; => n_return{value};
+// return(f) x — выход из внешней f; return (x) через пробел — значение
+syntax return(target); => n_return{_, target};
+syntax return(target) {value}; => n_return{value, target};
+// throw — выражение 
+syntax throw {value} => n_throw{value};
+// hide x — имя исчезает из области:  
+syntax hide {x} => hide(x);
+// try_compile { … } — 
+// 
+syntax try_compile {body} => try_compile(body);
+
 // Операторы — сущности языка (§4.4): 
 // Объявление повторяет запись:
 // параметры — на стороне своих веток. Приоритетов нет — цепочку с несколькими

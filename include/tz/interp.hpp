@@ -338,6 +338,9 @@ struct interpreter {
 
   // Announcement in current elaboration: from a module or generated emit.
   void register_item(node_id item) {
+    if(record_of(db, item)) return; // Syntax (if, loop, return...) - projection node
+    if(db.is<n_extend>(item) && db.as<n_extend>(item).of && !db.is_struct(item)) // T Name { … } : from T VM knows struct
+      fail(cat("нет вида сущности ", str(db.as<n_extend>(item).of), ": ", str(db.as<n_extend>(item).name), " — инстанс struct"), db[item].where);
     if(db.is<n_fn>(item)) check_sealed(db.as<n_fn>(item).name, item);
     else if(db.is<n_extend>(item))
       check_sealed(db.as<n_extend>(item).target ? db.as<n_fn>(node_id(db.as<n_extend>(item).target)).name : db.as<n_extend>(item).name, item);

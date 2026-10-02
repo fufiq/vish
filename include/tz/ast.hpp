@@ -563,6 +563,116 @@ bool is_node_kind(std::string_view name) {
   return found;
 }
 
+// The node type number in node_kind is named for the structure (-1 is not).
+int node_kind_index(std::string_view name) {
+  int out = -1, i = 0;
+  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+    if(std::meta::identifier_of(t) == name) out = i;
+    ++i;
+  }
+  return out;
+}
+
+// Fields in the form node; -1 - not all fields node (such a node does not build a record).
+int node_code_fields(int kind) {
+  int out = -1, i = 0;
+  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+    if(i == kind) {
+      int n = 0;
+      bool code = true;
+      template for(constexpr auto m: fields_of<typename[:t:]>()) {
+        code = code && std::is_same_v<typename[:std::meta::type_of(m):], node_id>;
+        ++n;
+      }
+      out = code ? n : -1;
+    }
+    ++i;
+  }
+  return out;
+}
+
+// Kind node with fields in order (empty node_id - the field is empty).
+node_kind make_node(int kind, std::vector<node_id> const & places) {
+  node_kind out;
+  int i = 0;
+  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+    if(i == kind) {
+      typename[:t:] x{};
+      uint32_t k = 0;
+      template for(constexpr auto m: fields_of<typename[:t:]>()) {
+        if constexpr(std::is_same_v<typename[:std::meta::type_of(m):], node_id>)
+          if(k < places.size()) x.[:m:] = places[k];
+        ++k;
+      }
+      out = std::move(x);
+    }
+    ++i;
+  }
+  return out;
+}
+
+// Place node (if the field is a node)
+node_id node_place(node_kind const & k, uint32_t place) {
+  node_id out;
+  std::visit([&](auto const & x) {
+    uint32_t i = 0;
+    template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+      if constexpr(std::is_same_v<typename[:std::meta::type_of(m):], node_id>)
+        if(i == place) out = x.[:m:];
+      ++i;
+    }
+  },
+      k);
+  return out;
+}
+
+// Write (§4.4): Syntax-ad, whose body is one node above the parameters: `syntax loop
+// {body} => n_loop{body};` is the node record of the kernel; `syntax hide {x} =>
+// hide(x);` is the record of the kernel call under the head name.
+// 
+// . parsing builds the node itself (not a function call), node prints on the record; the
+// record is not a function (not registered, not called). `_` in the body is an empty field.
+//
+struct record_info {
+  int kind = -1; // node (number in node_kind); -1 - kernel call with head name
+  std::vector<uint32_t> slot; // parameter k → place in the body (field node / call argument)
+  uint32_t places = 0; // body-place
+};
+
+std::optional<record_info> record_of(ast_db const & db, node_id fn) {
+  if(!db.is<n_fn>(fn)) return std::nullopt;
+  auto const & f = db.as<n_fn>(fn);
+  if(f.form.empty() || !f.body) return std::nullopt;
+  record_info r;
+  node_list items;
+  if(db.is<n_construct>(f.body) && db.is<n_ident>(db.as<n_construct>(f.body).type)) {
+    r.kind = node_kind_index(db.strings.text(db.as<n_ident>(db.as<n_construct>(f.body).type).name));
+    if(r.kind < 0) return std::nullopt;
+    int n = node_code_fields(r.kind);
+    items = db.as<n_construct>(f.body).items;
+    if(n < 0 || items.size() > uint32_t(n)) return std::nullopt;
+    r.places = uint32_t(n);
+  } else if(db.is<n_call>(f.body)) {
+    auto const & c = db.as<n_call>(f.body);
+    if(!db.is<n_ident>(c.callee) || db.as<n_ident>(c.callee).name != f.name || !c.words.empty() || c.tagged || c.form) return std::nullopt;
+    items = c.args;
+    r.places = uint32_t(items.size());
+  } else return std::nullopt;
+  r.slot.assign(f.params.size(), ~uint32_t{0});
+  for(uint32_t i = 0; i < items.size(); ++i) {
+    if(!db.is<n_ident>(items[i])) return std::nullopt;
+    symbol s = db.as<n_ident>(items[i]).name;
+    if(r.kind >= 0 && db.strings.text(s) == "_") continue;
+    uint32_t k = 0;
+    while(k < f.params.size() && db.as<n_param>(f.params[k]).name != s) ++k;
+    if(k == f.params.size() || r.slot[k] != ~uint32_t{0}) return std::nullopt;
+    r.slot[k] = i;
+  }
+  for(uint32_t s: r.slot)
+    if(s == ~uint32_t{0}) return std::nullopt;
+  return r;
+}
+
 // node field type in the program: node - code, list node and names - array, name and text - str.
 template<typename F>
 consteval char const * node_field_type() {

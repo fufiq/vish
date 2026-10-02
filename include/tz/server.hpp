@@ -940,7 +940,7 @@ struct editor_server {
     for(node_id m: {session.root, session.db.prelude}) {
       if(!m || !session.db.is<n_module>(m)) continue;
       for(node_id f: session.db.as<n_module>(m).items)
-        if(session.db.is<n_fn>(f) && session.db.strings.text(session.db.as<n_fn>(f).name) == name) out.push_back(f);
+        if(session.db.is<n_fn>(f) && session.db.strings.text(session.db.as<n_fn>(f).name) == name && !record_of(session.db, f)) out.push_back(f);
     }
     return out;
   }

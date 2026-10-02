@@ -1,0 +1,54 @@
+// out: 3 2
+// out: ветка 1
+// out: 10 7
+// out: 4
+// out: пусто
+// machine
+// fmt-stable
+// store-roundtrip
+// Записи (§4.4): if, loop, return, break, continue, throw, hide, try_compile —
+// объявления syntax прелюдии, тело которых — узел ядра (n_if{c, then_, else_}) или
+// вызов ядра (hide(x)): 
+// 
+// 
+// Программа объявляет свои
+// записи тех же узлов: разбор строит тот же узел, печать — по записи прелюдии.
+syntax forever {body} => n_loop{body};
+syntax when (c) {yes} otherwise {no} => n_if{c, yes, no};
+syntax leave {v}; => n_return{v};
+
+count(n) {
+  i = 0;
+  forever {
+    i += 1;
+    when(i >= n) { break; } otherwise { continue; }
+  }
+  leave i;
+}
+
+pick(x) {
+  if(x > 1) return 1; else return 2; // ; else — та же запись if
+}
+
+main() {
+  print(count(3), pick(1));
+  r = 0;
+  if(r == 0) r = 1; else r = 2;
+  print("ветка", r);
+  i64 f(x) {
+    return (x) + 3; // через пробел — значение; return(f) вплотную — выход из f
+  }
+  print(when(r > 0) { 10 } otherwise { 20 }, f(4));
+  n = 0;
+  loop {
+    n += 1;
+    if(n < 4) continue;
+    break;
+  }
+  print(n);
+  try {
+    throw "пусто";
+  } catch(e) {
+    print(e);
+  }
+}
