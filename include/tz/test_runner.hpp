@@ -14,6 +14,7 @@
 // // slice: function variable
 // // slice-has: text / slice-lacks: text
 // // fmt-stable check fmtffmt = fmt
+// // fmt-has: text in projection (with holes) has a string
 // // store-roundtrip save to .tzdb, download: same projection and same output
 #pragma once
 
@@ -155,7 +156,7 @@ struct test_runner {
   }
   struct expect {
     std::vector<std::string> args, stdin_lines, out, out2, errors, instances, check, check_lacks, check_errors;
-    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, unknown;
+    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, fmt_has, unknown;
     bool fmt_stable = false;
     bool machine = false; // The same program is a process machine: the same output
     std::vector<std::string> machine_dump; // dump step: dump, restore to new base, count
@@ -181,7 +182,7 @@ struct test_runner {
       std::vector<std::string> args_line;
       if(take("args:", args_line)) {
         for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
-      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats)) {
+      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has)) {
       } else if(take("machine-dump:", e.machine_dump)) {
         e.machine = true;
       } else if(body == "machine") {
@@ -463,6 +464,11 @@ struct test_runner {
       parser p2(db2, once);
       std::string twice = printer(db2).print(p2.parse_module());
       if(once != twice) return "    проекция нестабильна: fmt∘fmt ≠ fmt\n";
+    }
+    if(!e.fmt_has.empty()) {
+      std::string text = printer(db).print(root);
+      for(auto & want: e.fmt_has)
+        if(!text.contains(want)) return cat("    нет в проекции: ", in_quotes(want), "\n", text);
     }
 
     // stdin - queue of interpreter lines (as in a session), output - in a row

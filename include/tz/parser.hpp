@@ -1,8 +1,8 @@
 // parsing text projection to the AST base (§4 stack).
 //
-// Phase 1: table of brackets -- . Phase 2: operators. An error inside brackets turns
-// only these brackets into n_hole; parsing continues after the closing bracket. Any
-// text gives you AST.
+// Phase 1: the table of paired brackets - unpaired are repaired by indentation. Phase
+// 2: operators. An error inside brackets turns only these brackets into n_hole; parsing
+// continues after the closing bracket. Any text gives you AST.
 //
 //
 // M0: The set of operators and their groups is sewn into a table. Definition of operators
@@ -28,13 +28,10 @@ struct parser {
     load_prelude(db); // before import: node of this text from this import
     source = db.record_import(std::string(text), std::move(label));
     src = db.source(source);
-    try {
-      toks = lexer(src).run();
-    } catch(diagnostic const & d) {
-      diags.push_back(with_source(d));
-      toks.assign(1, token{});
-      lex_error = d.what();
-    }
+    lexer lx(src);
+    toks = lx.run();
+    diags = std::move(lx.errors); // token::err - Diag numbers
+    if(!diags.empty()) lex_error = diags.front().what();
     match_brackets();
     for(uint32_t i = 0; i < db.size(); ++i)
       if(db.is<n_fn>(node_id(i))) learn(db.as<n_fn>(node_id(i)), node_id(i));
@@ -89,15 +86,6 @@ struct parser {
   }
 
   node_id parse_module() {
-    // The text is not divided into lexemes (unclosed line) - the whole text is a hole:
-    //  
-    if(!lex_error.empty()) {
-      n_module m;
-      m.items.push_back(db.add(n_hole{std::string(src), lex_error}, {0, uint32_t(src.size())}));
-      auto id = db.add(std::move(m), {0, uint32_t(src.size())});
-      db.link_parents(id);
-      return id;
-    }
     uint32_t start = here().where.begin;
     n_module m;
     if(is_word("sealed") && is_word("module", 1)) { // sealed module k; does not expand from the outside
@@ -128,7 +116,6 @@ struct parser {
   // It forms such a unit (its own brackets are broken): the edit goes up to the outer
   // brackets. Mistakes inside are holes, like everywhere else.
   node_id parse_unit(bool as_block) {
-    if(!lex_error.empty()) return {}; // Not broken down into lexemes - to the outer brackets n
     try {
       node_id n = as_block ? block() : item();
       if(!at_end()) return {};
@@ -167,32 +154,94 @@ struct parser {
   }
   // --- Phase 1: paired brackets ---
 
+  // Brackets are unpaired - first fixed (close_by_indent), then always paired.
   void match_brackets() {
-    match.assign(toks.size(), ~uint32_t{0});
-    std::vector<uint32_t> stack;
-    for(uint32_t i = 0; i < toks.size(); ++i) {
-      if(toks[i].kind == tok::open) stack.push_back(i);
-      else if(toks[i].kind == tok::close) {
-        // Unpaired Closing: Remove unclosed openers until suitable so that one lost `(`
-        // does not break the enveloping `{ }`.
-        auto fits = [&](uint32_t o) { return pairs(toks[o].ch(), toks[i].ch()); };
-        if(std::ranges::none_of(stack, fits)) {
-          diags.push_back(diagnostic("непарная скобка", toks[i].where));
-          bracket_error = true;
-          continue;
-        }
-        while(!fits(stack.back())) {
-          diags.push_back(diagnostic("незакрытая скобка", toks[stack.back()].where));
-          bracket_error = true;
-          stack.pop_back();
-        }
-        match[stack.back()] = i;
-        match[i] = stack.back();
-        stack.pop_back();
+    std::vector<char> stack;
+    for(auto const & t: toks) {
+      if(t.kind == tok::open) stack.push_back(t.ch());
+      else if(t.kind == tok::close) {
+        if(stack.empty() || !pairs(stack.back(), t.ch())) bracket_error = true;
+        else stack.pop_back();
       }
     }
-    for(uint32_t i: stack) diags.push_back(diagnostic("незакрытая скобка", toks[i].where));
     if(!stack.empty()) bracket_error = true;
+    if(bracket_error) close_by_indent();
+    match.assign(toks.size(), ~uint32_t{0});
+    std::vector<uint32_t> open;
+    for(uint32_t i = 0; i < toks.size(); ++i) {
+      if(toks[i].kind == tok::open) open.push_back(i);
+      else if(toks[i].kind == tok::close) {
+        match[open.back()] = i;
+        match[i] = open.back();
+        open.pop_back();
+      }
+    }
+  }
+
+  // Repair of unpaired brackets (§4.1):
+// ). Unclosed opening closes
+  // before the first line with an indentation ≤ indentation of his line (or in front of
+  // someone else's closing on the same line, or at the end of the text) - an empty
+  // closing with the cause "unclosed bracket" is inserted; parsing makes a hole that it
+  // closed. Extra closing - token-hole "unpaired bracket". The rest is as it was. *my*:
+  // indentation - only when brackets are unpaired (in pairs, indentation means nothing);
+  // indentation - the number of gaps and tabulations at the beginning of the line.
+  //
+  void close_by_indent() {
+    std::vector<token> out;
+    std::vector<uint32_t> open; // room
+    std::vector<uint32_t> indent; // opening-line
+    auto close_top = [&] {
+      token const & o = out[open.back()];
+      token t;
+      t.kind = tok::close;
+      t.text = o.ch() == '(' ? ")" : o.ch() == '[' ? "]" : "}";
+      uint32_t at = out.back().where.end;
+      t.where = {at, at};
+      t.glued = true;
+      t.err = uint32_t(diags.size());
+      diags.push_back(diagnostic("незакрытая скобка", o.where));
+      out.push_back(t);
+      open.pop_back();
+      indent.pop_back();
+    };
+    for(token t: toks) {
+      uint32_t ind = indent_of(t.where.begin);
+      bool first = line_begin(t.where.begin) + ind == t.where.begin;
+      bool own_close = t.kind == tok::close && !open.empty() && pairs(out[open.back()].ch(), t.ch());
+      while(!open.empty() && !own_close && (t.kind == tok::end || (first && ind <= indent.back()))) {
+        close_top();
+        own_close = t.kind == tok::close && !open.empty() && pairs(out[open.back()].ch(), t.ch());
+      }
+      if(t.kind == tok::open) {
+        open.push_back(uint32_t(out.size()));
+        indent.push_back(ind);
+      } else if(t.kind == tok::close) {
+        auto fits = [&](uint32_t o) { return pairs(out[o].ch(), t.ch()); };
+        if(std::ranges::none_of(open, fits)) {
+          t.kind = tok::bad;
+          t.err = uint32_t(diags.size());
+          diags.push_back(diagnostic("непарная скобка", t.where));
+        } else {
+          while(!fits(open.back())) close_top(); // `{ ( }` - `(` closes before `}`
+          open.pop_back();
+          indent.pop_back();
+        }
+      }
+      out.push_back(t);
+    }
+    toks = std::move(out);
+  }
+
+  // Retreat of the line of text on which the position at.
+  uint32_t indent_of(uint32_t at) const {
+    uint32_t b = line_begin(at), ind = 0;
+    while(b + ind < src.size() && (src[b + ind] == ' ' || src[b + ind] == '\t')) ++ind;
+    return ind;
+  }
+  uint32_t line_begin(uint32_t at) const {
+    while(at > 0 && src[at - 1] != '\n') --at;
+    return at;
   }
 
   static bool pairs(char o, char c) { return (o == '(' && c == ')') || (o == '[' && c == ']') || (o == '{' && c == '}'); }
@@ -245,6 +294,7 @@ struct parser {
 
   void expect_close(char c) {
     if(!is_close(c)) throw diagnostic(cat("ожидалось '", c, "'"), here().where);
+    if(here().err != ~uint32_t{0}) throw diagnostic(diags[here().err].what(), here().where); // Closed by repair - closed will become a hole
     advance();
   }
 
@@ -276,7 +326,6 @@ struct parser {
     try {
       return f();
     } catch(diagnostic const & d) {
-      diags.push_back(d);
       uint32_t start = toks[start_tok].where.begin;
       pos = start_tok;
       skip_to_statement_end();
@@ -284,7 +333,13 @@ struct parser {
       // otherwise parsing does not move
       if(pos == start_tok && !at_end()) advance();
       uint32_t end = toks[pos > 0 ? pos - 1 : 0].where.end;
-      return db.add(n_hole{std::string(src.substr(start, end - start)), d.what()}, {start, end});
+      // the reason is a token hole or bracket closed by repair (her error is already
+      // in diags); the parsing error before it is its own, it is also in diags
+      std::string why = d.what();
+      auto cause = std::ranges::find_if(toks.begin() + start_tok, toks.begin() + pos, [&](token const & t) { return t.err != ~uint32_t{0}; });
+      if(cause != toks.begin() + pos) why = diags[cause->err].what();
+      if(cause == toks.begin() + pos || d.where.begin < cause->where.begin) diags.push_back(d);
+      return db.add(n_hole{std::string(src.substr(start, end - start)), why}, {start, end});
     }
   }
 
@@ -299,9 +354,11 @@ struct parser {
         }
         pos = m + 1;
         if(toks[m].ch() == '}') return; // block completes the design
+        if(toks[m].err != ~uint32_t{0}) return; // Closed by repair: next line
         continue;
       }
-      bool semi = is_op(";");
+      // The unclosed line ate the end of the line of text (and its `;`) - the instruction ends on it
+      bool semi = is_op(";") || (here().kind == tok::bad && (here().text[0] == '"' || here().text[0] == '\''));
       advance();
       if(semi) return;
     }
@@ -1434,7 +1491,7 @@ struct parser {
           symbol lang = db.strings.intern(unescape(here().text));
           advance();
           uint32_t close = match[pos];
-          if(close == ~uint32_t{0}) throw diagnostic("native: незакрытый блок", here().where);
+          if(close == ~uint32_t{0} || toks[close].err != ~uint32_t{0}) throw diagnostic("native: незакрытый блок", here().where);
           uint32_t b = here().where.end, e = toks[close].where.begin;
           pos = close;
           advance();
@@ -1635,7 +1692,7 @@ struct parser {
   uint32_t source = 0;
   std::string_view src;
   std::vector<token> toks;
-  std::string lex_error; // The lexer failed (unclosed line) - the whole text is a hole
+  std::string lex_error; // The first error of the lexer: the line of the editor's set - the whole hole
   bool bracket_error = false; // unpaired brackets (editor's unit - to outer brackets)
   bool line_mode = false; // typing line: end of text - as `}` for value
   std::vector<uint32_t> match;

@@ -99,6 +99,10 @@ uint32_t align(std::string_view from, uint32_t at, std::string_view to) {
       i += ni, ++ci;
     } else if(nj && space(to[j])) {
       j += nj, ++cj;
+    } else if(nj && to[j] == ';') { // `;` delivered projection (after a hole in the block)
+      j += nj, ++cj;
+    } else if(from[i] == ';') { // Excess `;` set (`y = 2;;`) - projection removed it
+      i += ni, ++ci;
     } else { // Divergence (literal written differently) - go together
       i += ni, ++ci;
       if(nj) j += nj, ++cj;
