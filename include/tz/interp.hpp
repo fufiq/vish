@@ -402,8 +402,24 @@ struct interpreter {
     // VM errors are one hierarchy: catch(vm_error e) catches any
     for(std::string_view e: {"out_of_bounds", "div_by_zero", "require_failed", "unpack_failed", "closed_stream", "deadlock", "invalidated_alias", "io_error", "overflow"})
       types.set_parent(types.named(e), types.named("vm_error"));
+    // Mutations of the previous elaboration code are rolled back: the ct module is executed
+    // again over the written
+// A remote source doesn't change anything anymore.
+    struct elab_hold {
+      interpreter & vm;
+      ast_db::elab_mark mark;
+      ~elab_hold() {
+        vm.elaborating = false;
+        vm.ct_source = {};
+        vm.db.end_elaboration(mark);
+      }
+    } eh{*this, db.begin_elaboration()};
+    elab_base = db.size();
+    elab_nested = eh.mark.nested;
+    elaborating = true;
     for(node_id m: module_order) { // ct modules - in order of modules (used earlier)
       for(node_id item: db.as<n_module>(m).items) {
+        ct_source = item;
         if(db.is<n_ct>(item)) {
           ++ct_depth;
           flow f = eval(db.as<n_ct>(item).body, globals, 0);
@@ -1699,6 +1715,13 @@ struct interpreter {
   fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
     out = v;
     if(want == "auto" || types.describe(v) == want || types.name(types.of(v)) == want) return fit::exact;
+    if(value const * x = want.starts_with("n_") ? shape_of(v) : nullptr; x && code_agg(*x) && (is_node_kind(want) || want == std::meta::identifier_of(^^n_context))) {
+      // N if c receives the node code n if, n context c and the heirs
+      if(!v.known()) return strict ? fit::no : fit::maybe;
+      node_id c = code_node(v, {});
+      std::string k(kind_name(db[c]));
+      return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
+    }
     if(!strict && types.is_a(types.name(types.of(v)), want)) return fit::representable; // base
     if(strict || !numeric_pair(v, want)) return fit::no;
     value const * x = shape_of(v);
@@ -2448,61 +2471,245 @@ struct interpreter {
         e = c->as<thunk_v>().expr;
         env = c->as<thunk_v>().env;
       } else break;
-    if(db.is<n_ident>(e) && !env->find(db.as<n_ident>(e).name)) // function name - its declaration (first overload)
+    if(db.is<n_ident>(e) && !env->find(db.as<n_ident>(e).name)) { // function name - its declaration (first overload)
       if(auto it = functions.find(db.as<n_ident>(e).name); it != functions.end() && !it->second.empty()) return it->second.front();
+      if(auto it = structs.find(db.as<n_ident>(e).name); it != structs.end()) return it->second; // Struct's name is his announcement
+    }
     return e;
   }
 
   // node fields in order (as in its struct program): node - code (empty - code without node,
   // given - lie), list node and names - array, name and text - string.
+  value field_value(auto const & f) {
+    using field_t = std::remove_cvref_t<decltype(f)>;
+    if constexpr(std::is_same_v<field_t, node_id>) return code_value(f);
+    else if constexpr(std::is_same_v<field_t, node_list>) {
+      std::vector<value> ys;
+      for(node_id y: f) ys.push_back(code_value(y));
+      return value(array_v::of(std::move(ys)));
+    } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
+      std::vector<value> ys;
+      for(symbol y: f) ys.push_back(value(std::string(str(y))));
+      return value(array_v::of(std::move(ys)));
+    } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) { // layout
+      std::vector<value> ys;
+      for(uint32_t y: f) ys.push_back(value(int64_t(y)));
+      return value(array_v::of(std::move(ys)));
+    } else if constexpr(std::is_same_v<field_t, symbol>) return value(std::string(f ? str(f) : ""));
+    else if constexpr(std::is_same_v<field_t, bool>) return value(f);
+    else if constexpr(std::is_floating_point_v<field_t>) return value(double(f));
+    else if constexpr(std::is_same_v<field_t, std::string>) return value(f);
+    else return value(int64_t(f));
+  }
   std::vector<value> node_fields(node_id c) {
     std::vector<value> xs;
     std::visit([&](auto const & k) {
-      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) {
-        using field_t = [:std::meta::type_of(m):];
-        auto const & f = k.[:m:];
-        if constexpr(std::is_same_v<field_t, node_id>) xs.push_back(code_value(f));
-        else if constexpr(std::is_same_v<field_t, node_list>) {
-          std::vector<value> ys;
-          for(node_id y: f) ys.push_back(code_value(y));
-          xs.push_back(value(array_v::of(std::move(ys))));
-        } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
-          std::vector<value> ys;
-          for(symbol y: f) ys.push_back(value(std::string(str(y))));
-          xs.push_back(value(array_v::of(std::move(ys))));
-        } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) { // layout
-          std::vector<value> ys;
-          for(uint32_t y: f) ys.push_back(value(int64_t(y)));
-          xs.push_back(value(array_v::of(std::move(ys))));
-        } else if constexpr(std::is_same_v<field_t, symbol>) xs.push_back(value(std::string(f ? str(f) : "")));
-        else if constexpr(std::is_same_v<field_t, bool>) xs.push_back(value(f));
-        else if constexpr(std::is_floating_point_v<field_t>) xs.push_back(value(double(f)));
-        else if constexpr(std::is_same_v<field_t, std::string>) xs.push_back(value(f));
-        else xs.push_back(value(int64_t(f)));
-      }
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) xs.push_back(field_value(k.[:m:]));
     },
         db[c].kind);
     return xs;
   }
-  // Samples of node fields of the kind type - for parsing (node - run-time): types from the structure of node
+  // Sample field for parsing (node - run-time): type from the structure node
+  value field_sample(auto const & f) {
+    using field_t = std::remove_cvref_t<decltype(f)>;
+    value code = code_value(node_id(1));
+    if constexpr(std::is_same_v<field_t, node_id>) return erase(code);
+    else if constexpr(std::is_same_v<field_t, node_list>) return erase(value(array_v::of({code})));
+    else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) return erase(value(array_v::of({value(std::string("x"))})));
+    else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) return erase(value(array_v::of({value(int64_t(1))})));
+    else if constexpr(std::is_same_v<field_t, symbol> || std::is_same_v<field_t, std::string>) return erase(value(std::string("x")));
+    else if constexpr(std::is_same_v<field_t, bool>) return erase(value(true));
+    else if constexpr(std::is_floating_point_v<field_t>) return erase(value(1.0));
+    else return erase(value(int64_t(1)));
+  }
   std::vector<value> node_samples(std::string_view kind) {
     std::vector<value> xs;
     template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-      if(std::meta::identifier_of(t) == kind)
-        template for(constexpr auto m: fields_of<typename[:t:]>()) {
-          using field_t = [:std::meta::type_of(m):];
-          value code = code_value(node_id(1));
-          if constexpr(std::is_same_v<field_t, node_id>) xs.push_back(erase(code));
-          else if constexpr(std::is_same_v<field_t, node_list>) xs.push_back(erase(value(array_v::of({code}))));
-          else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) xs.push_back(erase(value(array_v::of({value(std::string("x"))}))));
-          else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) xs.push_back(erase(value(array_v::of({value(int64_t(1))}))));
-          else if constexpr(std::is_same_v<field_t, symbol> || std::is_same_v<field_t, std::string>) xs.push_back(erase(value(std::string("x"))));
-          else if constexpr(std::is_same_v<field_t, bool>) xs.push_back(erase(value(true)));
-          else if constexpr(std::is_floating_point_v<field_t>) xs.push_back(erase(value(1.0)));
-          else xs.push_back(erase(value(int64_t(1))));
-        }
+      if(std::meta::identifier_of(t) == kind) {
+        [[maybe_unused]] typename[:t:] x{};
+        template for(constexpr auto m: fields_of<typename[:t:]>()) xs.push_back(field_sample(x.[:m:]));
+      }
     }
     return xs;
+  }
+
+  // --- node - living values-code (§7.4 ) --------------------------------------------- Author's
+  // decision 2026-10-02: n_X {…} creates a real base node and gives the code, e. field reads the
+  // field node , e. field = v changes the node during elaboration (journal with source, rollback).
+  //
+//;
+  // 
+//.
+
+  bool code_agg(value const & v) { // code type number - once (hot path: fields and assignment of aggregates)
+    if(!v.is<agg_v>()) return false;
+    if(!code_type) code_type = types.named("code");
+    return v.as<agg_v>().type == code_type;
+  }
+  type_id code_type;
+
+  // node field by name: value (node known) or pattern (run-time: field type - in the first
+  // species with such field; different types in different species - unknown)
+  std::optional<value> node_field(node_id c, symbol name) {
+    std::optional<value> out;
+    std::visit([&](auto const & k) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>())
+        if(std::meta::identifier_of(m) == str(name)) out = field_value(k.[:m:]);
+    },
+        db[c].kind);
+    return out;
+  }
+  std::optional<value> node_field_sample(symbol name) {
+    std::optional<value> out;
+    bool mixed = false;
+    template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+      [[maybe_unused]] typename[:t:] x{};
+      template for(constexpr auto m: fields_of<typename[:t:]>())
+        if(std::meta::identifier_of(m) == str(name)) {
+          value v = field_sample(x.[:m:]);
+          if(out && types.describe(*out) != types.describe(v)) mixed = true;
+          if(!out) out = std::move(v);
+        }
+    }
+    if(mixed) return value(rt_v{});
+    return out;
+  }
+
+  // A value-code node (empty code is an empty node); not a code is a value node like the
+  // #x insert (number, string, type, function).
+  node_id child_node(value const & v, std::string_view what, span where) {
+    if(code_agg(v)) {
+      value const & nd = v.as<agg_v>().fields[0].second;
+      if(nd.is<int64_t>()) return node_id(uint32_t(nd.as<int64_t>()));
+    }
+    if(v.is<array_v>() || v.is<unit_v>()) fail(cat(what, ": ожидался код, получено ", types.describe(v)), where);
+    return value_node(v, where);
+  }
+  // A child of a new kind node owner: a node without a parent passes to him; a node already
+  // standing in a tree (in another place or a second time) is copied. node has one place in the
+  // tree - the insert does not take it away from the original (quote, function).
+  node_id adopt(node_id c, node_id owner, std::set<uint32_t> & taken) {
+    if(!c) return c;
+    bool elsewhere = db[c].parent && db[c].parent != owner;
+    if(elsewhere || !taken.insert(c.value).second) {
+      c = db.clone(c, [](node_id) -> std::optional<node_id> { return std::nullopt; });
+      taken.insert(c.value);
+    }
+    return c;
+  }
+  // The field of the form node from the value: type - as in the struct node program (node_field_type).
+  void set_field(auto & f, value const & v, std::string_view what, node_id owner, std::set<uint32_t> & taken, span where) {
+    using field_t = std::remove_cvref_t<decltype(f)>;
+    auto need = [&](bool ok, std::string_view type) {
+      if(!ok) fail(cat(what, ": ожидалось ", type, ", получено ", types.describe(v)), where);
+    };
+    auto items = [&](auto && each) {
+      need(v.is<array_v>(), "array");
+      for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) each(v.as<array_v>().get(k));
+    };
+    if constexpr(std::is_same_v<field_t, node_id>) f = adopt(child_node(v, what, where), owner, taken);
+    else if constexpr(std::is_same_v<field_t, node_list>) {
+      field_t xs;
+      items([&](value const & x) { xs.push_back(adopt(child_node(x, what, where), owner, taken)); });
+      f = std::move(xs);
+    } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
+      field_t xs;
+      items([&](value const & x) {
+        if(!x.is<str_v>()) fail(cat(what, ": ожидались строки, получено ", types.describe(x)), where);
+        xs.push_back(sym(x.as<str_v>().view()));
+      });
+      f = std::move(xs);
+    } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) {
+      field_t xs;
+      items([&](value const & x) {
+        if(!x.is<int64_t>()) fail(cat(what, ": ожидались числа, получено ", types.describe(x)), where);
+        xs.push_back(uint32_t(x.as<int64_t>()));
+      });
+      f = std::move(xs);
+    } else if constexpr(std::is_same_v<field_t, symbol>) {
+      need(v.is<str_v>(), "str");
+      f = v.as<str_v>().view().empty() ? symbol{} : sym(v.as<str_v>().view());
+    } else if constexpr(std::is_same_v<field_t, std::string>) {
+      need(v.is<str_v>(), "str");
+      f = std::string(v.as<str_v>().view());
+    } else if constexpr(std::is_same_v<field_t, bool>) {
+      need(v.is<bool>(), "bool");
+      f = v.as<bool>();
+    } else if constexpr(std::is_floating_point_v<field_t>) {
+      need(v.is<double>() || v.is<int64_t>(), "f64");
+      f = v.is<double>() ? v.as<double>() : double(v.as<int64_t>());
+    } else {
+      need(v.is<int64_t>(), "i64");
+      f = field_t(v.as<int64_t>());
+    }
+  }
+
+  // n_X {a, b, …} - new node of the form n_X, field by position (missing - empty); run-time field
+  // (in parsing) - code unknown
+  value node_literal(std::string_view kind, std::vector<value> const & items, span where) {
+    for(auto const & x: items)
+      if(!x.known()) return erase(code_value(node_id(1)));
+    std::optional<node_kind> out;
+    std::set<uint32_t> taken;
+    template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+      if(std::meta::identifier_of(t) == kind) {
+        typename[:t:] x{};
+        uint32_t k = 0;
+        template for(constexpr auto m: fields_of<typename[:t:]>()) {
+          if(k < items.size()) set_field(x.[:m:], items[k], cat(kind, ".", std::meta::identifier_of(m)), node_id{}, taken, where);
+          ++k;
+        }
+        if(items.size() > k) fail(cat(kind, ": полей ", k, ", значений ", items.size()), where);
+        out = node_kind(std::move(x));
+      }
+    }
+    node_id n = db.add(std::move(*out), where);
+    db.link_parents(n);
+    return code_value(n);
+  }
+
+  // e.field = v - mutation node: only at elaboration (ct module and the code caused from it).
+  //  
+// - the execution code only reads.
+  void mutate_node(node_id c, symbol name, value const & v, span where) {
+    if(!elaborating)
+      fail(ct_depth ? "изменение кода из ct тела функции — пока только из ct модуля (элаборация)" : "изменение кода — только при компиляции (ct { … } модуля)", where);
+    if(!c) fail("изменение кода: пустой узел", where);
+    if(!v.known()) fail(cat("изменение кода: значение поля ", str(name), " должно быть известно при компиляции"), where);
+    node_kind k = db[c].kind; // copy: its appearance in node - on the field
+    bool found = false;
+    std::visit([&](auto & x) {
+      std::set<uint32_t> taken; // Children of other node fields are busy
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if(std::meta::identifier_of(m) != str(name)) {
+          if constexpr(std::is_same_v<field_t, node_id>) taken.insert(x.[:m:].value);
+          else if constexpr(std::is_same_v<field_t, node_list>)
+            for(node_id y: x.[:m:]) taken.insert(y.value);
+        }
+      }
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>())
+        if(std::meta::identifier_of(m) == str(name)) {
+          found = true;
+          set_field(x.[:m:], v, cat(kind_name(db[c]), ".", str(name)), c, taken, where);
+        }
+    },
+        k);
+    if(!found) fail(cat("у узла ", kind_name(db[c]), " нет поля ", str(name)), where);
+    if(elab_nested && c.value < elab_base) return; // Written knot changes external elaboration
+    // node created by this elaboration is completion (without writing and rollback): nested
+    // elaboration (parsing, JIT) rolls back only mutations of the written
+    db.mutate(c, std::move(k), c.value >= elab_base ? 0 : ct_source.value + 1);
+    db.link_parents(c);
+  }
+
+  // The object of assignment is code: the name that stores the code, or a chain of fields from it
+  // (f.body.items = ...); it can be calculated without side effects.
+  bool code_place(node_id n, scope * env) {
+    while(db.is_member(n)) n = db.member_of(n).object;
+    if(!db.is<n_ident>(n)) return false;
+    value const * c = find(env, db.as<n_ident>(n).name);
+    return c && (code_agg(*c) || (c->is<rt_v>() && shape_of(*c) && code_agg(*shape_of(*c))));
   }
 
   node_id code_node(value const & v, span where) {
@@ -2548,6 +2755,34 @@ struct interpreter {
 
   flow eval_node(node_id n, n_splice const & s, scope *, uint32_t) { fail(cat("#", str(s.name), " вне quote"), db[n].where); }
 
+  // ref(f) - node-link to the ad f (function, struct, ct-variable module): in the created code
+  // is not caught by the name of the place of insertion (author's decision 2026-10-02: names are
+  // linked by the analysis at the insertion site, specific entity - reference). Argument: An ad
+  // name or ad code.
+  bool ref_target(node_id d) const { return db.is<n_fn>(d) || db.is_struct(d) || (db.is<n_var>(d) && db.as<n_var>(d).ct); }
+  flow eval_ref(node_id arg, scope * env, uint32_t frame, span where) {
+    node_id d = code_of(arg, env);
+    if(value * c = db.is<n_ident>(d) ? find(env, db.as<n_ident>(d).name) : nullptr; c && ct_cells.contains(c)) // ct-variable module named
+      for(node_id item: db.as<n_module>(mod).items)
+        if(db.is<n_var>(item) && db.as<n_var>(item).ct && db.as<n_var>(item).name == db.as<n_ident>(d).name) d = item;
+    if(!ref_target(d)) {
+      TZ_TRY(v, eval(arg, env, frame));
+      if(code_agg(v) && v.known()) d = code_node(v, where);
+    }
+    if(!ref_target(d)) fail("ref: ожидалось объявление — функция, struct или ct-переменная модуля", where);
+    return ok(code_value(db.add(n_ref{d.value}, where)));
+  }
+  // entity of the goal: the function is its overload (under the current name, not in the area
+  // of the place), the struct is the type, the ct-variable is its value.
+  flow eval_node(node_id n, n_ref const & r, scope *, uint32_t) {
+    node_id d(r.target);
+    if(db.is<n_fn>(d)) return ok(value(fn_v{db.as<n_fn>(d).name, {}, nullptr, {}}));
+    if(db.is_struct(d)) return ok(value(type_v{types.named(str(db.as<n_extend>(d).name))}));
+    if(db.is<n_var>(d))
+      if(value * c = globals->find(db.as<n_var>(d).name)) return read(c);
+    fail("ref: цель ссылки не объявлена", db[n].where);
+  }
+
   flow eval_try_compile(node_id n, node_id body, scope * env, uint32_t frame) {
     auto saved_may = may_return;
     try {
@@ -2586,6 +2821,7 @@ struct interpreter {
       items.push_back(std::move(x));
     }
     auto tname = str(db.as<n_ident>(c.type).name);
+    if(tname.starts_with("n_") && is_node_kind(tname)) return ok(node_literal(tname, items, db[n].where)); // n_X {…} is a living base node
     if(auto it = structs.find(db.as<n_ident>(c.type).name); it != structs.end()) { // Name {a, b} - by position n
       auto all = fields_of_struct(it->first);
       if(items.size() > all.size()) fail(cat(tname, ": полей ", all.size(), ", значений ", items.size()), db[n].where);
@@ -2631,7 +2867,16 @@ struct interpreter {
     if(obj.is<rt_v>()) {
       value const * shape = shape_of(obj);
       if(!shape) return value(rt_v{});
+      if(code_agg(*shape) && str(name) != "node") { // node field: species unknown - type named field
+        if(auto f = node_field_sample(name)) return *f;
+        fail(cat("у узлов нет поля ", str(name)), where);
+      }
       return erase(member(*shape, name, where));
+    }
+    if(code_agg(obj) && str(name) != "node") { // e.cond is the field node (§7.4)
+      node_id c = code_node(obj, where);
+      if(auto f = node_field(c, name)) return *f;
+      fail(cat("у узла ", kind_name(db[c]), " нет поля ", str(name)), where);
     }
     if(str(name) == "size") {
       if(obj.is<array_v>()) return value(int64_t(obj.as<array_v>().size()));
@@ -3970,6 +4215,16 @@ struct interpreter {
         ctx = saved;
         return r;
       }
+    if(db.is_member(lhs) && code_place(db.member_of(lhs).object, env)) { // code.field = v - mutation node (§7.4 )
+      auto const & m = db.member_of(lhs);
+      flow o = eval(m.object, env, frame);
+      if(o.normal() && (code_agg(o.v) || (shape_of(o.v) && code_agg(*shape_of(o.v)))) && str(m.name) != "node") {
+        if(op != "=") fail("изменение кода: только код.поле = значение", where);
+        if(!o.v.known()) fail("изменение кода: узел должен быть известен при компиляции", where);
+        mutate_node(code_node(o.v, where), m.name, rhs, where);
+        return ok();
+      }
+    }
     written(lhs, env);
     if(db.is<n_ident>(lhs))
       if(value * c = find(env, db.as<n_ident>(lhs).name); c && c->is<ref_v>()) return ref_assign(c->as<ref_v>(), op, rhs, where);
@@ -4165,6 +4420,8 @@ struct interpreter {
     auto want = str(tname);
     if(want == "auto") return;
     auto check1 = [&](value const & x) {
+      value got;
+      if(code_agg(x) && is_node_kind(want) && type_fit(x, want, false, got) != fit::no) return; // code node n_X - instance n_X
       if(types.describe(x) != want && types.name(types.of(x)) != want)
         fail(cat("ожидался тип ", want, ", получен ", types.describe(x)), where);
     };
@@ -4222,6 +4479,7 @@ struct interpreter {
       // (bypass and build node, §7.4):
 //.
       if(str(name) == "code" && c.args.size() == 1 && !functions.contains(name)) return ok(code_value(code_of(c.args[0], env)));
+      if(str(name) == "ref" && c.args.size() == 1 && !functions.contains(name)) return eval_ref(c.args[0], env, frame, where);
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
       if(name == sym_alloc_in && !functions.contains(name)) return alloc_in(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
@@ -5109,10 +5367,17 @@ struct interpreter {
     // operations of the base language over the state of the compiler-interpreter, and not
     // host calls "down": "Here in cp this is exactly what part of the program ... because in
     // the cp in the database there is the integration of conditional api into the language."
-    if(n == "emit" && a.size() == 1) { // Advertisements from quote to current elaboration
+    if(n == "emit" && a.size() == 1) { // Advertisements from quote or ad node - to current elaboration
       node_id q = code_node(a[0], where);
-      if(!db.is<n_quote>(q)) fail("emit: ожидался quote { объявления }", where);
-      for(node_id item: db.as<n_quote>(q).items) register_item(item);
+      if(db.is<n_quote>(q))
+        for(node_id item: db.as<n_quote>(q).items) {
+          register_item(item);
+          emitted.push_back(item);
+        }
+      else if(db.is<n_fn>(q) || db.is<n_extend>(q)) { // n_fn {…}, n_extend {…} - generated by the ct code
+        register_item(q);
+        emitted.push_back(q);
+      } else fail("emit: ожидался quote { объявления } или узел объявления (n_fn, n_extend)", where);
       return value();
     }
     if(n == "attrs" && a.size() == 1) { // [[…]] attributes of a function or type - values
@@ -5523,6 +5788,12 @@ struct interpreter {
   std::set<value const *> ct_cells; // ct-variable module
   std::vector<symbol> ct_names;
   uint32_t ct_depth = 0;
+  // elaboration: the ct module is executed - the source of code mutations (node ct { } / ct x = e)
+  bool elaborating = false;
+  node_id ct_source;
+  uint32_t elab_base = 0; // the first node created by this elaboration
+  bool elab_nested = false; // Elaboration within another: mutations have already been made
+  std::vector<node_id> emitted; // Advertisements generated by emit (tz fmt - ct)
   std::vector<override_rec> overrides;
   uint32_t override_depth = 0;
   uint64_t array_gen = 0; // generation of array buffers (performance)

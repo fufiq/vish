@@ -519,6 +519,12 @@ struct printer {
   }
 
   void print_node(node_id, n_splice const & s) { out += cat("#", str(s.name)); }
+  // ad link - current target name (link, not name: renaming the target changes the target)
+  void print_node(node_id, n_ref const & r) {
+    node_id d(r.target);
+    symbol s = db.is<n_fn>(d) ? db.as<n_fn>(d).name : db.is<n_extend>(d) ? db.as<n_extend>(d).name : db.is<n_var>(d) ? db.as<n_var>(d).name : symbol{};
+    out += s ? std::string(str(s)) : std::string("?");
+  }
 
   // --- If, loop, return, break, continue, throw - from prelude (record_for)
   //

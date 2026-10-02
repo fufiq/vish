@@ -42,7 +42,20 @@ bool is_statement(ast_db const & db, node_id n) {
 // A static parsing (check) with predetermined inputs observes the values of node; known
 // and pure expressions are replaced by values, branch with a known condition is folded
 // into its branch, unexecuted code and functions needed only in folded form are removed.
+// projection after elaboration (tz fmt --ct): ct module executed - node, modified by the
+// ct code, printed modified, generated emit ads - after the module. The written text is tz
+// fmt; this is .
 //
+//
+std::string elaborated_text(ast_db & db, node_id root, std::string const & name) {
+  interpreter vm(db, root, {name}, mode::check);
+  vm.elaborate();
+  std::string out = printer(db).print(root);
+  if(!vm.emitted.empty()) out += "// порождено ct (emit):\n";
+  for(node_id e: vm.emitted) out += printer(db).print(e) + "\n";
+  return out;
+}
+
 struct residual_view {
   residual_view(ast_db const & db, interpreter const & vm) : db(db), vm(vm) {}
 

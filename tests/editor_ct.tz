@@ -1,0 +1,13 @@
+// Программа для сценария 144_editor_ct_rollback.wire (сама по себе — обычный тест).
+// out: point{x: 1, y: 2, z: 7}
+// fmt-ct-has: struct point { i64 x; i64 y; i64 z = 7; }
+struct point { i64 x; i64 y; }
+
+ct {
+  p = code(point);
+  p.items = array{...p.items, n_var{"z", n_ident{"i64"}, n_int{7}}};
+}
+
+main() {
+  print(point{1, 2});
+}

@@ -9,6 +9,7 @@
 #include "base.hpp"
 #include "lexer.hpp"
 
+#include <algorithm>
 #include <deque>
 #include <variant>
 
@@ -244,10 +245,18 @@ struct n_native {
   symbol lang;
   std::string code;
 };
+// The link to the ad (function, struct, ct-variable) is its node number, not its name:
+// 
+// ; Generates ct code (ref(f)): the name in the insert location does not intercept it.
+// Print is the current name of the target.
+//
+struct n_ref {
+  uint32_t target = 0;
+};
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_if, n_loop, n_break, n_continue, n_return,
-    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native>;
+    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native, n_ref>;
 
 struct node {
   node_kind kind;
@@ -279,7 +288,20 @@ struct j_import {
   std::string text;
   std::string label;
 }; // projection: span node - position in it
-using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import>;
+// Mutation node ct code (§7.4): Replace the type node with the source node ct code that made it.
+// .
+//
+struct j_mutate {
+  uint32_t id;
+  node_kind kind;
+  uint32_t source;
+};
+// Return of mutations of the source (0 - all) and all later:
+//
+struct j_rollback {
+  uint32_t source;
+};
+using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback>;
 
 struct journal_entry {
   uint64_t revision;
@@ -419,14 +441,143 @@ struct ast_db {
   }
 
   void replace(node_id n, node_kind k) {
+    // Quoting the source of the mutations (or node over it - deletion) rolls them back.
+    if(!mutations.empty())
+      for(auto const & m: mutations)
+        if(within(node_id(m.source - 1), n) || within(n, node_id(m.source - 1))) {
+          rollback(m.source);
+          break;
+        }
     ++revision;
     nodes[n].kind = std::move(k);
-    // Up to function: Cache granularity - functions, not files
+    touch(n);
+    if(edited_at.size() <= n.value) edited_at.resize(n.value + 1);
+    edited_at[n.value] = revision;
+    log({j_replace{n.value, nodes[n].kind}});
+  }
+
+  // Up to function: Cache granularity - functions, not files
+  void touch(node_id n) {
     for(node_id x = n; x; x = nodes[x].parent) {
+      if(touch_logging) touch_undo.push_back({x.value, node_rev[x.value]});
       node_rev[x.value] = revision;
       if(std::holds_alternative<n_fn>(nodes[x].kind)) break;
     }
-    log({j_replace{n.value, nodes[n].kind}});
+  }
+  bool within(node_id x, node_id top) const {
+    for(; x; x = nodes[x].parent)
+      if(x == top) return true;
+    return false;
+  }
+
+  // -- mutations of the ct code (§7.4) The node changes the ct code (`e.поле = v` during
+  // elaboration: the former form is in the mutation record (rollback), the source is a ct-code
+  // node. The view of the node is transferred, not overwritten: executable rounds hold links to
+  // its lists - old buffers live in records and in retired ones.
+  //
+//  
+// The mutation changes the base node.
+  // source - node ct-code number + 1; 0 - without writing: the node created by the
+  // same elaboration is completed, and does not mutate the program (no rollback)
+  struct mutation {
+    uint32_t target;
+    uint32_t source;
+    uint64_t at; // Mutation revision: the right node does not roll back after it
+    node_kind old;
+  };
+  void mutate(node_id n, node_kind k, uint32_t source) {
+    ++revision;
+    if(source) mutations.push_back({n.value, source, revision, std::move(nodes[n].kind)});
+    else retired.push_back(std::move(nodes[n].kind));
+    nodes[n].kind = std::move(k);
+    touch(n);
+    changed.push_back(n.value);
+    log({j_mutate{n.value, nodes[n].kind, source}});
+  }
+  // The rollback of mutations of the source (0 - all) and all after the first of them - later
+  // ones could read its result (canonical order, §7.3 p.5):
+// The node that is right after the mutation remains.
+  // The righteousness of the scriptures.
+  void rollback(uint32_t source) {
+    std::size_t from = 0;
+    while(from < mutations.size() && source && mutations[from].source != source) ++from;
+    if(from == mutations.size()) return;
+    ++revision;
+    for(std::size_t i = mutations.size(); i-- > from;) {
+      mutation & m = mutations[i];
+      node_id n(m.target);
+      if(m.target < edited_at.size() && edited_at[m.target] > m.at) continue;
+      retired.push_back(std::move(nodes[n].kind));
+      nodes[n].kind = std::move(m.old);
+      touch(n);
+      changed.push_back(m.target);
+    }
+    for(std::size_t i = from; i < mutations.size(); ++i) retired.push_back(std::move(mutations[i].old));
+    mutations.resize(from);
+    log({j_rollback{source}});
+  }
+
+  // Re-elaboration (ct module over written): rollback of all mutations, ct code makes them again.
+  // *My:* if the result is the same (the subtrees of the modified node are the same in
+  // structure), node revisions return to the same, and rollback and repetition are not in
+  // journal: dependent analysis (instance, JIT) invalidates only the present change, and nested
+  // elaborations (parsing instance, compiler on the language) do not reset it.
+  struct elab_mark {
+    std::vector<std::pair<uint32_t, node_kind>> was; // modified node before rollback
+    std::size_t log_from, changed_from;
+    bool nested; // inside another elaboration (ct code caused parsing, JIT): node - as is
+  };
+  elab_mark begin_elaboration() {
+    if(elab_depth++) return {{}, 0, 0, true};
+    elab_mark m{{}, oplog.size(), changed.size(), false};
+    for(auto const & x: mutations)
+      if(std::ranges::none_of(m.was, [&](auto const & w) { return w.first == x.target; })) m.was.push_back({x.target, nodes[node_id(x.target)].kind});
+    touch_undo.clear();
+    touch_logging = true;
+    rollback(0);
+    return m;
+  }
+  void end_elaboration(elab_mark const & m) {
+    --elab_depth;
+    if(m.nested) return;
+    touch_logging = false;
+    bool same = true;
+    for(auto const & x: mutations) // Every change is changed before and before.
+      same = same && std::ranges::any_of(m.was, [&](auto const & w) { return w.first == x.target; });
+    for(auto const & [t, k]: m.was)
+      same = same && std::ranges::any_of(mutations, [&](auto const & x) { return x.target == t; }) && same_kind(k, nodes[node_id(t)].kind);
+    if(same) {
+      for(std::size_t i = touch_undo.size(); i-- > 0;) node_rev[touch_undo[i].first] = touch_undo[i].second;
+      changed.resize(m.changed_from);
+      auto tail = std::ranges::remove_if(oplog.begin() + std::ptrdiff_t(m.log_from), oplog.end(), [](auto const & e) {
+        return std::holds_alternative<j_rollback>(e.second.op) || (std::holds_alternative<j_mutate>(e.second.op) && std::get<j_mutate>(e.second.op).source);
+      });
+      oplog.erase(tail.begin(), tail.end());
+    }
+    touch_undo.clear();
+  }
+  // Subtrees of the same structure (node numbers may vary)
+  bool same_tree(node_id a, node_id b) const {
+    if(a == b) return true;
+    if(!a || !b) return false;
+    return same_kind(nodes[a].kind, nodes[b].kind);
+  }
+  bool same_kind(node_kind const & a, node_kind const & b) const {
+    if(a.index() != b.index()) return false;
+    bool same = true;
+    std::visit([&](auto const & x) {
+      auto const & y = std::get<std::remove_cvref_t<decltype(x)>>(b);
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if constexpr(std::is_same_v<field_t, node_id>) same = same && same_tree(x.[:m:], y.[:m:]);
+        else if constexpr(std::is_same_v<field_t, node_list>) {
+          same = same && x.[:m:].size() == y.[:m:].size();
+          for(std::size_t i = 0; same && i < x.[:m:].size(); ++i) same = same_tree(x.[:m:][i], y.[:m:][i]);
+        } else same = same && x.[:m:] == y.[:m:];
+      }
+    },
+        a);
+    return same;
   }
 
   // Assign a parent to all descendants - bypass through reflection of node fields.
@@ -484,6 +635,10 @@ struct ast_db {
           replace(node_id(op.id), op.kind);
         } else if constexpr(std::is_same_v<T, j_link>) {
           link_parents(node_id(op.root));
+        } else if constexpr(std::is_same_v<T, j_mutate>) {
+          mutate(node_id(op.id), op.kind, op.source);
+        } else if constexpr(std::is_same_v<T, j_rollback>) {
+          rollback(op.source);
         } else {
           record_import(op.text, op.label);
         }
@@ -554,6 +709,13 @@ struct ast_db {
   std::deque<std::string> sources; // Deque: Text references are stable
   std::vector<std::string> labels;
   std::vector<uint64_t> node_rev;
+  std::vector<uint64_t> edited_at; // revision of the last node edit (not mutations)
+  std::vector<mutation> mutations; // active ct-code mutations in order
+  std::deque<node_kind> retired; // Species filmed by mutation and rollback: bypasses can keep their lists
+  std::vector<uint32_t> changed; // node modified by mutation/rollback (editor updates them)
+  std::vector<std::pair<uint32_t, uint64_t>> touch_undo; // previous revisions (elaboration with the same result)
+  bool touch_logging = false;
+  uint32_t elab_depth = 0; // elaborative
 };
 
 // Module with key in the database (last import - valid).

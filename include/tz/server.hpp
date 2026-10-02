@@ -266,6 +266,7 @@ struct editor_server {
   }
 
   void show_view(peer & p, editor_view & v, bool relayout = true) {
+    recheck(); // elaboration - to layout: ct-code mutations are visible immediately
     if(relayout) layout(v);
     proto::s_view out{v.id, v.root, session.db.revision, {}, v.kind};
     for(auto const & l: v.layouts) out.nodes.push_back(wire_node(l));
@@ -749,6 +750,9 @@ struct editor_server {
     reparsed.clear();
     mutate();
     session.db.link_parents(session.root);
+    // elaboration - to layout: node, modified by the ct code (and rollback of its mutations), -
+    // in the same projection as editing
+    recheck(false);
     // Edit - the track describes the previous version: close it all
     for(auto & q: peers)
       if(q.debugging) {
@@ -773,6 +777,9 @@ struct editor_server {
       node_id top = target;
       for(node_id x: reparsed)
         while(top && !within(x, top) && session.db[top].parent) top = session.db[top].parent;
+      for(uint32_t x: session.db.changed) // modified by elaboration in the same update
+        if(v.layout_of(node_id(x)) != ~uint32_t{0})
+          while(top && !within(node_id(x), top) && session.db[top].parent) top = session.db[top].parent;
       if(top != target && v.layout_of(top) != ~uint32_t{0}) {
         send(*b.p, proto::s_update{v.id, session.db.revision, top, subtree(v, top)});
         if(&v != &av) close_completion(*b.p, v);
@@ -791,7 +798,7 @@ struct editor_server {
       if(&v != &av) close_completion(*b.p, v); // crossword
       send_cursor(*b.p, v);
     }
-    recheck();
+    refresh_changed(); // representations which the amendment did not concern
     for(auto & b: views) send_marks(*b.p, *b.v);
   }
 
@@ -864,10 +871,43 @@ struct editor_server {
 
   uint64_t checked_revision = ~uint64_t{0};
 
-  void recheck() {
-    if(checked_revision == session.db.revision) return;
-    session.check();
-    checked_revision = session.db.revision;
+  void recheck(bool refresh = true) {
+    if(checked_revision != session.db.revision) {
+      session.check();
+      checked_revision = session.db.revision;
+    }
+    if(refresh) refresh_changed();
+  }
+
+  // node modified by ct code mutations and their rollback (check elaboration, source
+  // editing, §7.4): representations where they are visible and whose text has changed are
+  // updated - the editor shows the result of elaboration
+//.
+  void refresh_changed() {
+    auto & db = session.db;
+    if(db.changed.empty()) return;
+    std::vector<uint32_t> xs = std::move(db.changed);
+    db.changed.clear();
+    for(auto & p: peers)
+      for(auto & v: p.views) {
+        if(!v.root) continue;
+        std::vector<node_id> shown;
+        for(uint32_t x: xs)
+          if(v.layout_of(node_id(x)) != ~uint32_t{0} && !std::ranges::contains(shown, node_id(x))) shown.push_back(node_id(x));
+        if(shown.empty()) continue;
+        std::string was = v.text;
+        uint32_t cur = v.cursor;
+        caret at = v.places[cur];
+        layout(v); // cursor - in the same place node
+        v.cursor = std::min<uint32_t>(cur, uint32_t(v.places.size() - 1));
+        for(uint32_t k = 0; k < v.places.size(); ++k)
+          if(v.places[k].node == at.node && v.places[k].piece == at.piece && v.places[k].offset == at.offset) v.cursor = k;
+        if(v.text == was) continue;
+        for(node_id x: shown)
+          if(v.layout_of(x) != ~uint32_t{0} && !std::ranges::any_of(shown, [&](node_id y) { return y != x && within(x, y); }))
+            send(p, proto::s_update{v.id, db.revision, x, subtree(v, x)});
+        send_cursor(p, v);
+      }
   }
 
   // Name types in the area: all its mentions in the subtree (without nested
