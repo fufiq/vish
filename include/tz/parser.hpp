@@ -125,16 +125,20 @@ struct parser {
         if(db.is<n_fn>(f)) learn(db.as<n_fn>(f), f);
     } else if(db.is<n_use>(x)) learn_use(db.as<n_use>(x));
   }
-  // use k; / use k. {a, b}; - rules of the module k to its end (selective - only called
-  // entity; use inside k - as written in k). The module is not yet disassembled (use cycle)
-  // - without rules.
+  // use k; / use k. {a, b}; - rules of module k to its end (selective - only called
+  // entity; operators - always: module - semantic inclusion,
+// The operator has no name - the decision
+  // user 2026-10-02; use inside k as written in k. The module is not yet
+  // disassembled (use cycle) - without rules.
   void learn_use(n_use const & u) {
     node_id m = find_module(db, u.key);
     if(!m || std::ranges::contains(learning, m)) return;
     learning.push_back(m);
     for(node_id x: db.as<n_module>(m).items) {
       symbol name = db.is<n_fn>(x) ? db.as<n_fn>(x).name : db.is<n_extend>(x) ? db.as<n_extend>(x).name : symbol{};
-      if(db.is<n_use>(x) || u.names.empty() || std::ranges::contains(u.names, name)) learn_item(x);
+      std::string_view nm = name ? db.strings.text(name) : std::string_view{};
+      bool op = nm.starts_with("infix") || nm.starts_with("prefix") || nm.starts_with("postfix");
+      if(db.is<n_use>(x) || op || u.names.empty() || std::ranges::contains(u.names, name)) learn_item(x);
     }
     learning.pop_back();
   }

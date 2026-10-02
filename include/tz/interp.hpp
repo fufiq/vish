@@ -291,6 +291,7 @@ struct interpreter {
         : db.is<n_extend>(item)                                                        ? db.as<n_extend>(item).name
         : db.is<n_var>(item)                                                           ? db.as<n_var>(item).name
                                                                                        : symbol{};
+    if(name && operator_name(str(name))) return true; // module operators - at any use (module - inclusion, author's decision 2026-10-02)
     auto it = module_names.find(m.value);
     return !name || (it != module_names.end() && it->second.contains(name));
   }
