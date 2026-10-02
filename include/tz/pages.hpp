@@ -187,6 +187,8 @@ static_assert(sizeof(state_header) <= address_space::state_meta);
 
 // Open the status level: the path file; the existing kernel selects the new address - the same ones recorded
 // in the file. Empty and text - it is impossible (occupied with another execution, the address is occupied).
+std::vector<std::byte *> & free_bands();
+
 std::string open_state(address_space & a, std::string const & path) {
   uint64_t base = 0;
   int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
@@ -206,11 +208,18 @@ std::string open_state(address_space & a, std::string const & path) {
     }
     base = h.base;
   }
-  void * r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0), -1, 0);
-  if(r == MAP_FAILED || (base && r != reinterpret_cast<void *>(base))) {
-    if(r != MAP_FAILED) munmap(r, address_space::state_range);
-    ::close(fd);
-    return "адреса состояния программы заняты";
+  void * r = MAP_FAILED;
+  auto & pool = free_bands(); // the same addresses that were at the closed level - for VM (pool)
+  if(auto it = std::ranges::find(pool, reinterpret_cast<std::byte *>(base)); base && it != pool.end()) {
+    r = *it;
+    pool.erase(it);
+  } else {
+    r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+    if(r == MAP_FAILED || (base && r != reinterpret_cast<void *>(base))) {
+      if(r != MAP_FAILED) munmap(r, address_space::state_range);
+      ::close(fd);
+      return "адреса состояния программы заняты";
+    }
   }
   base = uint64_t(r);
   a.persistent = true;
@@ -264,9 +273,12 @@ void save_state(address_space & a) {
   msync(a.lo, a.file_size, MS_SYNC);
 }
 
-// Close the level: addresses - back, file - release (saves save_state).
+// Close the level: pages to the system, addresses remain behind the VM (pool, like process lanes:
+// reopening in the same process - at the same addresses, they will not be occupied by anyone else),
+// the file - release (saves save_state).
 void close_state(address_space & a) {
-  munmap(a.lo, address_space::state_range);
+  mmap(a.lo, address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+  free_bands().push_back(a.lo);
   ::close(a.fd);
   a.fd = -1;
   a.persistent = false;
