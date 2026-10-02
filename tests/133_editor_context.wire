@@ -1,0 +1,33 @@
+// Contexts parsing in the editor (§4.4): above the parsing unit sees exactly the rules of
+// its place - as a full parsing (announced below in the text, in other modules and
+// outdated - no); editing the design announcement re-examines the context elements after
+// it.
+// 
+//.
+// program: editor_context.tz
+open_view module
+[2] open_view module
+// The line above the syntax twice advert: no record yet - the hole remains a hole
+pointer 1 @twice 0 14
+key 1 2
+// expect: kind="n_hole" pieces=["twice { n += 12; }"] note="ожидалось ';'"
+// expect-not: kind="n_call"
+// Block brackets (Backspace in indentation - translation of the line): the block is disassembled - the same
+pointer 1 @n:3 0 0
+key 1 Backspace
+// expect: kind="n_block"
+// expect: kind="n_hole" pieces=["twice { n += 12; }"] note="ожидалось ';'"
+// expect-not: kind="n_call"
+// announcement when ceased to be a design (exp - type, not mode): the instruction with the
+// tail after it - a hole, both clients; record twice - as it was
+pointer 1 @expr 0 4
+key 1 Backspace
+// expect: курсор: when(c, exp‸ body) {
+// expect: kind="n_hole" pieces=["when(n > 1) n += 10;"] note="ожидалось ';'"
+// expect: kind="n_call" pieces=["twice " #
+// expect: другому клиенту:⏎update
+// Again design, again tail challenge.
+key 1 r
+// expect: курсор: when(c, expr‸ body) {
+// expect-not: pieces=["when(n > 1) n += 10;"]
+// expect: kind="n_ident" pieces=["when"]

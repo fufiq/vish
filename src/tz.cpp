@@ -48,10 +48,7 @@ void load(program & p, std::string const & path) {
     return;
   }
   tz::os::mapped_file file(path);
-  tz::parser parser(p.db, file.text());
-  p.root = parser.parse_module();
-  p.parse_errors = parser.errors();
-  for(auto & e: tz::load_uses(p.db, p.root, std::filesystem::path(path).parent_path())) p.parse_errors.push_back(e); // use k; next to the program
+  p.root = tz::parse_program(p.db, file.text(), std::filesystem::path(path).parent_path(), p.parse_errors); // use k; next to the program
 }
 
 int report_error(program const & p, tz::diagnostic const & d) {

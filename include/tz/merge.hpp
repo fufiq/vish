@@ -119,6 +119,7 @@ void take_theirs(ast_db & db, node_id root, std::vector<uint32_t> const & base_i
   }
   parser pr(db, *text, cat("<слияние ", key, ">"));
   pr.outer_items = m.items; // f(…) - on the function of this module
+  pr.place(root, mine ? mine->node : node_id{}); // Rules parsing of the Item Place (§4.4)
   node_id snippet = pr.parse_module();
   auto const & items = db.as<n_module>(snippet).items;
   if(items.empty()) return;

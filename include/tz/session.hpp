@@ -135,6 +135,10 @@ struct vm_session {
   // function is replaced with new content - id and all references to the function are saved.
   std::string edit(std::string const & fn_name, std::string const & text) {
     parser p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
+    node_id at; // parsing rules of the function location (§4.4): announced before it; new - the entire module
+    for(node_id item: db.as<n_module>(root).items)
+      if(!at && db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) at = item;
+    p.place(root, at);
     node_id snippet = p.parse_module();
     auto errs = p.errors();
     if(!errs.empty()) {

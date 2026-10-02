@@ -454,6 +454,8 @@ struct editor_server {
       uint32_t base = v.byte_at[u.range.first];
       std::string edited = cat(old.substr(0, v.byte_at[a] - base), ins, old.substr(v.byte_at[b] - base));
       parser pr(session.db, edited, cat("<ввод #", edits, ">"));
+      // parsing Rules: Contexts around the unit declared before it (§4.4)
+      if(u.kind != 2) pr.place(session.db[u.node].parent, u.node);
       node_id fresh = u.kind == 2 ? pr.parse_module() : pr.parse_unit(u.kind == 0);
       if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
       if(u.kind != 2) { // f(…) is a reference to the module function
@@ -461,6 +463,8 @@ struct editor_server {
         pr.resolve_refs(items);
       }
       node_id target = u.node;
+      // The module element declares other parsing rules - the following are redefined
+      bool rules_changed = u.kind == 1 && parser::rule_trace(session.db, target) != parser::rule_trace(session.db, fresh);
       auto range = [&](editor_view const & w) { return w.range[w.layout_of(target)]; };
       auto mutate = [&] {
         node_kind k = session.db[fresh].kind;
@@ -470,6 +474,10 @@ struct editor_server {
           nm.inner = session.db.as<n_module>(session.root).inner;
         }
         session.db.replace(target, std::move(k));
+        if(rules_changed) {
+          auto const & items = session.db.as<n_module>(session.root).items;
+          reparse_after(session.root, std::size_t(std::ranges::find(items, target) - items.begin()) + 1);
+        }
       };
       apply(v, target, mutate, range, range, edited, {a - u.range.first, b - u.range.first, code_points(ins)}, caret);
       return;
@@ -548,6 +556,7 @@ struct editor_server {
     uint32_t base = v.byte_at[old.first];
     std::string edited = count ? cat(was.substr(0, v.byte_at[a] - base), ins, was.substr(v.byte_at[b] - base)) : ins;
     parser pr(db, edited, cat("<ввод #", edits, ">"));
+    pr.place(c, k < items.size() ? items[k] : node_id{}); // Rules of Place (§4.4)
     bool value = false;
     auto fresh = pr.parse_line(module_level, value);
     if(!fresh) return false;
@@ -597,6 +606,13 @@ struct editor_server {
     bool now_hole = fresh->size() == 1 && db.is<n_hole>((*fresh)[0]);
     node_id first_fresh = fresh->empty() ? node_id{} : (*fresh)[0];
     uint32_t n_new = uint32_t(added.size());
+    // The line declared other parsing rules (syntax, operator, construction, use) - the
+    // context elements are then redefined:
+//  
+    std::string was_rules, now_rules;
+    for(uint32_t i = k; i < k + count; ++i) was_rules += parser::rule_trace(db, items[i]);
+    for(node_id x: *fresh) now_rules += parser::rule_trace(db, x);
+    bool rules_changed = was_rules != now_rules;
     auto mutate = [&] {
       if(count && first_fresh) db.replace(items[k], db[first_fresh].kind);
       if(db.is<n_block>(c)) {
@@ -616,6 +632,7 @@ struct editor_server {
         parser::trim_blank(nm.blank);
         db.replace(c, nm);
       }
+      if(rules_changed) reparse_after(c, k + n_new);
     };
     auto before = [&](editor_view const & w) { return items_range(w, c, k, count, a); };
     auto after = [&](editor_view const & w) {
@@ -626,6 +643,56 @@ struct editor_server {
     };
     apply(v, c, mutate, before, after, edited, {count ? a - old.first : 0, count ? b - old.first : 0, code_points(ins)}, caret);
     return true;
+  }
+
+  // The parsing rule has changed - elements of the context c from the number from from from are
+  // rediscovered from their text according to the rules of their place, as in full parsing (§4.4):
+  // the element retains id; broke up into several - they stand in its place (c is updated).
+  node_list reparsed; // Redisassembled outside the editing unit - their projection is also sent out
+  void reparse_after(node_id c, std::size_t from) {
+    auto & db = session.db;
+    bool module_level = db.is<n_module>(c);
+    for(std::size_t k = from; k < db.context_items(c).size(); ++k) {
+      node_id x = db.context_items(c)[k];
+      bool last = k + 1 == db.context_items(c).size();
+      bool was_value = !module_level && last && db.as<n_block>(c).has_value;
+      printer pp(db);
+      std::string text = pp.print(x);
+      if(!was_value) {
+        pp.out.clear();
+        pp.terminate(x);
+        text += pp.out;
+      }
+      parser pr(db, text, cat("<переразбор #", edits, ">"));
+      pr.place(c, x);
+      bool value = false;
+      auto fresh = pr.parse_line(module_level, value);
+      if(!fresh || fresh->empty()) continue;
+      if(module_level) { // f(…) is a reference to the module function
+        node_list all = db.as<n_module>(c).items;
+        all.insert(all.end(), fresh->begin(), fresh->end());
+        pr.resolve_refs(all);
+      }
+      db.replace(x, db[(*fresh)[0]].kind);
+      reparsed.push_back(x);
+      if(fresh->size() == 1) continue;
+      // disintegrated: the rest - in context after (the value of the block - as it was)
+      node_list items = db.context_items(c);
+      items.insert(items.begin() + std::ptrdiff_t(k) + 1, fresh->begin() + 1, fresh->end());
+      if(module_level) {
+        n_module m = db.as<n_module>(c);
+        m.items = items;
+        if(!m.blank.empty()) m.blank.insert(m.blank.begin() + std::ptrdiff_t(k) + 1, fresh->size() - 1, 0);
+        db.replace(c, std::move(m));
+      } else {
+        n_block b = db.as<n_block>(c);
+        b.items = items;
+        if(!b.blank.empty()) b.blank.insert(b.blank.begin() + std::ptrdiff_t(k) + 1, fresh->size() - 1, 0);
+        db.replace(c, std::move(b));
+      }
+      if(!std::ranges::contains(reparsed, c)) reparsed.push_back(c);
+      k += fresh->size() - 1;
+    }
   }
 
   // Editing within the unit (in places from its beginning): [from, to] replaced by
@@ -654,6 +721,7 @@ struct editor_server {
           auto r = range_before(v);
           views.push_back({&v, &p, r, v.text.substr(v.byte_at[r.second])});
         }
+    reparsed.clear();
     mutate();
     session.db.link_parents(session.root);
     // Edit - the track describes the previous version: close it all
@@ -680,6 +748,10 @@ struct editor_server {
       for(node_id e: fn_extensions())
         if(v.layout_of(e) != ~uint32_t{0} && within(node_id(session.db.as<n_extend>(e).target), target) && !within(e, target))
           send(*b.p, proto::s_update{v.id, session.db.revision, e, subtree(v, e)});
+      // Redisassembled under the new parsing rules (after corrected announcement)
+      for(node_id x: reparsed)
+        if(v.layout_of(x) != ~uint32_t{0} && !within(x, target) && !std::ranges::any_of(reparsed, [&](node_id y) { return y != x && within(x, y) && !within(y, target); }))
+          send(*b.p, proto::s_update{v.id, session.db.revision, x, subtree(v, x)});
       if(&v != &av) close_completion(*b.p, v); // crossword
       send_cursor(*b.p, v);
     }
@@ -1129,6 +1201,7 @@ struct editor_server {
     text += ") {\n\n}\n";
     ++edits;
     parser pr(db, text, cat("<добавить ", sig, ">"));
+    pr.place(session.root); // internal element at the end of the module
     node_id mod = pr.parse_module();
     auto const & items = db.as<n_module>(mod).items;
     if(items.size() != 1 || !db.is<n_fn>(items[0])) return send(p, proto::s_error{cat("не удалось добавить ", sig)});

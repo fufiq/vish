@@ -219,9 +219,8 @@ struct test_runner {
       if(l.starts_with("// program:")) {
         auto file = path.parent_path() / std::string_view(l).substr(11 + (l.size() > 11 && l[11] == ' '));
         os::mapped_file f(file.string());
-        parser p(db, f.text());
-        root = p.parse_module();
-        load_uses(db, root, file.parent_path());
+        std::vector<diagnostic> ignored;
+        root = parse_program(db, f.text(), file.parent_path(), ignored); // use k; modules next to the program
         session.emplace(db, root, file.filename().string());
         if(wire) {
           int fds[2];
@@ -450,19 +449,17 @@ struct test_runner {
     expect e = read_header(src);
 
     ast_db db;
-    parser p(db, src);
-    node_id root = p.parse_module();
-    auto module_errors = load_uses(db, root, path.parent_path()); // use k; modules next to the program
+    std::vector<diagnostic> parse_errors;
+    node_id root = parse_program(db, src, path.parent_path(), parse_errors); // use k; modules next to the program
 
     std::string errors;
-    for(auto const & d: p.errors()) errors += render(d, path.filename().string(), db);
-    for(auto const & d: module_errors) errors += render(d, path.filename().string(), db);
+    for(auto const & d: parse_errors) errors += render(d, path.filename().string(), db);
 
     if(e.fmt_stable) {
       std::string once = printer(db).print(root);
       ast_db db2;
-      parser p2(db2, once);
-      std::string twice = printer(db2).print(p2.parse_module());
+      std::vector<diagnostic> ignored;
+      std::string twice = printer(db2).print(parse_program(db2, once, path.parent_path(), ignored));
       if(once != twice) return "    проекция нестабильна: fmt∘fmt ≠ fmt\n";
     }
     if(!e.fmt_has.empty()) {
@@ -515,7 +512,7 @@ struct test_runner {
     std::string why;
     for(auto & d: e.unknown) why += cat("    неизвестная директива теста: ", d, "\n");
     // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
-    if(p.errors().empty()) {
+    if(parse_errors.empty()) {
       std::string out3, err3;
       std::vector<std::string> args{path.filename().string()};
       args.insert(args.end(), e.args.begin(), e.args.end());
@@ -547,7 +544,7 @@ struct test_runner {
     }
     if(!e.check.empty() || !e.check_lacks.empty() || !e.check_errors.empty()) {
       std::string check_errors, report;
-      if(p.errors().empty()) {
+      if(parse_errors.empty()) {
         interpreter chk(db, root, {path.filename().string()}, mode::check);
         try {
           chk.run_main();
@@ -564,7 +561,7 @@ struct test_runner {
         if(!check_errors.contains(want)) why += cat("    нет ошибки check: ", in_quotes(want), "; есть: ", check_errors, "\n");
       if(e.check_errors.empty() && !check_errors.empty()) why += "    неожиданная ошибка check:\n" + check_errors;
     }
-    if(!e.residual.empty() && p.errors().empty()) {
+    if(!e.residual.empty() && parse_errors.empty()) {
       std::vector<std::string> args{path.filename().string()};
       for(auto a: words_of(e.residual[0])) args.emplace_back(a);
       interpreter vm(db, root, args, mode::check, interpreter::known_inputs{});
@@ -578,7 +575,7 @@ struct test_runner {
       for(auto & bad: e.residual_lacks)
         if(text.contains(bad)) why += cat("    лишнее в остаточной программе: ", in_quotes(bad), "\n", text);
     }
-    if(!e.slice.empty() && p.errors().empty()) {
+    if(!e.slice.empty() && parse_errors.empty()) {
       auto w = words_of(e.slice[0]);
       std::string fn(w.size() > 0 ? w[0] : ""), var(w.size() > 1 ? w[1] : "");
       std::string text = slice_view(db).print(root, fn, var);
@@ -608,7 +605,7 @@ struct test_runner {
     }
     why += why_state;
     states.fresh();
-    if(e.machine && p.errors().empty()) why += machine_check(db, root, path, e, out, errors);
+    if(e.machine && parse_errors.empty()) why += machine_check(db, root, path, e, out, errors);
     uint32_t i = 0;
     for(std::string_view line: lines_of(out)) {
       if(i >= e.out.size()) {

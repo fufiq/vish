@@ -25,10 +25,20 @@ enum class param_mode : uint8_t { let, mut, own, out, expr, ct };
 
 // --- node ---
 
+// Context is a node that enters the region (author’s decision 2026-10-02): the module, the
+// `{}` block (and the body of the structure is its block) are the heirs of the context, and
+// there is no node wrapper. Rules parsing (syntax, operator, construction) - from ads in
+// context: operate from the announcement to the end of its context and in nested, search -
+// from place up the context, prelude - the external context of all modules (§4.4).
+// 
+// 
+//.
+struct n_context {};
+
 // blank[k] - empty lines before the element k (over canonical), the last - before the
 // end: the layout of the text that a person put Enter (author's decision 2026-09-29).
 // The performance doesn't see her.
-struct n_module {
+struct n_module : n_context {
   symbol name;
   node_list items;
   std::vector<uint32_t> blank;
@@ -74,7 +84,7 @@ struct n_var {
   bool strict = false; // explicit T x = e - type exactly T (§5.8)
   node_list attrs; // [[state]] x = e is the state of the program (§12.2)
 };
-struct n_block {
+struct n_block : n_context {
   node_list items;
   bool has_value = false;
   std::vector<uint32_t> blank; // n_module
@@ -482,6 +492,13 @@ struct ast_db {
     }
   }
 
+  // Node - context (module, block): heir to n_context
+  bool is_context(node_id n) const {
+    return n && std::visit([](auto const & k) { return std::is_base_of_v<n_context, std::remove_cvref_t<decltype(k)>>; }, nodes[n].kind);
+  }
+  // contextual elements
+  node_list const & context_items(node_id n) const { return is<n_block>(n) ? as<n_block>(n).items : as<n_module>(n).items; }
+
   // All daughter node_id node: One realization for all species through reflection.
   void for_each_child(node_id n, auto && f) const {
     std::visit([&](auto const & k) { for_each_child_of(k, f); }, nodes[n].kind);
@@ -538,6 +555,14 @@ struct ast_db {
   std::vector<std::string> labels;
   std::vector<uint64_t> node_rev;
 };
+
+// Module with key in the database (last import - valid).
+node_id find_module(ast_db const & db, symbol key) {
+  node_id found;
+  for(uint32_t i = 0; i < db.size(); ++i)
+    if(db.is<n_module>(node_id(i)) && db.as<n_module>(node_id(i)).name == key) found = node_id(i);
+  return found;
+}
 
 // Diagnostics on the basis: the text is taken from the import to which the node belongs.
 std::string render(diagnostic const & d, std::string_view file, ast_db const & db) {
@@ -686,12 +711,17 @@ consteval char const * node_field_type() {
 
 // node AST - struct programs:
 // 
-// Ads are generated from node C++ structures (one source) and parsed together
-// with prelude.
+// Ads are generated from node C++ structures (one source) and parsed together with
+// prelude. The node base (n_block: n_context) is the program's struct base: is_a, a
+// sample base.
 std::string ast_structs_text() {
   std::string out = "// узлы АСТ (порождено из структур узлов VM)\n";
+  out += cat("struct ", std::meta::identifier_of(^^n_context), " { }\n");
   template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-    out += cat("struct ", std::meta::identifier_of(t), " {");
+    out += cat("struct ", std::meta::identifier_of(t));
+    template for(constexpr auto b: std::define_static_array(std::meta::bases_of(t, std::meta::access_context::unchecked())))
+      out += cat(" : ", std::meta::identifier_of(std::meta::type_of(b)));
+    out += " {";
     template for(constexpr auto m: fields_of<typename[:t:]>())
       out += cat(" ", node_field_type<typename[:std::meta::type_of(m):]>(), " ", std::meta::identifier_of(m), ";");
     out += " }\n";

@@ -5,8 +5,8 @@
 // continues after the closing bracket. Any text gives you AST.
 //
 //
-// M0: The set of operators and their groups is sewn into a table. Definition of operators
-// by code in language (§4.4) - later, the same table will be filled from the program.
+// Phase 2 rules (operators, syntax records, construction) - from ads in the context
+// of the place: module, block, prelude as external (§4.4, “contexts”).
 #pragma once
 
 #include "ast.hpp"
@@ -34,8 +34,6 @@ struct parser {
     diags = std::move(lx.errors); // token::err - Diag numbers
     if(!diags.empty()) lex_error = diags.front().what();
     match_brackets();
-    for(uint32_t i = 0; i < db.size(); ++i)
-      if(db.is<n_fn>(node_id(i))) learn(db.as<n_fn>(node_id(i)), node_id(i));
   }
 
   // --- designs declared code (§4.4) ---
@@ -54,10 +52,11 @@ struct parser {
     if(!f.name) return;
     if(!f.form.empty()) { // Syntax - a form of recording, not a call design
       if(!id) return;
-      syntaxes[f.name.value].push_back(id);
+      touch();
+      rules.syntaxes[f.name.value].push_back(id);
       if(record_of(db, id)) // Write words are not names: `if(c) { … }` does not declare an if function
         for(symbol w: f.form)
-          if(lexer::is_ident_start(db.strings.text(w)[0])) record_words.insert(std::string(db.strings.text(w)));
+          if(lexer::is_ident_start(db.strings.text(w)[0])) rules.record_words.insert(std::string(db.strings.text(w)));
       return;
     }
     learn_operator(f);
@@ -73,7 +72,8 @@ struct parser {
       }
     }
     if(!any_clause && !last_expr) return;
-    construct & c = constructs[f.name.value];
+    touch();
+    construct & c = rules.constructs[f.name.value];
     if(last_expr) c.tail = true;
     if(head == 1 && last_expr) c.bare = true;
     for(node_id pn: f.params) {
@@ -86,11 +86,124 @@ struct parser {
 
   construct const * construct_of(node_id callee) const {
     if(!db.is<n_ident>(callee)) return nullptr;
-    auto it = constructs.find(db.as<n_ident>(callee).name.value);
-    return it == constructs.end() ? nullptr : &it->second;
+    auto it = rules.constructs.find(db.as<n_ident>(callee).name.value);
+    return it == rules.constructs.end() ? nullptr : &it->second;
+  }
+
+  // --- Contexts: parsing rules from ads in an area (§4.4) ---
+  //
+  // A syntax, operator or construct ad is valid from itself to the end of its context
+  // (module, block - n_context) and in nested:
+// 
+// 
+// prelude is the external context of all modules.
+  // use k; brings the rules of modulus k to the use point (module-include, §9.1).
+
+  // The rule changes in the nested context - the old rules remain until the end.
+  void touch() {
+    if(depth && (saved.empty() || saved.back().first != depth)) saved.push_back({depth, rules});
+  }
+  // The block is the context of the rules: the output of the rule is as before it (and with an error inside).
+  struct context_scope {
+    parser & p;
+    explicit context_scope(parser & p) : p(p) { ++p.depth; }
+    ~context_scope() {
+      if(!p.saved.empty() && p.saved.back().first == p.depth) {
+        p.rules = std::move(p.saved.back().second);
+        p.saved.pop_back();
+      }
+      --p.depth;
+    }
+  };
+
+  // Rules that declare the context element: function (design, operator, syntax), extension
+  // function Name { … }, use k (module k rules).
+  void learn_item(node_id x) {
+    if(db.is<n_fn>(x)) learn(db.as<n_fn>(x), x);
+    else if(db.is<n_extend>(x)) {
+      for(node_id f: db.as<n_extend>(x).items)
+        if(db.is<n_fn>(f)) learn(db.as<n_fn>(f), f);
+    } else if(db.is<n_use>(x)) learn_use(db.as<n_use>(x));
+  }
+  // use k; / use k. {a, b}; - rules of the module k to its end (selective - only called
+  // entity; use inside k - as written in k). The module is not yet disassembled (use cycle)
+  // - without rules.
+  void learn_use(n_use const & u) {
+    node_id m = find_module(db, u.key);
+    if(!m || std::ranges::contains(learning, m)) return;
+    learning.push_back(m);
+    for(node_id x: db.as<n_module>(m).items) {
+      symbol name = db.is<n_fn>(x) ? db.as<n_fn>(x).name : db.is<n_extend>(x) ? db.as<n_extend>(x).name : symbol{};
+      if(db.is<n_use>(x) || u.names.empty() || std::ranges::contains(u.names, name)) learn_item(x);
+    }
+    learning.pop_back();
+  }
+  node_list learning; // Modules whose rules are taken (use cycle)
+
+  // The trace of an element's rules is what learn_item takes from it: the edit that changes the
+  // trail changes parsing after the element in its context (the editor re-examines the following).
+  static std::string rule_trace(ast_db const & db, node_id x) {
+    std::string out;
+    auto fn = [&](node_id f) {
+      auto const & d = db.as<n_fn>(f);
+      if(!d.name) return;
+      std::string_view name = db.strings.text(d.name);
+      if(!d.form.empty()) {
+        out += "syntax";
+        for(symbol w: d.form) out += cat(" ", db.strings.text(w));
+        if(auto r = record_of(db, f)) {
+          out += cat(" =", r->kind);
+          for(uint32_t s: r->slot) out += cat(" ", s);
+        }
+        out += ";";
+        return;
+      }
+      bool rule = false;
+      for(std::string_view role: {"infix", "prefix", "postfix"})
+        rule = rule || (name.size() > role.size() && name.starts_with(role) && !lexer::is_ident_start(name[role.size()]));
+      for(node_id pn: d.params)
+        rule = rule || db.as<n_param>(pn).clause || db.as<n_param>(pn).mode == param_mode::expr;
+      if(!rule) return;
+      out += cat(name, "(");
+      for(node_id pn: d.params) {
+        auto const & p = db.as<n_param>(pn);
+        out += cat(p.clause ? db.strings.text(p.clause) : "", p.pack ? "..." : "", p.mode == param_mode::expr ? "expr" : "", ",");
+      }
+      out += ")";
+      for(node_id a: d.attrs)
+        if(db.is<n_ident>(a)) out += cat("[[", db.strings.text(db.as<n_ident>(a).name), "]]");
+      out += ";";
+    };
+    if(db.is<n_fn>(x)) fn(x);
+    else if(db.is<n_extend>(x)) {
+      for(node_id f: db.as<n_extend>(x).items)
+        if(db.is<n_fn>(f)) fn(f);
+    } else if(db.is<n_use>(x)) {
+      out += cat("use ", db.strings.text(db.as<n_use>(x).key));
+      for(symbol s: db.as<n_use>(x).names) out += cat(" ", db.strings.text(s));
+      out += ";";
+    }
+    return out;
+  }
+
+  // Place rules: prelude, then contexts from the outside to the place - announcements
+  // of each to the item on the way to the place (in ctx - before; empty - everything).
+  void place(node_id ctx, node_id before = {}) {
+    placed = true;
+    std::vector<std::pair<node_id, node_id>> chain; // (context, its element on the way)
+    for(node_id c = ctx, at = before; c; at = c, c = db[c].parent)
+      if(db.is_context(c)) chain.push_back({c, at});
+    if(db.prelude && (chain.empty() || chain.back().first != db.prelude))
+      for(node_id x: db.as<n_module>(db.prelude).items) learn_item(x);
+    for(auto it = chain.rbegin(); it != chain.rend(); ++it)
+      for(node_id x: db.context_items(it->first)) {
+        if(x == it->second) break;
+        learn_item(x);
+      }
   }
 
   node_id parse_module() {
+    if(!placed) place({}); // new module: prelude rules
     uint32_t start = here().where.begin;
     n_module m;
     if(is_word("sealed") && is_word("module", 1)) { // sealed module k; does not expand from the outside
@@ -285,7 +398,7 @@ struct parser {
     };
     for(std::string_view o: core)
       if(o.size() > best.size() && glued_as(o)) best = o;
-    for(auto const & [o, forms]: operators)
+    for(auto const & [o, forms]: rules.operators)
       if(o.size() > best.size() && glued_as(o)) best = o;
     return best;
   }
@@ -426,6 +539,7 @@ struct parser {
       }
       u.key = db.strings.intern(key);
       end_statement();
+      learn_use(u); // module forms - from this place (module - inclusion, §9.1 )
       return db.add(std::move(u), {start, toks[pos - 1].where.end});
     }
     node_id s = statement();
@@ -654,12 +768,12 @@ struct parser {
 // 
 //.
   bool is_keyword(std::string_view w) const {
-    return w == "ct" || w == "const" || w == "outline" || w == "module" || w == "operator" || record_words.contains(std::string(w));
+    return w == "ct" || w == "const" || w == "outline" || w == "module" || w == "operator" || rules.record_words.contains(std::string(w));
   }
   // w is the first word of the declared syntax record (begins the expression)
   bool heads_syntax(std::string_view w) const {
     auto it = db.strings.index.find(std::string(w));
-    return it != db.strings.index.end() && syntaxes.contains(it->second.value);
+    return it != db.strings.index.end() && rules.syntaxes.contains(it->second.value);
   }
 
   node_list param_list(symbol clause = {}) {
@@ -821,6 +935,7 @@ struct parser {
   }
 
   node_id block() {
+    context_scope scope(*this); // declared in the block - until its end
     uint32_t start = here().where.begin;
     expect_open('{');
     n_block b;
@@ -955,7 +1070,8 @@ struct parser {
     auto name = db.strings.text(f.name);
     for(std::string_view role: {"infix", "prefix", "postfix"})
       if(name.size() > role.size() && name.starts_with(role) && (op_char(name[role.size()]) || name.substr(role.size()) == "[]")) {
-        op_forms & o = operators[std::string(name.substr(role.size()))];
+        touch();
+        op_forms & o = rules.operators[std::string(name.substr(role.size()))];
         (role == "infix" ? o.infix : role == "prefix" ? o.prefix
                                                       : o.postfix) = true;
         for(node_id a: f.attrs)
@@ -964,8 +1080,8 @@ struct parser {
   }
 
   bool is_role(std::string const & sym, int role) const { // 0 prefix, 1 infix, 2 postfix
-    auto it = operators.find(sym);
-    if(it == operators.end()) return false;
+    auto it = rules.operators.find(sym);
+    if(it == rules.operators.end()) return false;
     return role == 0 ? it->second.prefix : role == 1 ? it->second.infix
                                                      : it->second.postfix;
   }
@@ -1073,8 +1189,8 @@ struct parser {
   // is a hole, like any instruction. Otherwise (form-challenge) did not fit any -
   // nullopt, the position is not shifted.
   std::optional<node_id> syntax_use(uint32_t start) {
-    auto it = syntaxes.find(db.strings.intern(here().text).value);
-    if(it == syntaxes.end()) return std::nullopt;
+    auto it = rules.syntaxes.find(db.strings.intern(here().text).value);
+    if(it == rules.syntaxes.end()) return std::nullopt;
     std::vector<node_id> live(it->second.rbegin(), it->second.rend());
     auto piece = [&](node_id d, std::size_t k) -> std::string_view {
       auto const & form = db.as<n_fn>(d).form;
@@ -1322,7 +1438,8 @@ struct parser {
     }
     if(atoms.size() == 1) return atoms[0];
     bool same = std::ranges::all_of(infix, [&](auto const & s) { return s == infix[0]; });
-    if(infix.size() == 1 || (same && operators[infix[0]].assoc)) { // tree
+    auto assoc = [&](std::string const & s) { auto it = rules.operators.find(s); return it != rules.operators.end() && it->second.assoc; };
+    if(infix.size() == 1 || (same && assoc(infix[0]))) { // tree
       node_id t = atoms[0];
       for(std::size_t k = 0; k < infix.size(); ++k)
         t = db.add(n_op{db.strings.intern(infix[k]), {t, atoms[k + 1]}}, {start, db[atoms[k + 1]].where.end});
@@ -1458,7 +1575,7 @@ struct parser {
       throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только имена: ", db.strings.text(word), "(e)"), db[c.args[first]].where);
     node_id body;
     if(is_open('{')) body = block();
-    else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && (!record_words.contains(std::string(here().text)) || heads_syntax(here().text))) {
+    else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && (!rules.record_words.contains(std::string(here().text)) || heads_syntax(here().text))) {
       body = statement();
       tail_statement = true;
     }
@@ -1730,13 +1847,20 @@ struct parser {
   bool last_was_value = false;
   uint32_t statement_head = ~uint32_t{0}; // starting-point
   bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
-  std::unordered_map<uint32_t, construct> constructs; // head-name
-  std::unordered_map<uint32_t, std::vector<node_id>> syntaxes; // Syntax announcements by first word
-  std::set<std::string> record_words; // words of records (heads and words of forms)
   struct op_forms {
     bool prefix = false, infix = false, postfix = false, assoc = false;
   };
-  std::map<std::string, op_forms> operators; // symbolically
+  // parsing place rules (§4.4) - from ads in context and external contexts
+  struct rule_set {
+    std::unordered_map<uint32_t, construct> constructs; // head-name
+    std::unordered_map<uint32_t, std::vector<node_id>> syntaxes; // Syntax announcements by first word
+    std::set<std::string> record_words; // words of records (heads and words of forms)
+    std::map<std::string, op_forms> operators; // symbolically
+  };
+  rule_set rules;
+  uint32_t depth = 0; // nesting of context-blocks (module - 0)
+  std::vector<std::pair<uint32_t, rule_set>> saved; // rules of embedded context before the first announcement in it
+  bool placed = false; // Place rules already taken (place)
   std::vector<diagnostic> diags;
 };
 
