@@ -13,11 +13,13 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <liburing.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace tz::os {
@@ -187,6 +189,68 @@ std::string read_ready(int fd) {
     out.append(buf, std::size_t(n));
   }
   return out;
+}
+
+// --- child processes (parallel run of tests) ---
+//
+// The child is fork: the body is executed in it, its total (bytes) goes into the pipe, the
+// output is exit, without destructors of statics. The global state (JIT, pages, forms) of the
+// child has its own. The ends of the pipe - O_CLOEXEC: grandchildren (qemu) do not hold them.
+struct child {
+  int pid = -1;
+  int fd = -1; // parent's pipe end: child's total, EOF - child finished
+};
+
+child fork_child(auto && body) {
+  int fds[2];
+  if(::pipe2(fds, O_CLOEXEC) != 0) throw diagnostic(cat("pipe: ", std::strerror(errno)), {});
+  std::fflush(stdout); // The stdio buffer of the parent must not leave twice.
+  std::fflush(stderr);
+  int pid = ::fork();
+  if(pid < 0) throw diagnostic(cat("fork: ", std::strerror(errno)), {});
+  if(pid == 0) {
+    ::close(fds[0]);
+    int code = 0;
+    try {
+      write_all(fds[1], body());
+    } catch(diagnostic const &) {
+      code = 1;
+    }
+    ::_exit(code);
+  }
+  ::close(fds[1]);
+  return {pid, fds[0]};
+}
+
+// Wait for one of the fds to be read or closed; the finished ones are true.
+std::vector<bool> wait_readable(std::vector<int> const & fds) {
+  std::vector<pollfd> ps;
+  for(int fd: fds) ps.push_back({fd, POLLIN, 0});
+  while(::poll(ps.data(), ps.size(), -1) < 0)
+    if(errno != EINTR) throw diagnostic(cat("poll: ", std::strerror(errno)), {});
+  std::vector<bool> ready;
+  for(auto const & p: ps) ready.push_back(p.revents != 0);
+  return ready;
+}
+
+// Finish finished (after wait_readable): False - end of flow.
+bool read_some(int fd, std::string & to) {
+  char buf[65536];
+  for(;;) {
+    auto n = ::read(fd, buf, sizeof buf);
+    if(n < 0 && errno == EINTR) continue;
+    if(n <= 0) return false;
+    to.append(buf, std::size_t(n));
+    return true;
+  }
+}
+
+// The result of the child: exit code, or -signal if he was killed.
+int wait_child(int pid) {
+  int st = 0;
+  while(::waitpid(pid, &st, 0) < 0)
+    if(errno != EINTR) return -1;
+  return WIFEXITED(st) ? WEXITSTATUS(st) : -WTERMSIG(st);
 }
 
 void close_fd(int fd) { ::close(fd); }

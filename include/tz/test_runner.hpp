@@ -30,6 +30,7 @@
 #include "jit/jit.hpp"
 
 #include <filesystem>
+#include <thread>
 
 namespace tz {
 
@@ -44,21 +45,113 @@ struct test_runner {
       if(e.path().extension() == ".tz" || e.path().extension() == ".session" || e.path().extension() == ".wire") files.push_back(e.path());
     std::ranges::sort(files);
     uint32_t passed = 0;
-    for(auto & f: files) {
-      std::string why = run_one(f);
+    auto show = [&](std::filesystem::path const & f, std::string const & why) {
       if(why.empty()) {
         ++passed;
         put(stdout, cat("  ok   ", f.filename().string(), "\n"));
       } else {
         put(stdout, cat("  FAIL ", f.filename().string(), "\n", why, "\n"));
       }
-    }
+    };
+    if(uint32_t jobs = test_jobs(); jobs > 1) run_forked(files, jobs, show);
+    else for(auto & f: files) show(f, run_one(f));
     if(a64) {
       put(stdout, cat("AArch64: проверено вызовов ", a64_checked, ", не проверено ", a64_skipped, "\n"));
       for(auto const & n: a64_notes) put(stdout, cat("  не проверено  ", n, "\n"));
     }
     put(stdout, cat(passed, "/", files.size(), " тестов прошло\n"));
     return passed == files.size() ? 0 : 1;
+  }
+
+  // Simultaneous tests: TZ_TEST_JOBS, otherwise - on the cores; 1 - in a row in this process, without fork.
+  static uint32_t test_jobs() {
+    if(char const * s = std::getenv("TZ_TEST_JOBS")) {
+      uint32_t n = 0;
+      std::from_chars(s, s + std::strlen(s), n);
+      return std::max(n, 1u);
+    }
+    return std::max(std::thread::hardware_concurrency(), 1u);
+  }
+
+  // Each test is in its child (fork), no more jobs at once; the results are in the order of the
+  // files, as when running in a row. The child sends to the pipe: counters and notes AArch64
+  // (they are saved by the runner between tests), then the text parsing (empty - passed).
+  void run_forked(std::vector<std::filesystem::path> const & files, uint32_t jobs, auto && show) {
+    struct running {
+      os::child c;
+      std::string got;
+      bool done = false;
+      int code = 0;
+    };
+    std::vector<running> kids(files.size());
+    std::size_t next = 0, shown = 0;
+    uint32_t busy = 0;
+    while(shown < files.size()) {
+      for(; busy < jobs && next < files.size(); ++next, ++busy)
+        kids[next].c = os::fork_child([&] {
+          a64_checked = a64_skipped = 0;
+          a64_notes.clear();
+          std::string why;
+          try {
+            why = run_one(files[next]);
+          } catch(diagnostic const & d) {
+            why = cat("    ", d.what(), "\n");
+          }
+          std::string out;
+          put_u32(out, a64_checked);
+          put_u32(out, a64_skipped);
+          put_u32(out, uint32_t(a64_notes.size()));
+          for(auto const & n: a64_notes) {
+            put_u32(out, uint32_t(n.size()));
+            out += n;
+          }
+          return out + why;
+        });
+      std::vector<int> fds;
+      std::vector<std::size_t> who;
+      for(std::size_t i = shown; i < next; ++i)
+        if(!kids[i].done) {
+          fds.push_back(kids[i].c.fd);
+          who.push_back(i);
+        }
+      if(!fds.empty()) {
+        auto ready = os::wait_readable(fds);
+        for(std::size_t k = 0; k < who.size(); ++k) {
+          auto & r = kids[who[k]];
+          if(!ready[k] || os::read_some(r.c.fd, r.got)) continue;
+          os::close_fd(r.c.fd);
+          r.code = os::wait_child(r.c.pid);
+          r.done = true;
+          --busy;
+        }
+      }
+      for(; shown < next && kids[shown].done; ++shown) {
+        auto & r = kids[shown];
+        if(r.code != 0) { // The fallen child did not complete the result
+          show(files[shown], cat("    тест не закончился: ", r.code < 0 ? cat("сигнал ", -r.code) : cat("код ", r.code), "\n"));
+          continue;
+        }
+        std::string_view in = r.got;
+        a64_checked += take_u32(in);
+        a64_skipped += take_u32(in);
+        for(uint32_t k = 0, notes = take_u32(in); k < notes; ++k) {
+          uint32_t n = std::min<uint32_t>(take_u32(in), uint32_t(in.size()));
+          a64_notes.emplace(in.substr(0, n));
+          in.remove_prefix(n);
+        }
+        show(files[shown], std::string(in));
+        r.got = {};
+      }
+    }
+  }
+
+  static void put_u32(std::string & to, uint32_t v) { to.append(reinterpret_cast<char const *>(&v), 4); }
+  static uint32_t take_u32(std::string_view & from) {
+    uint32_t v = 0;
+    if(from.size() < 4) return 0;
+    std::memcpy(&v, from.data(), 4);
+    from.remove_prefix(4);
+    return v;
   }
   struct expect {
     std::vector<std::string> args, stdin_lines, out, out2, errors, instances, check, check_lacks, check_errors;
