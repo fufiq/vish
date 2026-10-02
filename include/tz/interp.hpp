@@ -337,6 +337,29 @@ struct interpreter {
     return false;
   }
 
+  // Operators declared in blocks (operator in the body of a function or structure) are
+  // local functions: the operator node looks for them in its area.
+  void note_local_ops(node_id n, bool nested = false) {
+    if(nested && db.is<n_fn>(n) && db.is<n_block>(db[n].parent) && !db.as<n_fn>(n).scoped && operator_name(str(db.as<n_fn>(n).name))) local_ops.insert(db.as<n_fn>(n).name.value);
+    db.for_each_child(n, [&](node_id c) { note_local_ops(c, true); });
+  }
+  // The parsing rule (operator, syntax, construction) is not used.
+  bool rule_decl(node_id n) const {
+    if(!db.is<n_fn>(n) || db.as<n_fn>(n).scoped) return false;
+    auto const & f = db.as<n_fn>(n);
+    if(!f.form.empty() || operator_name(str(f.name))) return true;
+    return std::ranges::any_of(f.params, [&](node_id p) { return db.as<n_param>(p).clause || db.as<n_param>(p).mode == param_mode::expr; });
+  }
+  // e - call block (block, block with parameters, tail instruction, pack clause) - as in parsing
+  bool block_arg(node_id e) const {
+    bool block = db.is<n_block>(e) || (db.is<n_lambda>(e) && db.as<n_lambda>(e).block);
+    node_id c = db[e].parent;
+    if(c && db.is<n_construct>(c)) return block && db.is<n_call>(db[c].parent) && !db.as<n_call>(db[c].parent).words.empty();
+    if(!c || !db.is<n_call>(c)) return false;
+    auto const & k = db.as<n_call>(c);
+    return block || (k.tail && !k.args.empty() && k.args.back() == e);
+  }
+
   // Announcement in current elaboration: from a module or generated emit.
   void register_item(node_id item) {
     if(record_of(db, item)) return; // Syntax (if, loop, return...) - projection node
@@ -347,6 +370,7 @@ struct interpreter {
       check_sealed(db.as<n_extend>(item).target ? db.as<n_fn>(node_id(db.as<n_extend>(item).target)).name : db.as<n_extend>(item).name, item);
     if(db.is<n_fn>(item) && operator_name(str(db.as<n_fn>(item).name)) && !intrinsic_operator(item))
       user_ops.insert(db.as<n_fn>(item).name.value);
+    note_local_ops(item);
     if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
     else if(db.is_struct(item)) {
       auto const & st = db.as<n_extend>(item);
@@ -1235,9 +1259,10 @@ struct interpreter {
       if(db.is<n_lambda>(t.expr) && db.as<n_lambda>(t.expr).block)
         fail("блок конструкции вводит имена — его вызывают с аргументами: body(x)", db[t.expr].where);
       uint64_t saved = std::exchange(ctx, t.ctx); // expression of the caller in its context
+      ruled_hold rh{*this, t, ruled_env(t)};
       flow r;
       try {
-        r = eval(t.expr, t.env, t.frame);
+        r = eval(t.expr, rh.s, t.frame);
       } catch(...) {
         ctx = saved;
         throw;
@@ -1553,8 +1578,38 @@ struct interpreter {
         return ok();
       }
     env->declare(f.name, value(fn_v{{}, n, env, {n}}));
+    rules_for_blocks(n, env);
     return ok();
   }
+
+  // The rule in the body of the structure (operator, syntax, construction - §4.4) - for its
+  // blocks: parsing took the rules of the body, the execution of the block sees the rules
+  // announced at this point (the layer above the region of the caller - ruled_env). Lexically,
+  // like parsing, it's not like using operator (§8.2). "" run_in_govno { мы можем здесь
+  // поллучить всё для чего мы его вызываем.}.
+  void rules_for_blocks(node_id n, scope * env) {
+    node_id b = db[n].parent;
+    if(!env->parent || !rule_decl(n) || !db.is<n_block>(b) || !db[b].parent || !db.is<n_fn>(db[b].parent) || db.as<n_fn>(db[b].parent).body != b) return;
+    for(auto & [name, cell]: env->parent->vars) // design
+      if(cell->is<thunk_v>() && block_arg(cell->as<thunk_v>().expr)) cell->as<thunk_v>().rules = env;
+  }
+  // The block with rules has a layer above the area of the caller with the rules of the
+  // body (only they: the rest of the body is not visible to the block).
+  scope * ruled_env(thunk_v const & t) { return t.rules ? rules_layer(t) : t.env; }
+  [[gnu::cold, gnu::noinline]] scope * rules_layer(thunk_v const & t) { // The path of hot cycles does not affect him.
+    scope * layer = new_scope(t.env);
+    for(auto & [name, cell]: t.rules->vars)
+      if(cell->is<fn_v>() && rule_decl(cell->as<fn_v>().lambda)) layer->alias(name, cell);
+    return layer;
+  }
+  struct ruled_hold {
+    interpreter & vm;
+    thunk_v const & t;
+    scope * s;
+    ~ruled_hold() {
+      if(s != t.env) vm.drop_scope(s);
+    }
+  };
 
   flow eval_node(node_id n, n_return const & r, scope * env, uint32_t frame) {
     value v;
@@ -2356,7 +2411,8 @@ struct interpreter {
   flow call_block(thunk_v const & t, node_list const & args, scope * env, uint32_t frame, span where) {
     auto const & l = db.as<n_lambda>(t.expr);
     if(l.params.size() != args.size()) fail(cat("блок ждёт ", l.params.size(), " аргументов, передано ", args.size()), where);
-    scope * inner = new_scope(t.env);
+    ruled_hold rh{*this, t, ruled_env(t)};
+    scope * inner = new_scope(rh.s);
     scope_hold hold{*this, inner};
     for(uint32_t i = 0; i < args.size(); ++i) {
       auto const & p = db.as<n_param>(l.params[i]);
@@ -3131,9 +3187,10 @@ struct interpreter {
     if(checking()) { // parsing: the body is in place; fiber launch - runtime effect
       rt_effect();
       uint64_t saved = std::exchange(ctx, t.ctx); // as in performance: the body in the context where it is written
+      ruled_hold rh{*this, t, ruled_env(t)};
       flow r;
       try {
-        r = eval(t.expr, t.env, t.frame);
+        r = eval(t.expr, rh.s, t.frame);
       } catch(...) {
         ctx = saved;
         throw;
@@ -3142,10 +3199,11 @@ struct interpreter {
       (void)r;
       return ok();
     }
-    capture(t.env);
+    scope * body_env = ruled_env(t); // Rule layer lives with fiber
+    capture(body_env);
     fiber_rec & f = new_fiber();
     f.body = t.expr;
-    f.env = t.env;
+    f.env = body_env;
     f.frame = t.frame;
     f.body_ctx = t.ctx;
     return ok();
@@ -3804,6 +3862,11 @@ struct interpreter {
     if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(sym("infix[]").value) || db.in_prelude(n))) return eval_index(n, db.index_of(n), env, frame);
     auto op = str(o.op);
     span where = db[n].where;
+    // operator declared in a block (in the body of a function or structure for its blocks) is a
+    // local function of a region
+    if(!local_ops.empty() && !(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/="))
+      if(symbol f = operator_entity(o); local_ops.contains(f.value))
+        if(value * cell = env->find(f); cell && cell->is<fn_v>()) return call_value(*cell, o.args, env, frame, where, n.value);
     // Operator declared to be an unbuilt primitive code calls its entity (overload by
     // type; embedded is also a candidate)
     if(!user_ops.empty() || o.postfix)
@@ -3896,9 +3959,10 @@ struct interpreter {
       if(value * c = find(env, db.as<n_ident>(lhs).name); c && c->is<thunk_v>()) {
         thunk_v t = c->as<thunk_v>();
         uint64_t saved = std::exchange(ctx, t.ctx);
+        ruled_hold rh{*this, t, ruled_env(t)};
         flow r;
         try {
-          r = assign(t.expr, op, std::move(rhs), t.env, t.frame, where);
+          r = assign(t.expr, op, std::move(rhs), rh.s, t.frame, where);
         } catch(...) {
           ctx = saved;
           throw;
@@ -4202,7 +4266,7 @@ struct interpreter {
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
       if(p.mode == param_mode::expr) {
-        inner->declare(p.name, value(thunk_v{args[i], env, frame, ctx}));
+        inner->declare(p.name, value(thunk_v{args[i], frame, env, ctx}));
         continue;
       }
       if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr) {
@@ -4320,7 +4384,7 @@ struct interpreter {
         auto const & ps = db.as<n_fn>(f).params;
         if(i >= ps.size() || db.as<n_param>(ps[i]).mode != param_mode::expr) expr_everywhere = false;
       }
-      if(expr_everywhere) vals[i] = value(thunk_v{args[i], env, frame, ctx});
+      if(expr_everywhere) vals[i] = value(thunk_v{args[i], frame, env, ctx});
       else if(value * cell = checking() ? nullptr : place_or_null(args[i], env); cell && cell->is<array_v>())
         vals[i] = value(array_v::borrow(cell->as<array_v>())); // place-link, not copy
       else {
@@ -4985,8 +5049,9 @@ struct interpreter {
     if(!db.is<n_op>(n)) return false;
     auto const & o = db.as<n_op>(n);
     if(o.postfix) return !db.is_member(n);
-    if(user_ops.empty()) return false;
-    return user_ops.contains(db.strings.intern(cat(o.args.size() == 2 ? "infix" : "prefix", str(o.op))).value);
+    if(user_ops.empty() && local_ops.empty()) return false;
+    uint32_t f = db.strings.intern(cat(o.args.size() == 2 ? "infix" : "prefix", str(o.op))).value;
+    return user_ops.contains(f) || local_ops.contains(f);
   }
 
   bool has_addressed_return(node_id n) const {
@@ -5462,6 +5527,7 @@ struct interpreter {
   uint32_t override_depth = 0;
   uint64_t array_gen = 0; // generation of array buffers (performance)
   std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
+  std::set<uint32_t> local_ops; // operators declared in blocks (local functions)
   std::unordered_map<uint64_t, symbol> op_entities;
   std::unordered_map<uint32_t, bool> assoc_ops;
   std::unordered_map<uint32_t, std::vector<symbol>> chain_names; // chain-name

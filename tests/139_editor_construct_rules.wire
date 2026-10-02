@@ -1,0 +1,26 @@
+// Rules of the body of the structure in the editor (§4.4): from the parsing line inside the block
+// of the structure takes the rules of the place together with the rules of its body; editing the
+// ad in the body of the structure re-arranges its calls (elements after the announcement).
+//  
+//;.
+// program: editor_construct.tz
+open_view module
+[2] open_view module
+// sqlish line: `~` is the sqlish body rule
+pointer 1 @2 0 1
+key 1 3
+// expect: kind="n_op" pieces=[#
+// expect: kind="n_int" pieces=["23"]
+// expect: курсор:     1 ~ 23‸
+// expect-not: n_hole
+// advert in body became `~~`: call redisassembled - `~` no longer announced
+pointer 1 @~ 2 3
+key 1 ~
+// expect: курсор:   operator (a) ~~‸ (b) => (a * 10) + b;
+// expect: kind="n_hole" pieces=["1 ~ 23"] note="нет оператора «~»"
+// expect: другому клиенту:⏎update
+// `~` again - operator again
+key 1 Backspace
+// expect: курсор:   operator (a) ~‸ (b) => (a * 10) + b;
+// expect: kind="n_int" pieces=["23"]
+// expect-not: n_hole

@@ -465,6 +465,8 @@ struct editor_server {
       node_id target = u.node;
       // The module element declares other parsing rules - the following are redefined
       bool rules_changed = u.kind == 1 && parser::rule_trace(session.db, target) != parser::rule_trace(session.db, fresh);
+      // block - the body of the structure, and the rules in it are different - reexamination of its calls
+      bool body_rules = u.kind == 0 && items_trace(target) != items_trace(fresh);
       auto range = [&](editor_view const & w) { return w.range[w.layout_of(target)]; };
       auto mutate = [&] {
         node_kind k = session.db[fresh].kind;
@@ -478,6 +480,7 @@ struct editor_server {
           auto const & items = session.db.as<n_module>(session.root).items;
           reparse_after(session.root, std::size_t(std::ranges::find(items, target) - items.begin()) + 1);
         }
+        if(body_rules) reparse_users(target);
       };
       apply(v, target, mutate, range, range, edited, {a - u.range.first, b - u.range.first, code_points(ins)}, caret);
       return;
@@ -632,7 +635,10 @@ struct editor_server {
         parser::trim_blank(nm.blank);
         db.replace(c, nm);
       }
-      if(rules_changed) reparse_after(c, k + n_new);
+      if(rules_changed) {
+        reparse_after(c, k + n_new);
+        reparse_users(c);
+      }
     };
     auto before = [&](editor_view const & w) { return items_range(w, c, k, count, a); };
     auto after = [&](editor_view const & w) {
@@ -643,6 +649,25 @@ struct editor_server {
     };
     apply(v, c, mutate, before, after, edited, {count ? a - old.first : 0, count ? b - old.first : 0, code_points(ins)}, caret);
     return true;
+  }
+
+  std::string items_trace(node_id block) const {
+    std::string out;
+    for(node_id x: session.db.as<n_block>(block).items) out += parser::rule_trace(session.db, x);
+    return out;
+  }
+  // The rules of the body of the design are the rules of its blocks (§4.4): editing in the
+  // body re-examines the elements of the context of the ad after it - there its calls (the
+  // call above the ad is not understood by the design).
+  void reparse_users(node_id body) {
+    auto & db = session.db;
+    node_id f = db[body].parent;
+    if(!f || !db.is<n_fn>(f) || db.as<n_fn>(f).body != body) return;
+    node_id c = db[f].parent;
+    if(!c || !db.is_context(c)) return;
+    auto const & items = db.context_items(c);
+    auto at = std::ranges::find(items, f);
+    if(at != items.end()) reparse_after(c, std::size_t(at - items.begin()) + 1);
   }
 
   // The parsing rule has changed - elements of the context c from the number from from from are
@@ -743,6 +768,17 @@ struct editor_server {
       if(&v == &av) c = blank_line_end(v, r.first + align(was, ch.from + caret, now));
       else if(c >= b.r.first) c = r.first + align(was, ch.map(c - b.r.first), now);
       v.cursor = std::min<uint32_t>(c, uint32_t(v.places.size() - 1));
+      // Disassembled out of place change their text (the hole loses the value of the block): one
+      // update of the common ancestor - the client does not see the intermediate mixture
+      node_id top = target;
+      for(node_id x: reparsed)
+        while(top && !within(x, top) && session.db[top].parent) top = session.db[top].parent;
+      if(top != target && v.layout_of(top) != ~uint32_t{0}) {
+        send(*b.p, proto::s_update{v.id, session.db.revision, top, subtree(v, top)});
+        if(&v != &av) close_completion(*b.p, v);
+        send_cursor(*b.p, v);
+        continue;
+      }
       send(*b.p, proto::s_update{v.id, session.db.revision, target, subtree(v, target)});
       // f(…) { … } prints the name and signature of the target: editing the target changes its projection
       for(node_id e: fn_extensions())

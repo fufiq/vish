@@ -913,7 +913,8 @@ jit_compile(cg, f, types, type result) {
       } else assign(name, init, true);
     } else if(k == n_throw) gen_throw(e);
     else if(k == n_fn) { // локальная функция: кода на месте нет — встраивается в вызовы
-      n_fn{nm, _, _, _, _, _, _, _, _} = e;
+      n_fn{nm, _, _, _, _, _, _, sc, _} = e;
+      if(!sc && op_name(nm)) bad(fmt"оператор в блоке ({nm}) — интерпретатор");
       lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
     }
     else if(k == n_construct) gen_construct(e);
@@ -1478,6 +1479,7 @@ jit_compile(cg, f, types, type result) {
       }
     }
     if(g.size != 1) bad(fmt"локальная функция {name}: нет перегрузки");
+    else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор");
     else if(rec) call_sub(e, name, g[0], xs);
     else {
       lf = lfns[0];
@@ -1671,6 +1673,7 @@ jit_compile(cg, f, types, type result) {
     }
     if((g.size == 0) || (rec || is_outline)) vm_or_bad(e, fmt"вызов {name}: нет встраиваемой перегрузки");
     else if(leading_require(body)) vm_or_bad(e, fmt"вызов {name}: ведущий require — выбор перегрузки по значениям");
+    else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор");
     else {
       fn = g[0];
       binds = bind_args(ps, xs);
@@ -2137,6 +2140,32 @@ jit_compile(cg, f, types, type result) {
     else vm_eval(e, t);
   };
   vm_kind(type t) => if(is_handle(t)) 9 else jt_code(t);
+  // правила разбора в теле (operator, syntax, конструкция — §4.4): блоки конструкции
+  // исполняются с ними — слой правил у интерпретатора; машинный код их не видит
+  starts(str s, str p) => (s.size > p.size) && {
+    same = true;
+    for(i : range(p.size)) if(s[i] != p[i]) same = false;
+    same
+  };
+  op_name(str nm) => starts(nm, "infix") || (starts(nm, "prefix") || starts(nm, "postfix"));
+  rule_decl(x) => (code_kind(x) == n_fn) && {
+    n_fn{nm, ps, _, _, _, _, _, sc, form} = x;
+    r = (form.size > 0) || op_name(nm);
+    for(p : ps) {
+      n_param{_, _, mode, _, clause, _, _} = p;
+      if((mode == 4) || (clause != "")) r = true;
+    }
+    r && !sc
+  };
+  rules_in(fn) => {
+    n_fn{_, _, _, b, _, _, _, _, _} = fn;
+    r = false;
+    if(code_kind(b) == n_block) {
+      n_block{items, _, _} = b;
+      for(x : items) if(rule_decl(x)) r = true;
+    }
+    r
+  };
   // тело начинается с require — условие выбора перегрузки (неудача — unpack_failed у вызова)
   leading_require(body) => (code_kind(body) == n_block) && {
     n_block{items, _, _} = body;

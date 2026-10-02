@@ -170,9 +170,10 @@ struct fn_v {
 // caller at each mention.
 struct thunk_v {
   node_id expr;
-  scope * env = nullptr; // Calling area (lives longer than the call)
   uint32_t frame; // function from which `return` within the expression
+  scope * env = nullptr; // Calling area (lives longer than the call)
   uint64_t ctx = 0; // context in which the expression is written
+  scope * rules = nullptr; // structure block: area of her body with rules (operator, syntax...)
 };
 
 // Verification mode (value approach):

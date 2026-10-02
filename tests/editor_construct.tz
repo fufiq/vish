@@ -1,0 +1,12 @@
+// out: 12
+// Программа для сценария 139_editor_construct_rules.wire: правила тела конструкции
+// в её блоке (§4.4).
+sqlish(expr body) {
+  operator (a) ~ (b) => (a * 10) + b;
+  body
+}
+
+main() {
+  r = sqlish { 1 ~ 2 };
+  print(r);
+}

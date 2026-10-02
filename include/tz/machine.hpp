@@ -58,6 +58,7 @@ struct m_thunk {
   uint32_t env = m_none;
   uint32_t frame = 0;
   uint64_t ctx = 0; // context
+  uint32_t rules = m_none; // structure block: area of her body with rules (operator, syntax...)
 };
 // Parameter - alias of the caller's place (author's decision): area and slot. alias
 // is a place by number: a variable (scope, slot) or an element of its array (index
@@ -101,6 +102,7 @@ struct m_scope {
   bool live = true;
   uint32_t caller = m_none; // Body root function: call environment (O4)
   uint32_t fn = m_none;
+  bool layer = false; // layer of design rules over the domain of the caller (ruled_scope)
 };
 
 struct m_frame {
@@ -208,7 +210,7 @@ struct m_state {
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "TZPROC03";
+  std::string magic = "TZPROC04";
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -1147,7 +1149,8 @@ struct process_machine {
         throw diagnostic("блок конструкции вводит имена — его вызывают с аргументами: body(x)", db[th.expr].where);
       t.kind = m_lambda_body; // The result of the expression is the result of this node
       t.extra = th.expr;
-      t.scope = th.env;
+      t.scope = ruled_scope(th);
+      if(t.scope != th.env) t.owned = t.scope;
       t.frame = th.frame;
       t.ctx = th.ctx;
       t.phase = 0;
@@ -1521,6 +1524,11 @@ struct process_machine {
     }
     // operator entity prelude (infix+, prefix-...): its overload
     std::string entity = cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix" : "prefix", op);
+    if(symbol e = helper.sym(entity); helper.local_ops.contains(e.value)) // operator declared in the block
+      if(place p = find_lexical(t.scope, e); p.scope != m_none && cell(p).is<m_fn>() && !cell(p).as<m_fn>().set.empty()) {
+        std::vector<node_id> fns(cell(p).as<m_fn>().set.begin(), cell(p).as<m_fn>().set.end());
+        return eval_call_args(n, fns, o.args, true);
+      }
     auto it = helper.functions.find(helper.sym(entity));
     if(it == helper.functions.end()) throw diagnostic(cat("оператор ", op, " не определён"), db[n].where);
     return eval_call_args(n, it->second, o.args, true);
@@ -1719,8 +1727,11 @@ struct process_machine {
   // overload of the call n: local set (from the caller area) or module function; env is the
   // local set environment (m_none is the global area).
   std::vector<node_id> overloads_of(node_id n, node_id any, uint32_t scope, uint32_t * env = nullptr) {
-    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee))
-      if(place p = find(scope, db.as<n_ident>(db.as<n_call>(n).callee).name); p.scope != m_none)
+    symbol local; // Local dial: call by name or operator declared in the block
+    if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) local = db.as<n_ident>(db.as<n_call>(n).callee).name;
+    else if(db.is<n_op>(n) && helper.local_ops.contains(db.as<n_fn>(any).name.value)) local = db.as<n_fn>(any).name;
+    if(local)
+      if(place p = db.is<n_op>(n) ? find_lexical(scope, local) : find(scope, local); p.scope != m_none)
         if(mval & cv = cell(p); cv.is<m_fn>() && !cv.as<m_fn>().set.empty()) {
           if(env) *env = cv.as<m_fn>().env;
           return std::vector<node_id>(cv.as<m_fn>().set.begin(), cv.as<m_fn>().set.end());
@@ -1829,7 +1840,7 @@ struct process_machine {
     auto const & l = db.as<n_lambda>(th.expr);
     if(l.params.size() != args.size()) throw diagnostic(cat("блок ждёт ", l.params.size(), " аргументов, передано ", args.size()), db[n].where);
     t.extra = th.expr;
-    t.a = th.env;
+    t.a = ruled_scope(th); // rule layer is released with block
     t.b = th.frame;
     t.thunk_ctx = th.ctx;
     t.phase = 4;
@@ -1842,6 +1853,7 @@ struct process_machine {
     uint32_t have = uint32_t(fib().vals.size() - t.base);
     if(t.phase == 5) {
       mval r = pop_val();
+      if(st.scopes[t.a].layer) release_scope(t.a);
       return finish(deref(r));
     }
     if(have < args.size()) return push_eval(args[have], t.scope, t.frame);
@@ -1897,7 +1909,8 @@ struct process_machine {
     fib().vals.resize(t.base);
     fib().vals.push_back(mval{hs});
     t.extra = body.expr;
-    t.a = body.env;
+    t.a = ruled_scope(body);
+    if(t.a != body.env) t.owned = t.a;
     t.thunk_ctx = body.ctx;
     t.b = body.frame;
   }
@@ -1932,6 +1945,7 @@ struct process_machine {
       pending_error.reset();
       f.vals.resize(t.base + 1);
       t.phase = 2;
+      release_scope(t.owned); // layer of body rules (if there was) - the body is over
       t.owned = sc;
       f.tasks.push_back(m_task{m_lambda_body, h, 0, sc, hs.frame, uint32_t(f.vals.size()), m_none, 0, 0, l.body, hs.ctx});
       return true;
@@ -1944,10 +1958,11 @@ struct process_machine {
   void begin_spawn(node_id n, node_list const & args) {
     if(args.size() != 1) throw diagnostic("spawn(тело)", db[n].where);
     m_thunk th = thunk_named(args[0], top().scope);
-    capture(th.env);
+    uint32_t env = ruled_scope(th); // Rule layer lives with fiber
+    capture(env);
     uint32_t id = uint32_t(st.fibers.size());
     st.fibers.emplace_back();
-    st.fibers.back().tasks.push_back(m_task{m_lambda_body, th.expr, 0, th.env, th.frame, 0, m_none, 0, 0, th.expr, th.ctx});
+    st.fibers.back().tasks.push_back(m_task{m_lambda_body, th.expr, 0, env, th.frame, 0, m_none, 0, 0, th.expr, th.ctx});
     st.ready.push_back(id);
     finish(mval{m_unit{}});
   }
@@ -2177,7 +2192,29 @@ struct process_machine {
         return finish(mval{m_unit{}});
       }
     declare(t.scope, f.name, mval{m_fn{{}, {}, t.scope, {n}}});
+    rules_for_blocks(n, t.scope);
     finish(mval{m_unit{}});
+  }
+
+  // The rule in the body of a structure is for its blocks (as in the interpreter,
+  // §4.4): the parameters-blocks remember the area of the body; the block is executed
+  // in a layer of rules over the area of the caller.
+  void rules_for_blocks(node_id n, uint32_t scope) {
+    node_id b = db[n].parent;
+    uint32_t params = st.scopes[scope].parent;
+    if(params == m_none || !helper.rule_decl(n) || !db.is<n_block>(b) || !db[b].parent || !db.is<n_fn>(db[b].parent) || db.as<n_fn>(db[b].parent).body != b) return;
+    for(auto & v: st.scopes[params].vars)
+      if(v.v.is<m_thunk>() && helper.block_arg(v.v.as<m_thunk>().expr)) v.v.as<m_thunk>().rules = scope;
+  }
+  uint32_t ruled_scope(m_thunk const & th) {
+    if(th.rules == m_none) return th.env;
+    uint32_t layer = new_scope(th.env);
+    st.scopes[layer].layer = true;
+    std::vector<m_var> rules;
+    for(auto const & v: st.scopes[th.rules].vars)
+      if(v.v.is<m_fn>() && !v.v.as<m_fn>().set.empty() && helper.rule_decl(v.v.as<m_fn>().set.front())) rules.push_back(v);
+    for(auto & v: rules) declare(layer, v.name, std::move(v.v));
+    return layer;
   }
 
   // Redefining the context for an operation: the nearest, whose parameter types take values.
@@ -2310,7 +2347,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(std::string_view(h.magic) != "TZPROC03") throw diagnostic("не дамп процесса tz", {});
+    if(std::string_view(h.magic) != "TZPROC04") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }

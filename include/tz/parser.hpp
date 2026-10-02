@@ -46,6 +46,7 @@ struct parser {
     std::vector<std::pair<symbol, bool>> clauses; // Clause word; repeated (pak)
     bool tail = false; // The tail of the head can be an instruction, not just a block.
     bool bare = false; // head without brackets: try { … }
+    std::vector<node_id> decls; // announcements (overload): their body rules for call blocks
   };
 
   void learn(n_fn const & f, node_id id = {}) {
@@ -74,6 +75,7 @@ struct parser {
     if(!any_clause && !last_expr) return;
     touch();
     construct & c = rules.constructs[f.name.value];
+    if(id && !std::ranges::contains(c.decls, id)) c.decls.push_back(id);
     if(last_expr) c.tail = true;
     if(head == 1 && last_expr) c.bare = true;
     for(node_id pn: f.params) {
@@ -116,6 +118,27 @@ struct parser {
     }
   };
 
+  // The design specifies the parsing rules of its block from its body (user solution
+  // 2026-10-02): the syntax, operator, and design ads in the declaration body operate in the
+  // blocks transmitted to it at the call point over the rules of the place; the nested inserts
+  // receive the rules of both.
+// 
+//;
+  // 
+// 
+// My: * The overloads are theirs
+  // unification (which is chosen - decide the types at instantiation, parsing before).
+  void learn_body(node_id d) {
+    if(!db.is<n_fn>(d) || !db.is<n_block>(db.as<n_fn>(d).body)) return;
+    for(node_id x: db.as<n_block>(db.as<n_fn>(d).body).items) learn_item(x);
+  }
+  // Block (or tail instruction) of a call: its context with decls body rules.
+  node_id ruled(std::vector<node_id> const & decls, auto && parse) {
+    context_scope scope(*this);
+    for(node_id d: decls) learn_body(d);
+    return parse();
+  }
+
   // Rules that declare the context element: function (design, operator, syntax), extension
   // function Name { … }, use k (module k rules).
   void learn_item(node_id x) {
@@ -148,6 +171,12 @@ struct parser {
   // trail changes parsing after the element in its context (the editor re-examines the following).
   static std::string rule_trace(ast_db const & db, node_id x) {
     std::string out;
+    auto body = [&](node_id f) { // The rules of the body of the structure - the rules of its blocks
+      if(!db.is<n_block>(db.as<n_fn>(f).body)) return;
+      std::string in;
+      for(node_id x: db.as<n_block>(db.as<n_fn>(f).body).items) in += rule_trace(db, x);
+      if(!in.empty()) out += cat("{", in, "}");
+    };
     auto fn = [&](node_id f) {
       auto const & d = db.as<n_fn>(f);
       if(!d.name) return;
@@ -159,6 +188,7 @@ struct parser {
           out += cat(" =", r->kind);
           for(uint32_t s: r->slot) out += cat(" ", s);
         }
+        body(f);
         out += ";";
         return;
       }
@@ -176,6 +206,7 @@ struct parser {
       out += ")";
       for(node_id a: d.attrs)
         if(db.is<n_ident>(a)) out += cat("[[", db.strings.text(db.as<n_ident>(a).name), "]]");
+      body(f);
       out += ";";
     };
     if(db.is<n_fn>(x)) fn(x);
@@ -190,20 +221,44 @@ struct parser {
     return out;
   }
 
-  // Place rules: prelude, then contexts from the outside to the place - announcements
-  // of each to the item on the way to the place (in ctx - before; empty - everything).
+  // Place rules: prelude, then contexts from the outside to the place - announcements of each
+  // to the item on the way to the place (in ctx - before; empty - everything). The block of a
+  // design call on the way is the rules of its body (according to the rules of the call place).
   void place(node_id ctx, node_id before = {}) {
     placed = true;
-    std::vector<std::pair<node_id, node_id>> chain; // (context, its element on the way)
+    std::vector<std::pair<node_id, node_id>> chain; // (context or challenge, its element on the way)
     for(node_id c = ctx, at = before; c; at = c, c = db[c].parent)
-      if(db.is_context(c)) chain.push_back({c, at});
+      if(db.is_context(c) || (at && call_block_arg(c, at))) chain.push_back({c, at});
     if(db.prelude && (chain.empty() || chain.back().first != db.prelude))
       for(node_id x: db.as<n_module>(db.prelude).items) learn_item(x);
-    for(auto it = chain.rbegin(); it != chain.rend(); ++it)
+    for(auto it = chain.rbegin(); it != chain.rend(); ++it) {
+      if(!db.is_context(it->first)) {
+        for(node_id d: call_decls(it->first)) learn_body(d);
+        continue;
+      }
       for(node_id x: db.context_items(it->first)) {
         if(x == it->second) break;
         learn_item(x);
       }
+    }
+  }
+  // a - call block c (block, block with parameters, tail instruction; clause - and in pack)
+  bool call_block_arg(node_id c, node_id a) const {
+    if(db.is<n_construct>(c) && db.is<n_call>(db[c].parent) && !db.as<n_call>(db[c].parent).words.empty()) // Pack Clause: catch { } catch { }
+      return std::ranges::contains(db.as<n_construct>(c).items, a) && block_like(a);
+    if(!db.is<n_call>(c)) return false;
+    auto const & k = db.as<n_call>(c);
+    if(!std::ranges::contains(k.args, a)) return false;
+    return block_like(a) || (k.tail && k.args.back() == a);
+  }
+  bool block_like(node_id a) const { return db.is<n_block>(a) || (db.is<n_lambda>(a) && db.as<n_lambda>(a).block); }
+  // Announcement of the design of the call c according to the rules of the place (the syntax record is its announcement).
+  std::vector<node_id> call_decls(node_id c) const {
+    if(db.is<n_construct>(c)) c = db[c].parent;
+    auto const & k = db.as<n_call>(c);
+    if(k.form) return {node_id(k.form - 1)};
+    if(auto con = construct_of(k.callee)) return con->decls;
+    return {};
   }
 
   node_id parse_module() {
@@ -763,8 +818,9 @@ struct parser {
     } else {
       f.body = block();
     }
-    learn(f);
-    return db.add(std::move(f), {start, toks[pos - 1].where.end});
+    node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
+    learn(db.as<n_fn>(id), id); // node - for the rules of the body of the structure in its blocks
+    return id;
   }
 
   // Words that are not names: kernel parsing (ads) and words of syntax entries from ads in
@@ -961,6 +1017,9 @@ struct parser {
   node_id statement() {
     last_was_value = false;
 
+    // operator and syntax in the block - the rules of its block (and the blocks of the structure in the body of which)
+    if(is_word("operator")) return operator_decl({});
+    if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl({});
     if(auto f = try_fn_decl(true)) return *f;
 
     if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
@@ -1074,12 +1133,16 @@ struct parser {
     auto name = db.strings.text(f.name);
     for(std::string_view role: {"infix", "prefix", "postfix"})
       if(name.size() > role.size() && name.starts_with(role) && (op_char(name[role.size()]) || name.substr(role.size()) == "[]")) {
+        bool assoc = std::ranges::any_of(f.attrs, [&](node_id a) { return db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "associative"; });
+        if(auto it = rules.operators.find(std::string(name.substr(role.size()))); it != rules.operators.end()) { // It is already there, the context does not change.
+          op_forms const & o = it->second;
+          if((role == "infix" ? o.infix : role == "prefix" ? o.prefix : o.postfix) && (o.assoc || !assoc)) continue;
+        }
         touch();
         op_forms & o = rules.operators[std::string(name.substr(role.size()))];
         (role == "infix" ? o.infix : role == "prefix" ? o.prefix
                                                       : o.postfix) = true;
-        for(node_id a: f.attrs)
-          if(db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "associative") o.assoc = true;
+        if(assoc) o.assoc = true;
       }
   }
 
@@ -1132,8 +1195,9 @@ struct parser {
     } else {
       f.body = block();
     }
-    learn(f);
-    return db.add(std::move(f), {start, toks[pos - 1].where.end});
+    node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
+    learn(db.as<n_fn>(id), id);
+    return id;
   }
 
   // syntax word (x) {тело} word ... => expression; is a form of writing declared by the
@@ -1258,7 +1322,8 @@ struct parser {
           live = std::move(v);
           committed = records;
           tail_statement = false;
-          args.push_back(is_open('{') ? block() : expression()); // body: block or expression (branch)
+          // body: block (with rules of body shapes - as in the structure) or expression (branch)
+          args.push_back(is_open('{') ? ruled(live, [&] { return block(); }) : expression());
           ++k;
           continue;
         }
@@ -1504,7 +1569,10 @@ struct parser {
 // announcement in brackets - `auto x: xs`, `E e` is a parameter
   // The tailblock, not the expression.
   node_id call(node_id callee, uint32_t start) {
+    // copy: block rules (context) change and restore the table of designs
+    construct own;
     construct const * con = construct_of(callee);
+    if(con) con = &(own = *con);
     bool head_of_statement = db[callee].where.begin == statement_head;
     n_call c;
     c.callee = callee;
@@ -1578,9 +1646,10 @@ struct parser {
     if(packed && c.args.size() > first) // Repetitive Clause - a block with parameters: catch(E e), catch(auto e)
       throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только имена: ", db.strings.text(word), "(e)"), db[c.args[first]].where);
     node_id body;
-    if(is_open('{')) body = block();
+    std::vector<node_id> decls = con ? con->decls : std::vector<node_id>{};
+    if(is_open('{')) body = ruled(decls, [&] { return block(); });
     else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && (!rules.record_words.contains(std::string(here().text)) || heads_syntax(here().text))) {
-      body = statement();
+      body = ruled(decls, [&] { return statement(); });
       tail_statement = true;
     }
     if(!body) {
