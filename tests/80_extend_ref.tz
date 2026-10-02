@@ -3,7 +3,7 @@
 // machine
 // fmt-stable
 // store-roundtrip
-// jit-stats: jit  weight(f64)
+// jit-stats: jit  sum3(значение VM, f64, значение VM)
 // Расширение конкретной функции ссылкой на её узел (M5, §5.4): 
 // 
 // 

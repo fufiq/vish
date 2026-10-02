@@ -98,7 +98,7 @@ jit_service_result jit_vm_service(uint64_t op, uint64_t id, uint64_t bits, uint6
 }
 
 // clang-format off
-enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, other }; // range - range(n) : in the slot only n; stream is its number
+enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, handle, ct, other }; // range - range(n) : in the slot only n; stream is its number
 // clang-format on
 
 std::string_view jt_name(jt t) {
@@ -113,6 +113,8 @@ std::string_view jt_name(jt t) {
     case jt::stream_i64: return "stream<i64>";
     case jt::stream_f64: return "stream<f64>";
     case jt::stream_bool: return "stream<bool>";
+    case jt::handle: return "значение VM";
+    case jt::ct: return "кт";
     default: return "?";
   }
 }
@@ -181,7 +183,25 @@ struct jit_fn {
   bool by_lang = false; // all code - compiler in language (jit_compile)
   std::string lang_note; // statistician
   std::string lang_error; // the compiler in the language could not - the reason (performs the interpreter)
+  // Value of VM (cell address) and compile-time
+// sample/value in the types of caller
+  std::vector<value> extra;
+  type_registry * extra_from = nullptr;
+  value result_shape; // result - the value of VM: its sample (types parsing instance)
 };
+
+// The value of VM, which the machine code holds at the cell address: string, aggregate,
+// general layout array; splitting from the same (the code also contains the cell address).
+bool handle_like(value const & v, type_registry const & types) {
+  if(v.is<split_v>()) {
+    for(auto const & a: v.as<split_v>().alts)
+      if(!handle_like(a, types)) return false;
+    return true;
+  }
+  value const * x = shape_of(v);
+  if(x && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "stream") return false; // flow is number, not cell
+  return x && (x->is<str_v>() || x->is<agg_v>() || x->is<array_v>());
+}
 
 struct jit_unsupported {
   node_id node;
@@ -196,9 +216,11 @@ struct jit_machine {
   jit_machine(ast_db & db, node_id module) : db(db), mod(module) {}
 
   // A compiled instance or nullptr (then an interpreter).
-  jit_fn * get(node_id fn, std::vector<jt> const & types) {
+  jit_fn * get(node_id fn, std::vector<jt> const & types, std::vector<value> const & extra = {}, type_registry * from = nullptr,
+      std::string const & extra_key = "") {
     std::string key = cat(fn.value, "(");
     for(jt t: types) key += std::string(jt_name(t)) + ",";
+    key += extra_key;
     auto it = cache.find(key);
     if(it != cache.end() && still_valid(fns[it->second])) return fns[it->second].ok ? &fns[it->second] : nullptr;
     // new instance - at the end of the arena; outdated remains in place: its input
@@ -206,6 +228,8 @@ struct jit_machine {
     jit_fn * f = &fns.emplace_back();
     cache[key] = uint32_t(fns.size() - 1);
     f->params = types;
+    f->extra = extra;
+    f->extra_from = from;
     compile(fn, *f);
     return f->ok ? f : nullptr;
   }
@@ -254,9 +278,15 @@ struct jit_machine {
       comp.jit_analysis = an_for_lang;
       if constexpr(std::is_same_v<A, x64::assembler>) // The compiler in the language is executed by its own code (bootstrapping).
         if(std::getenv("TZ_JIT_SELF")) comp.use_jit(static_cast<jit_engine *>(this));
-      for(jt t: out.params) types.push_back(type_value(comp, t));
+      for(std::size_t i = 0; i < out.params.size(); ++i) { // The value of VM is its type; compile-time is unit (not transmitted)
+        jt t = out.params[i];
+        if(t == jt::handle) types.push_back(value(type_v{comp.types.of(port_value(out.extra[i], *out.extra_from, comp.types))}));
+        else if(t == jt::ct) types.push_back(value(type_v{comp.types.named("unit")}));
+        else types.push_back(type_value(comp, t));
+      }
       // entity context (amd64, arm64), not a string
-      r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), type_value(comp, out.result)});
+      value rt = out.result == jt::handle ? value(type_v{comp.types.of(port_value(out.result_shape, an_for_lang->types, comp.types))}) : type_value(comp, out.result);
+      r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), rt});
     } catch(diagnostic const & d) {
       out.lang_error = d.what();
       if(std::getenv("TZ_LANG_DEBUG")) put(stderr, render(d, "?", db)); // compiler debugging
@@ -352,7 +382,12 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
     }
   auto shapes_for = [&](interpreter & in) {
     std::vector<value> shapes;
-    for(jt t: out.params) {
+    for(std::size_t i = 0; i < out.params.size(); ++i) {
+      jt t = out.params[i];
+      if(t == jt::handle || t == jt::ct) { // value of VM - sample, compile-time - value (instance parameter)
+        shapes.push_back(port_value(out.extra[i], *out.extra_from, in.types));
+        continue;
+      }
       if(is_stream(t)) { // flow-parameter: parsing flow with element type
         auto & ss = in.root->streams;
         ss.emplace_back();
@@ -387,6 +422,10 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   try {
     value r = an.analyze_instance(fn, shapes);
     out.result = jt_of(r);
+    if(out.result == jt::other && handle_like(r, an.types)) { // VM is the address of the cell (flow - number, not cell)
+      out.result = jt::handle;
+      out.result_shape = r.is<split_v>() ? r.as<split_v>().alts[0] : r;
+    }
     if(out.result == jt::other) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
@@ -549,12 +588,35 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     if(!vals[i].is<array_v>() && writes_param(f, i)) return std::nullopt;
   }
   std::vector<jt> param_types;
-  for(auto const & v: vals) {
+  std::vector<value> extra(vals.size());
+  std::string extra_key;
+  // compile-time: type, function, context, array of types - instance parameter
+// 
+// 
+  auto ct_param = [&](value const & v) {
+    if(v.is<type_v>()) return true;
+    if(v.is<fn_v>()) return !v.as<fn_v>().lambda;
+    if(!v.is<array_v>() || v.as<array_v>().empty()) return false;
+    for(uint32_t k = 0; k < v.as<array_v>().size(); ++k)
+      if(!v.as<array_v>().get(k).is<type_v>()) return false;
+    return true;
+  };
+  for(uint32_t i = 0; i < vals.size(); ++i) {
+    value const & v = vals[i];
     jt t = jt_of(v, this);
+    if(t == jt::other && ct_param(v)) {
+      t = jt::ct;
+      extra[i] = v;
+      extra_key += cat("кт ", show_v(v), ",");
+    } else if(t == jt::other && !v.is<split_v>() && handle_like(v, types) && !v.is<rt_v>()) {
+      t = jt::handle;
+      extra[i] = erase(v);
+      extra_key += cat(types.describe(v), ",");
+    }
     if(t == jt::other || t == jt::unit) return std::nullopt;
     param_types.push_back(t);
   }
-  jit_fn * code = jit->get(f, param_types);
+  jit_fn * code = jit->get(f, param_types, extra, &types, extra_key);
   if(!code) return std::nullopt;
 
   std::vector<uint64_t> raw(vals.size());
@@ -565,7 +627,12 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     else if(v.is<bool>()) raw[i] = v.as<bool>();
     else if(v.is<double>()) std::memcpy(&raw[i], &v.as<double>(), 8);
     else if(is_stream(param_types[i])) raw[i] = stream_id(v, {});
-    else { // array: pointer to array_v caller (alias) or to a copy
+    else if(param_types[i] == jt::ct) raw[i] = 0; // nontransmittable
+    else if(param_types[i] == jt::handle) { // VM is the address of the cell (caller or copy)
+      value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
+      cells[i] = cell && !cell->is<thunk_v>() && !cell->is<ref_v>() ? cell : &vals[i];
+      raw[i] = reinterpret_cast<uint64_t>(cells[i]);
+    } else { // array: pointer to array_v caller (alias) or to a copy
       value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
       cells[i] = cell && cell->is<array_v>() ? cell : &vals[i];
       raw[i] = reinterpret_cast<uint64_t>(&cells[i]->as<array_v>());
@@ -574,7 +641,9 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   // AArch64 verification: same call to qemu before execution to host (inputs - as is)
   std::optional<a64_check::outcome> shadow;
   std::vector<a64_check::arg> sargs;
-  if(a64 && code->result != jt::arr_i64 && code->result != jt::arr_f64 && a64->calls[key]++ < 3) { // array-result is the address of the cell host : qemu does not compare
+  bool host_only = code->result == jt::arr_i64 || code->result == jt::arr_f64 || code->result == jt::handle;
+  for(jt t: param_types) host_only = host_only || t == jt::handle || t == jt::ct;
+  if(a64 && !host_only && a64->calls[key]++ < 3) { // array-result is the address of the cell host : qemu does not compare
     bool ok = true;
     for(uint32_t i = 0; i < vals.size() && ok; ++i) {
       a64_check::arg a;
@@ -609,7 +678,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
         auto want = param_types[i] == jt::arr_i64 ? array_v::layout::ints : array_v::layout::floats;
         if(!arr.empty() && arr.kind() != want) throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[f].where);
         area.push_back(reinterpret_cast<uint64_t>(c));
-      } else area.push_back(raw[i]);
+      } else if(param_types[i] != jt::ct) area.push_back(raw[i]);
     }
     std::size_t fault_at = area.size();
     area.insert(area.end(), 4, 0); // type of error, node, thrown value, its type
@@ -670,7 +739,8 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
       return ok(value(x));
     }
     case jt::arr_i64:
-    case jt::arr_f64: return ok(*reinterpret_cast<value const *>(bits)); // array - address of the cell (argument or memory of the call)
+    case jt::arr_f64:
+    case jt::handle: return ok(*reinterpret_cast<value const *>(bits)); // VM is the address of the cell (argument or call memory)
     default: return ok(value());
   }
 }

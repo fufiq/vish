@@ -1,0 +1,22 @@
+// out: 21 10 13 7 -7
+// jit-compiled: norm1
+// jit-compiled: len
+// jit-compiled: shift
+// jit-stats: jit  pick(кт, i64) → 76
+// jit-stats: jit  pick(кт, i64) → 58
+// Параметры машинного кода сверх скаляров и массивов. Значение VM (агрегат, строка) —
+// адрес его ячейки, как массив (§12.2). Тип, функция, контекст — параметр экземпляра:
+// экземпляр на
+// сигнатуру (решение автора 2026-10-02): pick(i64, …) и pick(f64, …) — два
+// экземпляра, условие над кт-параметром известно разбору — только живая ветка.
+struct pt { i64 x; i64 y; };
+norm1(pt p) => p.x + p.y;
+len(str s, i64 k) => k * 2;
+shift(pt p, i64 d) => pt{p.x + d, p.y};
+pick(type t, i64 v) => if(t == i64) v else 0 - v;
+main() {
+  a = pt{3, 4};
+  s = 0;
+  for(i : range(3)) s += norm1(a);
+  print(s, len("ab", 5), shift(a, 10).x, pick(i64, 7), pick(f64, 7));
+}

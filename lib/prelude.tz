@@ -570,8 +570,8 @@ jit_compile(cg, f, types, type result) {
   is_handle(type t) => (t != unit) && (!((t == i64) || ((t == bool) || ((t == f64) || is_stream(t)))) && (t != jc_range));
   scalar(type t) => (t == i64) || ((t == bool) || ((t == f64) || is_stream(t))); // поток — его номер
   elem(type t) => if((t == array(f64)) || (t == stream(f64))) f64 else if(t == stream(bool)) bool else i64;
-  if(!scalar(result) && ((result != unit) && !is_arr(result))) bad("тип результата"); // массив — адрес ячейки в acc
-  for(t : types) if(!scalar(t) && !is_arr(t)) bad("тип параметра");
+  if(!scalar(result) && ((result != unit) && !is_handle(result))) bad("тип результата"); // значение VM (и массив) — адрес ячейки в acc
+  // параметр: скаляр, значение VM (адрес ячейки), unit — кт-параметр экземпляра (не передаётся)
   put_bytes(bytes) => {
     for(b : bytes) out.push(b);
   };
@@ -750,7 +750,25 @@ jit_compile(cg, f, types, type result) {
     } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
     else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
     else if(is_handle(env[k].kind)) put_bytes(cg.load(acc, sb(env[k].slot), so(env[k].slot))); // значение VM — адрес его ячейки
+    else if(env[k].kind == unit) {
+      kc = jit_const(e, ctx);
+      if(kc.size == 1) gen_const(kc[0]) else bad(fmt"кт-параметр {name} в выражении");
+    }
     else load_slot(env[k].kind, env[k].slot);
+  };
+  // значение узла, зависящее только от кт-параметров экземпляра (и литералов, имён модуля):
+  // локальную переменную разбор может не видеть целиком (запись из рекурсии, которую он
+  // обрезает), подпрограмма исполняется на всех глубинах — там не сворачивается
+  ct_const(e) => if(gen_sub) array{} else {
+    names = array{};
+    name_nodes(e, names);
+    pure = true;
+    for(c : names) {
+      array{nm} = code_fields(c);
+      k = find(nm);
+      if((k >= 0) && (env[k].thunk || (env[k].kind != unit))) pure = false;
+    }
+    if(pure) jit_const(e, ctx) else array{}
   };
   gen_const(v) => {
     if(typeof(v) == f64) {
@@ -770,7 +788,10 @@ jit_compile(cg, f, types, type result) {
       array{v} = code_fields(e);
       gen_const(v);
     } else if(k == n_ident) gen_name(e);
-    else if(k == n_op) gen_op(e);
+    else if(k == n_op) {
+      kc = ct_const(e); // значение известно разбору экземпляра
+      if(kc.size == 1) gen_const(kc[0]) else gen_op(e);
+    }
     else if(k == n_chain) {
       t = jit_chain(e, ctx);
       if(t.size == 0) bad("цепочка: дерево зависит от пути");
@@ -785,15 +806,23 @@ jit_compile(cg, f, types, type result) {
       lfns = take_first(lfns, saved_lf);
     } else if(k == n_if) {
       array{c, t, el} = code_fields(e);
-      l_else = label();
-      l_done = label();
-      gen(c);
-      jump_unless(acc, l_else);
-      in_region(() => gen(t));
-      jump(l_done);
-      bind(l_else);
-      if(given(el)) in_region(() => gen(el));
-      bind(l_done);
+      // условие известно разбору экземпляра (кт-параметр) — только живая ветка; подпрограмма
+      // исполняется на всех глубинах рекурсии, а разбор видел её в контексте первого встраивания
+      kc = ct_const(c);
+      if(kc.size == 1) {
+        if(kc[0] == true) gen(t)
+        else if(given(el)) gen(el);
+      } else {
+        l_else = label();
+        l_done = label();
+        gen(c);
+        jump_unless(acc, l_else);
+        in_region(() => gen(t));
+        jump(l_done);
+        bind(l_else);
+        if(given(el)) in_region(() => gen(el));
+        bind(l_done);
+      }
     } else if(k == n_loop) {
       array{body} = code_fields(e);
       t = label();
@@ -1979,6 +2008,7 @@ jit_compile(cg, f, types, type result) {
         seen.push(k);
         if(env[k].thunk) bad(fmt"узел VM читает expr-параметр {nm}");
         else if(is_stream(env[k].kind) || (env[k].kind == jc_range)) bad(fmt"узел VM читает {env[k].kind}");
+        else if(env[k].kind == unit) bad(fmt"узел VM читает кт-параметр {nm}");
         else vs.push(array{c, k});
       }
     }
@@ -2071,9 +2101,9 @@ jit_compile(cg, f, types, type result) {
   for(i : range(fps.size)) {
     array{pname, ...prest} = code_fields(fps[i]);
     s = declare(pname, types[i]);
-    for(w : range(1)) {
+    if(types[i] != unit) {
       put_bytes(cg.load(acc, argbase, 8 * ap));
-      put_bytes(cg.store(sb(s + w), so(s + w), acc));
+      put_bytes(cg.store(sb(s), so(s), acc));
       ap += 1;
     }
   }
