@@ -109,9 +109,15 @@ struct arena {
 struct symbol_tag;
 using symbol = id<symbol_tag>;
 
+// Hash strings without a copy of the key: search string_view does not allocate memory (hot path sym()).
+struct text_hash {
+  using is_transparent = void;
+  size_t operator()(std::string_view s) const { return std::hash<std::string_view>{}(s); }
+};
+
 struct interner {
   symbol intern(std::string_view s) {
-    if(auto it = index.find(std::string(s)); it != index.end()) return it->second;
+    if(auto it = index.find(s); it != index.end()) return it->second;
     symbol sym(uint32_t(strings.size()));
     strings.emplace_back(s);
     index.emplace(strings.back(), sym);
@@ -124,7 +130,7 @@ struct interner {
     return s.valid() ? std::string_view(strings[s.value]) : std::string_view("<none>");
   }
   std::deque<std::string> strings; // Line addresses are stable: string_view from text() does not hang when growing
-  std::unordered_map<std::string, symbol> index;
+  std::unordered_map<std::string, symbol, text_hash, std::equal_to<>> index;
 };
 
 // Position in the text projection (for diagnostics and feedback with the editor).

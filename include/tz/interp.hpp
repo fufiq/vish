@@ -302,13 +302,14 @@ struct interpreter {
 
   // entity operator node: infix+/prefix-/postfix++.
   symbol operator_entity(n_op const & o) {
-    uint64_t k = (uint64_t(o.op.value) << 2) | (o.args.size() == 2 ? 1 : o.postfix ? 2
-                                                                                   : 0);
-    auto [it, fresh] = op_entities.try_emplace(k, symbol{});
-    if(fresh) it->second = sym(cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix"
-                                                                            : "prefix",
+    uint32_t k = o.args.size() == 2 ? 1 : o.postfix ? 2
+                                                    : 0;
+    if(o.op.value >= op_entities.size()) op_entities.resize(o.op.value + 1);
+    symbol & e = op_entities[o.op.value][k]; // by symbol number: no hash on each operator
+    if(!e) e = sym(cat(k == 1 ? "infix" : k == 2 ? "postfix"
+                                                 : "prefix",
                   str(o.op)));
-    return it->second;
+    return e;
   }
 
   // The prelude operator, whose body is built-in primitive over parameters in order
@@ -1570,7 +1571,7 @@ struct interpreter {
 // - Yarik.
   value * find(scope * env, symbol name) {
     if(value * c = env->find(name)) return c;
-    if(functions.contains(name) || structs.contains(name) || types.builtin(str(name)) || str(name) == "true" || str(name) == "false") return nullptr;
+    if(functions.contains(name) || structs.contains(name) || fixed_name(name)) return nullptr;
     for(scope * s = env; s; s = s->parent) {
       if(!s->caller) continue;
       value * c = find(s->caller, name);
@@ -1581,6 +1582,22 @@ struct interpreter {
     }
     return nullptr;
   }
+
+  // Register type name or true/false: the character number response is remembered (name
+  // search miss on each function call; no string comparison). The register only grows: the
+  // "no" is forgotten with the new type.
+  bool fixed_name(symbol name) {
+    if(fixed_types != types.names.size()) {
+      fixed_names.assign(fixed_names.size(), 0);
+      fixed_types = types.names.size();
+    }
+    if(name.value >= fixed_names.size()) fixed_names.resize(name.value + 1, 0);
+    uint8_t & k = fixed_names[name.value];
+    if(!k) k = types.builtin(str(name)) || str(name) == "true" || str(name) == "false" ? 2 : 1;
+    return k == 2;
+  }
+  std::vector<uint8_t> fixed_names; // 0 don't know, 1 no, 2 yes
+  size_t fixed_types = 0;
 
   bool implicit_declaration(node_id s, scope * env) const {
     if(!db.is<n_op>(s) || db.strings.text(db.as<n_op>(s).op) != "=" || !db.is<n_ident>(db.as<n_op>(s).args[0])) return false;
@@ -4451,12 +4468,13 @@ struct interpreter {
     if(db.is_member(n)) return eval_member(n, db.member_of(n), env, frame); // a.x is the kernel shape
     if(db.is_field(n)) return eval_field(n, db.field_of(n), env, frame);
     // a[i]: kernel if [] is not overloaded with code (overload to its types, otherwise the kernel below)
-    if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(sym("infix[]").value) || db.in_prelude(n))) return eval_index(n, db.index_of(n), env, frame);
+    if(db.is_index(n) && (user_ops.empty() || !user_ops.contains(known(sym_index_op).value) || db.in_prelude(n))) return eval_index(n, db.index_of(n), env, frame);
     auto op = str(o.op);
+    bool assign_op = db.sym_kind(o.op) & ast_db::sc_assign;
     span where = db[n].where;
     // operator declared in a block (in the body of a function or structure for its blocks) is a
     // local function of a region
-    if(!local_ops.empty() && !(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/="))
+    if(!local_ops.empty() && !assign_op)
       if(symbol f = operator_entity(o); local_ops.contains(f.value))
         if(value * cell = env->find(f); cell && cell->is<fn_v>()) return call_value(*cell, o.args, env, frame, where, n.value);
     // Operator declared to be an unbuilt primitive code calls its entity (overload by
@@ -4490,7 +4508,7 @@ struct interpreter {
       return ok(lift(x, [&](value const & a) { return unary(op, a, where); }));
     }
     // redefinition of context (checked { … }): the nearest, whose parameters assume types
-    if(!overrides.empty() && override_depth == 0 && o.args.size() == 2 && op != "&&" && op != "||" && !(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=")) {
+    if(!overrides.empty() && override_depth == 0 && o.args.size() == 2 && op != "&&" && op != "||" && !assign_op) {
       symbol f = operator_entity(o);
       if(std::ranges::any_of(overrides, [&](override_rec const & r) { return r.entity == f; })) {
         std::vector<value> vals;
@@ -4526,7 +4544,7 @@ struct interpreter {
       if(av && bv) return ok(value(*bv));
       return ok(erase(value(true)));
     }
-    if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
+    if(assign_op) {
       TZ_TRY(rhs, eval(o.args[1], env, frame));
       // x = e and no name x is an announcement with type output
       if(op == "=" && db.is<n_ident>(o.args[0]) && !env->find(db.as<n_ident>(o.args[0]).name)) {
@@ -4826,9 +4844,9 @@ struct interpreter {
       // code(x) - AST expression value: the expr-parameter - the code of the caller
       // (bypass and build node, §7.4):
 //.
-      if(str(name) == "code" && c.args.size() <= 1 && !functions.contains(name)) // code() is an empty node
+      if(name == known(sym_code) && c.args.size() <= 1 && !functions.contains(name)) // code() is an empty node
         return ok(code_value(c.args.empty() ? node_id() : code_of(c.args[0], env)));
-      if(str(name) == "ref" && c.args.size() == 1 && !functions.contains(name)) return eval_ref(c.args[0], env, frame, where);
+      if(name == known(sym_ref) && c.args.size() == 1 && !functions.contains(name)) return eval_ref(c.args[0], env, frame, where);
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
       if(name == sym_alloc_in && !functions.contains(name)) return alloc_in(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
@@ -6090,6 +6108,21 @@ struct interpreter {
   std::deque<address_space> regions; // region() memory levels (at VM root); live as long as the process is alive
   symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
   symbol sym_set_ct_state; // ct-state of place (disassembled in place as append)
+  // Symbol on the text without internment (journal lines of the base does not change): while the
+  // line is not, there is no name with it; it is searched again only when the lines become more.
+  struct lazy_sym {
+    std::string_view text;
+    symbol s;
+    uint32_t seen = 0;
+  };
+  symbol known(lazy_sym & l) {
+    if(!l.s && l.seen != db.strings.size()) {
+      l.seen = db.strings.size();
+      if(auto it = db.strings.index.find(l.text); it != db.strings.index.end()) l.s = it->second;
+    }
+    return l.s;
+  }
+  lazy_sym sym_index_op{"infix[]"}, sym_code{"code"}, sym_ref{"ref"}; // Comparison by number, not text (hot path)
   uint32_t hook_depth = 0; // Executed by hook parsing (call_hook, attribute_hooks)
   std::unordered_map<uint32_t, node_id> hook_idents; // Names of hook arguments parsing (call_hook)
   std::vector<std::string> instance_keys; // instance in the parsing chain
@@ -6133,7 +6166,7 @@ struct interpreter {
   uint64_t array_gen = 0; // generation of array buffers (performance)
   std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
   std::set<uint32_t> local_ops; // operators declared in blocks (local functions)
-  std::unordered_map<uint64_t, symbol> op_entities;
+  std::vector<std::array<symbol, 3>> op_entities; // entity: prefix, infix, postfix
   std::unordered_map<uint32_t, bool> assoc_ops;
   std::unordered_map<uint32_t, std::vector<symbol>> chain_names; // chain-name
   std::unordered_map<std::string, node_id> resolved_chains; // (chain, types of names) → tree

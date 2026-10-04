@@ -375,12 +375,31 @@ struct ast_db {
   template<typename kind>
   kind const & as(node_id n) const { return std::get<kind>(nodes[n].kind); }
 
+  // The character class for node checks at each execution step: the text of the character
+  // is unchanged - the answer is remembered by number (without comparing lines).
+  enum sym_class : uint8_t { sc_known = 1, sc_index = 2, sc_field = 4, sc_member = 8, sc_require = 16, sc_hide = 32, sc_try = 64, sc_assign = 128 };
+  uint8_t sym_kind(symbol s) const {
+    if(!s) return sc_known;
+    if(s.value >= sym_kinds.size()) sym_kinds.resize(std::max<size_t>(strings.size(), s.value + 1), 0);
+    uint8_t & k = sym_kinds[s.value];
+    if(!k) {
+      auto t = strings.text(s);
+      k = sc_known | (t == "[]" ? sc_index : 0) | (t == ".[]" ? sc_field : 0) | (t.size() > 1 && t[0] == '.' && lexer::is_ident_start(t[1]) ? sc_member : 0) |
+          (t == "require" ? sc_require : 0) | (t == "hide" ? sc_hide : 0) | (t == "try_compile" ? sc_try : 0) |
+          (t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" ? sc_assign : 0);
+    }
+    return k;
+  }
+  mutable std::vector<uint8_t> sym_kinds;
+  // Call by name with character class (require, hide, try_compile)
+  bool call_named_kind(n_call const & c, uint8_t k) const { return c.words.empty() && is<n_ident>(c.callee) && (sym_kind(as<n_ident>(c.callee).name) & k); }
+
   // require(c)/require(c, "сообщение", "пометка", место, …) is a normal kernel call, not a form
   // of node : condition c, otherwise empty
   node_id require_cond(node_id n) const {
     if(!is<n_call>(n)) return {};
     auto const & c = as<n_call>(n);
-    if(c.args.empty() || !c.words.empty() || !is<n_ident>(c.callee) || strings.text(as<n_ident>(c.callee).name) != "require") return {};
+    if(c.args.empty() || !call_named_kind(c, sc_require)) return {};
     return c.args[0];
   }
 
@@ -389,7 +408,7 @@ struct ast_db {
   bool is_index(node_id n) const {
     if(!is<n_op>(n)) return false;
     auto const & o = as<n_op>(n);
-    return o.args.size() == 2 && !o.postfix && strings.text(o.op) == "[]";
+    return o.args.size() == 2 && !o.postfix && (sym_kind(o.op) & sc_index);
   }
   // node in the code prelude : modules are included, prelude does not
   // include a program module - overload [] programs are not visible in it
@@ -405,9 +424,7 @@ struct ast_db {
   bool is_member(node_id n) const {
     if(!is<n_op>(n)) return false;
     auto const & o = as<n_op>(n);
-    if(o.args.size() != 1 || !o.postfix) return false;
-    auto t = strings.text(o.op);
-    return t.size() > 1 && t[0] == '.' && lexer::is_ident_start(t[1]);
+    return o.args.size() == 1 && o.postfix && (sym_kind(o.op) & sc_member);
   }
   member_view member_of(node_id n) const { return {as<n_op>(n).args[0], member_name(as<n_op>(n).op)}; }
   // field name by operator symbol .x (parsing internees both)
@@ -422,7 +439,7 @@ struct ast_db {
   bool is_field(node_id n) const {
     if(!is<n_op>(n)) return false;
     auto const & o = as<n_op>(n);
-    return o.args.size() == 2 && !o.postfix && strings.text(o.op) == ".[]";
+    return o.args.size() == 2 && !o.postfix && (sym_kind(o.op) & sc_field);
   }
   field_view field_of(node_id n) const { return {as<n_op>(n).args[0], as<n_op>(n).args[1]}; }
 
@@ -435,7 +452,7 @@ struct ast_db {
   node_id try_compile_body(node_id n) const {
     if(!is<n_call>(n)) return {};
     auto const & c = as<n_call>(n);
-    if(c.args.size() != 1 || !c.tail || !c.words.empty() || !is<n_ident>(c.callee) || strings.text(as<n_ident>(c.callee).name) != "try_compile") return {};
+    if(c.args.size() != 1 || !c.tail || !call_named_kind(c, sc_try)) return {};
     return c.args[0];
   }
 
@@ -460,7 +477,7 @@ struct ast_db {
   symbol hide_name(node_id n) const {
     if(!is<n_call>(n)) return {};
     auto const & c = as<n_call>(n);
-    if(c.args.size() != 1 || !c.words.empty() || !is<n_ident>(c.callee) || !is<n_ident>(c.args[0]) || strings.text(as<n_ident>(c.callee).name) != "hide") return {};
+    if(c.args.size() != 1 || !call_named_kind(c, sc_hide) || !is<n_ident>(c.args[0])) return {};
     return as<n_ident>(c.args[0]).name;
   }
 
