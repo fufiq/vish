@@ -1354,6 +1354,16 @@ struct process_machine {
     finish(from_value(e->fn(helper, a, db[n].where), db[n].where));
   }
 
+  // Raw block (§4.4): node parsing - in the assistant (ct code without a process state), the
+  // result is calculated in the same area as the expression of the block
+  void eval_node(node_id n, n_raw const & r) {
+    if(!r.rule) throw diagnostic("подблок сырого блока не исполняется: его разбирает правило конструкции", db[n].where);
+    m_task & t = top();
+    t.kind = m_lambda_body;
+    t.extra = helper.raw_result(n);
+    t.phase = 0;
+  }
+
   // ...t in arguments: meaning in its entirety; in arguments it unfolds call_args_step
   void eval_node(node_id, n_spread const & s) {
     m_task & t = top();
@@ -1680,6 +1690,7 @@ struct process_machine {
           e = th.expr;
           sc = th.env;
         }
+        if(db.is<n_raw>(e) && db.as<n_raw>(e).rule) e = helper.raw_result(e); // The block disassembled by the code - its result
         return finish(from_value(helper.code_value(e), db[n].where));
       }
       if(it == helper.functions.end() && helper.str(name) == "intercept") return begin_intercept(n, c.args);

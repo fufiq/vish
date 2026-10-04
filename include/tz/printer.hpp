@@ -313,6 +313,10 @@ struct printer {
     out += cat("native ", in_quotes(str(x.lang)), " {", x.code, "}");
   }
 
+  // raw block (§4.4) - text as written: it is parsed by code in language, not projection
+  void print_node(node_id, n_raw const & x) { out += x.text; }
+  void print_node(node_id, n_sym const & x) { out += x.text; }
+
   // call tag(s) with template writing: tag "text {x} text"
   void tagged(n_call const & t) {
     item(t.callee);
@@ -425,7 +429,7 @@ struct printer {
       while(!t.empty() && (t.back() == ' ' || t.back() == '\n' || t.back() == '\t')) t.remove_suffix(1);
       if(t.empty() || t.back() == ';' || t.back() == '}') return;
     }
-    if(db.is<n_block>(s) || db.is<n_extend>(s)) return;
+    if(db.is<n_block>(s) || db.is<n_raw>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(closed(s)) return;
     if(db.is<n_call>(s)) {
@@ -445,7 +449,7 @@ struct printer {
     if(last == ";") return true;
     if(last != "{" || r.slot.empty()) return false;
     node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot.back()) : db.as<n_call>(n).args[r.slot.back()];
-    return db.is<n_block>(x) || closed(x);
+    return db.is<n_block>(x) || db.is<n_raw>(x) || closed(x);
   }
 
   void print_node(node_id n, n_extend const & e) {
@@ -707,7 +711,7 @@ struct printer {
     node_id b = lam ? lam->body : body;
     out += ' ';
     item(b);
-    if(!db.is<n_block>(b)) terminate(b);
+    if(!db.is<n_block>(b) && !db.is<n_raw>(b)) terminate(b);
   }
 
   void field(n_op const & f) { // v.[f]

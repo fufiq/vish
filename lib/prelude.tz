@@ -554,6 +554,221 @@ fill(i64 n, x) => native "cpp" {
 
 is_err(result r) => !r.ok;
 
+// Разбор кодом (§4.4): блок конструкции, тело которой объявляет `syntax {r} => f(r);`,
+// хранится сырым (n_raw: атомы и подблоки с позициями), f разбирает его при анализе и
+// возвращает код (или значение — VM строит код, который его создаёт) либо parse_error —
+// дыру с причиной на месте атома. 
+// Библиотека — по его критике mecha:
+// 
+//;
+// 
+// Альтернатива — 
+// 
+// *Моё:* парсер — данные (struct-наследники
+// parser), разбор — перегрузки p_run по виду; вход — атомы сырого блока, не символы;
+// итог p_run — array{true, позиция, значение} или array{false, позиция, причина, атом}.
+struct parse_error { code at; str why; }
+struct parser {}
+struct p_int : parser { bool sign; } // целое (атом-число; sign — и «-» впереди)
+struct p_num : parser { bool sign; } // число: целое или дробное — f64
+struct p_word : parser { str w; } // имя ("" — любое) — строка
+struct p_text : parser {} // строковый литерал — строка
+struct p_bool : parser {} // true / false
+struct p_sym : parser { str s; } // символы подряд, склеенные: "=", "->"
+struct p_code : parser {} // подблок {…} — штатный разбор по правилам места (код)
+struct p_seq : parser { array ps; bool drop; } // подряд — кортеж; drop: без литералов (combine)
+struct p_alt : parser { array ps; } // первый удавшийся
+struct p_rep : parser { array ps; i64 min; } // повтор — массив
+struct p_map : parser { type t; array names; array ps; } // агрегат t: поля по именам
+struct p_as : parser { array v; array ps; } // удался ps[0] — значение v[0]
+struct p_sub : parser { str open; array ps; } // подблок (…), […], {…} — разбор целиком внутри
+
+// парсер из значения по контексту: тип — парсер типа, строка — литерал (слово или символы)
+as_parser(parser p) => p;
+as_parser(type t) {
+  if(t == i64) return p_int{true};
+  if(t == f64) return p_num{true};
+  if(t == str) return p_text{};
+  if(t == bool) return p_bool{};
+  if(t == code) return p_code{};
+  throw parse_error{code(), "нет парсера типа"};
+}
+p_word_text(str s) => (s.size > 0) && (((s[0] >= 'a') && (s[0] <= 'z')) || (((s[0] >= 'A') && (s[0] <= 'Z')) || (s[0] == '_')));
+as_parser(str s) => if(p_word_text(s)) p_word{s} else p_sym{s};
+
+int() => p_int{true};
+int(bool sign) => p_int{sign};
+word() => p_word{""};
+word(str w) => p_word{w};
+p_parsers(xs) {
+  ps = array{};
+  for(x : xs) ps = array{...ps, as_parser(x)};
+  ps
+}
+seq(...xs) => p_seq{p_parsers(xs), false};
+combine(...xs) => p_seq{p_parsers(xs), true};
+repeated(p) => p_rep{array{as_parser(p)}, 0};
+repeated(p, i64 min) => p_rep{array{as_parser(p)}, min};
+within(str open, p) => p_sub{open, array{as_parser(p)}};
+as(v, p) => p_as{array{v}, array{as_parser(p)}};
+// map(T, "поле", парсер, …) — агрегат T по именам полей (порядок в записи — любой)
+map(type t, ...xs) {
+  names = array{};
+  ps = array{};
+  for(k : range(xs.size / 2)) {
+    names = array{...names, xs[2 * k]};
+    ps = array{...ps, as_parser(xs[(2 * k) + 1])};
+  }
+  p_map{t, names, ps}
+}
+operator (parser a) | (parser b) => p_alt{array{a, b}};
+operator (p_alt a) | (parser b) => p_alt{array{...a.ps, b}};
+
+// атом k — вида t
+p_has(xs, i64 k, type t) => (k < xs.size) && (code_kind(xs[k]) == t);
+p_fail(xs, i64 k, str why) => array{false, k, why, if(k < xs.size) xs[k] else code()};
+
+p_run(p_int p, xs, i64 k) {
+  j = k;
+  neg = false;
+  if(p.sign && p_has(xs, j, n_sym)) {
+    n_sym{t, _} = xs[j];
+    if(t == "-") {
+      neg = true;
+      j = j + 1;
+    }
+  }
+  if(!p_has(xs, j, n_int)) return p_fail(xs, j, "ожидалось целое");
+  n_int{v, _, _} = xs[j];
+  array{true, j + 1, if(neg) -v else v}
+}
+p_run(p_num p, xs, i64 k) {
+  r = p_run(p_int{p.sign}, xs, k);
+  if(r[0]) return array{true, r[1], f64(r[2])};
+  j = k;
+  neg = false;
+  if(p.sign && p_has(xs, j, n_sym)) {
+    n_sym{t, _} = xs[j];
+    if(t == "-") {
+      neg = true;
+      j = j + 1;
+    }
+  }
+  if(!p_has(xs, j, n_float)) return p_fail(xs, j, "ожидалось число");
+  n_float{v} = xs[j];
+  array{true, j + 1, if(neg) -v else v}
+}
+p_run(p_word p, xs, i64 k) {
+  if(!p_has(xs, k, n_ident)) return p_fail(xs, k, if(p.w == "") "ожидалось имя" else "ожидалось " + p.w);
+  n_ident{nm} = xs[k];
+  if((p.w != "") && (nm != p.w)) return p_fail(xs, k, "ожидалось " + p.w);
+  array{true, k + 1, nm}
+}
+p_run(p_text p, xs, i64 k) {
+  if(!p_has(xs, k, n_str)) return p_fail(xs, k, "ожидалась строка");
+  n_str{v} = xs[k];
+  array{true, k + 1, v}
+}
+p_run(p_bool p, xs, i64 k) {
+  r = p_run(p_word{""}, xs, k);
+  if(r[0] && (r[2] == "true")) return array{true, r[1], true};
+  if(r[0] && (r[2] == "false")) return array{true, r[1], false};
+  p_fail(xs, k, "ожидалось true или false")
+}
+p_run(p_sym p, xs, i64 k) {
+  ok = true;
+  for(i : range(p.s.size)) {
+    if(!p_has(xs, k + i, n_sym)) ok = false;
+    else {
+      n_sym{t, g} = xs[k + i];
+      if((t[0] != p.s[i]) || ((i > 0) && !g)) ok = false;
+    }
+  }
+  if(!ok) return p_fail(xs, k, "ожидалось " + p.s);
+  array{true, k + p.s.size, p.s}
+}
+p_run(p_code p, xs, i64 k) {
+  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, "ожидался блок {…}");
+  n_raw{open, _, _, _, _} = xs[k];
+  if(open != "{") return p_fail(xs, k, "ожидался блок {…}");
+  array{true, k + 1, code_parse(xs[k])}
+}
+p_run(p_sub p, xs, i64 k) {
+  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, "ожидался подблок " + p.open);
+  n_raw{open, items, _, _, _} = xs[k];
+  if(open != p.open) return p_fail(xs, k, "ожидался подблок " + p.open);
+  r = p_whole(p.ps[0], items);
+  if(!r[0]) return array{false, k, r[2], r[3]}; // место ошибки — атом внутри подблока
+  array{true, k + 1, r[2]}
+}
+// литерал (слово или символы) в combine — конфигурация, не результат
+p_literal(p_sym p) => true;
+p_literal(p_word p) => p.w != "";
+p_literal(p) => false;
+p_seq_from(p_seq p, xs, i64 k, i64 i, acc) {
+  if(i == p.ps.size) return array{true, k, if(p.drop && (acc.size == 1)) acc[0] else acc};
+  r = p_run(p.ps[i], xs, k);
+  if(!r[0]) return r;
+  if(p.drop && p_literal(p.ps[i])) return p_seq_from(p, xs, r[1], i + 1, acc);
+  p_seq_from(p, xs, r[1], i + 1, array{...acc, r[2]})
+}
+p_run(p_seq p, xs, i64 k) => p_seq_from(p, xs, k, 0, array{});
+// неудача всех — та, что ушла дальше
+p_alt_from(p_alt p, xs, i64 k, i64 i, far) {
+  if(i == p.ps.size) return far;
+  r = p_run(p.ps[i], xs, k);
+  if(r[0]) return r;
+  p_alt_from(p, xs, k, i + 1, if(r[1] > far[1]) r else far)
+}
+p_run(p_alt p, xs, i64 k) => p_alt_from(p, xs, k, 1, p_run(p.ps[0], xs, k));
+p_rep_from(p_rep p, xs, i64 k, acc) {
+  r = p_run(p.ps[0], xs, k);
+  if(r[0] && (r[1] > k)) return p_rep_from(p, xs, r[1], array{...acc, r[2]});
+  if(acc.size >= p.min) return array{true, k, acc};
+  r
+}
+p_run(p_rep p, xs, i64 k) => p_rep_from(p, xs, k, array{});
+p_run(p_as p, xs, i64 k) {
+  r = p_run(p.ps[0], xs, k);
+  if(!r[0]) return r;
+  array{true, r[1], p.v[0]}
+}
+// значение — код, который его строит (агрегат по map — Имя{…} в порядке полей)
+p_lit(i64 v) => n_int{v};
+p_lit(f64 v) => n_float{v};
+p_lit(str v) => n_str{v};
+p_lit(bool v) => n_ident{if(v) "true" else "false"};
+p_lit(v) => v;
+p_index(names, str n) {
+  i = -1;
+  for(k : range(names.size)) if(names[k] == n) i = k;
+  i
+}
+p_run(p_map p, xs, i64 k) {
+  r = p_run(p_seq{p.ps, false}, xs, k);
+  if(!r[0]) return r;
+  items = array{};
+  for(f : fields(p.t)) {
+    i = p_index(p.names, f.name);
+    if(i < 0) return p_fail(xs, k, "map: нет парсера поля " + f.name);
+    items = array{...items, p_lit(r[2][i])};
+  }
+  array{true, r[1], n_construct{n_ident{text(p.t)}, items}}
+}
+// весь вход: после разбора — конец
+p_whole(p, xs) {
+  r = p_run(as_parser(p), xs, 0);
+  if(r[0] && (r[1] < xs.size)) return p_fail(xs, r[1], "лишнее: ожидался конец блока");
+  r
+}
+// parse(r, p) — правило блока: syntax {r} => parse(r, p);
+parse(code r, p) {
+  n_raw{_, items, _, _, _} = r;
+  x = p_whole(p, items);
+  if(!x[0]) return parse_error{if(given(x[3])) x[3] else r, x[2]};
+  p_lit(x[2])
+}
+
 // Компилятор на языке — единственная кодогенерация JIT (шаг к раскрутке, §10.4): 
 // 
 // 

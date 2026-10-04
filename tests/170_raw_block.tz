@@ -1,0 +1,41 @@
+// out: 16
+// out: 11
+// out: sum: 0 + 1 + 2 + 3 + x
+// machine
+// fmt-stable
+// store-roundtrip
+// jit-stats: вызов sum_of: правила тела для блоков конструкции — интерпретатор
+// Разбор кодом: тело конструкции
+// объявляет правило разбора своего блока `syntax {r} => f(r);` — блок вызова хранится
+// сырым (атомы и подблоки с позициями — фаза 1), f на языке делает из него узлы при
+// анализе, лениво, как шаблон. 
+// 
+// Итог — обычный код в месте блока: имена — у вызывающего.
+sum_parse(r) {
+  n_raw{_, items, _, _, _} = r;
+  e = n_int{0};
+  for(a : items) e = n_op{"+", array{e, a}};
+  e
+}
+
+sum_of(expr body) {
+  syntax {r} => sum_parse(r);
+  body
+}
+
+// код блока — итог разбора: code(body) у конструкции — он, а не сырой текст
+shown(expr body) {
+  syntax {r} => sum_parse(r);
+  print("sum:", code_text(code(body)));
+}
+
+twice(i64 x) => sum_of { x x };
+
+main() {
+  x = 10;
+  print(sum_of { 1 2 3 x });
+  print(twice(5) + sum_of {
+    1   // комментарий и раскладка — как написаны
+  } + sum_of { });
+  shown { 1 2 3 x }
+}

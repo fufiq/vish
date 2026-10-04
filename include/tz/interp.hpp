@@ -347,7 +347,7 @@ struct interpreter {
   }
   // e - call block (block, block with parameters, tail instruction, pack clause) - as in parsing
   bool block_arg(node_id e) const {
-    bool block = db.is<n_block>(e) || (db.is<n_lambda>(e) && db.as<n_lambda>(e).block);
+    bool block = db.is<n_block>(e) || db.is<n_raw>(e) || (db.is<n_lambda>(e) && db.as<n_lambda>(e).block);
     node_id c = db[e].parent;
     if(c && db.is<n_construct>(c)) return block && db.is<n_call>(db[c].parent) && !db.as<n_call>(db[c].parent).words.empty();
     if(!c || !db.is<n_call>(c)) return false;
@@ -2539,6 +2539,7 @@ struct interpreter {
       if(auto it = functions.find(db.as<n_ident>(e).name); it != functions.end() && !it->second.empty()) return it->second.front();
       if(auto it = structs.find(db.as<n_ident>(e).name); it != structs.end()) return it->second; // Struct's name is his announcement
     }
+    if(db.is<n_raw>(e) && db.as<n_raw>(e).rule) return raw_result(e); // The block disassembled by the code - its result
     return e;
   }
 
@@ -2736,7 +2737,8 @@ struct interpreter {
   //  
 // - the execution code only reads.
   void mutate_node(node_id c, symbol name, value const & v, span where) {
-    if(!elaborating)
+    bool own = deriving && c.value >= derive_base; // node created by the parsing block - completion
+    if(!elaborating && !own)
       fail(ct_depth ? "изменение кода из ct тела функции — пока только из ct модуля (элаборация)" : "изменение кода — только при компиляции (ct { … } модуля)", where);
     if(!c) fail("изменение кода: пустой узел", where);
     if(!v.known()) fail(cat("изменение кода: значение поля ", str(name), " должно быть известно при компиляции"), where);
@@ -2760,6 +2762,11 @@ struct interpreter {
     },
         k);
     if(!found) fail(cat("у узла ", kind_name(db[c]), " нет поля ", str(name)), where);
+    if(own) {
+      db.mutate(c, std::move(k), 0);
+      db.link_parents(c);
+      return;
+    }
     if(elab_nested && c.value < elab_base) return; // Written knot changes external elaboration
     // node created by this elaboration is completion (without writing and rollback): nested
     // elaboration (parsing, JIT) rolls back only mutations of the written
@@ -2791,7 +2798,113 @@ struct interpreter {
     if(v.is<type_v>()) return db.add(n_ident{sym(types.name(v.as<type_v>().type))}, where);
     if(v.is<fn_v>() && v.as<fn_v>().name) return db.add(n_ident{v.as<fn_v>().name}, where);
     if(v.is<agg_v>() && types.name(v.as<agg_v>().type) == "code") return code_node(v, where);
+    // aggregate and array - constructor by positions: Name {…}, array {…} (*my*: the value of the
+    // parsing block code becomes the code that builds it)
+    if(v.known() && (v.is<agg_v>() || v.is<array_v>())) {
+      n_construct c;
+      c.type = db.add(n_ident{sym(v.is<agg_v>() ? types.name(v.as<agg_v>().type) : "array")}, where);
+      if(v.is<agg_v>())
+        for(auto const & f: v.as<agg_v>().fields) c.items.push_back(value_node(f.second, where));
+      else
+        for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) c.items.push_back(value_node(v.as<array_v>().get(k), where));
+      node_id n = db.add(std::move(c), where);
+      db.link_parents(n);
+      return n;
+    }
     fail(cat("#: значение типа ", types.describe(v), " нельзя вставить в код"), where);
+  }
+
+  // --- parsing code (§4.4): raw block → node ----------------------------------- Construction block
+  // with the rule `syntax {r} => f(r);` is stored raw (n_raw); node from it makes f when analyzed -
+  // lazy, like the instantiation template:
+// The result is derivative.
+  // (ast_db::derived): editing a block, structure, or any database text recalculates it; it is
+  // neither human editing nor a mutation from the journal source. The parsing error is a hole with
+  // a cause in place of an atom.
+  node_id raw_result(node_id n) {
+    auto const & r = db.as<n_raw>(n);
+    node_id decl(r.rule ? r.rule - 1 : 0);
+    node_id rule = r.rule ? raw_rule_of(db, decl) : node_id{};
+    std::array<uint64_t, 4> key{db.node_revision(n), r.rule ? db.node_revision(decl) : 0, rule ? db.node_revision(rule) : 0, db.edits};
+    if(auto it = db.derived.find(n.value); it != db.derived.end() && it->second.key == key) return node_id(it->second.node);
+    span w = db[n].where;
+    auto hole = [&](std::string why, span at) {
+      uint32_t saved = std::exchange(db.pinned_source, at.source);
+      node_id h = db.add(n_hole{r.text, std::move(why)}, at);
+      db.pinned_source = saved;
+      return h;
+    };
+    node_id out;
+    if(!rule) out = hole(r.rule ? "у конструкции нет правила разбора блока: syntax {r} => …" : "подблок разбирает правило конструкции", w);
+    else {
+      // rule - ct-code over the raw block: executed immediately (check mode does not erase it)
+      auto saved_mode = std::exchange(run_mode, mode::run);
+      auto saved_deriving = std::exchange(deriving, n);
+      uint32_t saved_base = std::exchange(derive_base, db.size());
+      uint32_t saved_pin = std::exchange(db.pinned_source, w.source);
+      struct restore {
+        interpreter & vm;
+        mode m;
+        node_id d;
+        uint32_t b, p;
+        ~restore() {
+          vm.run_mode = m;
+          vm.deriving = d;
+          vm.derive_base = b;
+          vm.db.pinned_source = p;
+          --vm.ct_depth;
+        }
+      } hold{*this, saved_mode, saved_deriving, saved_base, saved_pin};
+      ++ct_depth;
+      try {
+        scope * s = new_scope(globals);
+        scope_hold sh{*this, s};
+        s->declare(db.as<n_param>(db.as<n_fn>(rule).params[0]).name, code_value(n));
+        flow f = run_frame(db.as<n_fn>(rule).body, s, sym("{}"), false);
+        if(f.kind == flow_kind::thr) out = hole(cat("разбор блока: исключение ", exception_type(f.v), ": ", show_v(f.v)), w);
+        else if(code_agg(f.v)) out = code_node(f.v, w);
+        else if(f.v.is<agg_v>() && types.is_a(types.describe(f.v), "parse_error")) { // parsing error in place of the atom
+          auto const & e = f.v.as<agg_v>().fields;
+          span at = w;
+          if(code_agg(e[0].second) && e[0].second.as<agg_v>().fields[0].second.is<int64_t>() && e[0].second.as<agg_v>().fields[0].second.as<int64_t>())
+            at = db[code_node(e[0].second, w)].where;
+          out = hole(cat("разбор блока: ", e[1].second.is<str_v>() ? std::string(e[1].second.as<str_v>().view()) : show_v(e[1].second)), at);
+        } else out = value_node(f.v, w);
+      } catch(diagnostic const & d) {
+        out = hole(cat("разбор блока: ", d.what()), d.where.end > d.where.begin && d.where.source == w.source ? d.where : w);
+      }
+    }
+    db[out].parent = n; // the names of the result - in the place of the block (the search goes up through the call)
+    db.derived[n.value] = {key, out.value};
+    return out;
+  }
+
+  flow eval_node(node_id n, n_raw const & r, scope * env, uint32_t frame) {
+    if(!r.rule) fail("подблок сырого блока не исполняется: его разбирает правило конструкции", db[n].where);
+    return eval(raw_result(n), env, frame);
+  }
+  flow eval_node(node_id n, n_sym const &, scope *, uint32_t) { fail("символ сырого блока не исполняется", db[n].where); }
+
+  // parse_block(b) is a subblock {…} of the raw block by standard parsing according to the rules
+  // of the block place (contexts around the call and the rules of the body of the design):
+// Positions in
+  // Errors are holes inside, like everywhere else.
+  node_id parse_sub(node_id b, span where) {
+    if(!db.is<n_raw>(b) || db.as<n_raw>(b).open != "{") fail("parse_block: ожидался подблок {…} сырого блока", where);
+    node_id top = b;
+    while(db[top].parent && db.is<n_raw>(db[top].parent)) top = db[top].parent;
+    span w = db[b].where;
+    uint32_t saved = std::exchange(db.pinned_source, w.source);
+    struct restore {
+      ast_db & db;
+      uint32_t p;
+      ~restore() { db.pinned_source = p; }
+    } hold{db, saved};
+    parser pr(db, w.source, w);
+    pr.place(db[top].parent, top);
+    node_id x = pr.parse_unit(true);
+    if(!x) return db.add(n_hole{db.as<n_raw>(b).text, pr.errors().empty() ? "незакрытая скобка" : pr.errors().front().what()}, w);
+    return x;
   }
 
   bool has_splice(node_id n) const {
@@ -5434,8 +5547,9 @@ struct interpreter {
       bool fits = ps.size() == ts.size();
       for(std::size_t k = 0; fits && k < ps.size(); ++k) {
         auto const & p = db.as<n_param>(ps[k]);
-        // Type or family: array accepts array<i64 >>
-        if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != ts[k] && str(db.as<n_ident>(p.type).name) != std::string_view(ts[k]).substr(0, ts[k].find('<'))) fits = false;
+        // parameter type: type, family (array accepts array<i64>) or base:
+// overload
+        if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != ts[k] && str(db.as<n_ident>(p.type).name) != std::string_view(ts[k]).substr(0, ts[k].find('<')) && !types.is_a(ts[k], str(db.as<n_ident>(p.type).name))) fits = false;
       }
       if(fits) return true;
     }
@@ -5558,7 +5672,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -5755,6 +5869,7 @@ struct interpreter {
       if(n == "code_text") return value(printer(db).print(c));
       if(n == "code_id") return value(int64_t(c.value)); // node number - compare node
       if(n == "code_parent") return code_value(db[c].parent); // The root is empty; the root is empty.
+      if(n == "code_parse") return code_value(parse_sub(c, where)); // Subblock {…} - standard parsing seat (§4.4)
     }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);
@@ -6009,6 +6124,8 @@ struct interpreter {
   bool elaborating = false;
   node_id ct_source;
   uint32_t elab_base = 0; // the first node created by this elaboration
+  node_id deriving; // parsing is a raw block (§4.4): its node is completed without a journal source
+  uint32_t derive_base = 0; // first node of this parsing
   bool elab_nested = false; // Elaboration within another: mutations have already been made
   std::vector<node_id> emitted; // Advertisements generated by emit (tz fmt - ct)
   std::vector<override_rec> overrides;

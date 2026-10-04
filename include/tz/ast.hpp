@@ -10,7 +10,9 @@
 #include "lexer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <deque>
+#include <unordered_map>
 #include <variant>
 
 namespace tz {
@@ -253,10 +255,31 @@ struct n_native {
 struct n_ref {
   uint32_t target = 0;
 };
+// Raw block (§4.4, "parsing code"): A block of construction whose body declares the parsing
+// rule `syntax {r} => f(r);` is stored as a result of phase 1 - brackets, atoms (names,
+// numbers, strings, symbols) and sub-blocks with positions; node from it makes a function on
+// the language lazily, when analyzed (like the instantiation template).
+// 
+// 
+// 
+// The text is how it is written (the print does not change it).
+struct n_raw {
+  std::string open; // bracket: {[[]
+  node_list items; // atoms (n_ident, n_int, n_float, n_str, n_sym, n_hole) and subblocks of n_raw
+  std::string text; // Block text with brackets - as written
+  uint32_t rule = 0; // announcement of the structure, the body of which is disassembled by the block (+1); for sub-blocks - 0
+  bool glued = false; // close to the previous one: f(x) vs. f(x)
+};
+// The operator symbol of the raw unit is one: “the operator is always
+// single-character” gluing (==, ->) is visible by glued.
+struct n_sym {
+  std::string text;
+  bool glued = false;
+};
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_if, n_loop, n_break, n_continue, n_return,
-    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native, n_ref>;
+    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native, n_ref, n_raw, n_sym>;
 
 struct node {
   node_kind kind;
@@ -327,7 +350,7 @@ struct field_view {
 struct ast_db {
   node_id add(node_kind k, span where) {
     ++revision;
-    where.source = uint32_t(sources.empty() ? 0 : sources.size() - 1);
+    where.source = pinned_source != ~uint32_t{0} ? pinned_source : uint32_t(sources.empty() ? 0 : sources.size() - 1);
     node_id id = nodes.add(node{std::move(k), where, {}});
     node_rev.push_back(revision);
     log({j_add{id.value, nodes[id].kind, where}});
@@ -450,6 +473,7 @@ struct ast_db {
           break;
         }
     ++revision;
+    ++edits;
     nodes[n].kind = std::move(k);
     touch(n);
     if(edited_at.size() <= n.value) edited_at.resize(n.value + 1);
@@ -631,7 +655,10 @@ struct ast_db {
         if constexpr(std::is_same_v<T, j_intern>) {
           if(strings.intern(op.text).value != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
         } else if constexpr(std::is_same_v<T, j_add>) {
-          if(add(op.kind, op.where).value != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
+          pinned_source = op.where.source; // as written (node parsing raw block - in its text)
+          node_id got = add(op.kind, op.where);
+          pinned_source = ~uint32_t{0};
+          if(got.value != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
         } else if constexpr(std::is_same_v<T, j_replace>) {
           replace(node_id(op.id), op.kind);
         } else if constexpr(std::is_same_v<T, j_link>) {
@@ -717,7 +744,32 @@ struct ast_db {
   std::vector<std::pair<uint32_t, uint64_t>> touch_undo; // previous revisions (elaboration with the same result)
   bool touch_logging = false;
   uint32_t elab_depth = 0; // elaborative
+  uint32_t pinned_source = ~uint32_t{0}; // import of new node (parsing raw block - its text); ~0 - last
+
+  // parsing raw block (§4.4) - derivative, like instance template: not human editing and not
+  // ct-code mutation (journal source no, there is nothing to roll back). Cache by node; the key
+  // is a revision of the block, the structure and its rules and the base correction counter (the
+  // parsing library edit also changes the result). *My:* node total is in journal (j_add), the
+  // cache itself is not: the .tzdb block is disassembled again.
+  struct derived_rec {
+    std::array<uint64_t, 4> key;
+    uint32_t node;
+  };
+  std::unordered_map<uint32_t, derived_rec> derived;
+  uint64_t edits = 0; // replacement
 };
+
+// The parsing rule of the decl blocks is: `syntax {r} => f(r);` in her body. The ad repeats the
+// recording, like operator and syntax: "" {r} "" is the entire block.
+bool raw_rule_form(ast_db const & db, n_fn const & f) {
+  return f.form.size() == 1 && db.strings.text(f.form[0]) == "{" && f.params.size() == 1;
+}
+node_id raw_rule_of(ast_db const & db, node_id decl) {
+  if(!db.is<n_fn>(decl) || !db.is<n_block>(db.as<n_fn>(decl).body)) return {};
+  for(node_id x: db.as<n_block>(db.as<n_fn>(decl).body).items)
+    if(db.is<n_fn>(x) && raw_rule_form(db, db.as<n_fn>(x))) return x;
+  return {};
+}
 
 // Module with key in the database (last import - valid).
 node_id find_module(ast_db const & db, symbol key) {

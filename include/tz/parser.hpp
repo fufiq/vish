@@ -36,6 +36,23 @@ struct parser {
     match_brackets();
   }
 
+  // The section of the already imported text is a sub-block of the raw block given to the
+  // standard parsing (§4.4, "parsing code"): the positions node - in the same text, without new
+  // imports (the import of new node is specified by the calling: ast_db::pinned_source).
+  parser(ast_db & db, uint32_t from, span range) : db(db) {
+    source = from;
+    src = db.source(source);
+    lexer lx(src.substr(range.begin, range.end - range.begin));
+    toks = lx.run();
+    for(auto & t: toks) {
+      t.where.begin += range.begin;
+      t.where.end += range.begin;
+    }
+    for(auto const & d: lx.errors) diags.push_back(diagnostic(d.what(), {d.where.begin + range.begin, d.where.end + range.begin}));
+    if(!diags.empty()) lex_error = diags.front().what();
+    match_brackets();
+  }
+
   // --- designs declared code (§4.4) ---
   //
   // The syntax of the call is taken from the ads in the area:
@@ -50,7 +67,7 @@ struct parser {
   };
 
   void learn(n_fn const & f, node_id id = {}) {
-    if(!f.name) return;
+    if(!f.name || raw_rule_form(db, f)) return; // Syntax {r} => is a rule of blocks of construction, not of its context.
     if(!f.form.empty()) { // Syntax - a form of recording, not a call design
       if(!id) return;
       touch();
@@ -251,7 +268,7 @@ struct parser {
     if(!std::ranges::contains(k.args, a)) return false;
     return block_like(a) || (k.tail && k.args.back() == a);
   }
-  bool block_like(node_id a) const { return db.is<n_block>(a) || (db.is<n_lambda>(a) && db.as<n_lambda>(a).block); }
+  bool block_like(node_id a) const { return db.is<n_block>(a) || db.is<n_raw>(a) || (db.is<n_lambda>(a) && db.as<n_lambda>(a).block); }
   // Announcement of the design of the call c according to the rules of the place (the syntax record is its announcement).
   std::vector<node_id> call_decls(node_id c) const {
     if(db.is<n_construct>(c)) c = db[c].parent;
@@ -1020,6 +1037,7 @@ struct parser {
     // operator and syntax in the block - the rules of its block (and the blocks of the structure in the body of which)
     if(is_word("operator")) return operator_decl({});
     if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl({});
+    if(is_word("syntax") && is_open('{', 1)) return raw_rule_decl();
     if(auto f = try_fn_decl(true)) return *f;
 
     if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
@@ -1322,8 +1340,9 @@ struct parser {
           live = std::move(v);
           committed = records;
           tail_statement = false;
-          // body: block (with rules of body shapes - as in the structure) or expression (branch)
-          args.push_back(is_open('{') ? ruled(live, [&] { return block(); }) : expression());
+          // body: block (with the rules of body forms - as in the structure; raw - if the form
+          // disassembles it with the code) or expression (branch)
+          args.push_back(is_open('{') ? ruled_block(live) : expression());
           ++k;
           continue;
         }
@@ -1647,7 +1666,7 @@ struct parser {
       throw diagnostic(cat("в скобках клаузы ", db.strings.text(word), " — только имена: ", db.strings.text(word), "(e)"), db[c.args[first]].where);
     node_id body;
     std::vector<node_id> decls = con ? con->decls : std::vector<node_id>{};
-    if(is_open('{')) body = ruled(decls, [&] { return block(); });
+    if(is_open('{')) body = ruled_block(decls);
     else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && (!rules.record_words.contains(std::string(here().text)) || heads_syntax(here().text))) {
       body = ruled(decls, [&] { return statement(); });
       tail_statement = true;
@@ -1667,6 +1686,84 @@ struct parser {
     c.args.push_back(body);
     c.words.push_back(word);
     if(!word) c.tail = true; // The block is always the last.
+  }
+
+  // Design call block decls: raw if the body of the structure declares the rule of its parsing
+  // (syntax {r} =>...), otherwise - the standard parsing with the rules of the bodies (§4.4).
+  node_id ruled_block(std::vector<node_id> const & decls) {
+    for(node_id d: decls)
+      if(raw_rule_of(db, d)) return raw_tree(d.value + 1);
+    return ruled(decls, [&] { return block(); });
+  }
+
+  // Raw block (§4.4, "parsing code"): the result of phase 1 is brackets, atoms and sub-blocks
+  // with positions. ;
+  // 
+  // . node from it makes the rule of construction on the language - in analysis.
+  node_id raw_tree(uint32_t rule = 0) {
+    span o = here().where;
+    bool glued = here().glued;
+    char open = here().ch();
+    uint32_t close = match[pos];
+    if(close == ~uint32_t{0}) throw diagnostic("незакрытая скобка", o);
+    if(toks[close].err != ~uint32_t{0}) throw diagnostic(diags[toks[close].err].what(), toks[close].where); // closed by repair - hole
+    n_raw x;
+    x.open = std::string(1, open);
+    x.glued = glued;
+    x.rule = rule;
+    advance();
+    while(pos < close) {
+      token const & t = here();
+      if(t.kind == tok::open) {
+        x.items.push_back(raw_tree());
+        continue;
+      }
+      switch(t.kind) {
+        case tok::ident: x.items.push_back(db.add(n_ident{db.strings.intern(t.text)}, t.where)); break;
+        case tok::int_lit: x.items.push_back(db.add(n_int{parse_int(t.text), false, t.text.starts_with("0x") || t.text.starts_with("0X")}, t.where)); break;
+        case tok::float_lit: x.items.push_back(db.add(n_float{parse_float(t.text)}, t.where)); break;
+        case tok::str_lit: x.items.push_back(db.add(n_str{unescape(t.text)}, t.where)); break;
+        case tok::char_lit: {
+          std::string b = unescape(t.text);
+          if(b.size() != 1) x.items.push_back(db.add(n_hole{std::string(t.text), "символ '…' — один байт"}, t.where));
+          else x.items.push_back(db.add(n_int{int64_t(uint8_t(b[0])), true}, t.where));
+          break;
+        }
+        case tok::op: x.items.push_back(db.add(n_sym{std::string(t.text), t.glued}, t.where)); break;
+        default: x.items.push_back(db.add(n_hole{std::string(t.text), t.err != ~uint32_t{0} ? diags[t.err].what() : "не лексема"}, t.where)); break;
+      }
+      advance();
+    }
+    span w{o.begin, toks[close].where.end};
+    advance();
+    x.text = std::string(src.substr(w.begin, w.end - w.begin));
+    return db.add(std::move(x), w);
+  }
+
+  // Syntax {r} => f(r) is a rule of parsing blocks of construction declared in her body: the
+  // call block is stored raw (n_raw), node from it makes f - a function on the language.
+  //  
+// 
+// *My:* recording is like syntax
+  // ("announcement repeats record": {r} is the entire block), place is the body of the structure (as
+  // the rules of its blocks); entity is a function "{}" with the parameter r, not called by name.
+  node_id raw_rule_decl() {
+    uint32_t start = here().where.begin;
+    advance();
+    uint32_t p0 = here().where.begin;
+    expect_open('{');
+    n_param p;
+    p.name = ident();
+    expect_close('}');
+    n_fn f;
+    f.name = db.strings.intern("{}");
+    f.form.push_back(db.strings.intern("{"));
+    f.params.push_back(db.add(std::move(p), {p0, toks[pos - 1].where.end}));
+    expect_op("=>");
+    f.body = is_open('{') ? block() : expression();
+    f.expr_body = true;
+    if(is_op(";")) eat_op(";");
+    return db.add(std::move(f), {start, toks[pos - 1].where.end});
   }
 
   // auto x | Type x before `:`, `,` or `)` is a block parameter (not added to the base).

@@ -1,0 +1,20 @@
+// out: 16
+// Программа для сценария 175_editor_raw.wire: блок, разобранный кодом (§4.4).
+sum_parse(r) {
+  n_raw{_, items, _, _, _} = r;
+  e = n_int{0};
+  for(a : items) e = n_op{"+", array{e, a}};
+  e
+}
+
+negsum_parse(r) => n_int{7};
+
+sum_of(expr body) {
+  syntax {r} => sum_parse(r);
+  body
+}
+
+main() {
+  x = 10;
+  print(sum_of {1 2 3 x});
+}

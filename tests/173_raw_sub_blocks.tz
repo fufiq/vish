@@ -1,0 +1,39 @@
+// out: first
+// out: 12
+// out: second
+// out: 5
+// out: 7
+// machine
+// fmt-stable
+// store-roundtrip
+// Подблок {…} сырого блока — штатному разбору по правилам места (§4.4): контексты
+// вокруг вызова и правила тела конструкции (здесь — оператор ~). 
+// 
+// 
+// — код подблока видит имена вызывающего. Тип code — парсер
+// подблока штатным разбором; перегрузка по parse_error пропускает ошибку дальше.
+steps(expr body) {
+  operator (a) ~ (b) => (a * 10) + b;
+  syntax {r} => steps_code(parse(r, repeated(seq(word(), code))));
+  body
+}
+
+steps_code(parse_error e) => e;
+steps_code(xs) {
+  items = array{};
+  for(s : xs) items = array{...items, n_call{n_ident{"print"}, array{n_str{s[0]}}}, s[1]};
+  n_block{items}
+}
+
+main() {
+  x = 1;
+  steps {
+    first { print(1 ~ 2); }
+    second {
+      x += 4;
+      print(x);
+    }
+  }
+  x += 2;
+  print(x);
+}

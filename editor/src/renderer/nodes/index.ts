@@ -34,6 +34,8 @@ import './expressions/subject';
 import './expressions/spread';
 import './expressions/native';
 import './expressions/ref';
+import './expressions/raw';
+import './expressions/sym';
 
 export function tagOf(kind: string): string {
   return `tz-${kind.replace(/^n_/, '').replaceAll('_', '-')}`;

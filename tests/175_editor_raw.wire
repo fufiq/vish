@@ -1,0 +1,33 @@
+// parsing code in the editor (§4.4): the set inside the raw block reassembles it completely
+// (unit - instruction with a call: the parsing rule knows the design), the result of parsing -
+// derivative, editing it invalidates:
+// 
+// The block text is as written.
+// program: editor_raw.tz
+open_view module
+run
+// expect: output text="16\n" ok=true
+// 3 → 30: Next launch with new parsing
+pointer 1 @{1 0 6
+key 1 0
+// expect: курсор:   print(sum_of() {1 2 30‸ x});
+// expect-not: n_hole
+run 
+// expect: output text="43\n" ok=true
+// a string instead of a number - the rule will make the atom a component, the error - when executed
+key 1 Backspace
+key 1 Backspace
+key 1 "
+key 1 a
+key 1 "
+// expect: print(sum_of() {1 2 "a" x});
+run 
+// expect: ok=false
+// rule correction: the block is re-examined by the same text
+pointer 1 @sum_parse:3 0 0
+key 1 n
+key 1 e
+key 1 g
+// expect: syntax {r} => negsum_parse(r);
+run 
+// expect: output text="7\n" ok=true
