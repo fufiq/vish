@@ -635,7 +635,7 @@ struct process_machine {
     declare(st.globals, helper.sym("stdin"), mval{m_agg{helper.types.named("stream"), {}}});
     // ct-variables of the module and ct-code instance - in canonical order (§7.3): the
     // results of parsing of the entire program assistant become the memory of the process
-    if(!helper.ct_names.empty()) helper.canonical_ct();
+    helper.check_before_run(); // parsing before execution: errors of hooks parsing - before the first step
     for(auto const & [k, v]: helper.ct_memo)
       if(portable(v)) st.ct_memo.push_back({node_id(k.first), k.second, from_value(v, {})});
     for(node_id item: db.as<n_module>(root).items)
@@ -948,13 +948,6 @@ struct process_machine {
     auto const & fn = db.as<n_fn>(chosen);
     if(fn.outline && helper.inline_required(chosen))
       throw diagnostic(cat(helper.str(fn.name), " помечена outline, но использует семантику инлайна"), db[chosen].where);
-    for(node_id at: fn.attrs) { // [[inside(g)]] - entity only in blocks g: at the place of call in the text (§7.4 )
-      if(!db.is<n_call>(at) || !db.is<n_ident>(db.as<n_call>(at).callee) || helper.str(db.as<n_ident>(db.as<n_call>(at).callee).name) != "inside") continue;
-      auto const & c = db.as<n_call>(at);
-      if(c.args.size() != 1 || !db.is<n_ident>(c.args[0])) throw diagnostic("[[inside(конструкция)]]", db[at].where);
-      symbol g = db.as<n_ident>(c.args[0]).name;
-      if(!site_node || !helper.inside_block_of(site_node, g)) throw diagnostic(cat(helper.str(fn.name), " существует только внутри блоков ", helper.str(g)), where);
-    }
     // function-operator from one primitive - VM operation
     if(helper.intrinsic_operator(chosen)) {
       std::string prim(helper.str(db.as<n_ident>(db.as<n_call>(fn.body).callee).name));

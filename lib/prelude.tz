@@ -133,6 +133,54 @@ ref_used(xs, ref_anchor r) => require(anchor_of(xs).gen == r.gen,
   "ссылка на элемент использована после инвалидации опоры (опасное-опасное)",
   "ссылка взята здесь", r.at, "опора инвалидирована здесь", anchor_of(xs).at);
 
+// [[inside(g)]] f(…) — сущность существует только в блоках конструкции g: 
+// 
+// 
+// Хук разбора: место вызова — блок,
+// хвост или клауза вызова g до границы функции. Разбор идёт и перед запуском, так что
+// при исполнении проверки нет: 
+//.
+inside(expr g) {
+  site = call_site();
+  require(in_blocks_of(site, code_name(code(g))),
+    code_name(site) + " существует только внутри блоков " + code_name(code(g)));
+}
+// место c — внутри блока вызова g (идём к корню до объявления функции)
+in_blocks_of(c, str g) {
+  at = c;
+  up = code_parent(c);
+  found = false;
+  done = false;
+  while(!done && given(up)) {
+    if(code_kind(up) == n_fn) done = true;
+    else if(block_of_call(up, at, g)) {
+      found = true;
+      done = true;
+    }
+    at = up;
+    up = code_parent(up);
+  }
+  found
+}
+// c — блок-аргумент вызова g: блок, блок-лямбда, пак клауз или хвост
+block_of_call(cl, c, str g) => (code_kind(cl) == n_call) && {
+  n_call{callee, xs, _, tail, _, _} = cl;
+  arg = false;
+  for(x : xs) if(code_id(x) == code_id(c)) arg = true;
+  last = (xs.size > 0) && (code_id(xs[xs.size - 1]) == code_id(c));
+  (code_kind(callee) == n_ident) && ((code_name(callee) == g) && (arg && ((tail && last) || (is_code_block(c) || is_clause_pack(c)))))
+};
+is_code_block(c) => (code_kind(c) == n_block) || ((code_kind(c) == n_lambda) && {
+  n_lambda{_, _, block} = c;
+  block
+});
+is_clause_pack(c) => (code_kind(c) == n_construct) && {
+  n_construct{t, items} = c;
+  all = (items.size > 0) && (given(t) && ((code_kind(t) == n_ident) && (code_name(t) == "array")));
+  for(x : items) if(!is_code_block(x)) all = false;
+  all
+};
+
 // checked { … } — контекст: арифметика i64 с проверкой переполнения для всего,
 // что выполняется внутри блока, включая вызванные функции (их экземпляры —
 // свои для контекста): 

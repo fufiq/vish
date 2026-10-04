@@ -1,0 +1,18 @@
+// error: 182_inside_lexical.tz:12:19: ошибка: commit существует только внутри блоков transaction
+// machine
+// Место — по тексту, не по исполнению: функция, вызванная из блока transaction, —
+// не блок transaction (граница — объявление функции). Ошибка — разбор, до запуска.
+[[inside(transaction)]] commit(mut log) { log += 1; }
+
+transaction(expr body) {
+  body;
+}
+
+// вызов commit — в теле функции, а не в блоке
+helper(mut log) { commit(log); }
+
+main() {
+  log = 0;
+  transaction { helper(log); }
+  print(log);
+}

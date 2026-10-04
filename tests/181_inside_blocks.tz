@@ -1,0 +1,26 @@
+// out: 1 3
+// out: 2
+// machine
+// Внутри блоков конструкции g сущность существует: хвостовой блок, блок-аргумент в
+// скобках, вложенные блоки других конструкций внутри блока g (for, if) — место
+// вызова в тексте внутри блока g до границы функции. 
+//.
+[[inside(transaction)]] commit(mut log) { log += 1; }
+
+transaction(expr body) {
+  body;
+}
+
+main() {
+  log = 0;
+  transaction { commit(log); }
+  n = 0;
+  transaction {
+    for(i : range(2)) if(i >= 0) commit(log);
+    n = log;
+  }
+  print(n - 2, log);
+  k = 0;
+  transaction({ commit(k); commit(k); });
+  print(k);
+}

@@ -575,9 +575,7 @@ struct interpreter {
     if(it == functions.end()) throw diagnostic("нет функции main", {});
     owns_state = true; // Execution of the program: it opens its state
     elaborate();
-    // ct-state - in canonical order, not along the execution branches; for JIT - also the types of
-    // thread elements at the place of creation (types - from parsing, not from statistics)
-    if(!checking() && (!ct_names.empty() || (jit && calls(mod, sym("stream"))))) canonical_ct();
+    if(!checking()) check_before_run();
     it = functions.find(sym("main"));
     call_site site{db[it->second.front()].where, "main"};
     flow r;
@@ -751,6 +749,40 @@ struct interpreter {
     return found;
   }
 
+  // parsing before execution:
+// Hook error parsing [[g(…)]] (inside prelude)
+  // Only he sees - it stops the start; other errors parsing execution finds itself in its place
+  // (as before). ct-state - in canonical order, not along the execution branches; for JIT - also
+  // the types of thread elements at the place of creation.
+  void check_before_run() {
+    if(!ct_names.empty() || (jit && calls(mod, sym("stream")))) {
+      canonical_ct();
+      return;
+    }
+    if(!program_hooks()) return;
+    interpreter a(db, mod, std::vector<std::string>{"ct"}, mode::check, std::nullopt, nullptr, this);
+    a.fuel = 2000000;
+    try {
+      a.run_main();
+    } catch(diagnostic const & d) {
+      if(d.hook) throw;
+    } catch(std::bad_alloc const &) { // parsing did not fit in addresses (copies of large arrays in journal observations) - execution without it
+    }
+  }
+
+  // Hook parsing for a program function ([[g(…)]], g is a language function). Without them,
+  // parsing won’t add anything before launch - the launch doesn’t pay for it (mys; the
+  // prelude hooks don’t refuse: invalidates only changes the ct state).
+  bool program_hooks() const {
+    for(uint32_t i = 0; i < db.size(); ++i) {
+      node_id f(i);
+      if(!db.is<n_fn>(f) || db.as<n_fn>(f).attrs.empty() || db.in_prelude(f)) continue;
+      for(node_id a: db.as<n_fn>(f).attrs)
+        if(db.is<n_call>(a) && db.is<n_ident>(db.as<n_call>(a).callee) && functions.contains(db.as<n_ident>(db.as<n_call>(a).callee).name)) return true;
+    }
+    return false;
+  }
+
   void canonical_ct() {
     // parsing is in the order of the text: the spawn body reads the stream before the
     // sequel - read "" run-time. The next pass starts with the types of streams of the
@@ -763,8 +795,8 @@ struct interpreter {
       std::size_t first = root->streams.size();
       try {
         a.run_main();
-      } catch(diagnostic const &) {
-        if(!ct_names.empty()) throw; // ct is part of the program; thread types are just a JIT hint
+      } catch(diagnostic const & d) {
+        if(!ct_names.empty() || d.hook) throw; // ct is part of the program; thread types are just a JIT hint
         stream_shapes.clear();
         return;
       }
@@ -3404,16 +3436,21 @@ struct interpreter {
 
   // Location of value in the program: the nearest call outside prelude
 //.
+  // The [[g(…)]] hook is not the place of the program: the place is the challenge it tests.
   node_id program_site() const {
     for(auto it = stack.rbegin(); it != stack.rend(); ++it)
-      if(it->node && !db.in_prelude(node_id(it->node))) return node_id(it->node);
+      if(it->node && !db.in_prelude(node_id(it->node)) && !hook_call(node_id(it->node))) return node_id(it->node);
     return {};
   }
   span program_where(node_id n) const {
     if(!db.in_prelude(n)) return db[n].where;
     for(auto it = stack.rbegin(); it != stack.rend(); ++it)
-      if(!db.prelude || it->where.source != db[db.prelude].where.source) return it->where;
+      if((!db.prelude || it->where.source != db[db.prelude].where.source) && !(it->node && hook_call(node_id(it->node)))) return it->where;
     return db[n].where;
+  }
+  bool hook_call(node_id n) const {
+    node_id p = db[n].parent;
+    return p && db.is<n_fn>(p) && std::ranges::find(db.as<n_fn>(p).attrs, n) != db.as<n_fn>(p).attrs.end();
   }
 
   // set_ct_state(x, s): The ct-state of the place x is the compile value.
@@ -3545,6 +3582,11 @@ struct interpreter {
       hook_hold hh{*this};
       try {
         eval(a, s, site.frame);
+      } catch(diagnostic & d) { // The hook error only sees parsing: it goes before launch
+        stack.pop_back();
+        for(auto & x: alts) *x.cell = std::move(x.saved);
+        d.hook = true;
+        throw;
       } catch(...) {
         stack.pop_back();
         for(auto & x: alts) *x.cell = std::move(x.saved);
@@ -5119,7 +5161,6 @@ struct interpreter {
     auto const & fn = db.as<n_fn>(f);
     scope * parent = std::exchange(invoke_parent, nullptr);
     bool open = std::exchange(invoke_open, false);
-    check_inside(f, site);
     attribute_hooks(f, vals, args, env, site);
     // own-параметр: значение уходит в функцию, имя вызывающего исчезает (явное перемещение, §5.6)
     for(uint32_t k = 0; k < fn.params.size() && k < args.size(); ++k)
@@ -5363,33 +5404,6 @@ struct interpreter {
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
 
-  // Contextual condition [[inside(g)]] : entity exists only in the blocks of
-  // construction g.
-// 
-// Check the place of call in the text.
-  void check_inside(node_id f, call_site const & site) {
-    for(node_id a: db.as<n_fn>(f).attrs) {
-      if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "inside") continue;
-      auto const & c = db.as<n_call>(a);
-      if(c.args.size() != 1 || !db.is<n_ident>(c.args[0])) fail("[[inside(конструкция)]]", db[a].where);
-      symbol g = db.as<n_ident>(c.args[0]).name;
-      if(!site.node || !inside_block_of(node_id(site.node), g))
-        fail(cat(site.what, " существует только внутри блоков ", str(g)), site.where);
-    }
-  }
-
-  bool inside_block_of(node_id n, symbol g) const {
-    for(node_id c = n, p = db[n].parent; p; c = p, p = db[p].parent) {
-      if(db.is<n_fn>(p)) return false;
-      if(!db.is<n_call>(p)) continue;
-      auto const & call = db.as<n_call>(p);
-      if(!db.is<n_ident>(call.callee) || db.as<n_ident>(call.callee).name != g) continue;
-      bool block = db.is<n_block>(c) || (db.is<n_lambda>(c) && db.as<n_lambda>(c).block) || db.clause_pack(c) || (call.tail && call.args.back() == c);
-      if(block && std::ranges::find(call.args, c) != call.args.end()) return true;
-    }
-    return false;
-  }
-
   // The function uses inline semantics (§6.1): expr-parameter or address return.
   bool inline_required(node_id f) const {
     for(node_id p: db.as<n_fn>(f).params)
@@ -5536,7 +5550,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -5732,6 +5746,7 @@ struct interpreter {
       }
       if(n == "code_text") return value(printer(db).print(c));
       if(n == "code_id") return value(int64_t(c.value)); // node number - compare node
+      if(n == "code_parent") return code_value(db[c].parent); // The root is empty; the root is empty.
     }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);

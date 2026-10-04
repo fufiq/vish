@@ -244,8 +244,8 @@ int main(int argc, char ** argv) {
     // - stop after N steps and write down the dump (tz resume).
     if(cmd == "run" && machine) {
       tz::process_machine m(p.db, p.root, p.path);
-      m.start(std::vector<std::string>(argv + at, argv + argc));
       try {
+        m.start(std::vector<std::string>(argv + at, argv + argc)); // parsing before execution - its errors with place
         if(dump_path.empty()) m.run();
         else {
           m.run(dump_after);

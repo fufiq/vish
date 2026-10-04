@@ -162,6 +162,7 @@ struct diagnostic : std::runtime_error {
   std::vector<frame> trace;
   std::string type; // runtime - VM error as language exception: out_of_bounds, div_by_zero
   bool fixed = false; // parsing: Violation known at compilation (require) - error, no exception
+  bool hook = false; // from hook parsing [[g(…)]]: visible only parsing - stops launch
 };
 
 // The line / column for span - only when output to a person.
