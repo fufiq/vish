@@ -1263,9 +1263,17 @@ struct interpreter {
     bool throws = false; // run-time is still validated - it can throw
   };
 
+  // A large known array of observation holds a sample of the type, not a copy: a copy for
+  // each observation (cycles) exhausted the addresses (growing array - its own band), and to
+  // know the values of this size neither the analysis nor the editor need (*my*)
+  static constexpr uint32_t observed_items = 256;
+  static value observable(value const & v) {
+    if(v.is<array_v>() && v.as<array_v>().size() > observed_items) return erase(v);
+    return v;
+  }
   void observe(node_id n, flow const & f, bool effect, bool throws = false) {
     if(!f.normal()) journal.push_back({n.value, {}, false, true, effect, ctx, false, throws});
-    else journal.push_back({n.value, f.v, true, false, effect, ctx, false, throws});
+    else journal.push_back({n.value, observable(f.v), true, false, effect, ctx, false, throws});
     observations_dirty = true;
   }
 
