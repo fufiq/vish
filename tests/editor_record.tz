@@ -1,0 +1,9 @@
+// Программа для сценария 190_editor_record.wire (сама по себе — обычный тест).
+// out: 3.0 box
+// fmt-stable
+struct point { f64 x; f64 y; }
+
+main() {
+  p = {x: 1.0, y: 2.0, name: "box"};
+  print(p.x + p.y, p.name);
+}

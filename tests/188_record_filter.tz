@@ -1,0 +1,34 @@
+// out: a
+// out: c
+// out: 1
+// out: b
+// machine
+// fmt-stable
+// store-roundtrip
+// Фильтр по образцу из полей — пример 
+//;
+// 
+// q — анонимный
+// агрегат (тип не ожидается — остаётся анонимным), цикл по его полям раскрывается при
+// компиляции (§7.4), поле записи — по имени дескриптора.
+struct govno { i64 a; i64 b; str name; }
+
+matches(x, q) {
+  ok = true;
+  for(f : fields(typeof(q))) if(x.[f.name] != q.[f]) ok = false;
+  ok
+}
+
+filter(xs, q) {
+  out = array{};
+  for(x : xs) if(matches(x, q)) out = array{...out, x};
+  out
+}
+
+find() => array{govno{10, 20, "a"}, govno{10, 30, "b"}, govno{10, 20, "c"}};
+
+main() {
+  for(g : find().filter({a: 10, b: 20})) print(g.name);
+  print(find().filter({b: 30, name: "b"}).size);
+  for(g : find().filter({b: 30})) print(g.name);
+}

@@ -1,0 +1,53 @@
+// out: 25.0
+// out: point{x: 0.0, y: 0.0, tag: 7} point{x: 1.0, y: 0.0, tag: 7}
+// out: line{a: point{x: 1.0, y: 2.0, tag: 7}, b: point{x: 3.0, y: 4.0, tag: 1}}
+// out: point{x: 9.0, y: 9.0, tag: 7}
+// out: point{x: 6.0, y: 5.0, tag: 7}
+// out: point{x: 1.0, y: 1.0, tag: 7} point
+// out: 2
+// out: 25.0 {x: 3, y: 4}
+// out: 1.5
+// machine
+// machine-dump: 40
+// fmt-stable
+// store-roundtrip
+// Тип из места (§4.3): где ожидается struct — параметр, объявление `T x = …`, поле
+// struct, место со struct, результат функции с типом, — анонимный литерал становится им:
+// поля по именам, значения представимы в типах полей, недостающие — значения по
+// умолчанию. 
+// 
+//.
+struct point { f64 x; f64 y; i64 tag = 7; }
+struct line { point a; point b; }
+
+len2(point p) => (p.x * p.x) + (p.y * p.y);
+point origin() => {x: 0, y: 0};
+point shift(point p) {
+  return {x: p.x + 1.0, y: p.y};
+}
+
+struct clazz { i64 n; }
+method(clazz c, point p) => c.n + p.tag;
+half(f64 x) => x / 2.0;
+
+main() {
+  print(len2({x: 3, y: 4.0}));
+  print(origin(), shift(origin()));
+  l = line{{x: 1, y: 2}, {x: 3, y: 4, tag: 1}};
+  print(l);
+  l.a = {x: 9, y: 9};
+  print(l.a);
+  pt = origin();
+  pt = {y: 5, x: 6};
+  print(pt);
+  point z = {x: 1, y: 1};
+  print(z, typeof(z));
+  c = clazz{-5};
+  print(c.method({x: 1, y: 2}));
+  // переменная с литералом: параметр получает point (преобразованное значение — не алиас
+  // места вызывающего; попутно так же i64 → f64)
+  r = {x: 3, y: 4};
+  print(len2(r), r);
+  n = 3;
+  print(half(n));
+}

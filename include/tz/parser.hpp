@@ -912,6 +912,10 @@ struct parser {
 
   // The name {…} ... = - in front of the sample unpacking (after his `}` stands a single `=`).
   bool pattern_ahead() const {
+    if(record_ahead()) { // {x: a, y: b} = v is a sample of fields by name
+      uint32_t m = match[pos];
+      return m != ~uint32_t{0} && is_op("=", m + 1 - pos);
+    }
     if(here().kind != tok::ident || !is_open('{', 1) || !ahead(1).glued) return false;
     uint32_t m = match[pos + 1];
     if(m == ~uint32_t{0}) return false;
@@ -921,6 +925,22 @@ struct parser {
   node_id pattern() {
     uint32_t start = here().where.begin;
     n_pat p;
+    if(record_ahead()) { // {x: a, y: b} - without type: .x reference to value - subsample
+      expect_open('{');
+      while(!is_close('}') && !at_end()) {
+        uint32_t i0 = here().where.begin;
+        symbol name = ident();
+        node_id e = db.add(n_subject{}, {i0, i0});
+        e = db.add(n_op{db.strings.intern(cat(".", db.strings.text(name))), {e}, true}, {i0, toks[pos - 1].where.end});
+        expect_op(":");
+        node_id sub = pattern_element();
+        p.items.push_back(db.add(n_pat_field{e, sub}, {i0, toks[pos - 1].where.end}));
+        if(is_op(",")) eat_op(",");
+        else break;
+      }
+      expect_close('}');
+      return db.add(std::move(p), {start, toks[pos - 1].where.end});
+    }
     symbol tn = ident();
     p.type = db.add(n_ident{tn}, {start, toks[pos - 1].where.end});
     expect_open('{');
@@ -966,7 +986,7 @@ struct parser {
   node_id pattern_element() {
     uint32_t i0 = here().where.begin;
     if(is_open('(')) return expression();
-    if(here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) return pattern();
+    if((here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) || record_ahead()) return pattern();
     n_param b;
     if(is_word("explicit") && ahead(1).kind == tok::ident && ahead(2).kind == tok::ident) { // explicit T name - strictly
       advance();
@@ -1082,7 +1102,7 @@ struct parser {
   }
 
   node_id statement_or_block() {
-    if(is_open('{')) return block();
+    if(is_open('{') && !record_ahead()) return block();
     node_id s = statement();
     return s;
   }
@@ -1259,7 +1279,7 @@ struct parser {
       } else throw diagnostic("в записи syntax — слова, символы, ;, (параметр) и {тело}", here().where);
     }
     expect_op("=>");
-    f.body = is_open('{') ? block() : expression();
+    f.body = is_open('{') && !record_ahead() ? block() : expression();
     f.expr_body = true;
     if(is_op(";")) eat_op(";");
     node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
@@ -1342,7 +1362,7 @@ struct parser {
           tail_statement = false;
           // body: block (with the rules of body forms - as in the structure; raw - if the form
           // disassembles it with the code) or expression (branch)
-          args.push_back(is_open('{') ? ruled_block(live) : expression());
+          args.push_back(is_open('{') && !record_ahead() ? ruled_block(live) : expression());
           ++k;
           continue;
         }
@@ -1760,7 +1780,7 @@ struct parser {
     f.form.push_back(db.strings.intern("{"));
     f.params.push_back(db.add(std::move(p), {p0, toks[pos - 1].where.end}));
     expect_op("=>");
-    f.body = is_open('{') ? block() : expression();
+    f.body = is_open('{') && !record_ahead() ? block() : expression();
     f.expr_body = true;
     if(is_op(";")) eat_op(";");
     return db.add(std::move(f), {start, toks[pos - 1].where.end});
@@ -1781,6 +1801,26 @@ struct parser {
     if(typed) p.type = type_expr();
     p.name = ident();
     return std::pair{std::move(p), start};
+  }
+
+  // {имя: e, …} is an anonymous structural literal, not a block: a block does not begin with `имя :`.
+  // 
+//;.
+  bool record_ahead(uint32_t k = 0) const { return is_open('{', k) && ahead(k + 1).kind == tok::ident && is_op(":", k + 2); }
+
+  node_id record() {
+    uint32_t start = here().where.begin;
+    expect_open('{');
+    n_construct c;
+    while(!is_close('}')) {
+      c.names.push_back(ident());
+      expect_op(":");
+      c.items.push_back(expression());
+      if(is_op(",")) eat_op(",");
+      else break;
+    }
+    expect_close('}');
+    return db.add(std::move(c), {start, toks[pos - 1].where.end});
   }
 
   node_list brace_items() {
@@ -1855,6 +1895,7 @@ struct parser {
         return db.add(n_ident{db.strings.intern(t.text)}, t.where);
       }
       case tok::open: {
+        if(record_ahead()) return record();
         if(t.ch() == '{') return block();
         if(t.ch() == '(') {
           // lambda: (parameters) => body
@@ -1863,7 +1904,7 @@ struct parser {
             n_lambda l;
             l.params = param_list();
             eat_op("=>");
-            l.body = is_open('{') ? block() : expression();
+            l.body = is_open('{') && !record_ahead() ? block() : expression();
             return db.add(std::move(l), {start, toks[pos - 1].where.end});
           }
           advance();

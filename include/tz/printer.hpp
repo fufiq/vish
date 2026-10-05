@@ -271,7 +271,7 @@ struct printer {
   }
 
   void print_node(node_id, n_pat const & p) {
-    item(p.type);
+    if(p.type) item(p.type); // typeless - {x: a, y: b}
     out += '{';
     for(std::size_t i = 0; i < p.items.size(); ++i) {
       node_id x = p.items[i];
@@ -287,8 +287,11 @@ struct printer {
     out += '}';
   }
 
-  void print_node(node_id, n_pat_field const & f) {
-    item(f.access);
+  void print_node(node_id n, n_pat_field const & f) {
+    node_id p = db[n].parent;
+    if(p && db.is<n_pat>(p) && !db.as<n_pat>(p).type && db.is<n_op>(f.access)) // {x: a} is the name of a field without a point
+      out += str(db.as<n_op>(f.access).op).substr(1);
+    else item(f.access);
     out += ": ";
     if(db.is<n_param>(f.sub) || db.is<n_pat>(f.sub)) item(f.sub);
     else {
@@ -740,10 +743,11 @@ struct printer {
   }
 
   void print_node(node_id, n_construct const & c) {
-    item(c.type);
+    if(c.type) item(c.type); // without type - anonymous literature {x: 1, y: 2}
     out += '{';
     for(uint32_t i = 0; i < c.items.size(); ++i) {
       if(i) out += ", ";
+      if(i < c.names.size()) out += cat(db.strings.text(c.names[i]), ": ");
       item(c.items[i]);
     }
     out += '}';

@@ -761,7 +761,7 @@ struct process_machine {
         if(catch_into(t)) return; // caught: next - catch block
       }
       if(t.kind == m_call_body && s.kind == sig_return && s.target == t.a) {
-        mval v = std::move(s.v);
+        mval v = result_in_type(t.node, std::move(s.v));
         s.kind = sig_none;
         end_frame(t);
         finish(std::move(v));
@@ -1036,7 +1036,7 @@ struct process_machine {
       push_eval(body, t.scope, t.a);
       return;
     }
-    mval r = deref(pop_val()); // a value, not a alias, on an area that is now freed up
+    mval r = result_in_type(t.node, deref(pop_val())); // a value, not a alias, on an area that is now freed up
     end_frame(t);
     finish(std::move(r));
   }
@@ -1219,6 +1219,12 @@ struct process_machine {
     std::string have = describe(v);
     if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2;
     if(!strict && helper.types.is_a(have, want)) return 1; // base
+    if(!strict && v.is<m_agg>() && helper.types.anonymous(v.as<m_agg>().type) && helper.structs.contains(helper.sym(want))) { // {x: …} where struct is expected
+      value got;
+      if(helper.record_fit(to_value(v), want, got) == interpreter::fit::no) return 0;
+      out = from_value(got, {});
+      return 1;
+    }
     if(strict || !numeric_pair(v, want)) return 0;
     if(want == "f64") {
       int64_t i = v.as<int64_t>();
@@ -1231,6 +1237,23 @@ struct process_machine {
     if(!(d >= -9.2e18 && d <= 9.2e18) || std::trunc(d) != d) return 0;
     out = mval{int64_t(d)};
     return 1;
+  }
+  // Anonymous literature in a place of a known type (as in the interpreter, §4.3).
+  bool is_record(mval const & v) const { return v.is<m_agg>() && helper.types.anonymous(v.as<m_agg>().type); }
+  mval to_type(mval v, std::string_view want, span where) {
+    if(want.empty() || !is_record(v)) return v;
+    return from_value(helper.to_type(to_value(v), want, where), where);
+  }
+  std::string place_type(mval const & cur) const {
+    if(!cur.is<m_agg>() || helper.types.anonymous(cur.as<m_agg>().type)) return {};
+    return std::string(helper.types.name(cur.as<m_agg>().type));
+  }
+  // point f() => {x: …} is the result of a function with type
+  mval result_in_type(node_id f, mval v) {
+    if(!db.is<n_fn>(f)) return v;
+    node_id rt = db.as<n_fn>(f).result_type;
+    if(!rt || !db.is<n_ident>(rt)) return v;
+    return to_type(std::move(v), helper.str(db.as<n_ident>(rt).name), db[rt].where);
   }
   static bool numeric_pair(mval const & v, std::string_view want) { return (want == "f64" && v.is<int64_t>()) || (want == "i64" && v.is<double>()); }
 
@@ -1268,7 +1291,7 @@ struct process_machine {
 
   bool unpack_into(node_id pat, mval const & v0, uint32_t into, span where) {
     auto const & p = db.as<n_pat>(pat);
-    std::string_view kind = helper.str(db.as<n_ident>(p.type).name);
+    std::string_view kind = p.type ? helper.str(db.as<n_ident>(p.type).name) : std::string_view();
     mval v = deref(v0);
     auto elem = [&](node_id item, mval const & e) -> bool {
       if(db.is<n_pat>(item)) return unpack_into(item, e, into, where);
@@ -1301,6 +1324,7 @@ struct process_machine {
       }
       return true;
     };
+    if(!p.type) return v.is<m_agg>() && interface(); // {x: a, y: b} = v - addresses .x to the aggregate
     if(kind == "array") {
       if(!v.is<m_arr>()) return false;
       auto const & a = v.as<m_arr>().items;
@@ -1564,6 +1588,7 @@ struct process_machine {
         throw diagnostic("ct-переменная меняется только кодом при компиляции (ct { … })", db[n].where);
       mval & c = cell(p);
       bool whole = !st.scopes[p.scope].vars[p.slot].v.is<m_alias>() || st.scopes[p.scope].vars[p.slot].v.as<m_alias>().index == m_none;
+      if(op == "=" && is_record(rhs)) rhs = to_type(std::move(rhs), place_type(c), db[n].where); // Struct holds it, {x: …} becomes it.
       c = op == "=" ? std::move(rhs) : primitive(prim_of(op), {c, rhs}, db[n].where);
       if(whole && c.is<m_arr>()) c.as<m_arr>().gen = ++st.array_gen; // New buffer - old links are invalid
       return finish(mval{m_unit{}});
@@ -1583,6 +1608,7 @@ struct process_machine {
       auto & xs = arr.as<m_arr>().items;
       int64_t k = i.as<int64_t>();
       if(k < 0 || uint64_t(k) >= xs.size()) out_of_bounds(k, xs.size(), db[lhs].where);
+      if(op == "=" && is_record(rhs)) rhs = to_type(std::move(rhs), place_type(xs[uint64_t(k)]), db[n].where);
       xs[uint64_t(k)] = op == "=" ? std::move(rhs) : primitive(prim_of(op), {xs[uint64_t(k)], rhs}, db[n].where);
       return finish(mval{m_unit{}});
     }
@@ -1608,6 +1634,7 @@ struct process_machine {
           if(!next) throw diagnostic(cat("у значения типа ", describe(*target), " нет поля ", helper.str(*it)), db[lhs].where);
           target = next;
         }
+        if(op == "=" && is_record(rhs)) rhs = to_type(std::move(rhs), place_type(*target), db[n].where);
         *target = op == "=" ? std::move(rhs) : primitive(prim_of(op), {*target, rhs}, db[n].where);
         return finish(mval{m_unit{}});
       }
@@ -2136,6 +2163,7 @@ struct process_machine {
       }
       x = std::move(got);
     }
+    if(v.type && db.is<n_ident>(v.type) && !v.strict) x = to_type(std::move(x), helper.str(db.as<n_ident>(v.type).name), db[v.init].where); // point p = {x: …}
     declare(t.scope, v.name, std::move(x));
     finish(mval{m_unit{}});
   }
@@ -2145,6 +2173,16 @@ struct process_machine {
   // tuple, author's decision).
   void eval_node(node_id n, n_construct const & c) {
     m_task & t = top();
+    if(!c.type) { // {x: e, …} - anonymous unit: type by structure - the assistant
+      if(t.phase < c.items.size()) return push_eval(c.items[t.phase++], t.scope, t.frame);
+      field_list fs;
+      for(uint32_t i = 0; i < c.items.size(); ++i) {
+        for(auto const & [name, _]: fs)
+          if(name == c.names[i]) throw diagnostic(cat("{…}: поле ", helper.str(name), " дважды"), db[c.items[i]].where);
+        fs.push_back({c.names[i], to_value(deref(fib().vals[t.base + i]))});
+      }
+      return finish(from_value(helper.record_value(std::move(fs)), db[n].where));
+    }
     symbol tname = db.as<n_ident>(c.type).name;
     auto st_it = helper.structs.find(tname);
     node_list all;
@@ -2167,7 +2205,12 @@ struct process_machine {
         return push_eval(f.init, st.globals, t.frame);
       }
       m_agg g{helper.types.named(helper.str(tname)), {}};
-      for(uint32_t i = 0; i < all.size(); ++i) g.fields.push_back({db.as<n_var>(all[i]).name, deref(fib().vals[t.base + i])});
+      for(uint32_t i = 0; i < all.size(); ++i) { // Struct field: {x: …} becomes struct field
+        auto const & f = db.as<n_var>(all[i]);
+        mval v = deref(fib().vals[t.base + i]);
+        if(i < c.items.size() && f.type && db.is<n_ident>(f.type)) v = to_type(std::move(v), helper.str(db.as<n_ident>(f.type).name), db[c.items[i]].where);
+        g.fields.push_back({f.name, std::move(v)});
+      }
       return finish(mval{std::move(g)});
     }
     if(helper.str(tname) != "array") throw diagnostic(cat("конструктор ", helper.str(tname), "{} пока не поддержан"), db[n].where);

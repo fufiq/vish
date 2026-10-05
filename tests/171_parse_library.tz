@@ -10,13 +10,15 @@
 // 
 // 
 // Тип — парсер типа (i64, str, bool), строка — литерал-конфигурация,
-// | — альтернатива, map — агрегат по именам полей, as — значение удавшегося.
+// | — альтернатива, map(T, {поле: парсер, …}) — агрегат по именам полей (анонимный
+// литерал —, там же), as — значение удавшегося.
 struct server { str host; i64 port; bool tls; }
 
-server_p() => map(server,
-  "host", combine("host", "=", str),
-  "tls", combine("tls", "=", bool),
-  "port", combine("port", "=", int() | as(-1, word("auto"))));
+server_p() => map(server, {
+  host: combine("host", "=", str),
+  tls: combine("tls", "=", bool),
+  port: combine("port", "=", int() | as(-1, word("auto")))
+});
 
 config(expr body) {
   syntax {r} => parse(r, server_p());
@@ -27,7 +29,7 @@ struct point { i64 x; i64 y; }
 
 // точки: (x, y) …, подблок разбирается целиком внутри (within)
 points(expr body) {
-  syntax {r} => parse(r, repeated(within("(", map(point, "x", i64, "y", combine(",", i64)))));
+  syntax {r} => parse(r, repeated(within("(", map(point, {x: i64, y: combine(",", i64)}))));
   body
 }
 

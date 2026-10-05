@@ -175,7 +175,7 @@ is_code_block(c) => (code_kind(c) == n_block) || ((code_kind(c) == n_lambda) && 
   block
 });
 is_clause_pack(c) => (code_kind(c) == n_construct) && {
-  n_construct{t, items} = c;
+  n_construct{t, items, _} = c;
   all = (items.size > 0) && (given(t) && ((code_kind(t) == n_ident) && (code_name(t) == "array")));
   for(x : items) if(!is_code_block(x)) all = false;
   all
@@ -611,13 +611,17 @@ repeated(p) => p_rep{array{as_parser(p)}, 0};
 repeated(p, i64 min) => p_rep{array{as_parser(p)}, min};
 within(str open, p) => p_sub{open, array{as_parser(p)}};
 as(v, p) => p_as{array{v}, array{as_parser(p)}};
-// map(T, "поле", парсер, …) — агрегат T по именам полей (порядок в записи — любой)
-map(type t, ...xs) {
+// map(T, {поле: парсер, …}) — агрегат T по именам полей (порядок разбора — порядок записи):
+// 
+// 
+// 
+//  
+map(type t, q) {
   names = array{};
   ps = array{};
-  for(k : range(xs.size / 2)) {
-    names = array{...names, xs[2 * k]};
-    ps = array{...ps, as_parser(xs[(2 * k) + 1])};
+  for(f : fields(typeof(q))) {
+    names = array{...names, f.name};
+    ps = array{...ps, as_parser(q.[f])};
   }
   p_map{t, names, ps}
 }
@@ -1321,8 +1325,10 @@ jit_compile(cg, f, types, type result) {
   // VM в памяти вызова (op 10), элементы — push машинным кодом, ...ys — цикл по данным ys
   gen_construct(e) => {
     t = ty(e);
-    n_construct{tn, items} = e;
+    n_construct{tn, items, _} = e;
     fits = is_arr(t) && (given(tn) && (code_name(tn) == "array"));
+    // {x: …} без типа: тип — от места (параметр, поле, результат), это семантика VM
+    if(!given(tn)) bad("анонимный литерал {…} — интерпретатор");
     n = 0;
     for(x : items) if(fits) {
       if(code_kind(x) == n_spread) {
@@ -2089,7 +2095,7 @@ jit_compile(cg, f, types, type result) {
     else {
       hv = env[h];
       hs = if(code_kind(hv.th) == n_construct) { // пак клауз — кортеж блоков
-        n_construct{_, items} = hv.th;
+        n_construct{_, items, _} = hv.th;
         items
       } else array{hv.th};
       frame_c = array{};

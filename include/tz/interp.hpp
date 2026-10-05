@@ -1804,6 +1804,7 @@ struct interpreter {
       return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
     }
     if(!strict && types.is_a(types.name(types.of(v)), want)) return fit::representable; // base
+    if(!strict && is_record(v) && structs.contains(sym(want))) return record_fit(v, want, out); // {x: …} where struct is expected
     if(strict || !numeric_pair(v, want)) return fit::no;
     value const * x = shape_of(v);
     if(want == "f64") {
@@ -1831,6 +1832,85 @@ struct interpreter {
     value const * x = shape_of(v);
     if(!x) return false;
     return (want == "f64" && x->is<int64_t>()) || (want == "i64" && x->is<double>());
+  }
+
+  // Anonymous aggregate {x: 1, y: 2} (§4.3): type - by structure, type name - recording fields.
+  // 
+// 
+// One structure, one type.
+  value record_value(field_list fs) {
+    std::string name = "{";
+    for(uint32_t k = 0; k < fs.size(); ++k) name += cat(k ? ", " : "", str(fs[k].first), ": ", types.describe(fs[k].second));
+    return value(agg_v{types.named(name + "}"), std::move(fs)});
+  }
+  bool is_record(value const & v) const {
+    value const * x = shape_of(v);
+    return x && x->is<agg_v>() && types.anonymous(x->as<agg_v>().type);
+  }
+  // Anonymous fields - from his record: name and type (array type - array, tuple).
+  std::vector<std::pair<std::string, type_id>> record_fields(type_id t) {
+    std::vector<std::pair<std::string, type_id>> out;
+    std::string whole(types.name(t)); // copy: named() below grows the registry
+    for(auto [name, tn]: type_registry::record_parts(whole)) {
+      if(!types.anonymous(tn)) tn = tn.substr(0, tn.find('<')); // array<f64> — array
+      out.push_back({std::string(name), types.builtin(tn) ? types.builtin(tn) : types.named(tn)});
+    }
+    return out;
+  }
+  // Anonymous literature is where a struct want is expected (parameter, announcement, field,
+  // place, result): fields - by name, values - are represented in field types, missing - default
+  // values struct, extra field - no.
+// 
+//.
+  // My:* is the level of "imaginable", not "type equal" (`explicit point p` literal does not take).
+  fit record_fit(value const & v, std::string_view want, value & out, std::string * why = nullptr) {
+    auto no = [&](std::string w) {
+      if(why) *why = std::move(w);
+      return fit::no;
+    };
+    value const * x = shape_of(v);
+    auto all = fields_of_struct(sym(want));
+    auto const & have = x->as<agg_v>().fields;
+    for(auto const & [k, _]: have)
+      if(std::ranges::none_of(all, [&](node_id f) { return db.as<n_var>(f).name == k; })) return no(cat("у ", want, " нет поля ", str(k)));
+    agg_v g{types.named(want), {}};
+    fit r = fit::representable;
+    for(node_id f: all) {
+      auto const & d = db.as<n_var>(f);
+      value const * got = nullptr;
+      for(auto const & [k, fv]: have)
+        if(k == d.name) got = &fv;
+      value fv;
+      if(got && d.type && db.is<n_ident>(d.type)) {
+        fit q = type_fit(*got, str(db.as<n_ident>(d.type).name), false, fv);
+        if(q == fit::no) return no(cat("поле ", str(d.name), ": ожидается ", str(db.as<n_ident>(d.type).name), ", получено ", types.describe(*got)));
+        if(q == fit::maybe) r = fit::maybe;
+      } else if(got) fv = *got;
+      else if(d.init) {
+        flow dv = eval(d.init, globals, 0);
+        if(!dv.normal()) return no(cat("значение по умолчанию поля ", str(d.name), " не вычислилось"));
+        fv = std::move(dv.v);
+      } else return no(cat("не задано поле ", str(d.name)));
+      g.fields.push_back({d.name, std::move(fv)});
+      if(d.ct) pin(g.fields.back().second, d.name, db[f].where);
+    }
+    out = v.known() ? value(std::move(g)) : erase(value(std::move(g)));
+    return r;
+  }
+  // Value for a place whose type is known (field struct, variable with struct, result with
+  // type): the anonymous literal becomes that struct; otherwise, as is.
+  value to_type(value v, std::string_view want, span where) {
+    if(!is_record(v) || !structs.contains(sym(want))) return v;
+    value got;
+    std::string why;
+    if(record_fit(v, want, got, &why) == fit::no) fail(cat(types.describe(v), " не становится ", want, ": ", why), where);
+    return got;
+  }
+  // The place holds the value of the type: struct is its name, otherwise it is empty (*my:* type of place is the type of its meaning).
+  std::string place_type(value const & cur) const {
+    value const * x = shape_of(cur);
+    if(!x || !x->is<agg_v>() || types.anonymous(x->as<agg_v>().type)) return {};
+    return std::string(types.name(x->as<agg_v>().type));
   }
 
   // Whether samples-arrays of candidates cover any length (elements - names, , residue:
@@ -1889,7 +1969,7 @@ struct interpreter {
   // Value in sample: names in into; values-elements are calculated in env.
   unpacked unpack_into(node_id pat, value const & v, scope * into, scope * env, uint32_t frame, span where) {
     auto const & p = db.as<n_pat>(pat);
-    std::string_view kind = str(db.as<n_ident>(p.type).name);
+    std::string_view kind = p.type ? str(db.as<n_ident>(p.type).name) : std::string_view();
     value const * x = shape_of(v);
     if(unknown(v) || !x) return unpacked::maybe; // Type unknown even at parsing
     auto elem = [&](node_id item, value const & e) -> unpacked {
@@ -1938,6 +2018,10 @@ struct interpreter {
       }
       return r;
     };
+    // {x: a, y: b} = v - addresses .x to any aggregate (anonymous or struct): structure, not type
+    // name
+// 
+    if(!p.type) return x->is<agg_v>() ? interface(unpacked::yes) : unpacked::no;
     if(kind == "array") {
       if(!x->is<array_v>()) return unpacked::no;
       auto const & a = x->as<array_v>();
@@ -2819,9 +2903,13 @@ struct interpreter {
     // parsing block code becomes the code that builds it)
     if(v.known() && (v.is<agg_v>() || v.is<array_v>())) {
       n_construct c;
-      c.type = db.add(n_ident{sym(v.is<agg_v>() ? types.name(v.as<agg_v>().type) : "array")}, where);
+      bool anon = v.is<agg_v>() && types.anonymous(v.as<agg_v>().type); // {x: …} - no type, field by name
+      if(!anon) c.type = db.add(n_ident{sym(v.is<agg_v>() ? types.name(v.as<agg_v>().type) : "array")}, where);
       if(v.is<agg_v>())
-        for(auto const & f: v.as<agg_v>().fields) c.items.push_back(value_node(f.second, where));
+        for(auto const & f: v.as<agg_v>().fields) {
+          if(anon) c.names.push_back(f.first);
+          c.items.push_back(value_node(f.second, where));
+        }
       else
         for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) c.items.push_back(value_node(v.as<array_v>().get(k), where));
       node_id n = db.add(std::move(c), where);
@@ -2995,6 +3083,16 @@ struct interpreter {
   }
 
   flow eval_node(node_id n, n_construct const & c, scope * env, uint32_t frame) {
+    if(!c.type) { // {x: e, …} - anonymous aggregate, type - by structure
+      field_list fs;
+      for(uint32_t k = 0; k < c.items.size(); ++k) {
+        for(auto const & [name, _]: fs)
+          if(name == c.names[k]) fail(cat("{…}: поле ", str(name), " дважды"), db[c.items[k]].where);
+        TZ_TRY(x, eval(c.items[k], env, frame));
+        fs.push_back({c.names[k], std::move(x)});
+      }
+      return ok(record_value(std::move(fs)));
+    }
     std::vector<value> items;
     bool open = false; // the run-time-length array is disclosed: the result is the run-time-length array
     for(node_id item: c.items) {
@@ -3022,7 +3120,8 @@ struct interpreter {
       agg_v g{types.named(tname), {}};
       for(std::size_t k = 0; k < all.size(); ++k) {
         auto const & f = db.as<n_var>(all[k]);
-        if(k < items.size()) g.fields.push_back({f.name, std::move(items[k])});
+        if(k < items.size()) // Struct field: {x: …} becomes struct field
+          g.fields.push_back({f.name, f.type && db.is<n_ident>(f.type) ? to_type(std::move(items[k]), str(db.as<n_ident>(f.type).name), db[c.items[k]].where) : std::move(items[k])});
         else if(f.init) {
           TZ_TRY(d, eval(f.init, globals, frame));
           g.fields.push_back({f.name, std::move(d)});
@@ -4600,7 +4699,7 @@ struct interpreter {
       TZ_TRY(idx, eval(ix.index, env, frame));
       uint32_t k = checked_index(*arr, idx, db[lhs].where);
       value cur = arr->as<array_v>().get(k);
-      arr->as<array_v>().set(k, op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
+      arr->as<array_v>().set(k, op == "=" ? (is_record(rhs) ? to_type(std::move(rhs), place_type(cur), where) : std::move(rhs)) : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
       return ok();
     }
     value * target = place(lhs, env, frame);
@@ -4611,7 +4710,7 @@ struct interpreter {
         index_write = saved_write;
         if(!cur_f.normal()) return cur_f;
         value cur = std::move(cur_f.v);
-        value res = op == "=" ? rhs : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
+        value res = op == "=" ? to_type(rhs, place_type(cur), where) : binary(std::string_view(op).substr(0, 1), cur, rhs, where);
         if(!unknown(cur) && !unknown(res) && types.describe(cur) != types.describe(res))
           fail(cat("элемент массива типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)),
               where);
@@ -4624,6 +4723,7 @@ struct interpreter {
     bool pinned = target->pinned;
     if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
     value result = op == "=" ? std::move(rhs) : binary(std::string_view(op).substr(0, 1), *target, rhs, where);
+    if(op == "=" && is_record(result)) result = to_type(std::move(result), place_type(*target), where); // Struct holds it, {x: …} becomes it.
     if(root->state_level && root->state_level->holds(target)) { // place - state of the program: value in its level
       try {
         result = adopt_into(std::move(result), &*root->state_level);
@@ -4788,6 +4888,8 @@ struct interpreter {
     auto check1 = [&](value const & x) {
       value got;
       if(code_agg(x) && is_node_kind(want) && type_fit(x, want, false, got) != fit::no) return; // code node n_X - instance n_X
+      if(std::string why; is_record(x) && structs.contains(sym(want)) && record_fit(x, want, got, &why) == fit::no) // Reason: Excessive or inappropriate field
+        fail(cat(types.describe(x), " не становится ", want, ": ", why), where);
       if(types.describe(x) != want && types.name(types.of(x)) != want)
         fail(cat("ожидался тип ", want, ", получен ", types.describe(x)), where);
     };
@@ -5164,6 +5266,7 @@ struct interpreter {
           fit r = type_fit(vals[i], want, p.strict, got);
           if(r == fit::no) {
             why = cat("параметр ", str(p.name), " ожидает ", p.strict ? "ровно " : "", want, ", передано ", checking() || !vals[i].known() ? types.describe(vals[i]) : cat(types.describe(vals[i]), " ", show_v(vals[i])));
+            if(std::string rw; !p.strict && is_record(vals[i]) && structs.contains(sym(want)) && record_fit(vals[i], want, got, &rw) == fit::no) why += cat(" (", rw, ")");
             by_value += numeric_pair(vals[i], want) && !p.strict; // type fits, doesn't fit the value
           } else {
             score += r == fit::exact ? 2 : 1; // "Type equals" is better than "can imagine."
@@ -5388,7 +5491,7 @@ struct interpreter {
     if(checking() && !deps.empty()) deps.back()[f.value] = db.node_revision(f);
 
     if(jit && !checking() && overrides.empty()) { // JIT: machine code instance, if any (in context, as long as the interpreter)
-      if(auto r = try_jit(f, vals, args, env, key)) return *r;
+      if(auto r = try_jit(f, vals, args, env, key)) return typed_result(f, std::move(*r));
     }
 
     stack.push_back(site);
@@ -5457,6 +5560,7 @@ struct interpreter {
       approx.erase(active_key);
       recursed.erase(active_key);
     }
+    r = typed_result(f, std::move(r));
 
     // curled up in compile-time: all arguments and result known, runtime no effects
     bool folded_now = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect;
@@ -5488,6 +5592,12 @@ struct interpreter {
       }
     }
     return r; // return, addressed to the caller (semantic inlining), goes further
+  }
+
+  // f() => {x: …} is the result of a function with a type: the anonymous literal becomes it.
+  flow typed_result(node_id f, flow r) {
+    if(node_id rt = db.as<n_fn>(f).result_type; r.normal() && rt && db.is<n_ident>(rt)) r.v = to_type(std::move(r.v), str(db.as<n_ident>(rt).name), db[rt].where);
+    return r;
   }
 
   std::optional<flow> try_jit(node_id f, std::vector<value> & vals, node_list const & args, scope * env,
@@ -5527,7 +5637,9 @@ struct interpreter {
           continue;
         }
       if(p.mode != param_mode::expr && p.mode != param_mode::own && !vals[i].is<split_v>()) {
-        if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr; cell && !cell->is<split_v>()) {
+        // An argument converted to a parameter type (i64 → f64, {x: …} → struct) is another
+        // value: not alias of the caller’s location.
+        if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr; cell && !cell->is<split_v>() && (cell->is<ref_v>() || types.of(*cell) == types.of(vals[i]))) {
           inner->alias(p.name, cell);
           continue;
         }
@@ -5746,6 +5858,16 @@ struct interpreter {
     }
     if(n == "fields" && a.size() == 1 && a[0].is<type_v>()) { // aggregate field: {name, type}
       symbol owner = sym(types.name(a[0].as<type_v>().type));
+      if(types.anonymous(a[0].as<type_v>().type)) { // Anonymous: fields - from type recording
+        std::vector<value> vs;
+        for(auto const & [name, t]: record_fields(a[0].as<type_v>().type)) {
+          agg_v d{types.named("field"), {}};
+          d.fields.push_back({sym("name"), value(name)});
+          d.fields.push_back({sym("type"), value(type_v{t})});
+          vs.push_back(value(std::move(d)));
+        }
+        return value(array_v::of(std::move(vs)));
+      }
       if(!structs.contains(owner)) fail(cat("fields: ", str(owner), " — не агрегат"), where);
       std::vector<value> vs;
       for(node_id f: fields_of_struct(owner)) {

@@ -103,6 +103,7 @@ std::vector<completion_item> member_completions(ast_db const & db, node_id root,
   for(auto const & t: types) {
     std::string base = t.substr(0, t.find('<'));
     if(base == "array" || base == "str") add("size", "поле", cat("i64 — ", t), 0);
+    for(auto const & [name, tn]: type_registry::record_parts(t)) add(std::string(name), "поле", cat(tn, " — ", t), 0); // {x: …} - Type type write fields
     // entity is a struct ad and all of its `Имя { … }` extensions:
 // 
     // Fields and functions of all

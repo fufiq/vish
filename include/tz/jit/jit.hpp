@@ -660,7 +660,8 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     else if(param_types[i] == jt::ct) raw[i] = 0; // nontransmittable
     else if(param_types[i] == jt::handle) { // VM is the address of the cell (caller or copy)
       value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
-      cells[i] = cell && !cell->is<thunk_v>() && !cell->is<ref_v>() ? cell : &vals[i];
+      // converted to a type parameter ({x: …} → struct) - a copy, not a cell of the calling
+      cells[i] = cell && !cell->is<thunk_v>() && !cell->is<ref_v>() && types.of(*cell) == types.of(vals[i]) ? cell : &vals[i];
       raw[i] = reinterpret_cast<uint64_t>(cells[i]);
     } else { // array: pointer to array_v caller (alias) or to a copy
       value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;

@@ -1,0 +1,11 @@
+// Anonymous literature in the editor (§4.3): print - as written, members after `.` - write
+// fields of its type (type by structure:).
+// program: editor_record.tz
+open_view module
+// expect: {x: 1.0, y: 2.0, name: "box"}
+pointer 1 @.x 1 1
+key 1 \s 2
+// expect: name="x" kind="поле" detail="f64 — {x: f64, y: f64, name: str}"
+// expect: name="y" kind="поле" detail="f64 — {x: f64, y: f64, name: str}"
+// expect: name="name" kind="поле" detail="str — {x: f64, y: f64, name: str}"
+key 1 Escape

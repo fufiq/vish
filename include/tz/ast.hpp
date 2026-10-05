@@ -191,6 +191,10 @@ struct n_lambda {
 struct n_construct {
   node_id type;
   node_list items;
+  // {x: 1.0, y: 2.0} is an anonymous structural literal: type no, names[k] is the name of items[k].
+  // 
+//  
+  std::vector<symbol> names;
 }; // array{1, 2, 3}
 struct n_hole {
   std::string text;

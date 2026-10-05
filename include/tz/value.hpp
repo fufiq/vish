@@ -698,6 +698,34 @@ struct type_registry {
 
   std::string_view name(type_id t) const { return t ? std::string_view(names[t.value]) : "?"; }
 
+  // Anonymous aggregate {x: 1.0} is a type by structure: the name is a record of {x: f64} fields
+  // (names and types in order), one structure is one type.
+// 
+//.
+  static bool anonymous(std::string_view n) { return n.starts_with('{'); }
+  bool anonymous(type_id t) const { return t && anonymous(name(t)); }
+  // Anonymous field type by its record: name and field type record (array<f64>, {a: i64}).
+  static std::vector<std::pair<std::string_view, std::string_view>> record_parts(std::string_view s) {
+    std::vector<std::pair<std::string_view, std::string_view>> out;
+    if(!anonymous(s) || s.size() < 2) return out;
+    s = s.substr(1, s.size() - 2);
+    std::size_t from = 0;
+    int depth = 0;
+    for(std::size_t i = 0; i <= s.size(); ++i) {
+      char c = i < s.size() ? s[i] : ',';
+      if(c == '{' || c == '<') ++depth;
+      else if(c == '}' || c == '>') --depth;
+      else if(c == ',' && depth == 0) {
+        std::string_view f = s.substr(from, i - from);
+        if(f.starts_with(' ')) f.remove_prefix(1);
+        std::size_t colon = f.find(": ");
+        if(colon != std::string_view::npos) out.push_back({f.substr(0, colon), f.substr(colon + 2)});
+        from = i + 1;
+      }
+    }
+    return out;
+  }
+
   type_id of(value const & x) const {
     if(x.is<rt_v>()) return x.as<rt_v>() ? of(*shape_of(x)) : type_id{};
     return std::visit([&](auto const & a) -> type_id {
@@ -765,7 +793,7 @@ std::string show(value const & x, type_registry const & types, interner const & 
       }
       return s + "]";
     } else if constexpr(std::is_same_v<T, agg_v>) {
-      std::string s = cat(types.name(a.type), "{");
+      std::string s = cat(types.anonymous(a.type) ? "" : types.name(a.type), "{");
       for(uint32_t i = 0; i < a.fields.size(); ++i) {
         if(i) s += ", ";
         s += cat(strings.text(a.fields[i].first), ": ", show(a.fields[i].second, types, strings));

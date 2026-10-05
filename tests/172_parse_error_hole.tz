@@ -11,7 +11,7 @@
 struct server { i64 port; }
 
 config(expr body) {
-  syntax {r} => parse(r, map(server, "port", combine("port", "=", int() | as(0, word("auto")))));
+  syntax {r} => parse(r, map(server, {port: combine("port", "=", int() | as(0, word("auto")))}));
   body
 }
 
