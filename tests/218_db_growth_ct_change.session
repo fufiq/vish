@@ -1,0 +1,46 @@
+// Derivatives of node with a different result (§7.4): editing the ct code instance changes the result -
+// the former node, taken again, are completed differently, the difference is in journal (complete), and
+// the base from journal is the same; returning to the previous text is again the former result. parsing
+// of the raw block after editing the design - recalculation, the result is the same - the same node.
+// program: db_growth.tz
+run
+// expect: 300 15 7⏎16
+edit tune
+tune(f, op, k) => ct {
+  f.body = n_op{op, array{n_ident{"x"}, n_int{k + 1}}};
+};
+.
+run
+// expect: 400 16 7⏎16
+check
+jit
+roundtrip
+// expect: roundtrip: совпадает
+edit tune
+tune(f, op, k) => ct {
+  f.body = n_op{op, array{n_ident{"x"}, n_int{k}}};
+};
+.
+run
+// expect: 300 15 7⏎16
+jit
+// expect: jit  scale(i64)
+roundtrip
+// expect: roundtrip: совпадает
+edit sum_parse
+sum_parse(r) {
+  n_raw{_, items, _, _, _} = r;
+  e = n_int{100};
+  for(a : items) e = n_op{"+", array{e, a}};
+  e
+}
+.
+run
+// expect: 300 15 7⏎116
+roundtrip
+// expect: roundtrip: совпадает
+stats
+run
+check
+stats
+// expect: рост: узлов +0, журнал +0

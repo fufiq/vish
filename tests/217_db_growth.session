@@ -1,0 +1,42 @@
+// The growth of the base is limited in the session with many edits: editing grows the base for
+// disassembled text (new imports), and elaboration again, recalculation of the parsing raw block,
+// chain trees, samples, n_X {} ct code and new interpreters (check, run, JIT) with the same result
+// take the former derivatives of node - (Q§7.4 *my: * node too). Prior to this, each round added
+// ~210 node and ~430 journal entries.
+//
+// program: db_growth.tz
+stats
+edit other
+other() => 7;
+.
+check
+run
+// expect: 300 15 7⏎16⏎42 abab⏎true 6
+jit
+stats
+// first round: derivatives of the first elaboration - once
+edit other
+other() => 7;
+.
+check
+run
+jit
+stats
+// expect: рост: узлов +3, журнал +9
+edit other
+other() => 7;
+.
+check
+// expect: из кэша
+run
+// expect: 300 15 7⏎16⏎42 abab⏎true 6
+jit
+stats
+// expect: рост: узлов +3, журнал +9
+run
+check
+run
+stats
+// expect: рост: узлов +0, журнал +0
+roundtrip
+// expect: roundtrip: совпадает

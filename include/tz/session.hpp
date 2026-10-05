@@ -14,6 +14,8 @@
 // fmt text projection
 // edit <function> then the lines of the new function, the end is a line from one point
 // Save the way. tzdb> write down journal
+// stats base size: node, journal records, .tzdb bytes; growth from past stats
+// roundtrip journal to new base: same projection and run output
 #pragma once
 
 #include "interp.hpp"
@@ -47,6 +49,8 @@ struct vm_session {
       if(cmd == "residual") return residual(args);
       if(cmd == "fmt") return printer(db).print(root);
       if(cmd == "edit" && args.size() == 1) return edit(args[0], body);
+      if(cmd == "stats") return stats();
+      if(cmd == "roundtrip") return roundtrip();
       if(cmd == "save" && args.size() == 1) {
         save_db(db, root, args[0]);
         return cat("сохранено: ", args[0], "\n");
@@ -75,6 +79,42 @@ struct vm_session {
     std::string names;
     for(auto & n: cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
     return err + cat("check: пересчитано ", cache.recomputed, " экземпл. (", names.empty() ? "—" : names, "), из кэша ", cache.hits, "\n");
+  }
+
+  // Base size and growth from the past stats: edits grow the base to disassemble text, while
+  // elaboration, parsing recalculation and new interpreters with the same result do not (test 217)
+  std::string stats() {
+    writer w;
+    auto entries = db.journal();
+    for(auto const & e: entries) w.put(e);
+    std::string out = cat("база: узлов ", db.size(), ", журнал ", entries.size(), ", tzdb ", w.bytes.size(), " байт\n");
+    if(seen_size) out += cat("рост: узлов +", db.size() - seen_size, ", журнал +", entries.size() - seen_log, "\n");
+    seen_size = db.size();
+    seen_log = entries.size();
+    return out;
+  }
+
+  // journal → new base (as .tzdb): same projection and same run output (tests 218, 219)
+  std::string roundtrip() {
+    writer w;
+    for(auto const & e: db.journal()) w.put(e);
+    reader r(w.bytes);
+    std::vector<journal_entry> entries;
+    while(!r.at_end()) entries.push_back(r.get<journal_entry>());
+    ast_db db2;
+    db2.replay(entries);
+    std::string out;
+    if(printer(db).print(root) != printer(db2).print(root)) out += "roundtrip: проекция отличается\n";
+    std::string a = run({}), b;
+    interpreter vm(db2, root, {name}, mode::run, interpreter::known_inputs{stdin_lines});
+    vm.capture_output(&b);
+    try {
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      b += render(d, name, db2);
+    }
+    if(a != b) out += cat("roundtrip: вывод отличается: ", in_quotes(b), " против ", in_quotes(a), "\n");
+    return out.empty() ? cat("roundtrip: совпадает (узлов ", db2.size(), ")\n") : out;
   }
 
   std::string run(std::vector<std::string> const & args) {
@@ -175,6 +215,8 @@ struct vm_session {
   check_cache cache;
   std::vector<std::string> stdin_lines;
   uint32_t edits = 0;
+  uint32_t seen_size = 0; // stats: sizes on previous call
+  std::size_t seen_log = 0;
   std::string last_report;
   // Last check: node types in all contexts and errors (editor, §13.1).
   std::map<uint32_t, std::vector<std::string>> node_types;

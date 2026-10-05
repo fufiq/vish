@@ -454,7 +454,7 @@ struct interpreter {
         if(done && !mark.nested) vm.db.elab_edits = vm.db.edits; // result is valid until edited
       }
     } eh{*this, db.begin_elaboration()};
-    elab_base = db.size();
+    elab_base = db.births;
     elab_nested = eh.mark.nested;
     elaborating = true;
     for(node_id m: module_order) { // ct modules - in order of modules (used earlier)
@@ -522,7 +522,7 @@ struct interpreter {
     interpreter & a = level_runs.emplace_back(db, mod, std::vector<std::string>{"ct"}, mode::check, std::nullopt, nullptr, this);
     a.fuel = 2000000;
     a.instantiating = true;
-    a.pass_base = db.size();
+    a.pass_base = db.births;
     // parsing error, which did not change the code, is not an elaboration error: the execution
     // will find it itself, in its place (as canonical_ct without ct-variables); changed the code
     // parsing, ct-variables and hooks are part of the program (*mine*).
@@ -2897,6 +2897,13 @@ struct interpreter {
     return out;
   }
 
+  // Derivatives node subtree holds this interpreter: they will not be retaken by another
+  void hold_tree(node_id n) {
+    if(!n || n.value >= db.size()) return;
+    if(db.born.contains(n.value)) db.hold(n.value, derived_nodes);
+    db.for_each_child(n, [&](node_id c) { hold_tree(c); });
+  }
+
   // A value-code node (empty code is an empty node); not a code is a value node like the
   // #x insert (number, string, type, function).
   node_id child_node(value const & v, std::string_view what, span where) {
@@ -2914,7 +2921,7 @@ struct interpreter {
     if(!c) return c;
     bool elsewhere = db[c].parent && db[c].parent != owner;
     if(elsewhere || !taken.insert(c.value).second) {
-      c = db.clone(c, [](node_id) -> std::optional<node_id> { return std::nullopt; });
+      c = db.clone(c, [](node_id) -> std::optional<node_id> { return std::nullopt; }, &derived_nodes);
       taken.insert(c.value);
     }
     return c;
@@ -2985,7 +2992,7 @@ struct interpreter {
         out = node_kind(std::move(x));
       }
     }
-    node_id n = db.add(std::move(*out), where);
+    node_id n = db.derive(std::move(*out), where, derived_nodes);
     db.link_parents(n);
     return code_value(n);
   }
@@ -2995,7 +3002,7 @@ struct interpreter {
   //  
 // - the execution code only reads.
   void mutate_node(node_id c, symbol name, value const & v, span where) {
-    bool own = deriving && c.value >= derive_base; // node created by the parsing block - completion
+    bool own = deriving && db.birth_of(c) > derive_base; // node created by the parsing block - completion
     bool inst = !elaborating && !own && ct_depth && !deriving; // ct code instance
     if(!elaborating && !own && !inst)
       fail(deriving ? "изменение кода из правила разбора блока — только узлов его итога" : "изменение кода — только при компиляции (ct-код модуля или экземпляра)", where);
@@ -3028,7 +3035,7 @@ struct interpreter {
       return;
     }
     if(inst) { // parsing elaboration: change with source - ct- node instance
-      if(c.value < pass_base) // It is impossible to change the already disassembled run-time code: the execution and parsing would diverge
+      if(db.birth_of(c) <= pass_base) // It is impossible to change the already disassembled run-time code: the execution and parsing would diverge
         if(node_id u = used_within(c)) {
           code_failed = true;
           diagnostic d(cat("изменение кода после его использования: ", kind_name(db[c]), " уже разобран в каноническом порядке инстанцирования — менять код можно до первого использования"), where);
@@ -3036,15 +3043,15 @@ struct interpreter {
           for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
           throw d;
         }
-      if(c.value < pass_base) code_changes.push_back({db[ct_source].where, stack.empty() ? std::string("модуль") : stack.back().what, cat(kind_name(db[c]), ".", str(name))});
-      db.mutate(c, std::move(k), c.value >= pass_base ? 0 : ct_source.value + 1);
+      if(db.birth_of(c) <= pass_base) code_changes.push_back({db[ct_source].where, stack.empty() ? std::string("модуль") : stack.back().what, cat(kind_name(db[c]), ".", str(name))});
+      db.mutate(c, std::move(k), db.birth_of(c) > pass_base ? 0 : ct_source.value + 1);
       db.link_parents(c);
       return;
     }
-    if(elab_nested && c.value < elab_base) return; // Written knot changes external elaboration
+    if(elab_nested && db.birth_of(c) <= elab_base) return; // Written knot changes external elaboration
     // node created by this elaboration is completion (without writing and rollback): nested
     // elaboration (parsing, JIT) rolls back only mutations of the written
-    db.mutate(c, std::move(k), c.value >= elab_base ? 0 : ct_source.value + 1);
+    db.mutate(c, std::move(k), db.birth_of(c) > elab_base ? 0 : ct_source.value + 1);
     db.link_parents(c);
   }
 
@@ -3087,19 +3094,19 @@ struct interpreter {
 
   // The value > node for inserting #x.
   node_id value_node(value const & v, span where) {
-    if(v.is<int64_t>()) return db.add(n_int{v.as<int64_t>()}, where);
-    if(v.is<double>()) return db.add(n_float{v.as<double>()}, where);
-    if(v.is<str_v>()) return db.add(n_str{v.as<str_v>().str()}, where);
-    if(v.is<bool>()) return db.add(n_ident{sym(v.as<bool>() ? "true" : "false")}, where);
-    if(v.is<type_v>()) return db.add(n_ident{sym(types.name(v.as<type_v>().type))}, where);
-    if(v.is<fn_v>() && v.as<fn_v>().name) return db.add(n_ident{v.as<fn_v>().name}, where);
+    if(v.is<int64_t>()) return db.derive(n_int{v.as<int64_t>()}, where, derived_nodes);
+    if(v.is<double>()) return db.derive(n_float{v.as<double>()}, where, derived_nodes);
+    if(v.is<str_v>()) return db.derive(n_str{v.as<str_v>().str()}, where, derived_nodes);
+    if(v.is<bool>()) return db.derive(n_ident{sym(v.as<bool>() ? "true" : "false")}, where, derived_nodes);
+    if(v.is<type_v>()) return db.derive(n_ident{sym(types.name(v.as<type_v>().type))}, where, derived_nodes);
+    if(v.is<fn_v>() && v.as<fn_v>().name) return db.derive(n_ident{v.as<fn_v>().name}, where, derived_nodes);
     if(v.is<agg_v>() && types.name(v.as<agg_v>().type) == "code") return code_node(v, where);
     // aggregate and array - constructor by positions: Name {…}, array {…} (*my*: the value of the
     // parsing block code becomes the code that builds it)
     if(v.known() && (v.is<agg_v>() || v.is<array_v>())) {
       n_construct c;
       bool anon = v.is<agg_v>() && types.anonymous(v.as<agg_v>().type); // {x: …} - no type, field by name
-      if(!anon) c.type = db.add(n_ident{sym(v.is<agg_v>() ? types.name(v.as<agg_v>().type) : "array")}, where);
+      if(!anon) c.type = db.derive(n_ident{sym(v.is<agg_v>() ? types.name(v.as<agg_v>().type) : "array")}, where, derived_nodes);
       if(v.is<agg_v>())
         for(auto const & f: v.as<agg_v>().fields) {
           if(anon) c.names.push_back(f.first);
@@ -3107,7 +3114,7 @@ struct interpreter {
         }
       else
         for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) c.items.push_back(value_node(v.as<array_v>().get(k), where));
-      node_id n = db.add(std::move(c), where);
+      node_id n = db.derive(std::move(c), where, derived_nodes);
       db.link_parents(n);
       return n;
     }
@@ -3126,11 +3133,15 @@ struct interpreter {
     node_id decl(r.rule ? r.rule - 1 : 0);
     node_id rule = r.rule ? raw_rule_of(db, decl) : node_id{};
     std::array<uint64_t, 4> key{db.node_revision(n), r.rule ? db.node_revision(decl) : 0, rule ? db.node_revision(rule) : 0, db.edits};
-    if(auto it = db.derived.find(n.value); it != db.derived.end() && it->second.key == key) return node_id(it->second.node);
+    if(auto it = db.derived.find(n.value); it != db.derived.end()) {
+      if(it->second.key == key) return node_id(it->second.node);
+      db.derived.erase(it); // The previous result is free: the same result will take it node
+    }
+    std::size_t reborn_from = db.reborn.size();
     span w = db[n].where;
     auto hole = [&](std::string why, span at) {
       uint32_t saved = std::exchange(db.pinned_source, at.source);
-      node_id h = db.add(n_hole{r.text, std::move(why)}, at);
+      node_id h = db.derive(n_hole{r.text, std::move(why)}, at, derived_nodes);
       db.pinned_source = saved;
       return h;
     };
@@ -3140,13 +3151,14 @@ struct interpreter {
       // rule - ct-code over the raw block: executed immediately (check mode does not erase it)
       auto saved_mode = std::exchange(run_mode, mode::run);
       auto saved_deriving = std::exchange(deriving, n);
-      uint32_t saved_base = std::exchange(derive_base, db.size());
+      uint64_t saved_base = std::exchange(derive_base, db.births);
       uint32_t saved_pin = std::exchange(db.pinned_source, w.source);
       struct restore {
         interpreter & vm;
         mode m;
         node_id d;
-        uint32_t b, p;
+        uint64_t b;
+        uint32_t p;
         ~restore() {
           vm.run_mode = m;
           vm.deriving = d;
@@ -3179,6 +3191,7 @@ struct interpreter {
     }
     db[out].parent = n; // the names of the result - in the place of the block (the search goes up through the call)
     db.derived[n.value] = {key, out.value};
+    db.flush_reborn(std::min(reborn_from, db.reborn.size()));
     return out;
   }
 
@@ -3249,7 +3262,7 @@ struct interpreter {
       flow v = read(cell);
       if(!v.v.known()) fail(cat("#", str(name), ": значение неизвестно при компиляции"), db[x].where);
       return value_node(v.v, db[x].where);
-    });
+    }, &derived_nodes);
     return ok(code_value(copy));
   }
 
@@ -3270,7 +3283,7 @@ struct interpreter {
       if(code_agg(v) && v.known()) d = code_node(v, where);
     }
     if(!ref_target(d)) fail("ref: ожидалось объявление — функция, struct или ct-переменная модуля", where);
-    return ok(code_value(db.add(n_ref{d.value}, where)));
+    return ok(code_value(db.derive(n_ref{d.value}, where, derived_nodes)));
   }
   // entity of the goal: the function is its overload (under the current name, not in the area
   // of the place), the struct is the type, the ct-variable is its value.
@@ -3636,7 +3649,7 @@ struct interpreter {
       node_id t = c.atoms[0];
       for(uint32_t k = 0; k < c.ops.size(); ++k) {
         node_id l = t;
-        t = db.add(n_op{c.ops[k], {l, c.atoms[k + 1]}}, {db[n].where.begin, db[c.atoms[k + 1]].where.end});
+        t = db.derive(n_op{c.ops[k], {l, c.atoms[k + 1]}}, {db[n].where.begin, db[c.atoms[k + 1]].where.end}, derived_nodes);
         db[t].parent = n;
       }
       it->second = t;
@@ -3807,7 +3820,7 @@ struct interpreter {
       uint32_t m = uint32_t(x.op);
       node_id l = self(self, i, m, x.li);
       node_id r = self(self, m + 1, j, x.ri);
-      node_id t = db.add(n_op{c.ops[m], {l, r}}, {db[l].where.begin, db[r].where.end});
+      node_id t = db.derive(n_op{c.ops[m], {l, r}}, {db[l].where.begin, db[r].where.end}, derived_nodes);
       db[t].parent = n;
       return t;
     };
@@ -3845,9 +3858,9 @@ struct interpreter {
     if(auto it = applied.find(key); it != applied.end()) return it->second;
     auto & node = apply_nodes[op.value];
     if(!node) {
-      node_id a = db.add(n_ident{sym("__l")}, {});
-      node_id b = db.add(n_ident{sym("__r")}, {});
-      node = db.add(n_op{op, {a, b}}, {});
+      node_id a = db.derive(n_ident{sym("__l")}, {}, derived_nodes);
+      node_id b = db.derive(n_ident{sym("__r")}, {}, derived_nodes);
+      node = db.derive(n_op{op, {a, b}}, {}, derived_nodes);
       db[a].parent = db[b].parent = node;
     }
     scope * s = p.new_scope(p.globals);
@@ -4063,7 +4076,7 @@ struct interpreter {
     node_list args;
     auto ident = [&](symbol n) {
       auto & id = hook_idents[n.value];
-      if(!id) id = db.add(n_ident{n}, {});
+      if(!id) id = db.derive(n_ident{n}, {}, derived_nodes);
       args.push_back(id);
     };
     for(auto const & [n, c]: places) {
@@ -5832,6 +5845,8 @@ struct interpreter {
         }
         last_rt_effect = it->second.effect;
         if(!deps.empty()) deps.back().insert(it->second.deps.begin(), it->second.deps.end());
+        if(code_agg(it->second.result) && it->second.result.as<agg_v>().fields[0].second.is<int64_t>()) // Cache code - holds this parsing
+          hold_tree(node_id(uint32_t(it->second.result.as<agg_v>().fields[0].second.as<int64_t>())));
         return ok(it->second.result);
       }
     }
@@ -6665,13 +6680,13 @@ struct interpreter {
   // elaboration: the ct module is executed - the source of code mutations (node ct { } / ct x = e)
   bool elaborating = false;
   node_id ct_source;
-  uint32_t elab_base = 0; // the first node created by this elaboration
+  uint64_t elab_base = 0; // birth cycle node before this elaboration (db.births): later - created by it
   node_id deriving; // parsing is a raw block (§4.4): its node is completed without a journal source
-  uint32_t derive_base = 0; // first node of this parsing
+  uint64_t derive_base = 0; // clock before that parsing
   bool elab_nested = false; // Elaboration within another: mutations have already been made
   // parsing elaboration (instantiation_pass): ct code instance changes the code
   bool instantiating = false;
-  uint32_t pass_base = 0; // The first node created by parsing: its changes - completion
+  uint64_t pass_base = 0; // clock to parsing : node, born later - completion
   std::pair<uint32_t, uint64_t> ct_top; // external executable ct node and instance
   std::unordered_set<uint32_t> used_rt; // node run-time - codes already disassembled (parsing elaboration)
   std::set<uint32_t> inst_registered; // copy
@@ -6694,6 +6709,13 @@ struct interpreter {
   std::unordered_map<std::string, std::optional<value>> applied; // (operator, types) → type of result
   std::unordered_map<uint32_t, node_id> apply_nodes; // l op r for a sample
   std::deque<interpreter> probes; // parsing chains without side effects
+  // Derivatives of node held by this interpreter (ast_db::derive): at its end are free for the
+  // following (the same result is the same node)
+  std::vector<uint32_t> derived_nodes;
+  struct derived_release {
+    interpreter & vm;
+    ~derived_release() { vm.db.release(vm.derived_nodes); }
+  } derived_hold{*this};
   uint64_t effects = 0;
   uint64_t checks = 0; // run-time - parsing check (observation: node can throw)
 };
