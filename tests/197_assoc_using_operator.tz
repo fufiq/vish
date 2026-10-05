@@ -1,0 +1,17 @@
+// out: 5 6
+// machine
+// fmt-stable
+// using operator функции-контекста (как checked, amd64) входит в операторы
+// контекста исполнения: его [[associative]] делает цепочку одним деревом для всего
+// выполняемого внутри — и в вызванных функциях. 
+//.
+assoc_minus(expr body) {
+  [[associative]] using operator (i64 a) - (i64 b) => sub(a, b);
+  body
+}
+
+diff3(i64 a, i64 b, i64 c) => a - b - c;
+
+main() {
+  print(assoc_minus { diff3(10, 3, 2) }, assoc_minus { 10 - 3 - 1 });
+}

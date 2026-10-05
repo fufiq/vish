@@ -3364,8 +3364,17 @@ struct interpreter {
   // cache. Types of operands and applications are considered by a separate interpreter in
   // parsing mode (sample): no side effects and no computation of operands (a & & f() does
   // not cause f).
+  //
+  // Associativity is semantics, not parsing: the property of operator announcements
+  // seen in the context of execution.
+// 
+// 
+// 
+  // 
+//  (, об
+  // Invariants of operators: "association, priority".
   flow eval_node(node_id n, n_chain const & c, scope * env, uint32_t frame) {
-    node_id tree = resolve_chain(n, c, env);
+    node_id tree = assoc_run(c, env) ? assoc_tree(n, c) : resolve_chain(n, c, env, chain_assoc(c, env));
     if(!tree) return ok(value(rt_v{})); // The type of operand is still displayed (recursion).
     if(checking()) {
       auto [it, fresh] = chain_trees.try_emplace({n.value, ctx}, tree);
@@ -3390,13 +3399,69 @@ struct interpreter {
     db.for_each_child(n, [&](node_id ch) { free_names(ch, out); });
   }
 
-  node_id resolve_chain(node_id n, n_chain const & c, scope * env) {
+  // Visible operator announcements: module elements and prelude, block operators in the field
+  // (local functions, design body rules), using operator active function-contexts (checked,
+  // amd64...). [[associative]] is an invariant in this context. *My:* context complements,
+  // doesn't cancel
+// - Selected "to supplement": so the former
+  // programmes do not change the meaning.
+  bool assoc_attr(node_id fn) {
+    for(node_id a: db.as<n_fn>(fn).attrs)
+      if(db.is<n_ident>(a) && db.as<n_ident>(a).name == known(sym_associative)) return true;
+    return false;
+  }
+  symbol infix_entity(symbol op) {
+    auto [it, fresh] = infix_entities.try_emplace(op.value);
+    if(fresh) it->second = sym(cat("infix", str(op)));
+    return it->second;
+  }
+  bool op_associative(symbol op, scope * env) {
+    if(op_associative(op)) return true;
+    if(local_ops.empty() && overrides.empty()) return false;
+    symbol f = infix_entity(op);
+    if(local_ops.contains(f.value))
+      if(value * cell = env->find(f); cell && cell->is<fn_v>())
+        for(node_id fn: cell->as<fn_v>().set)
+          if(assoc_attr(fn)) return true;
+    for(auto const & r: overrides)
+      if(r.entity == f && assoc_attr(r.fn)) return true;
+    return false;
+  }
+  // The associativity of each chain operator in the context is the string “0/1” (cache key).
+  std::string chain_assoc(n_chain const & c, scope * env) {
+    std::string out;
+    for(symbol o: c.ops) out += op_associative(o, env) ? '1' : '0';
+    return out;
+  }
+  // The chain of one operator, associative in context, is one tree without brute
+  // force: a + b + c п (a + b) + c.
+  bool assoc_run(n_chain const & c, scope * env) {
+    for(symbol o: c.ops)
+      if(o != c.ops[0]) return false;
+    return op_associative(c.ops[0], env);
+  }
+  node_id assoc_tree(node_id n, n_chain const & c) {
+    auto [it, fresh] = assoc_trees.try_emplace(n.value);
+    if(fresh) {
+      node_id t = c.atoms[0];
+      for(uint32_t k = 0; k < c.ops.size(); ++k) {
+        node_id l = t;
+        t = db.add(n_op{c.ops[k], {l, c.atoms[k + 1]}}, {db[n].where.begin, db[c.atoms[k + 1]].where.end});
+        db[t].parent = n;
+      }
+      it->second = t;
+    }
+    return it->second;
+  }
+
+  // Assoc is the chain_assoc of context (in a process machine, its context).
+  node_id resolve_chain(node_id n, n_chain const & c, scope * env, std::string const & assoc) {
     auto & names = chain_names[n.value];
     if(names.empty()) {
       for(node_id a: c.atoms) free_names(a, names);
       if(names.empty()) names.push_back(symbol{}); // literary
     }
-    std::string key = cat(n.value, ":");
+    std::string key = cat(n.value, ":", assoc, ":");
     bool cacheable = true;
     for(symbol s: names) {
       value const * cell = s ? find(env, s) : nullptr;
@@ -3411,7 +3476,7 @@ struct interpreter {
     }
     if(cacheable)
       if(auto it = resolved_chains.find(key); it != resolved_chains.end()) return it->second;
-    node_id tree = enumerate_chain(n, c, env);
+    node_id tree = enumerate_chain(n, c, env, assoc);
     if(tree && cacheable) resolved_chains[key] = tree;
     return tree;
   }
@@ -3450,7 +3515,7 @@ struct interpreter {
     return s;
   }
 
-  node_id enumerate_chain(node_id n, n_chain const & c, scope * env) {
+  node_id enumerate_chain(node_id n, n_chain const & c, scope * env, std::string const & assoc_of) {
     interpreter & p = prober();
     std::map<scope *, scope *> seen;
     scope * ps = probe_scope(p, env, seen);
@@ -3482,7 +3547,7 @@ struct interpreter {
       for(uint32_t i = 0; i + len - 1 < k; ++i) {
         uint32_t j = i + len - 1;
         for(uint32_t m = i; m < j; ++m) { // operator m - between atoms m and m + 1
-          bool assoc = op_associative(c.ops[m]);
+          bool assoc = assoc_of[m] == '1';
           for(uint32_t li = 0; li < dp[i][m].size(); ++li)
             for(uint32_t ri = 0; ri < dp[m + 1][j].size(); ++ri) {
               entry const & r = dp[m + 1][j][ri];
@@ -3520,13 +3585,12 @@ struct interpreter {
     return build(build, 0, k - 1, 0);
   }
 
-  bool op_associative(symbol op) {
+  bool op_associative(symbol op) { // Module elements and prelude
     auto [it, fresh] = assoc_ops.try_emplace(op.value, false);
     if(fresh)
-      if(auto f = functions.find(sym(cat("infix", str(op)))); f != functions.end())
+      if(auto f = functions.find(infix_entity(op)); f != functions.end())
         for(node_id fn: f->second)
-          for(node_id a: db.as<n_fn>(fn).attrs)
-            if(db.is<n_ident>(a) && str(db.as<n_ident>(a).name) == "associative") it->second = true;
+          if(assoc_attr(fn)) it->second = true;
     return it->second;
   }
 
@@ -6273,7 +6337,7 @@ struct interpreter {
     }
     return l.s;
   }
-  lazy_sym sym_index_op{"infix[]"}, sym_code{"code"}, sym_ref{"ref"}; // Comparison by number, not text (hot path)
+  lazy_sym sym_index_op{"infix[]"}, sym_code{"code"}, sym_ref{"ref"}, sym_associative{"associative"}; // Comparison by number, not text (hot path)
   uint32_t hook_depth = 0; // Executed by hook parsing (call_hook, attribute_hooks)
   std::unordered_map<uint32_t, node_id> hook_idents; // Names of hook arguments parsing (call_hook)
   std::vector<std::string> instance_keys; // instance in the parsing chain
@@ -6318,7 +6382,9 @@ struct interpreter {
   std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
   std::set<uint32_t> local_ops; // operators declared in blocks (local functions)
   std::vector<std::array<symbol, 3>> op_entities; // entity: prefix, infix, postfix
-  std::unordered_map<uint32_t, bool> assoc_ops;
+  std::unordered_map<uint32_t, bool> assoc_ops; // operator [[associative]] for a module element or prelude
+  std::unordered_map<uint32_t, symbol> infix_entities; // + → infix+
+  std::unordered_map<uint32_t, node_id> assoc_trees; // The chain of one associative operator
   std::unordered_map<uint32_t, std::vector<symbol>> chain_names; // chain-name
   std::unordered_map<std::string, node_id> resolved_chains; // (chain, types of names) → tree
   std::map<std::pair<uint32_t, uint64_t>, node_id> chain_trees; // (chain, context) → tree (for JIT)

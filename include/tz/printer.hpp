@@ -598,29 +598,46 @@ struct printer {
   void print_node(node_id, n_chain const & c) {
     for(uint32_t k = 0; k < c.atoms.size(); ++k) {
       if(k) out += cat(" ", str(c.ops[k - 1]), " ");
-      operand(c.atoms[k], false, {});
+      operand(c.atoms[k], k == 0, same_op(c)); // (a + b) + c + d - as a + b + c + d
     }
+  }
+  // The chain of one operator is its symbol, otherwise it is empty.
+  symbol same_op(n_chain const & c) const {
+    for(symbol o: c.ops)
+      if(o != c.ops[0]) return {};
+    return c.ops[0];
   }
 
   // Brackets - where without them, parsing would give another tree: there are no
-  // priorities, so around any nested infix except the left operand of the same
-  // associative operator (a + b + c).
+  // priorities, so around any nested infix, except the left operand of the same
+  // associative operator (a + b + c is a chain, its tree is one).
   void operand(node_id child, bool left, symbol parent_op) {
     bool infix = (db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && !db.is_index(child) && !db.is_field(child)) || db.is<n_chain>(child);
     bool paren = infix || db.is<n_if>(child);
-    if(infix && left && db.is<n_op>(child) && db.as<n_op>(child).op == parent_op && associative(parent_op)) paren = false;
+    symbol child_op = db.is<n_op>(child) ? db.as<n_op>(child).op : db.is<n_chain>(child) ? same_op(db.as<n_chain>(child)) : symbol{};
+    if(infix && left && parent_op && child_op == parent_op && associative(parent_op, child)) paren = false;
     if(paren) out += '(';
     item(child);
     if(paren) out += ')';
   }
 
-  bool associative(symbol op) const {
-    for(uint32_t i = 0; i < db.size(); ++i) {
-      node_id f(i);
-      if(!db.is<n_fn>(f) || db.strings.text(db.as<n_fn>(f).name) != cat("infix", str(op))) continue;
+  // [[associative]] in the operator, visible in place lexically: module elements and prelude,
+  // the operators of the blocks declared above. The context of the execution (using operator
+  // of the function-context) the print does not know - there the brackets remain.
+  bool associative(symbol op, node_id at) const {
+    auto entity = cat("infix", str(op));
+    auto fits = [&](node_id f) {
+      if(!db.is<n_fn>(f) || db.strings.text(db.as<n_fn>(f).name) != entity) return false;
       for(node_id a: db.as<n_fn>(f).attrs)
         if(db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "associative") return true;
-    }
+      return false;
+    };
+    for(uint32_t i = 0; i < db.size(); ++i)
+      if(node_id f(i); fits(f) && !db.is<n_block>(db[f].parent)) return true;
+    for(node_id b = db[at].parent; b; b = db[b].parent)
+      if(db.is<n_block>(b))
+        for(node_id x: db.as<n_block>(b).items)
+          if(fits(x)) return true;
     return false;
   }
 

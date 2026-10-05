@@ -1,0 +1,23 @@
+// out: 5 5 14
+// machine
+// fmt-stable
+// store-roundtrip
+// Ассоциативность — семантика контекста, не разбор (§4.4): `a - b - c` — цепочка;
+// в блоке, где виден [[associative]] оператор, — одно дерево, вне его — перебор.
+// 
+// 
+//.
+minus3(i64 a, i64 b, i64 c) {
+  [[associative]] operator (i64 x) - (i64 y) => sub(x, y);
+  a - b - c
+}
+
+// правило тела конструкции — и для её блока
+assoc_minus(expr body) {
+  [[associative]] operator (i64 x) - (i64 y) => sub(x, y);
+  body
+}
+
+main() {
+  print(minus3(10, 3, 2), assoc_minus { 10 - 3 - 2 }, 1 + 2 + 3 + 8);
+}

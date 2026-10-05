@@ -1065,6 +1065,15 @@ struct parser {
       advance();
       return operator_decl({}, true);
     }
+    if(is_open('[') && is_open('[', 1)) { // [[associative]] operator ... in the block is a property of the context operator
+      node_list attrs = attributes();
+      if(is_word("operator")) return operator_decl(std::move(attrs));
+      if(is_word("using") && is_word("operator", 1)) {
+        advance();
+        return operator_decl(std::move(attrs), true);
+      }
+      throw diagnostic("атрибуты [[…]] в блоке — перед operator или using operator", attrs.empty() ? here().where : db[attrs.front()].where);
+    }
     if(pattern_ahead()) { // sample = value;
       node_id u = unpack();
       end_statement();
@@ -1160,11 +1169,13 @@ struct parser {
 // 
 // 
 //  
-// No Priorities: Multi-Tree Chain is a Node
-  // n_chain, the tree selects the types at instantiation. The same
-  // associative operator in a row - one tree
-// ibid. Prefix and postfix operators are part of
-  // operanda. Attribution (= += -= *= /=) is the form of the kernel, not the operator.
+// No Priorities: A chain of two or more infixes is a node
+  // n_chain, the tree selects the semantics for instantiation - by types and operators
+  // of the execution context: [[associative]] is the ad property, not the parsing rule
+  //
+//).
+  // Prefix and postfix operators are part of their operand. Attribution (= += -= *=
+  // /=) is the form of the kernel, not the operator.
 
   static bool op_char(char c) { return std::string_view("+-*/%<>=!&|^~?@$\\").contains(c); }
 
@@ -1172,16 +1183,14 @@ struct parser {
     auto name = db.strings.text(f.name);
     for(std::string_view role: {"infix", "prefix", "postfix"})
       if(name.size() > role.size() && name.starts_with(role) && (op_char(name[role.size()]) || name.substr(role.size()) == "[]")) {
-        bool assoc = std::ranges::any_of(f.attrs, [&](node_id a) { return db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "associative"; });
         if(auto it = rules.operators.find(std::string(name.substr(role.size()))); it != rules.operators.end()) { // It is already there, the context does not change.
           op_forms const & o = it->second;
-          if((role == "infix" ? o.infix : role == "prefix" ? o.prefix : o.postfix) && (o.assoc || !assoc)) continue;
+          if(role == "infix" ? o.infix : role == "prefix" ? o.prefix : o.postfix) continue;
         }
         touch();
         op_forms & o = rules.operators[std::string(name.substr(role.size()))];
         (role == "infix" ? o.infix : role == "prefix" ? o.prefix
                                                       : o.postfix) = true;
-        if(assoc) o.assoc = true;
       }
   }
 
@@ -1546,15 +1555,8 @@ struct parser {
       pre = sp.pre;
     }
     if(atoms.size() == 1) return atoms[0];
-    bool same = std::ranges::all_of(infix, [&](auto const & s) { return s == infix[0]; });
-    auto assoc = [&](std::string const & s) { auto it = rules.operators.find(s); return it != rules.operators.end() && it->second.assoc; };
-    if(infix.size() == 1 || (same && assoc(infix[0]))) { // tree
-      node_id t = atoms[0];
-      for(std::size_t k = 0; k < infix.size(); ++k)
-        t = db.add(n_op{db.strings.intern(infix[k]), {t, atoms[k + 1]}}, {start, db[atoms[k + 1]].where.end});
-      return t;
-    }
-    n_chain c;
+    if(infix.size() == 1) return db.add(n_op{db.strings.intern(infix[0]), {atoms[0], atoms[1]}}, {start, db[atoms[1]].where.end}); // tree
+    n_chain c; // a + b + c is also a chain: associativity - in the context of execution
     c.atoms = std::move(atoms);
     for(auto const & s: infix) c.ops.push_back(db.strings.intern(s));
     return db.add(std::move(c), {start, toks[pos - 1].where.end});
@@ -2072,7 +2074,7 @@ struct parser {
   uint32_t statement_head = ~uint32_t{0}; // starting-point
   bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
   struct op_forms {
-    bool prefix = false, infix = false, postfix = false, assoc = false;
+    bool prefix = false, infix = false, postfix = false;
   };
   // parsing place rules (§4.4) - from ads in context and external contexts
   struct rule_set {

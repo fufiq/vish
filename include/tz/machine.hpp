@@ -1652,9 +1652,30 @@ struct process_machine {
     return op == "+=" ? "add" : op == "-=" ? "sub" : op == "*=" ? "mul" : "div";
   }
 
+  // Associativity of the operator in the context of the process - as in the interpreter
+  // (op_associative): elements of modules and prelude, the operators of blocks in the
+  // field using the operator of active functions-contexts.
+  bool op_associative(symbol op, uint32_t scope) {
+    if(helper.op_associative(op)) return true;
+    symbol f = helper.infix_entity(op);
+    if(helper.local_ops.contains(f.value))
+      if(place p = find_lexical(scope, f); p.scope != m_none && cell(p).is<m_fn>())
+        for(node_id fn: cell(p).as<m_fn>().set)
+          if(helper.assoc_attr(fn)) return true;
+    for(auto const & r: fib().overrides)
+      if(r.entity == f && helper.assoc_attr(r.fn)) return true;
+    return false;
+  }
+
   void eval_node(node_id n, n_chain const & c) {
     m_task & t = top();
+    if(t.phase == 0 && std::ranges::all_of(c.ops, [&](symbol o) { return o == c.ops[0]; }) && op_associative(c.ops[0], t.scope)) {
+      t.phase = 1; // the same associative operator - one tree, without brute force
+      return push_eval(helper.assoc_tree(n, c), t.scope, t.frame);
+    }
     if(t.phase == 0) { // chain tree - according to the types of operands (solution parsing, "combination only")
+      std::string assoc;
+      for(symbol o: c.ops) assoc += op_associative(o, t.scope) ? '1' : '0';
       scope * probe = helper.new_scope(helper.globals);
       struct drop {
         interpreter & h;
@@ -1670,7 +1691,7 @@ struct process_machine {
         if(v.is<m_thunk>()) unsupported("цепочка с expr-параметром", n);
         probe->declare(s, to_value(v));
       }
-      node_id tree = helper.resolve_chain(n, c, probe);
+      node_id tree = helper.resolve_chain(n, c, probe, assoc);
       if(!tree) throw diagnostic("цепочка: дерево не выбрано", db[n].where);
       t.phase = 1;
       return push_eval(tree, t.scope, t.frame);
