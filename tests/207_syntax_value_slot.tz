@@ -1,0 +1,32 @@
+// out: point{x: 2, y: 2} point{x: 1, y: 2}
+// out: point{x: 1, y: 2} {x: 5} {}
+// out: 7
+// out: конец
+// machine
+// fmt-stable
+// store-roundtrip
+// Слот-значение в записи syntax (§4.4): {[[value]] x} — блок или выражение, как {x},
+// но `{}` в нём — пустой литерал, тип — из места (§4.3). 
+// Своя запись узла
+// ядра (leave {} — n_return с литералом) и форма-вызов (pick … or {} — литерал как
+// код вызывающего, тип — из места, где окажется значение). *Моё:* пометка слота.
+struct point { i64 x = 1; i64 y = 2; }
+
+syntax leave {[[value]] v}; => n_return{v};
+syntax pick (c) {[[value]] a} or {[[value]] b} => {
+  if(c) a else b
+};
+
+point corner(i64 n) {
+  if(n > 0) leave {x: n, y: n};
+  leave {};
+}
+
+main() {
+  print(corner(2), corner(0));
+  point p = pick(false) {x: 5} or {};
+  q = pick(true) {x: 5} or {};
+  print(p, q, pick(false) {x: 5} or {});
+  print(pick(true) { a = 3; a + 4 } or {});
+  print("конец");
+}

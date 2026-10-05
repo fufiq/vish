@@ -136,9 +136,10 @@ struct printer {
     attrs(f.attrs);
     if(!f.form.empty()) { // syntax - the record repeats the ad
       out += "syntax ";
-      form(f.form, [&](std::size_t k, bool block) {
+      form(f.form, [&](std::size_t k, std::string_view piece) {
         auto const & p = db.as<n_param>(f.params[k]);
-        if(block) out += cat("{", str(p.name), "}");
+        if(piece == "{=") out += cat("{[[value]] ", str(p.name), "}");
+        else if(piece == "{") out += cat("{", str(p.name), "}");
         else params({f.params[k]});
       }, true);
       out += " => ";
@@ -198,9 +199,10 @@ struct printer {
     }
   }
 
-  // Syntax form: word through space, (...) - close to word, {…} - through space, `;` -
-  // close; hole(k, блок) prints k-th hole. In the announcement (decl) brackets - as
-  // written: "()" close, "(" through the space.
+  // Syntax form: word through the space, (...) - close to the word, {…} - through the
+  // space, `;` - close; hole(k, часть) prints the k-th hole ("(", "()), "{" - body, "{="
+  // - slot value). In the announcement (decl) brackets - as written: "()" close, "("
+  // through the space.
   void form(std::vector<symbol> const & pieces, auto && hole, bool decl = false) {
     std::size_t k = 0;
     for(std::size_t i = 0; i < pieces.size(); ++i) {
@@ -209,7 +211,7 @@ struct printer {
       bool after_word = i && lexer::is_ident_start(str(pieces[i - 1])[0]);
       bool glued = p == "()" || (!decl && p == "(" && after_word);
       if(i && !glued && p != ";") out += ' ';
-      if(paren || p == "{") hole(k++, !paren);
+      if(paren || p == "{" || p == "{=") hole(k++, p);
       else out += p;
     }
   }
@@ -246,7 +248,8 @@ struct printer {
   }
   void print_record(node_id n, std::pair<node_id, record_info> const & rec) {
     auto const & [f, r] = rec;
-    form(db.as<n_fn>(f).form, [&](std::size_t k, bool block) {
+    form(db.as<n_fn>(f).form, [&](std::size_t k, std::string_view piece) {
+      bool block = piece[0] == '{';
       node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]];
       if(!block) out += '(';
       item(x);
@@ -450,7 +453,7 @@ struct printer {
     auto const & [f, r] = *rec;
     auto last = str(db.as<n_fn>(f).form.back());
     if(last == ";") return true;
-    if(last != "{" || r.slot.empty()) return false;
+    if((last != "{" && last != "{=") || r.slot.empty()) return false;
     node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot.back()) : db.as<n_call>(n).args[r.slot.back()];
     return db.is<n_block>(x) || db.is<n_raw>(x) || closed(x);
   }
@@ -648,7 +651,8 @@ struct printer {
     if(c.form && c.form - 1 < db.size() && db.is<n_fn>(node_id(c.form - 1)) && !db.as<n_fn>(node_id(c.form - 1)).form.empty()) {
       auto const & pieces = db.as<n_fn>(node_id(c.form - 1)).form;
       std::size_t shown = 0;
-      form(pieces, [&](std::size_t k, bool block) {
+      form(pieces, [&](std::size_t k, std::string_view piece) {
+        bool block = piece[0] == '{';
         if(k >= c.args.size()) return;
         if(!block) out += '(';
         item(c.args[k]);

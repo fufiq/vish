@@ -1253,8 +1253,9 @@ struct parser {
 //;
   // 
 // An announcement
-  // It repeats the recording like an operator. entity is a function with the name of the
-  // first word: (x) is a parameter (mode as a parameter), {x} is a block (expr).
+  // It repeats the recording like an operator. An entity is a function with the name of the first
+  // word: (x) is a parameter (mode as a parameter), {x} is a block (expr), {[[value]] x} is a slot
+  // value: a block or expression, but `{}` There is an empty letter in it (return {}).
   node_id syntax_decl(node_list attrs) {
     uint32_t start = here().where.begin;
     advance();
@@ -1275,12 +1276,21 @@ struct parser {
       } else if(is_open('{')) {
         uint32_t p0 = here().where.begin;
         advance();
+        bool value = is_open('[') && is_open('[', 1); // {[[value]] x} is the slot value
+        if(value) {
+          advance();
+          advance();
+          if(!is_word("value")) throw diagnostic("в слоте записи — только [[value]]", here().where);
+          advance();
+          expect_close(']');
+          expect_close(']');
+        }
         n_param p;
         p.mode = param_mode::expr;
         p.name = ident();
         expect_close('}');
         f.params.push_back(db.add(std::move(p), {p0, toks[pos - 1].where.end}));
-        f.form.push_back(db.strings.intern("{"));
+        f.form.push_back(db.strings.intern(value ? "{=" : "{"));
       } else if(here().kind == tok::ident) {
         f.form.push_back(db.strings.intern(here().text));
         advance();
@@ -1312,7 +1322,7 @@ struct parser {
       auto const & form = db.as<n_fn>(d).form;
       return k < form.size() ? db.strings.text(form[k]) : std::string_view();
     };
-    auto is_param = [](std::string_view p) { return p == "(" || p == "()" || p == "{"; };
+    auto is_param = [](std::string_view p) { return p == "(" || p == "()" || p == "{" || p == "{="; };
     bool records = std::ranges::all_of(live, [&](node_id d) { auto r = record_of(db, d); return r && r->kind >= 0; });
     uint32_t saved = pos;
     bool committed = false;
@@ -1366,13 +1376,18 @@ struct parser {
           ++k;
           continue;
         }
-        if(auto v = with([](std::string_view p) { return p == "{"; }); !v.empty()) {
+        if(auto v = with([](std::string_view p) { return p == "{" || p == "{="; }); !v.empty()) {
+          // {} in the slot value is an empty literal, the type is from the place:
+//  
+          bool literal = empty_value_ahead() && std::ranges::any_of(v, [&](node_id d) { return piece(d, k) == "{="; });
+          if(literal) std::erase_if(v, [&](node_id d) { return piece(d, k) != "{="; });
           live = std::move(v);
           committed = records;
           tail_statement = false;
           // body: block (with the rules of body forms - as in the structure; raw - if the form
           // disassembles it with the code) or expression (branch)
-          args.push_back(is_open('{') && !record_ahead() ? ruled_block(live) : expression());
+          if(literal) args.push_back(record());
+          else args.push_back(is_open('{') && !record_ahead() ? ruled_block(live) : expression());
           ++k;
           continue;
         }
@@ -1380,7 +1395,7 @@ struct parser {
         if(v.empty()) throw diagnostic(cat("ожидалось ", piece(live.front(), k)), here().where);
         node_id d = v.front();
         auto const & form = db.as<n_fn>(d).form;
-        bool tail = db.strings.text(form.back()) == "{" && !args.empty() && db.is<n_block>(args.back());
+        bool tail = db.strings.text(form.back()).starts_with('{') && !args.empty() && db.is<n_block>(args.back());
         span w{start, toks[pos - 1].where.end};
         if(auto r = record_of(db, d)) {
           std::vector<node_id> places(r->places);
@@ -1818,7 +1833,7 @@ struct parser {
   bool empty_value_ahead() const {
     if(!is_open('{') || ahead(1).kind != tok::close || ahead(1).ch() != '}') return false;
     token const & t = ahead(2);
-    return (t.kind == tok::close && (t.ch() == ')' || t.ch() == '}')) || is_op(",", 2) || is_op(";", 2);
+    return (t.kind == tok::close && (t.ch() == ')' || t.ch() == '}')) || is_op(",", 2) || is_op(";", 2) || (line_mode && t.kind == tok::end);
   }
   node_id value_expr() { return empty_value_ahead() ? record() : expression(); }
 
