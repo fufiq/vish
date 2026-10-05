@@ -230,7 +230,8 @@ struct printer {
   // Write node n: Body locations а node field (call arguments); empty no.
   std::pair<node_id, record_info> const * record_for(node_id n) {
     node_id up = db[n].parent; // hide(x) in syntax hide {x} => hide(x) - as written
-    if(up && db.is<n_fn>(up) && !db.as<n_fn>(up).form.empty() && db.as<n_fn>(up).body == n) return nullptr;
+    // (Form-call body - normal code: `=> if(c) a else b`, not n_if {…})
+    if(up && db.is<n_fn>(up) && !db.as<n_fn>(up).form.empty() && db.as<n_fn>(up).body == n && record_of(db, up)) return nullptr;
     for(auto const & rec: records()) {
       auto const & [f, r] = rec;
       if(r.kind >= 0) {

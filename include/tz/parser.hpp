@@ -1089,8 +1089,10 @@ struct parser {
       tail_statement = false;
       return e;
     }
-    if(is_op(";")) eat_op(";");
-    else if(is_close('}') || (line_mode && at_end())) last_was_value = true;
+    if(is_op(";")) {
+      eat_op(";");
+      last_was_value = false; // The block argument inside (f({ 1 }) ;) does not make the instruction value n
+    } else if(is_close('}') || (line_mode && at_end())) last_was_value = true;
     else if(!ends_with_block(e)) throw diagnostic("ожидалось ';'", here().where);
     return e;
   }
