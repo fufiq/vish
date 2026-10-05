@@ -1,0 +1,49 @@
+// out: 2 12 2
+// out: 7 3
+// out: 5 6
+// out: 9
+// machine
+// fmt-stable
+// sealed и синтаксис (§9.1, §4.4): use приносит правила запечатанного модуля в
+// точке use; свои новые формы и операторы вне модуля можно — и рядом с его
+// правилами, и в блоках его конструкций; перегрузка оператора прелюдии своим типом —
+// не сущность модуля. Контекст исполнения (using operator функции-контекста) —
+// и для кода модуля: 
+//.
+use geo.rules;
+
+syntax thrice {body} => {
+  body;
+  body;
+  body;
+};
+
+operator (a) <-> (b) => b - a;
+
+struct pt {
+  i64 x;
+}
+operator (pt a) + (pt b) => pt{a.x + b.x};
+
+assoc_minus(expr body) {
+  [[associative]] using operator (i64 a) - (i64 b) => sub(a, b);
+  body
+}
+
+main() {
+  n = 0;
+  twice { n += 1; }
+  print(n, 1 <+> 2, frame { 5 <~> 3 });
+  k = 0;
+  thrice { k += 1; }
+  frame {
+    syntax bump {body} => {
+      body;
+      k += 4;
+    };
+    bump { k += 0; }
+  }
+  print(k, frame { 2 <-> 5 });
+  print((pt{2} + pt{3}).x, frame { (5 <~> 3) + 4 });
+  print(assoc_minus { diff3(14, 3, 2) });
+}

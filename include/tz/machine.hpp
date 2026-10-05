@@ -1653,10 +1653,11 @@ struct process_machine {
   }
 
   // Associativity of the operator in the context of the process - as in the interpreter
-  // (op_associative): elements of modules and prelude, the operators of blocks in the
-  // field using the operator of active functions-contexts.
-  bool op_associative(symbol op, uint32_t scope) {
-    if(helper.op_associative(op)) return true;
+  // (op_associative): elements of modules and prelude, operators of blocks in the field using
+  // the operator of active functions-contexts; the code of the sealed module elements of
+  // modules - only its definition context (at - node of the chain).
+  bool op_associative(symbol op, uint32_t scope, node_id at) {
+    if(helper.op_associative(op, at)) return true;
     symbol f = helper.infix_entity(op);
     if(helper.local_ops.contains(f.value))
       if(place p = find_lexical(scope, f); p.scope != m_none && cell(p).is<m_fn>())
@@ -1669,13 +1670,13 @@ struct process_machine {
 
   void eval_node(node_id n, n_chain const & c) {
     m_task & t = top();
-    if(t.phase == 0 && std::ranges::all_of(c.ops, [&](symbol o) { return o == c.ops[0]; }) && op_associative(c.ops[0], t.scope)) {
+    if(t.phase == 0 && std::ranges::all_of(c.ops, [&](symbol o) { return o == c.ops[0]; }) && op_associative(c.ops[0], t.scope, n)) {
       t.phase = 1; // the same associative operator - one tree, without brute force
       return push_eval(helper.assoc_tree(n, c), t.scope, t.frame);
     }
     if(t.phase == 0) { // chain tree - according to the types of operands (solution parsing, "combination only")
       std::string assoc;
-      for(symbol o: c.ops) assoc += op_associative(o, t.scope) ? '1' : '0';
+      for(symbol o: c.ops) assoc += op_associative(o, t.scope, n) ? '1' : '0';
       scope * probe = helper.new_scope(helper.globals);
       struct drop {
         interpreter & h;
