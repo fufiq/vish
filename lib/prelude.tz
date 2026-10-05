@@ -547,6 +547,12 @@ text(x) => native "cpp" {
   return #x.is<str_v>() ? value(#x.as<str_v>()) : value(vm.show_v(#x));
 };
 
+// text_byte(b) — строка из одного байта b.
+text_byte(i64 b) => native "cpp" {
+  if(!#b.known()) return erase(value(std::string("x")));
+  return value(std::string(1, char(#b.as<int64_t>())));
+};
+
 // fill(n, x) — массив из n копий x.
 fill(i64 n, x) => native "cpp" {
   if(!#n.known() || !#x.known()) return erase(value(array_v::of({#x.known() ? #x : *shape_of(#x)})));
@@ -568,16 +574,29 @@ is_err(result r) => !r.ok;
 // Альтернатива — 
 // 
 // *Моё:* парсер — данные (struct-наследники
-// parser), разбор — перегрузки p_run по виду; вход — атомы сырого блока, не символы;
-// итог p_run — array{true, позиция, значение} или array{false, позиция, причина, атом}.
+// parser), разбор — перегрузки p_run по виду; вход — атомы сырого блока и символы внутри
+// них; позиция — (k, c): атом k и смещение c в нём (c > 0 — посреди атома).
+// Итог p_run — array{true, k, значение, code(), c} или array{false, k, причина, атом, c}.
+//
+// Символы внутри атома: 
+// 
+// 
+// Атом остаётся узлом,
+// code_text(атом) — его текст как написан. *Моё:* символьный парсер (int с конфигом —
+// int({sign: false, base: 16, digits: 2}), hex(2), байт '#') читает текст атома с (k, c);
+// слово — атомы вплотную (00ff00 — это 00 и ff00), без пробела между ними; между парсерами
+// граница атома свободна, как пробел. Уровень выбирается сам: атомные парсеры требуют
+// c = 0, литерал посреди атома сверяется по символам.
 struct parse_error { code at; str why; }
+struct parse_error_in : parse_error { i64 offset; } // место внутри атома: смещение от его начала
 struct parser {}
-struct p_int : parser { bool sign; } // целое (атом-число; sign — и «-» впереди)
+struct p_int : parser { bool sign; i64 base; i64 max; } // целое: атом-число; основание ≠ 10, max > 0 или посреди атома — символы
 struct p_num : parser { bool sign; } // число: целое или дробное — f64
 struct p_word : parser { str w; } // имя ("" — любое) — строка
 struct p_text : parser {} // строковый литерал — строка
 struct p_bool : parser {} // true / false
 struct p_sym : parser { str s; } // символы подряд, склеенные: "=", "->"
+struct p_chr : parser { i64 c; } // байт '#' — символ внутри атома
 struct p_code : parser {} // подблок {…} — штатный разбор по правилам места (код)
 struct p_seq : parser { array ps; bool drop; } // подряд — кортеж; drop: без литералов (combine)
 struct p_alt : parser { array ps; } // первый удавшийся
@@ -586,10 +605,12 @@ struct p_map : parser { type t; array names; array ps; } // агрегат t: п
 struct p_as : parser { array v; array ps; } // удался ps[0] — значение v[0]
 struct p_sub : parser { str open; array ps; } // подблок (…), […], {…} — разбор целиком внутри
 
-// парсер из значения по контексту: тип — парсер типа, строка — литерал (слово или символы)
+// парсер из значения по контексту: тип — парсер типа, строка — литерал (слово или символы),
+// байт 'c' — символ, форматтер hex(n) —
+// n шестнадцатеричных цифр (*моё*: та же настройка, что у вывода fmt"{hex(2)}{x}")
 as_parser(parser p) => p;
 as_parser(type t) {
-  if(t == i64) return p_int{true};
+  if(t == i64) return p_int{true, 10, 0};
   if(t == f64) return p_num{true};
   if(t == str) return p_text{};
   if(t == bool) return p_bool{};
@@ -598,9 +619,24 @@ as_parser(type t) {
 }
 p_word_text(str s) => (s.size > 0) && (((s[0] >= 'a') && (s[0] <= 'z')) || (((s[0] >= 'A') && (s[0] <= 'Z')) || (s[0] == '_')));
 as_parser(str s) => if(p_word_text(s)) p_word{s} else p_sym{s};
+as_parser(i64 c) => p_chr{c};
+as_parser(hex h) => p_int{false, 16, h.width};
 
-int() => p_int{true};
-int(bool sign) => p_int{sign};
+int() => p_int{true, 10, 0};
+int(bool sign) => p_int{sign, 10, 0};
+// int({sign: false, base: 16, digits: 2}) — конфиг парсера целого по именам: 
+// 
+//  
+int(q) {
+  p = p_int{true, 10, 0};
+  for(f : fields(typeof(q))) {
+    if(f.name == "sign") p.sign = q.[f];
+    else if(f.name == "base") p.base = q.[f];
+    else if(f.name == "digits") p.max = q.[f];
+    else throw parse_error{code(), "int: нет настройки " + f.name};
+  }
+  p
+}
 word() => p_word{""};
 word(str w) => p_word{w};
 p_parsers(xs) {
@@ -633,9 +669,90 @@ operator (p_alt a) | (parser b) => p_alt{array{...a.ps, b}};
 
 // атом k — вида t
 p_has(xs, i64 k, type t) => (k < xs.size) && (code_kind(xs[k]) == t);
-p_fail(xs, i64 k, str why) => array{false, k, why, if(k < xs.size) xs[k] else code()};
+p_ok(i64 k, i64 c, v) => array{true, k, v, code(), c};
+p_fail(xs, i64 k, i64 c, str why) => array{false, k, why, if(k < xs.size) xs[k] else code(), c};
+// атомный парсер посреди атома: прежний парсер съел только часть его символов
+p_mid(xs, i64 k, i64 c) => p_fail(xs, k, c, "лишнее внутри атома");
+// дальше по позиции (неудача альтернативы, что ушла дальше; продвижение повтора)
+p_further(a, b) => (a[1] > b[1]) || ((a[1] == b[1]) && (a[4] > b[4]));
 
-p_run(p_int p, xs, i64 k) {
+// символы: байт на (k, c) или -1 — конец слова; cont — продолжение того же слова: в
+// следующий атом — только вплотную; подблок — не символы
+p_at(xs, i64 k, i64 c, bool cont) {
+  if((k >= xs.size) || (code_kind(xs[k]) == n_raw)) return -1;
+  if(cont && (c == 0) && !code_glued(xs[k])) return -1;
+  code_text(xs[k])[c]
+}
+// позиция после символа на (k, c): конец атома — начало следующего
+p_next(xs, i64 k, i64 c) => if((c + 1) < code_text(xs[k]).size) array{k, c + 1} else array{k + 1, 0};
+// неудача символа на (k, c): конец слова или блока — место сразу за последним символом атома
+p_fail_at(xs, i64 k, i64 c, bool cont, str why) {
+  end = (c == 0) && (k > 0) && ((k == xs.size) || (cont && (p_at(xs, k, c, true) < 0)));
+  if(end && (code_kind(xs[k - 1]) != n_raw)) return p_fail(xs, k - 1, code_text(xs[k - 1]).size, why);
+  p_fail(xs, k, c, why)
+}
+p_digit(i64 ch, i64 base) {
+  d = -1;
+  if((ch >= '0') && (ch <= '9')) d = ch - '0';
+  else if((ch >= 'a') && (ch <= 'z')) d = (ch - 'a') + 10;
+  else if((ch >= 'A') && (ch <= 'Z')) d = (ch - 'A') + 10;
+  if(d >= base) d = -1;
+  d
+}
+// целое символами: знак, цифры основания base, не больше max (0 — сколько есть)
+p_int_chars(p_int p, xs, i64 k, i64 c) {
+  j = k;
+  d = c;
+  cont = false;
+  neg = false;
+  if(p.sign && (p_at(xs, j, d, false) == '-')) {
+    neg = true;
+    s = p_next(xs, j, d);
+    j = s[0];
+    d = s[1];
+    cont = true;
+  }
+  v = 0;
+  n = 0;
+  loop {
+    if((p.max > 0) && (n == p.max)) break;
+    x = p_digit(p_at(xs, j, d, cont), p.base);
+    if(x < 0) break;
+    v = (v * p.base) + x;
+    s = p_next(xs, j, d);
+    j = s[0];
+    d = s[1];
+    n = n + 1;
+    cont = true;
+  }
+  if(n == 0) return p_fail_at(xs, j, d, cont, if(p.base == 10) "ожидалась цифра" else "ожидалась цифра по основанию " + text(p.base));
+  p_ok(j, d, if(neg) -v else v)
+}
+// литерал символами: посреди атома или байт '#'
+p_lit_chars(xs, i64 k, i64 c, str s) {
+  j = k;
+  d = c;
+  ok = true;
+  for(i : range(s.size)) {
+    if(ok) {
+      if(p_at(xs, j, d, i > 0) != s[i]) ok = false;
+      else {
+        t = p_next(xs, j, d);
+        j = t[0];
+        d = t[1];
+      }
+    }
+  }
+  if(!ok) return p_fail(xs, k, c, "ожидалось " + s);
+  p_ok(j, d, s)
+}
+
+// литерал не совпал с атомом: атом вплотную к предыдущему (то же слово: 1x2 — 1 и x2) —
+// сверка по символам
+p_glued_lit(xs, i64 k, str s) => if((k < xs.size) && code_glued(xs[k])) p_lit_chars(xs, k, 0, s) else p_fail(xs, k, 0, "ожидалось " + s);
+
+p_run(p_int p, xs, i64 k, i64 c) {
+  if((c > 0) || (p.base != 10) || (p.max > 0)) return p_int_chars(p, xs, k, c);
   j = k;
   neg = false;
   if(p.sign && p_has(xs, j, n_sym)) {
@@ -645,13 +762,14 @@ p_run(p_int p, xs, i64 k) {
       j = j + 1;
     }
   }
-  if(!p_has(xs, j, n_int)) return p_fail(xs, j, "ожидалось целое");
+  if(!p_has(xs, j, n_int)) return p_fail(xs, j, 0, "ожидалось целое");
   n_int{v, _, _} = xs[j];
-  array{true, j + 1, if(neg) -v else v}
+  p_ok(j + 1, 0, if(neg) -v else v)
 }
-p_run(p_num p, xs, i64 k) {
-  r = p_run(p_int{p.sign}, xs, k);
-  if(r[0]) return array{true, r[1], f64(r[2])};
+p_run(p_num p, xs, i64 k, i64 c) {
+  if(c > 0) return p_mid(xs, k, c);
+  r = p_run(p_int{p.sign, 10, 0}, xs, k, 0);
+  if(r[0]) return p_ok(r[1], 0, f64(r[2]));
   j = k;
   neg = false;
   if(p.sign && p_has(xs, j, n_sym)) {
@@ -661,28 +779,33 @@ p_run(p_num p, xs, i64 k) {
       j = j + 1;
     }
   }
-  if(!p_has(xs, j, n_float)) return p_fail(xs, j, "ожидалось число");
+  if(!p_has(xs, j, n_float)) return p_fail(xs, j, 0, "ожидалось число");
   n_float{v} = xs[j];
-  array{true, j + 1, if(neg) -v else v}
+  p_ok(j + 1, 0, if(neg) -v else v)
 }
-p_run(p_word p, xs, i64 k) {
-  if(!p_has(xs, k, n_ident)) return p_fail(xs, k, if(p.w == "") "ожидалось имя" else "ожидалось " + p.w);
+p_run(p_word p, xs, i64 k, i64 c) {
+  if((c > 0) && (p.w != "")) return p_lit_chars(xs, k, c, p.w);
+  if(c > 0) return p_mid(xs, k, c);
+  if(!p_has(xs, k, n_ident)) return if(p.w == "") p_fail(xs, k, 0, "ожидалось имя") else p_glued_lit(xs, k, p.w);
   n_ident{nm} = xs[k];
-  if((p.w != "") && (nm != p.w)) return p_fail(xs, k, "ожидалось " + p.w);
-  array{true, k + 1, nm}
+  if((p.w != "") && (nm != p.w)) return p_glued_lit(xs, k, p.w);
+  p_ok(k + 1, 0, nm)
 }
-p_run(p_text p, xs, i64 k) {
-  if(!p_has(xs, k, n_str)) return p_fail(xs, k, "ожидалась строка");
+p_run(p_text p, xs, i64 k, i64 c) {
+  if(c > 0) return p_mid(xs, k, c);
+  if(!p_has(xs, k, n_str)) return p_fail(xs, k, 0, "ожидалась строка");
   n_str{v} = xs[k];
-  array{true, k + 1, v}
+  p_ok(k + 1, 0, v)
 }
-p_run(p_bool p, xs, i64 k) {
-  r = p_run(p_word{""}, xs, k);
-  if(r[0] && (r[2] == "true")) return array{true, r[1], true};
-  if(r[0] && (r[2] == "false")) return array{true, r[1], false};
-  p_fail(xs, k, "ожидалось true или false")
+p_run(p_bool p, xs, i64 k, i64 c) {
+  if(c > 0) return p_mid(xs, k, c);
+  r = p_run(p_word{""}, xs, k, 0);
+  if(r[0] && (r[2] == "true")) return p_ok(r[1], 0, true);
+  if(r[0] && (r[2] == "false")) return p_ok(r[1], 0, false);
+  p_fail(xs, k, 0, "ожидалось true или false")
 }
-p_run(p_sym p, xs, i64 k) {
+p_run(p_sym p, xs, i64 k, i64 c) {
+  if(c > 0) return p_lit_chars(xs, k, c, p.s);
   ok = true;
   for(i : range(p.s.size)) {
     if(!p_has(xs, k + i, n_sym)) ok = false;
@@ -691,54 +814,76 @@ p_run(p_sym p, xs, i64 k) {
       if((t[0] != p.s[i]) || ((i > 0) && !g)) ok = false;
     }
   }
-  if(!ok) return p_fail(xs, k, "ожидалось " + p.s);
-  array{true, k + p.s.size, p.s}
+  if(!ok) return p_glued_lit(xs, k, p.s);
+  p_ok(k + p.s.size, 0, p.s)
 }
-p_run(p_code p, xs, i64 k) {
-  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, "ожидался блок {…}");
+p_run(p_chr p, xs, i64 k, i64 c) {
+  if(p_at(xs, k, c, false) != p.c) return p_fail(xs, k, c, "ожидался символ " + text_byte(p.c));
+  s = p_next(xs, k, c);
+  p_ok(s[0], s[1], p.c)
+}
+p_run(p_code p, xs, i64 k, i64 c) {
+  if(c > 0) return p_mid(xs, k, c);
+  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, 0, "ожидался блок {…}");
   n_raw{open, _, _, _, _} = xs[k];
-  if(open != "{") return p_fail(xs, k, "ожидался блок {…}");
-  array{true, k + 1, code_parse(xs[k])}
+  if(open != "{") return p_fail(xs, k, 0, "ожидался блок {…}");
+  p_ok(k + 1, 0, code_parse(xs[k]))
 }
-p_run(p_sub p, xs, i64 k) {
-  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, "ожидался подблок " + p.open);
+p_run(p_sub p, xs, i64 k, i64 c) {
+  if(c > 0) return p_mid(xs, k, c);
+  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, 0, "ожидался подблок " + p.open);
   n_raw{open, items, _, _, _} = xs[k];
-  if(open != p.open) return p_fail(xs, k, "ожидался подблок " + p.open);
+  if(open != p.open) return p_fail(xs, k, 0, "ожидался подблок " + p.open);
   r = p_whole(p.ps[0], items);
-  if(!r[0]) return array{false, k, r[2], r[3]}; // место ошибки — атом внутри подблока
-  array{true, k + 1, r[2]}
+  if(!r[0]) return array{false, k, r[2], r[3], r[4]}; // место ошибки — атом внутри подблока
+  p_ok(k + 1, 0, r[2])
 }
-// литерал (слово или символы) в combine — конфигурация, не результат
+// литерал (слово, символы, байт) в combine — конфигурация, не результат
 p_literal(p_sym p) => true;
+p_literal(p_chr p) => true;
 p_literal(p_word p) => p.w != "";
 p_literal(p) => false;
-p_seq_from(p_seq p, xs, i64 k, i64 i, acc) {
-  if(i == p.ps.size) return array{true, k, if(p.drop && (acc.size == 1)) acc[0] else acc};
-  r = p_run(p.ps[i], xs, k);
+p_seq_from(p_seq p, xs, i64 k, i64 c, i64 i, acc) {
+  if(i == p.ps.size) return p_ok(k, c, if(p.drop && (acc.size == 1)) acc[0] else acc);
+  r = p_run(p.ps[i], xs, k, c);
   if(!r[0]) return r;
-  if(p.drop && p_literal(p.ps[i])) return p_seq_from(p, xs, r[1], i + 1, acc);
-  p_seq_from(p, xs, r[1], i + 1, array{...acc, r[2]})
+  if(p.drop && p_literal(p.ps[i])) return p_seq_from(p, xs, r[1], r[4], i + 1, acc);
+  p_seq_from(p, xs, r[1], r[4], i + 1, array{...acc, r[2]})
 }
-p_run(p_seq p, xs, i64 k) => p_seq_from(p, xs, k, 0, array{});
-// неудача всех — та, что ушла дальше
-p_alt_from(p_alt p, xs, i64 k, i64 i, far) {
+p_run(p_seq p, xs, i64 k, i64 c) => p_seq_from(p, xs, k, c, 0, array{});
+// неудача всех — та, что ушла дальше. *Моё:* удача,
+// кончившаяся посреди атома, уступает следующей, что дошла до границы атома: rgb(1) | rgb(2)
+// на ff00aa — rgb(2) (у атомных парсеров удача всегда на границе — первая удавшаяся)
+p_alt_from(p_alt p, xs, i64 k, i64 c, i64 i, far) {
   if(i == p.ps.size) return far;
-  r = p_run(p.ps[i], xs, k);
-  if(r[0]) return r;
-  p_alt_from(p, xs, k, i + 1, if(r[1] > far[1]) r else far)
+  r = p_run(p.ps[i], xs, k, c);
+  if(r[0] && (r[4] == 0)) return r;
+  if(r[0]) return p_alt_mid(p, xs, k, c, i + 1, r);
+  p_alt_from(p, xs, k, c, i + 1, if(p_further(r, far)) r else far)
 }
-p_run(p_alt p, xs, i64 k) => p_alt_from(p, xs, k, 1, p_run(p.ps[0], xs, k));
-p_rep_from(p_rep p, xs, i64 k, acc) {
-  r = p_run(p.ps[0], xs, k);
-  if(r[0] && (r[1] > k)) return p_rep_from(p, xs, r[1], array{...acc, r[2]});
-  if(acc.size >= p.min) return array{true, k, acc};
+p_alt_mid(p_alt p, xs, i64 k, i64 c, i64 i, mid) {
+  if(i == p.ps.size) return mid;
+  r = p_run(p.ps[i], xs, k, c);
+  if(r[0] && (r[4] == 0)) return r;
+  p_alt_mid(p, xs, k, c, i + 1, mid)
+}
+p_run(p_alt p, xs, i64 k, i64 c) {
+  r = p_run(p.ps[0], xs, k, c);
+  if(r[0] && (r[4] == 0)) return r;
+  if(r[0]) return p_alt_mid(p, xs, k, c, 1, r);
+  p_alt_from(p, xs, k, c, 1, r)
+}
+p_rep_from(p_rep p, xs, i64 k, i64 c, acc) {
+  r = p_run(p.ps[0], xs, k, c);
+  if(r[0] && p_further(r, p_ok(k, c, 0))) return p_rep_from(p, xs, r[1], r[4], array{...acc, r[2]});
+  if(acc.size >= p.min) return p_ok(k, c, acc);
   r
 }
-p_run(p_rep p, xs, i64 k) => p_rep_from(p, xs, k, array{});
-p_run(p_as p, xs, i64 k) {
-  r = p_run(p.ps[0], xs, k);
+p_run(p_rep p, xs, i64 k, i64 c) => p_rep_from(p, xs, k, c, array{});
+p_run(p_as p, xs, i64 k, i64 c) {
+  r = p_run(p.ps[0], xs, k, c);
   if(!r[0]) return r;
-  array{true, r[1], p.v[0]}
+  p_ok(r[1], r[4], p.v[0])
 }
 // значение — код, который его строит (агрегат по map — Имя{…} в порядке полей)
 p_lit(i64 v) => n_int{v};
@@ -751,28 +896,28 @@ p_index(names, str n) {
   for(k : range(names.size)) if(names[k] == n) i = k;
   i
 }
-p_run(p_map p, xs, i64 k) {
-  r = p_run(p_seq{p.ps, false}, xs, k);
+p_run(p_map p, xs, i64 k, i64 c) {
+  r = p_run(p_seq{p.ps, false}, xs, k, c);
   if(!r[0]) return r;
   items = array{};
   for(f : fields(p.t)) {
     i = p_index(p.names, f.name);
-    if(i < 0) return p_fail(xs, k, "map: нет парсера поля " + f.name);
+    if(i < 0) return p_fail(xs, k, c, "map: нет парсера поля " + f.name);
     items = array{...items, p_lit(r[2][i])};
   }
-  array{true, r[1], n_construct{n_ident{text(p.t)}, items}}
+  p_ok(r[1], r[4], n_construct{n_ident{text(p.t)}, items})
 }
-// весь вход: после разбора — конец
+// весь вход: после разбора — конец (и не посреди атома)
 p_whole(p, xs) {
-  r = p_run(as_parser(p), xs, 0);
-  if(r[0] && (r[1] < xs.size)) return p_fail(xs, r[1], "лишнее: ожидался конец блока");
+  r = p_run(as_parser(p), xs, 0, 0);
+  if(r[0] && ((r[1] < xs.size) || (r[4] > 0))) return p_fail(xs, r[1], r[4], "лишнее: ожидался конец блока");
   r
 }
 // parse(r, p) — правило блока: syntax {r} => parse(r, p);
 parse(code r, p) {
   n_raw{_, items, _, _, _} = r;
   x = p_whole(p, items);
-  if(!x[0]) return parse_error{if(given(x[3])) x[3] else r, x[2]};
+  if(!x[0]) return parse_error_in{if(given(x[3])) x[3] else r, x[2], x[4]};
   p_lit(x[2])
 }
 

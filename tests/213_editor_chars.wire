@@ -1,0 +1,24 @@
+// Symbols inside an atom in an editor (§4.4): a set inside an atom of a raw block disassembles a
+// block symbol parser hex(2) reads the text of the atom as written; an error reads with cause ().
+// The label is on a raw block (unit projection); the place inside the atom is at the hole of the
+// result.
+//
+//
+// program: editor_chars.tz
+open_view module
+run
+// expect: output text="rgb{r: 255, g: 0, b: 170}\n" ok=true
+pointer 1 @{#ff 0 4
+key 1 g
+// expect: курсор:   print(color() {#ffg‸00aa});
+// expect: kind="error" text="исполнение неразобранного фрагмента: разбор блока: ожидалась цифра по основанию 16
+key 1 Backspace
+// expect-not: kind="error"
+key 1 1
+key 1 2
+// expect: курсор:   print(color() {#ff12‸00aa});
+// expect: kind="error" text="исполнение неразобранного фрагмента: разбор блока: лишнее: ожидался конец блока
+key 1 Backspace
+key 1 Backspace
+run
+// expect: output text="rgb{r: 255, g: 0, b: 170}\n" ok=true

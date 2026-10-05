@@ -1,0 +1,63 @@
+// out: 10 px
+// out: -5 7
+// out: 5 rgb{r: 15, g: 35, b: 69}
+// out: rgb{r: 15, g: 0, b: 10} 2
+// out: 1 0 1
+// out: px
+// machine
+// fmt-stable
+// store-roundtrip
+// jit-stats: вызов size: правила тела для блоков конструкции — интерпретатор
+// check: экземпляры
+// Уровни атомов и символов в одном API (§4.4, *моё*): позиция — атом и смещение в нём;
+// атомный парсер — на границе атома, символьный читает с места. 
+// 
+// — один проход по атомам и символам, без отдельной
+// токенизации. Слово — атомы вплотную: 10px —
+// это 10 и px, 0f — 0 и f; граница атома между парсерами свободна, как пробел.
+struct rgb { i64 r; i64 g; i64 b; }
+
+// число и единица: атомный int, затем имя
+size(expr body) {
+  syntax {r} => parse(r, seq(int(), word()));
+  body
+}
+
+// знак символами: int с конфигом читает «-» и цифры посреди слова
+range_of(expr body) {
+  syntax {r} => parse(r, seq(int({base: 10, digits: 3}), combine("..", int({digits: 3}))));
+  body
+}
+
+// подблок и символы внутри него; hex(2) через атомы вплотную (0f — 0 и f)
+tagged(expr body) {
+  syntax {r} => parse(r, seq(i64, within("(", map(rgb, {r: hex(2), g: hex(2), b: hex(2)}))));
+  body
+}
+
+// альтернатива: удача на границе атома берёт верх; повтор символьных — до конца слова
+alt(expr body) {
+  syntax {r} => parse(r, seq(combine('#', map(rgb, {r: hex(1), g: hex(1), b: hex(1)}) | map(rgb, {r: hex(2), g: hex(2), b: hex(2)})), i64));
+  body
+}
+bits(expr body) {
+  syntax {r} => parse(r, repeated(int({base: 2, digits: 1})));
+  body
+}
+
+// JIT — честный отказ: правило разбора исполняет интерпретатор
+unit_of(i64 k) => size { 10px };
+
+main() {
+  s = size { 10px };
+  print(s[0], s[1]);
+  q = range_of { -5..7 };
+  print(q[0], q[1]);
+  t = tagged { 5 (0f2345) };
+  print(t[0], t[1]);
+  a = alt { #f0a 2 };
+  print(a[0], a[1]);
+  b = bits { 101 };
+  print(b[0], b[1], b[2]);
+  print(unit_of(3)[1]);
+}

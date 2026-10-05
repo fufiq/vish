@@ -1,0 +1,44 @@
+// out: rgb{r: 255, g: 0, b: 170}
+// out: rgb{r: 0, g: 255, b: 0}
+// out: rgb{r: 15, g: 0, b: 10}
+// out: rgb{r: 18, g: 52, b: 86}
+// out: rgb{r: 1, g: 2, b: 3}
+// machine
+// fmt-stable
+// store-roundtrip
+// Разбор символов внутри атома (§4.4) — пример автора о mecha: 
+// 
+// 
+// 
+// Атом ff00aa — одно имя, 00ff00 — атомы 00 и ff00 вплотную: символьный
+// парсер читает текст слова как написан. '#' — байт,
+// символьный литерал; rgb(1) | rgb(2) — удача на границе атома берёт верх (*моё*).
+struct rgb { i64 r; i64 g; i64 b; }
+
+hex_digits(i64 digits) => int({sign: false, base: 16, digits: digits});
+rgb_p(i64 digits) => map(rgb, {r: hex_digits(digits), g: hex_digits(digits), b: hex_digits(digits)});
+
+color(expr body) {
+  syntax {r} => parse(r, combine('#', rgb_p(1) | rgb_p(2)));
+  body
+}
+
+// без '#': форматтер hex(2) — и настройка разбора (та же, что у fmt"{hex(2)}{x}")
+plain(expr body) {
+  syntax {r} => parse(r, map(rgb, {r: hex(2), g: hex(2), b: hex(2)}));
+  body
+}
+
+// посреди атома — литерал по символам, целое — десятичными цифрами
+dotted(expr body) {
+  syntax {r} => parse(r, map(rgb, {r: int(false), g: combine("x", int(false)), b: combine("x", int(false))}));
+  body
+}
+
+main() {
+  print(color { #ff00aa });
+  print(color { #00ff00 });
+  print(color { #f0a });
+  print(plain { 123456 });
+  print(dotted { 1x2x3 });
+}

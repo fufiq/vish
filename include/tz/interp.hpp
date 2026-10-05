@@ -3168,6 +3168,9 @@ struct interpreter {
           span at = w;
           if(code_agg(e[0].second) && e[0].second.as<agg_v>().fields[0].second.is<int64_t>() && e[0].second.as<agg_v>().fields[0].second.as<int64_t>())
             at = db[code_node(e[0].second, w)].where;
+          // parse_error_in {атом, причина, смещение} is the place inside the atom (parsing characters)
+          if(e.size() > 2 && e[2].second.is<int64_t>() && e[2].second.as<int64_t>() > 0 && at.begin + uint64_t(e[2].second.as<int64_t>()) <= at.end)
+            at.begin += uint32_t(e[2].second.as<int64_t>());
           out = hole(cat("разбор блока: ", e[1].second.is<str_v>() ? std::string(e[1].second.as<str_v>().view()) : show_v(e[1].second)), at);
         } else out = value_node(f.v, w);
       } catch(diagnostic const & d) {
@@ -3177,6 +3180,26 @@ struct interpreter {
     db[out].parent = n; // the names of the result - in the place of the block (the search goes up through the call)
     db.derived[n.value] = {key, out.value};
     return out;
+  }
+
+  // The text of an atom of a raw block is a piece of block text by positions (both from one parsing).
+  std::optional<std::string_view> raw_atom_text(node_id c) const {
+    node_id p = db[c].parent;
+    if(!p || !db.is<n_raw>(p) || db.is<n_raw>(c)) return std::nullopt;
+    span a = db[c].where, b = db[p].where;
+    std::string_view t = db.as<n_raw>(p).text;
+    if(a.source != b.source || a.begin < b.begin || a.end < a.begin || a.end - b.begin > t.size()) return std::nullopt;
+    return t.substr(a.begin - b.begin, a.end - a.begin);
+  }
+  // The atom close to the previous element of its raw block (without a space) - in positions. The
+  // first in the block is not glued (with the block bracket - does not count).
+  bool raw_glued(node_id c) const {
+    node_id p = db[c].parent;
+    if(!p || !db.is<n_raw>(p)) return false;
+    auto const & xs = db.as<n_raw>(p).items;
+    for(size_t k = 1; k < xs.size(); ++k)
+      if(xs[k] == c) return db[xs[k - 1]].where.end == db[c].where.begin && db[xs[k - 1]].where.source == db[c].where.source;
+    return false;
   }
 
   flow eval_node(node_id n, n_raw const & r, scope * env, uint32_t frame) {
@@ -6138,7 +6161,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -6359,7 +6382,14 @@ struct interpreter {
         else if(db.is_member(c)) s = db.member_of(c).name; // a.x - name x
         return value(std::string(s ? str(s) : ""));
       }
-      if(n == "code_text") return value(printer(db).print(c));
+      // The atom of the raw block - as written (projection block - its text):
+// 
+      // The atom remains node, the text is its projection.
+      if(n == "code_text") {
+        if(auto t = raw_atom_text(c)) return value(std::string(*t));
+        return value(printer(db).print(c));
+      }
+      if(n == "code_glued") return value(raw_glued(c)); // atom close to the previous one in a raw block
       if(n == "code_id") return value(int64_t(c.value)); // node number - compare node
       if(n == "code_parent") return code_value(db[c].parent); // The root is empty; the root is empty.
       if(n == "code_parse") return code_value(parse_sub(c, where)); // Subblock {…} - standard parsing seat (§4.4)
