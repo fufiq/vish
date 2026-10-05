@@ -3603,15 +3603,46 @@ struct interpreter {
     }
     if(cacheable)
       if(auto it = resolved_chains.find(key); it != resolved_chains.end()) return it->second;
-    node_id tree = enumerate_chain(n, c, env, assoc);
-    if(tree && cacheable) resolved_chains[key] = tree;
+    // The choice of the same chain with the same types is already underway (the test performs a recursive
+    // call, in the body of which the same chain; the samples are nested - different interpreters) - the
+    // type is still derived, as in recursion parsing : otherwise the search is endless.
+    if(!checking()) { // Execution - choice as is; protection only in parsing samples
+      node_id tree = enumerate_chain(n, c, env, assoc);
+      if(tree && cacheable && !chain_open) resolved_chains[key] = tree;
+      return tree;
+    }
+    std::string guard = cat(n.value, ":", assoc, ":"); // Type Numbers of Registries - Names
+    for(symbol s: names) {
+      value const * cell = s ? find(env, s) : nullptr;
+      guard += cell ? types.describe(*cell) + "," : std::string("-,");
+    }
+    if(!chains_resolving().insert(guard).second) return {};
+    node_id tree;
+    try {
+      tree = enumerate_chain(n, c, env, assoc);
+    } catch(...) {
+      chains_resolving().erase(guard);
+      throw;
+    }
+    chains_resolving().erase(guard);
+    if(tree && cacheable && !chain_open) resolved_chains[key] = tree;
     return tree;
+  }
+  bool chain_open = false; // The last choice of the chain came with an atom (do not cache)
+  // sample selection of the chain tree: the values are erased to types, so the recursion
+  // according to known values will not stop - the recursion key only by types, the
+  // recursion converges with a fixed point (*my*; the sample needs only types)
+  bool probing = false;
+  static std::set<std::string> & chains_resolving() {
+    static std::set<std::string> keys;
+    return keys;
   }
 
   interpreter & prober() {
     if(probes.empty()) {
       probes.emplace_back(db, mod, std::vector<std::string>{}, mode::check, std::nullopt, nullptr, this);
       probes.back().fuel = 200000;
+      probes.back().probing = true;
     }
     return probes.back();
   }
@@ -3655,9 +3686,12 @@ struct interpreter {
     } hold{p, seen};
     uint32_t k = uint32_t(c.atoms.size());
     std::vector<value> shapes;
+    bool open = false; // The type of atom is still derived (recursion) - : operators decide for themselves
+    chain_open = false;
     for(node_id a: c.atoms) {
       flow f = p.eval(a, ps, 0);
-      if(!f.normal() || unknown(f.v)) return {}; // type still unknown
+      if(!f.normal()) return {}; // type still unknown
+      if(unknown(f.v)) open = true;
       shapes.push_back(f.v);
     }
     // dp[i][j] - parsing of atoms i..j: type, number of trees (1 or "many"), root
@@ -3692,6 +3726,11 @@ struct interpreter {
     auto const & top = dp[0][k - 1];
     uint32_t total = 0;
     for(auto const & e: top) total += e.count;
+    // atom with (recursion): only a single agreed tree is taken - `(k == n) || f(…)` : `bool ||
+    // ⊥` fits (right - expr), `i64 || ⊥` does not; otherwise the type is still derived as
+    // before; such a tree is not cached (*my*)
+    if(open && total != 1) return {};
+    chain_open = open;
     if(total == 0) fail(cat("ни один разбор цепочки не инстанцируется", why.empty() ? "" : cat(": ", why)), db[n].where);
     if(total > 1) {
       diagnostic d("цепочка операторов неоднозначна: подходят несколько разборов — расставьте скобки", db[n].where);
@@ -5664,13 +5703,27 @@ struct interpreter {
     // change.
 //).
     std::string active_key = cat(key, "@", f.value); // overload: Another with the same argument is not recursion
+    // The same function with the same types is nested deep with different known values (condition from run-time - `k ==
+    // part.size`, values in parsing instance are erased): values are generalized to types - recursion converges at a
+    // fixed point; in the sample - immediately (*my*: threshold 16; both the key and the values of the arguments are
+    // generalized)
+    std::string types_key;
+    bool widen = probing;
+    if(checking()) {
+      types_key = active_key + "|";
+      for(auto & v: vals) types_key += v.is<thunk_v>() ? cat("expr", v.as<thunk_v>().expr.value, "|") : types.describe(v) + "|";
+      if(auto it = active_depth.find(types_key); it != active_depth.end() && it->second >= 16) widen = true;
+      if(widen && !probing) // generalization - and the key, and values: otherwise the body considers the known
+        for(auto & v: vals)
+          if(!v.is<thunk_v>() && v.known()) v = erase(v);
+    }
     if(checking()) {
       active_key += "|";
       // The expr-argument is the code of the caller: the nested for(…) for(…) is not
       // recursion, the internal has another block; recursion transmits the same node further.
       for(auto & v: vals)
-        active_key += v.is<thunk_v>() ? cat("expr", v.as<thunk_v>().expr.value, "|") : v.known() ? show_v(v) + "|"
-                                                                                                 : "·|";
+        active_key += v.is<thunk_v>() ? cat("expr", v.as<thunk_v>().expr.value, "|") : v.known() && !widen ? show_v(v) + "|"
+                                                                                                           : "·|";
       if(active.contains(active_key)) {
         recursed.insert(active_key);
         auto it = approx.find(active_key);
@@ -5733,7 +5786,10 @@ struct interpreter {
       inner->fn = f;
       scope_hold hold{*this, inner};
       bind_values(fn.params, vals, args, env, inner, f, open);
-      if(checking()) active.insert(active_key);
+      if(checking()) {
+        active.insert(active_key);
+        ++active_depth[types_key];
+      }
       try {
         std::vector<value> escaped; // "painting": exceptions to instance
         throw_sinks.push_back(&escaped);
@@ -5761,12 +5817,16 @@ struct interpreter {
         }
         if(checking()) {
           active.erase(active_key);
+          --active_depth[types_key];
           approx.erase(active_key);
           recursed.erase(active_key);
         }
         throw;
       }
-      if(checking()) active.erase(active_key);
+      if(checking()) {
+        active.erase(active_key);
+        --active_depth[types_key];
+      }
       if(!checking() || !recursed.contains(active_key) || !r.normal()) break;
       value prev = approx.contains(active_key) ? approx[active_key] : value(rt_v{});
       value next = erase(merge(prev, r.v));
@@ -6403,6 +6463,7 @@ struct interpreter {
   std::map<std::string, uint32_t> instance_counts;
   std::map<std::string, uint32_t> folded;
   std::set<std::string> active;
+  std::unordered_map<std::string, uint32_t> active_depth; // nesting
   std::set<std::string> recursed;
   std::map<std::string, value> approx;
 
