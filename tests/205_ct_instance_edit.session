@@ -1,0 +1,30 @@
+// Editing in the working VM when changing the code with the ct code instance (§7.4, §10.1): editing
+// restarts elaboration (rollback all changes and parsing programs anew); the result is the same -
+// revisions of the changed node former, instance cache and machine code are not reset.
+// 
+// Tune - Changes are rolled back and made again.
+// program: ct_inst_edit.tz
+run
+// expect: 300 15 7
+check
+// expect: пересчитано
+edit other
+other() => 8;
+.
+// expect: функция other заменена
+check
+// expect: пересчитано 2 экземпл. (other, main)
+run
+// expect: 300 15 8
+jit
+// expect: jit  scale(i64)
+edit tune
+tune(f, op, k) => ct {
+  f.body = n_op{op, array{n_ident{"x"}, n_int{k + 1}}};
+};
+.
+// expect: функция tune заменена
+run
+// expect: 400 16 8
+check
+// expect: пересчитано 3 экземпл. (scale, shift, main)

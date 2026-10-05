@@ -1,0 +1,43 @@
+// out: i64: 42
+// out: f64: 0.5
+// out: i64: 7
+// check: изменения кода ct-кодом экземпляров (элаборация):
+// check: emit: 1 объявл.
+// fmt-stable
+// store-roundtrip
+// machine
+// machine-dump: 40
+// fmt-ct-has: describe(i64 v) => "i64: " + text(v);
+// fmt-ct-has: describe(f64 v) => "f64: " + text(v);
+// Порождение ct-кодом экземпляра (§7.4): экземпляр функции для типа аргумента порождает
+// перегрузку под этот тип — как инстанцирование шаблона. 
+//  
+// 
+// Порождённое экземпляром — элементы
+// модуля после элаборации (видны всем: запуску, разбору, JIT), источник — его ct-узел.
+// ct-переменная — реестр: тип, для которого перегрузка уже есть, второй раз не порождается.
+ct seen = array{"-"};
+
+note(x) {
+  ct {
+    t = text(typeof(x));
+    fresh = true;
+    for(s : seen) if(s == t) fresh = false;
+    if(fresh) {
+      seen = array{...seen, t};
+      f = n_fn{"describe", array{n_param{"v", n_ident{t}}}};
+      f.body = n_op{"+", array{n_str{t + ": "}, n_call{n_ident{"text"}, array{n_ident{"v"}}}}};
+      f.expr_body = true;
+      emit(f);
+    }
+  }
+}
+
+main() {
+  note(1);
+  note(2.5);
+  note(3);
+  print(describe(42));
+  print(describe(0.5));
+  print(describe(7));
+}

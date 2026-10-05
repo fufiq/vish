@@ -1,0 +1,19 @@
+// Программа для сценария 203_editor_ct_instance.wire (сама по себе — обычный тест).
+// out: вход
+// out: тело
+// fmt-ct-has: print("вход");
+greet() {
+  print("тело");
+}
+
+instrument(f, s) {
+  ct {
+    b = f.body;
+    b.items = array{n_call{n_ident{"print"}, array{n_str{s}}}, ...b.items};
+  }
+}
+
+main() {
+  instrument(code(greet), "вход");
+  greet();
+}
