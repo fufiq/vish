@@ -1,0 +1,31 @@
+// out: 25
+// out: 25.0
+// out: 3
+// out: точка 1 2
+// out: отрезок 4
+// out: 7
+// machine
+// fmt-stable
+// store-roundtrip
+// Образец-параметр {x: a, y: b} (§5, распаковка): параметр без имени, имена даёт
+// распаковка полей по именам у любого агрегата — анонимного и struct; как Имя{…} в
+// параметре — условие кандидата, перегрузки выбираются по тому, распаковывается ли
+// аргумент.;
+//.
+struct point { f64 x; f64 y; }
+
+len2({x: a, y: b}) => (a * a) + (b * b);
+diff({x: a}, {y: b}) => a - b;
+show({x: a, y: b}) => print("точка", a, b);
+show({from: f, to: t}) => print("отрезок", t - f);
+pick({x: i64 a}) => a;
+pick({x: str a}) => a.size;
+
+main() {
+  print(len2({x: 3, y: 4}));
+  print(len2(point{3.0, 4.0}));
+  print(diff({x: 5}, {y: 2, z: 0}));
+  show({x: 1, y: 2});
+  show({from: 1, to: 5});
+  print(pick({x: 4}) + pick({x: "abc"}));
+}

@@ -916,7 +916,7 @@ struct process_machine {
     if(!chosen && !repacked) {
       bool pack = std::ranges::any_of(fns, [&](node_id fn) {
         auto const & ps = db.as<n_fn>(fn).params;
-        return ps.size() == 1 && db.as<n_param>(ps[0]).type && db.is<n_pat>(db.as<n_param>(ps[0]).type) &&
+        return ps.size() == 1 && db.as<n_param>(ps[0]).type && db.is<n_pat>(db.as<n_param>(ps[0]).type) && db.as<n_pat>(db.as<n_param>(ps[0]).type).type &&
             helper.str(db.as<n_ident>(db.as<n_pat>(db.as<n_param>(ps[0]).type).type).name) == "array";
       });
       if(pack && nargs != 1) { // f(1, 2) → f(array{1, 2})
@@ -1225,6 +1225,10 @@ struct process_machine {
       out = from_value(got, {});
       return 1;
     }
+    if(value z; !strict && is_record(v) && v.as<m_agg>().fields.empty() && interpreter::scalar_default(want, z)) { // i64 n = {} — 0
+      out = from_value(z, {});
+      return 1;
+    }
     if(strict || !numeric_pair(v, want)) return 0;
     if(want == "f64") {
       int64_t i = v.as<int64_t>();
@@ -1245,6 +1249,8 @@ struct process_machine {
     return from_value(helper.to_type(to_value(v), want, where), where);
   }
   std::string place_type(mval const & cur) const {
+    if(cur.is<int64_t>()) return "i64"; // x = {} у i64 — 0
+    if(cur.is<double>()) return "f64";
     if(!cur.is<m_agg>() || helper.types.anonymous(cur.as<m_agg>().type)) return {};
     return std::string(helper.types.name(cur.as<m_agg>().type));
   }
@@ -2205,10 +2211,10 @@ struct process_machine {
         return push_eval(f.init, st.globals, t.frame);
       }
       m_agg g{helper.types.named(helper.str(tname)), {}};
-      for(uint32_t i = 0; i < all.size(); ++i) { // Struct field: {x: …} becomes struct field
+      for(uint32_t i = 0; i < all.size(); ++i) { // Type field: {x: …} and {} (and by default) become
         auto const & f = db.as<n_var>(all[i]);
         mval v = deref(fib().vals[t.base + i]);
-        if(i < c.items.size() && f.type && db.is<n_ident>(f.type)) v = to_type(std::move(v), helper.str(db.as<n_ident>(f.type).name), db[c.items[i]].where);
+        if(f.type && db.is<n_ident>(f.type)) v = to_type(std::move(v), helper.str(db.as<n_ident>(f.type).name), db[i < c.items.size() ? c.items[i] : f.init].where);
         g.fields.push_back({f.name, std::move(v)});
       }
       return finish(mval{std::move(g)});

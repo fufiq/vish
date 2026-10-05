@@ -738,7 +738,7 @@ struct parser {
         v.name = ident();
         if(is_op("=")) {
           eat_op("=");
-          v.init = expression();
+          v.init = value_expr(); // foo f = {} - the default value of the field type
         }
         end_statement();
         e.items.push_back(db.add(std::move(v), {i0, toks[pos - 1].where.end}));
@@ -778,7 +778,7 @@ struct parser {
       f.name = ident();
       if(is_op("=")) {
         eat_op("=");
-        f.init = expression();
+        f.init = value_expr(); // foo f = {} - the default value of the field type
       }
       end_statement();
       st.items.push_back(db.add(std::move(f), {f0, toks[pos - 1].where.end}));
@@ -893,8 +893,9 @@ struct parser {
       eat_op("...");
       p.pack = true;
     }
-    // foo(array{a, b, ...xs}) - parameter without a name, names give unpacking
-    if(p.mode == param_mode::let && here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) {
+    // sample: foo(array{a, b, ...xs}) - parameter without a name, names give unpacking; f({x:
+    // a, y: b}) - field by name of any unit (§4.3)
+    if(p.mode == param_mode::let && ((here().kind == tok::ident && is_open('{', 1) && ahead(1).glued) || record_ahead())) {
       p.type = pattern();
       return db.add(std::move(p), {start, toks[pos - 1].where.end});
     }
@@ -1148,7 +1149,7 @@ struct parser {
     if(typed) v.type = type_expr();
     v.name = ident();
     expect_op("=");
-    v.init = expression();
+    v.init = value_expr(); // point p = {}
     end_statement();
     return db.add(std::move(v), {start, toks[pos - 1].where.end});
   }
@@ -1492,7 +1493,7 @@ struct parser {
       if(is_op(a)) {
         uint32_t start = db[lhs].where.begin;
         eat_op(a);
-        node_id rhs = expression();
+        node_id rhs = a == "=" ? value_expr() : expression(); // p = {} - value of place type
         return db.add(n_op{db.strings.intern(a), {lhs, rhs}}, {start, db[rhs].where.end});
       }
     return lhs;
@@ -1674,7 +1675,7 @@ struct parser {
           c.args.push_back(db.add(n_spread{v}, {s0, toks[pos - 1].where.end}));
           c.words.push_back(word);
         } else {
-          c.args.push_back(expression());
+          c.args.push_back(value_expr()); // m({}) is the value of the parameter type
           c.words.push_back(word);
         }
         if(is_op(",")) eat_op(",");
@@ -1808,6 +1809,17 @@ struct parser {
 //;.
   bool record_ahead(uint32_t k = 0) const { return is_open('{', k) && ahead(k + 1).kind == tok::ident && is_op(":", k + 2); }
 
+  // {} is the entire expression of meaning (argument, literal field or name {…}, right side `=`,
+  // default field value): literal without fields, value of place type.
+// 
+// Instruction and body `{}` is a block.
+  bool empty_value_ahead() const {
+    if(!is_open('{') || ahead(1).kind != tok::close || ahead(1).ch() != '}') return false;
+    token const & t = ahead(2);
+    return (t.kind == tok::close && (t.ch() == ')' || t.ch() == '}')) || is_op(",", 2) || is_op(";", 2);
+  }
+  node_id value_expr() { return empty_value_ahead() ? record() : expression(); }
+
   node_id record() {
     uint32_t start = here().where.begin;
     expect_open('{');
@@ -1815,7 +1827,7 @@ struct parser {
     while(!is_close('}')) {
       c.names.push_back(ident());
       expect_op(":");
-      c.items.push_back(expression());
+      c.items.push_back(value_expr()); // {f: {}} is the value of the field type
       if(is_op(",")) eat_op(",");
       else break;
     }
@@ -1832,7 +1844,7 @@ struct parser {
         eat_op("...");
         node_id v = expression();
         items.push_back(db.add(n_spread{v}, {s0, toks[pos - 1].where.end}));
-      } else items.push_back(expression());
+      } else items.push_back(value_expr()); // Name {{}, ...} is the value of the field type
       if(is_op(",")) eat_op(",");
       else break;
     }

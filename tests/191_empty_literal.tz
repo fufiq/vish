@@ -1,0 +1,55 @@
+// out: 13
+// out: 13
+// out: 16
+// out: foobar{f: foo{a: 1, w: 0.5}, b: bar{n: 2}}
+// out: 0 0.0
+// out: foobar{f: foo{a: 1, w: 0.5}, b: bar{n: 5}}
+// out: holder{f: foo{a: 1, w: 0.5}, n: 0}
+// out: foobar{f: foo{a: 1, w: 0.5}, b: bar{n: 3}}
+// out: 0 foo{a: 1, w: 0.5}
+// out: 1.0
+// machine
+// machine-dump: 30
+// fmt-stable
+// store-roundtrip
+// {} — значение типа места (§4.3): там, где ожидается тип (параметр, поле литерала или
+// Имя{…}, T x = …, место с типом, значение поля по умолчанию), {} — то же, что T{}:
+// struct — поля по умолчанию, i64/f64 — ноль. 
+// 
+// 
+//,
+// 
+// 
+//.
+struct foo { i64 a = 1; f64 w = 0.5; }
+struct bar { i64 n = 2; }
+struct foobar { foo f; bar b; }
+struct clazz { i64 k; }
+struct holder { foo f = {}; i64 n = {}; }
+
+method(clazz c, foobar fb) => c.k + fb.f.a + fb.b.n;
+first(i64 n, foo f) => print(n, f);
+half(f64 x) => x / 2.0;
+
+main() {
+  c = clazz{10};
+  print(c.method({f: {}, b: {}}));
+  print(c.method(foobar{foo{}, bar{}}));
+  print(c.method({b: {}, f: {a: 4}}));
+  foobar q = {f: {}, b: {}};
+  print(q);
+  i64 n = {};
+  f64 d = {};
+  print(n, d);
+  q.f = {};
+  q.b = {n: 5};
+  print(q);
+  print(holder{});
+  print(foobar{{}, {n: 3}});
+  first({}, {});
+  m = 2;
+  m = {};
+  print(half(m + 2));
+  {}
+  if(m == 0) {}
+}

@@ -1805,6 +1805,7 @@ struct interpreter {
     }
     if(!strict && types.is_a(types.name(types.of(v)), want)) return fit::representable; // base
     if(!strict && is_record(v) && structs.contains(sym(want))) return record_fit(v, want, out); // {x: …} where struct is expected
+    if(!strict && empty_record(v) && scalar_default(want, out)) return fit::representable; // i64 n = {} — 0
     if(strict || !numeric_pair(v, want)) return fit::no;
     value const * x = shape_of(v);
     if(want == "f64") {
@@ -1846,6 +1847,18 @@ struct interpreter {
   bool is_record(value const & v) const {
     value const * x = shape_of(v);
     return x && x->is<agg_v>() && types.anonymous(x->as<agg_v>().type);
+  }
+  // {} is a literal without fields: in a place of type T - the same as T {} (struct - default
+  // fields). Numbers have zero, like zero(T) :
+  //
+// *Mine:* Only i64 and f64 (bool, str, y)
+  // There are no {} arrays, an error like zero(T).
+  bool empty_record(value const & v) const { return is_record(v) && shape_of(v)->as<agg_v>().fields.empty(); }
+  static bool scalar_default(std::string_view want, value & out) {
+    if(want == "i64") out = value(int64_t(0));
+    else if(want == "f64") out = value(double(0));
+    else return false;
+    return true;
   }
   // Anonymous fields - from his record: name and type (array type - array, tuple).
   std::vector<std::pair<std::string, type_id>> record_fields(type_id t) {
@@ -1889,7 +1902,7 @@ struct interpreter {
       else if(d.init) {
         flow dv = eval(d.init, globals, 0);
         if(!dv.normal()) return no(cat("значение по умолчанию поля ", str(d.name), " не вычислилось"));
-        fv = std::move(dv.v);
+        fv = field_typed(d, std::move(dv.v), db[d.init].where);
       } else return no(cat("не задано поле ", str(d.name)));
       g.fields.push_back({d.name, std::move(fv)});
       if(d.ct) pin(g.fields.back().second, d.name, db[f].where);
@@ -1900,6 +1913,7 @@ struct interpreter {
   // Value for a place whose type is known (field struct, variable with struct, result with
   // type): the anonymous literal becomes that struct; otherwise, as is.
   value to_type(value v, std::string_view want, span where) {
+    if(value z; empty_record(v) && scalar_default(want, z)) return z; // x = {} у i64 — 0
     if(!is_record(v) || !structs.contains(sym(want))) return v;
     value got;
     std::string why;
@@ -1909,8 +1923,14 @@ struct interpreter {
   // The place holds the value of the type: struct is its name, otherwise it is empty (*my:* type of place is the type of its meaning).
   std::string place_type(value const & cur) const {
     value const * x = shape_of(cur);
+    if(x && x->is<int64_t>()) return "i64";
+    if(x && x->is<double>()) return "f64";
     if(!x || !x->is<agg_v>() || types.anonymous(x->as<agg_v>().type)) return {};
     return std::string(types.name(x->as<agg_v>().type));
+  }
+  // the value of the field d (from the literal or by default): the field with the type {…} becomes it
+  value field_typed(n_var const & d, value v, span where) {
+    return d.type && db.is<n_ident>(d.type) ? to_type(std::move(v), str(db.as<n_ident>(d.type).name), where) : v;
   }
 
   // Whether samples-arrays of candidates cover any length (elements - names, , residue:
@@ -1931,7 +1951,7 @@ struct interpreter {
       if(mine < 0 || (at >= 0 && mine != at)) return false;
       at = mine;
       auto const & p = db.as<n_pat>(db.as<n_param>(fn.params[std::size_t(mine)]).type);
-      if(str(db.as<n_ident>(p.type).name) != "array") return false;
+      if(!p.type || str(db.as<n_ident>(p.type).name) != "array") return false; // {x: a} is not an array
       bool rest = false;
       for(node_id x: p.items) {
         if(!db.is<n_param>(x) || db.as<n_param>(x).type) return false; // check-in
@@ -2021,7 +2041,15 @@ struct interpreter {
     // {x: a, y: b} = v - addresses .x to any aggregate (anonymous or struct): structure, not type
     // name
 // 
-    if(!p.type) return x->is<agg_v>() ? interface(unpacked::yes) : unpacked::no;
+    if(!p.type) {
+      if(!x->is<agg_v>()) return unpacked::no;
+      for(node_id it: fields) { // no such field - sample does not fit (choice overload f({x: a}))
+        auto const & a = db.as<n_op>(db.as<n_pat_field>(it).access);
+        symbol name = sym(std::string(str(a.op).substr(1)));
+        if(std::ranges::none_of(x->as<agg_v>().fields, [&](auto const & f) { return f.first == name; })) return unpacked::no;
+      }
+      return interface(unpacked::yes);
+    }
     if(kind == "array") {
       if(!x->is<array_v>()) return unpacked::no;
       auto const & a = x->as<array_v>();
@@ -3124,7 +3152,7 @@ struct interpreter {
           g.fields.push_back({f.name, f.type && db.is<n_ident>(f.type) ? to_type(std::move(items[k]), str(db.as<n_ident>(f.type).name), db[c.items[k]].where) : std::move(items[k])});
         else if(f.init) {
           TZ_TRY(d, eval(f.init, globals, frame));
-          g.fields.push_back({f.name, std::move(d)});
+          g.fields.push_back({f.name, field_typed(f, std::move(d), db[f.init].where)}); // foo f = {} = value of field type
         } else fail(cat(tname, ": не задано поле ", str(f.name)), db[n].where);
         if(f.ct) pin(g.fields.back().second, f.name, db[n].where);
       }
@@ -4890,6 +4918,7 @@ struct interpreter {
       if(code_agg(x) && is_node_kind(want) && type_fit(x, want, false, got) != fit::no) return; // code node n_X - instance n_X
       if(std::string why; is_record(x) && structs.contains(sym(want)) && record_fit(x, want, got, &why) == fit::no) // Reason: Excessive or inappropriate field
         fail(cat(types.describe(x), " не становится ", want, ": ", why), where);
+      if(empty_record(x)) fail(cat("{} — значение типа места: есть у struct, i64, f64, не у ", want), where);
       if(types.describe(x) != want && types.name(types.of(x)) != want)
         fail(cat("ожидался тип ", want, ", получен ", types.describe(x)), where);
     };
@@ -5303,7 +5332,7 @@ struct interpreter {
     if(good.empty() && !repacked) {
       bool pack = std::ranges::any_of(fns, [&](node_id f) {
         auto const & ps = db.as<n_fn>(f).params;
-        return ps.size() == 1 && db.as<n_param>(ps[0]).type && db.is<n_pat>(db.as<n_param>(ps[0]).type) &&
+        return ps.size() == 1 && db.as<n_param>(ps[0]).type && db.is<n_pat>(db.as<n_param>(ps[0]).type) && db.as<n_pat>(db.as<n_param>(ps[0]).type).type &&
             str(db.as<n_ident>(db.as<n_pat>(db.as<n_param>(ps[0]).type).type).name) == "array";
       });
       if(pack && vals.size() != 1) { // f(1, 2) → f(array{1, 2})
