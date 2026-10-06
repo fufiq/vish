@@ -54,7 +54,10 @@ struct n_module : n_context {
   // presentation of the editor module; access - transition. The layout is like blank; the
   // numbers, not node_list, are not children (they are not seen twice by rounds in the fields).
   std::vector<uint32_t> inner;
-  bool sealed = false; // sealed module k; - entity modules do not expand externally (§9.1)
+  // [[extension(проверка)]] module k; - control of extensions entity module (§9.1):
+  // 
+  // 
+  node_list attrs;
 };
 struct n_fn {
   symbol name;

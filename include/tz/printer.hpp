@@ -108,7 +108,10 @@ struct printer {
   // --- instruction ---
 
   void print_node(node_id, n_module const & m) {
-    if(m.name) out += cat(m.sealed ? "sealed " : "", "module ", str(m.name), ";\n");
+    if(m.name) {
+      attrs(m.attrs); // [[extension]] module k;
+      out += cat("module ", str(m.name), ";\n");
+    }
     bool first = !m.name;
     for(uint32_t k = 0; k < m.items.size(); ++k) {
       node_id i = m.items[k];

@@ -57,7 +57,7 @@ main() {
   forms();
   local();
   b = n_block{array{}, false, array{}};
-  m = n_module{"m", array{}, array{}, array{}, false};
+  m = n_module{"m", array{}, array{}, array{}, array{}};
   print(kind(b), kind(m), kind(n_hole{"x", "y"}), if(n_context{} = m) "да" else "нет");
   print(fields(n_context));
 }

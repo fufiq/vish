@@ -1,0 +1,12 @@
+// Модуль для тестов 236–237: [[extension(same_module_types)]] — чужое расширение
+// его сущностей — только для типов своего модуля (условный тест прелюдии, §9.1);
+// свои расширения (show(i64) здесь же) — можно.
+[[extension(same_module_types)]] module geo.typed;
+
+struct cell {
+  i64 v;
+}
+
+show(cell c) => c.v;
+
+show(i64 n) => n + 100;

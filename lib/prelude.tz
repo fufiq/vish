@@ -184,6 +184,55 @@ is_clause_pack(c) => (code_kind(c) == n_construct) && {
   all
 };
 
+// Контроль расширений (§9.1): [[extension(g)]] у модуля или объявления — g(расширение,
+// сущность) исполняется при разборе на каждое расширение сущности (перегрузка, поле,
+// &f, запись syntax, оператор, using operator), решение — require. 
+// 
+// 
+// *Моё:* сами
+// проверки ниже — библиотека, не правило VM; модуль узла — code_module(c).
+same_module(a, b) => code_id(code_module(a)) == code_id(code_module(b));
+module_title(c) => {
+  n = code_name(code_module(c));
+  if(n == "") "программы" else n
+};
+// своё — можно, чужое — нет (прежний sealed — библиотекой)
+own_only(ext, entity) => require(same_module(ext, entity),
+  code_name(entity) + ": расширять сущности модуля " + module_title(entity) + " можно только в нём (own_only)",
+  "сущность объявлена здесь", entity);
+// условный тест: чужое расширение — только для типов своего модуля (параметры
+// перегрузок, поля расширения Имя { … }); своё — можно
+same_module_types(ext, entity) => require(same_module(ext, entity) || uses_module_type(ext, code_module(ext)),
+  code_name(entity) + ": расширение сущности модуля " + module_title(entity) + " из модуля " + module_title(ext) + " — только для типов своего модуля (same_module_types)",
+  "сущность объявлена здесь", entity);
+// тип t — struct, объявленный в модуле m
+module_declares(m, str t) {
+  found = false;
+  for(x : code_items(m))
+    if(code_kind(x) == n_extend) {
+      n_extend{name, _, _, _, of, _} = x;
+      if((of == "struct") && (name == t)) found = true;
+    }
+  found
+}
+declared_in(t, m) => given(t) && ((code_kind(t) == n_ident) && module_declares(m, code_name(t)));
+uses_module_type(c, m) {
+  found = false;
+  if(code_kind(c) == n_fn) {
+    n_fn{_, params, _, _, _, _, _, _, _} = c;
+    for(p : params) {
+      n_param{_, t, _, _, _, _, _} = p;
+      if(declared_in(t, m)) found = true;
+    }
+  } else if(code_kind(c) == n_var) {
+    n_var{_, t, _, _, _, _, _, _} = c;
+    found = declared_in(t, m);
+  } else if(code_kind(c) == n_extend) {
+    for(x : code_items(c)) if(uses_module_type(x, m)) found = true;
+  }
+  found
+}
+
 // checked { … } — контекст: арифметика i64 с проверкой переполнения для всего,
 // что выполняется внутри блока, включая вызванные функции (их экземпляры —
 // свои для контекста): 

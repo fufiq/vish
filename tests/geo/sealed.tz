@@ -1,4 +1,0 @@
-// Запечатанный модуль для теста 96_sealed.
-sealed module geo.sealed;
-
-area(f64 w, f64 h) => w * h;

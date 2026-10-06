@@ -282,10 +282,14 @@ struct parser {
     if(!placed) place({}); // new module: prelude rules
     uint32_t start = here().where.begin;
     n_module m;
-    if(is_word("sealed") && is_word("module", 1)) { // sealed module k; does not expand from the outside
+    // sealed removed (author's decision 2026-10-05):
+// - a tip error,
+    // module disassembles without a word
+    if(is_word("sealed") && is_word("module", 1)) {
+      diags.push_back(diagnostic("sealed убран: контроль расширений — [[extension(own_only)]] module …; (§9.1)", here().where));
       advance();
-      m.sealed = true;
     }
+    if(module_attrs_ahead()) m.attrs = attributes(); // [[extension]] module k;
     if(is_word("module")) {
       advance();
       m.name = db.strings.intern(dotted_name());
@@ -302,6 +306,13 @@ struct parser {
     auto id = db.add(std::move(m), {start, here().where.end});
     db.link_parents(id);
     return id;
+  }
+
+  // [[…]] Before Module: Module Attributes, Not First Element
+  bool module_attrs_ahead() const {
+    uint32_t k = pos;
+    while(k + 1 < toks.size() && toks[k].kind == tok::open && toks[k].ch() == '[' && toks[k + 1].kind == tok::open && toks[k + 1].ch() == '[') k = match[k] + 1;
+    return k != pos && k < toks.size() && toks[k].kind == tok::ident && toks[k].text == "module";
   }
 
   // Editor unit (§13.1): `{…}` block or entire module element.

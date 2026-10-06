@@ -1,0 +1,12 @@
+// error: editor_extension.tz:9:3: ошибка: twice: расширять сущности модуля geo.shapes можно только в нём (own_only)
+// Программа для сценария 239_editor_extension.wire (сама по себе — тест ошибки):
+// запись syntax со словом twice в блоке — расширение записи модуля geo.shapes, у
+// которой [[extension(own_only)]]; ошибка — на объявлении расширения (§9.1).
+use geo.shapes;
+
+main() {
+  n = 0;
+  syntax twice {body} again => { body; };
+  twice { n += 1; }
+  print(n, area(pt{2, 3}));
+}

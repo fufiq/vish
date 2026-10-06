@@ -1,0 +1,14 @@
+// Extension control and syntax in the editor (§9.1, §4.4): the parsing rule outside the module
+// with [[extension(own_only)]] for its entity (here is a record with the word twice in the
+// block) - own_only check rejects, error on the rule announcement; its word is the program
+// rule, no error.
+// program: editor_own.tz
+open_view module
+// expect: kind="error" text="twice: расширять сущности модуля geo.rules можно только в нём (own_only)
+// expect: kind="n_fn" pieces=["syntax twice {body} again => "
+// Twicy is the rule of the program block: no error, twice is the write of the module
+pointer 1 @syntax 0 12
+key 1 Backspace
+key 1 y
+// expect: kind="n_fn" pieces=["syntax twicy {body} again => "
+// expect-not: kind="error"
