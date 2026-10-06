@@ -110,11 +110,41 @@ export class ViewElement {
   }
 
   #marked = new Set<ASTNode>();
+  // Error locations within node (last labels)
+  errorRanges: Range[] = [];
+
+  // [from, to] in the code points of node (its chunks-texts) → Range DOM.
+  #rangeIn(id: NodeId, from: number, to: number): Range | undefined {
+    const el = this.byId.get(id);
+    const n = this.nodes.get(id);
+    if (!el || !n) return undefined;
+    const range = document.createRange();
+    let seen = 0;
+    let started = false;
+    for (const [i, p] of n.pieces.entries()) {
+      const t = typeof p === 'string' ? el.textOf(i) : undefined;
+      if (!t) continue;
+      const len = codePoints(t.data);
+      if (!started && from < seen + len) {
+        range.setStart(t, utf16Offset(t.data, from - seen));
+        started = true;
+      }
+      if (started && to <= seen + len) {
+        range.setEnd(t, utf16Offset(t.data, to - seen));
+        return range;
+      }
+      seen += len;
+    }
+    return undefined;
+  }
 
   // Check marks: old ones are removed, sent. Returns the first error for the status
   // string.
   showMarks(d: Decor): string | undefined {
-    for (const el of this.#marked) el.setMarks({});
+    for (const el of this.#marked) {
+      el.setMarks({});
+      el.removeAttribute('error-range');
+    }
     this.#marked.clear();
     const by = new Map<NodeId, NodeMarks>();
     let first: string | undefined;
@@ -135,6 +165,20 @@ export class ViewElement {
       if (!el) continue;
       el.setMarks(e);
       this.#marked.add(el);
+    }
+    // error place inside node (raw block: atom and displacement in it) - text range;
+    // backlight - CSS Custom Highlight, without editing DOM node
+    this.errorRanges = d.marks.flatMap((m) =>
+      m.kind === 'error' && m.to > m.from
+        ? (this.#rangeIn(m.node, m.from, m.to) ?? [])
+        : [],
+    );
+    const registry = (globalThis.CSS as typeof CSS | undefined)?.highlights;
+    if (registry) {
+      registry.set('tz-error', new Highlight(...this.errorRanges));
+      for (const m of d.marks)
+        if (m.kind === 'error' && m.to > m.from)
+          this.byId.get(m.node)?.setAttribute('error-range', '');
     }
     // icons shift text - cursor and list are put again
     if (this.#cursor) this.showCursor(this.#cursor);

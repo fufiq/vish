@@ -141,6 +141,8 @@ describe('представление', () => {
       node,
       kind,
       text,
+      from: 0,
+      to: 0,
     });
     const first = v.showMarks({
       type: 's_decor',
@@ -166,6 +168,46 @@ describe('представление', () => {
     expect(s?.shadowRoot?.querySelector('.badge')).toBeNull();
     expect(v.byId.get(14)?.hasAttribute('error')).toBe(false);
     expect(v.byId.get(12)?.hasAttribute('dead')).toBe(false);
+  });
+
+  it('метка ошибки внутри сырого блока — диапазон его текста', () => {
+    const host = document.createElement('div');
+    const raw: View = {
+      type: 's_view',
+      view: 1,
+      root: 20,
+      revision: 1,
+      kind: 'module',
+      nodes: [
+        {
+          type: 's_node',
+          id: 20,
+          kind: 'n_raw',
+          pieces: ['{#ffg00aa}'],
+          note: '',
+        },
+      ],
+    };
+    const v = new ViewElement(host, raw);
+    v.showMarks({
+      type: 's_decor',
+      view: 1,
+      revision: 2,
+      marks: [
+        {
+          type: 's_mark',
+          node: 20,
+          kind: 'error',
+          text: 'нет',
+          from: 4,
+          to: 9,
+        },
+      ],
+    });
+    expect(v.errorRanges.map((r) => r.toString())).toEqual(['g00aa']);
+    expect(v.byId.get(20)?.hasAttribute('error')).toBe(true);
+    v.showMarks({ type: 's_decor', view: 1, revision: 3, marks: [] });
+    expect(v.errorRanges).toEqual([]);
   });
 
   it('смещения: кодовые точки ↔ UTF-16', () => {

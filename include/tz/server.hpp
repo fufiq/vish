@@ -449,6 +449,7 @@ struct editor_server {
   void edit(editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret = ~uint32_t{0}) {
     ++edits;
     caret = std::min(caret, code_points(ins));
+    if(edit_raw(v, a, b, ins, caret)) return;
     if(edit_line(v, a, b, ins, caret)) return;
     for(auto const & u: units_around(v, a, b)) {
       std::string_view old = v.text_of(u.range);
@@ -497,6 +498,41 @@ struct editor_server {
       apply(v, target, [&] { session.db.replace(target, n_hole{edited, "не функция"}); }, range, range, edited,
           {a - r.first, b - r.first, code_points(ins)}, caret);
     }
+  }
+
+  // --- raw block: unit of editing - the block itself ---
+  //
+  // Editing inside the brackets of the raw block (§4.4) reassembles only its phase 1 - atoms and
+  // sub-blocks; the node of the block retains id, the result of parsing is a derivative, editing
+  // it invalidates (block revision); instruction with a call and neighbors do not touch, only
+  // the block leaves customers.
+// 
+//  
+// 
+// My unit is the call block.
+  // whole (subblock - no: its text is part of the text of the block); the brackets of the block
+  // are broken - to the external unit (line), as in the blocks.
+  bool edit_raw(editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret) {
+    auto & db = session.db;
+    for(uint32_t k = 0; k < v.layouts.size(); ++k) {
+      node_id n = v.layouts[k].node;
+      auto r = v.range[k];
+      if(!db.is<n_raw>(n) || !db.as<n_raw>(n).rule || r.second - r.first < 2 || a < r.first + 1 || b > r.second - 1) continue;
+      std::string_view old = v.text_of(r);
+      uint32_t base = v.byte_at[r.first];
+      std::string edited = cat(old.substr(0, v.byte_at[a] - base), ins, old.substr(v.byte_at[b] - base));
+      parser pr(db, edited, cat("<ввод #", edits, ">"));
+      node_id fresh = pr.parse_raw(db.as<n_raw>(n).rule);
+      if(!fresh) return false;
+      auto mutate = [&] {
+        db.replace(n, db[fresh].kind);
+        db.place(n, db[fresh].where); // atoms - in the text of the edit, the place of the block - there
+      };
+      auto range = [&](editor_view const & w) { return w.range[w.layout_of(n)]; };
+      apply(v, n, mutate, range, range, edited, {a - r.first, b - r.first, code_points(ins)}, caret);
+      return true;
+    }
+    return false;
   }
 
   // --- line of set: instruction - its unit ---
@@ -1046,9 +1082,27 @@ struct editor_server {
         if(!n) n = node_at(v, f.where);
       std::string text = d.what();
       for(auto const & f: d.trace) text += cat("\n  ", f.what);
-      if(n) out.push_back({n, "error", text});
+      if(!n) continue;
+      auto [from, to] = raw_range(n, d.where);
+      out.push_back({n, "error", text, from, to});
     }
     return out;
+  }
+
+  // The place of error inside the raw block (§4.4): its projection is the text as written, the
+  // positions of the atoms are in this text, so the label indicates the block - the atom and the
+  // displacement in it *My:* tag node - the block (unit projection and edits), the place - the
+  // code points [from, to] its text; {0, 0} - the entire node.
+  //
+  std::pair<uint32_t, uint32_t> raw_range(node_id n, span w) const {
+    auto const & db = session.db;
+    if(!db.is<n_raw>(n)) return {0, 0};
+    span b = db[n].where;
+    std::string_view t = db.as<n_raw>(n).text;
+    if(w.source != b.source || w.begin < b.begin || w.end < w.begin || w.end - b.begin > t.size()) return {0, 0};
+    if(w.begin == b.begin && w.end - b.begin == t.size()) return {0, 0};
+    uint32_t from = code_points(t.substr(0, w.begin - b.begin)), to = code_points(t.substr(0, w.end - b.begin));
+    return {from, std::max(to, from + 1)};
   }
 
   void send_marks(peer & p, editor_view const & v) {

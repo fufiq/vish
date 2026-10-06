@@ -1,7 +1,7 @@
 // Symbols inside an atom in an editor (§4.4): a set inside an atom of a raw block disassembles a
 // block symbol parser hex(2) reads the text of the atom as written; an error reads with cause ().
-// The label is on a raw block (unit projection); the place inside the atom is at the hole of the
-// result.
+// The label is on the raw block (unit projection), the place inside the atom is from/to the label
+// and the hole of the result (test 231).
 //
 //
 // program: editor_chars.tz

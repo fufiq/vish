@@ -164,6 +164,13 @@ body {
   text-decoration: wavy underline var(--tz-error);
   text-underline-offset: 3px;
 }
+.tz-node[error][error-range] {
+  text-decoration: none;
+}
+/* место ошибки внутри узла (сырой блок: атом и смещение) — VM шлёт from/to */
+::highlight(tz-error) {
+  text-decoration: wavy underline var(--tz-error);
+}
 #status[error] {
   color: var(--tz-error);
 }

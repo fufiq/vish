@@ -1,5 +1,5 @@
-// parsing code in the editor (§4.4): the set inside the raw block reassembles it completely
-// (unit - instruction with a call: the parsing rule knows the design), the result of parsing -
+// parsing code in the editor (§4.4): the set inside the raw block reassembles it as a whole (the
+// unit is the block itself, the test 230; the node stores the id), the result of parsing is a
 // derivative, editing it invalidates:
 // 
 // The block text is as written.

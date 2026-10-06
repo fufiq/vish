@@ -1,0 +1,26 @@
+// The error mark parsing is in place inside the raw block (§4.4, §13.1): the label node is a
+// block (the unit projection and edits), from / to are the code points of its text, as written:
+// atom and displacement in it (parse_error_in), excess from the stop place. The block is
+// redefining itself, id the same.
+// program: editor_chars.tz
+open_view module
+// let: blk @{#ff
+pointer 1 @{#ff 0 4
+key 1 g
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{#ffg00aa}"]
+// "ffg00aa": hex(2) reads "ff", then "g" is not a number: from "g" to the end of the atom
+// expect: node=$blk kind="error" text="исполнение неразобранного фрагмента: разбор блока: ожидалась цифра по основанию 16
+// expect: from=4 to=9
+key 1 Backspace
+// expect-not: kind="error"
+key 1 1
+key 1 2
+// three hex(2) Take "ff", "12", "00" - "aaa" extra
+// expect: node=$blk kind="error" text="исполнение неразобранного фрагмента: разбор блока: лишнее: ожидался конец блока
+// expect: from=8 to=10
+key 1 Backspace
+key 1 Backspace
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{#ff00aa}"]
+// expect-not: kind="error"
+run
+// expect: output text="rgb{r: 255, g: 0, b: 170}\n" ok=true

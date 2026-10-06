@@ -332,7 +332,14 @@ struct j_mutate {
 struct j_rollback {
   uint32_t source;
 };
-using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback>;
+// New place node: the raw block, redisassembled in place (editor's unit, §13.1), retains the
+// id, and its atoms - in the editing text; the block place - in the same place (it takes the
+// text of the atom as written).
+struct j_place {
+  uint32_t id;
+  span where;
+};
+using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place>;
 
 struct journal_entry {
   uint64_t revision;
@@ -505,6 +512,11 @@ struct ast_db {
     if(edited_at.size() <= n.value) edited_at.resize(n.value + 1);
     edited_at[n.value] = revision;
     log({j_replace{n.value, nodes[n].kind}});
+  }
+  // The node stood in a new place (raw block, redisassembled on site).
+  void place(node_id n, span where) {
+    nodes[n].where = where;
+    log({j_place{n.value, where}});
   }
 
   // Up to function: Cache granularity - functions, not files
@@ -892,6 +904,8 @@ struct ast_db {
           mutate(node_id(op.id), op.kind, op.source);
         } else if constexpr(std::is_same_v<T, j_rollback>) {
           rollback(op.source);
+        } else if constexpr(std::is_same_v<T, j_place>) {
+          place(node_id(op.id), op.where);
         } else {
           record_import(op.text, op.label);
         }

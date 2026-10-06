@@ -320,6 +320,23 @@ struct parser {
     }
   }
 
+  // Raw block - editing unit (§4.4, §13.1): edit text - the entire block with brackets, only
+  // phase 1 (atoms and sub-blocks) is disassembled, no place rules are needed.
+  // 
+// Empty - text not
+  // It forms one block (its parentheses or lexemes are broken): editing - to the external unit.
+  node_id parse_raw(uint32_t rule) {
+    if(!lex_error.empty() || bracket_error || at_end() || here().kind != tok::open) return {};
+    try {
+      node_id n = raw_tree(rule);
+      if(!at_end()) return {};
+      db.link_parents(n);
+      return n;
+    } catch(diagnostic const &) {
+      return {};
+    }
+  }
+
   // The typing line in the editor (author's decision: the line is like a new block, not
   // yet disassembled): its instructions (or module elements) are disassembled
   // separately from neighboring ones - the unwritten becomes a hole only for this line

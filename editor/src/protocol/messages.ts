@@ -151,12 +151,16 @@ export interface Complete {
   items: CompletionItem[];
 }
 // Verification tags: "type" - types of declared name for all instance, "error" -
-// error in place (with a trace). They come in full after the audit.
+// error in place (with a trace). They come in full after the audit. [from, to] is
+// the place inside the node text at the code points (parsing error inside the raw
+// block: atom and displacement in it); from ===to is the entire node.
 export interface Mark {
   type: 's_mark';
   node: NodeId;
   kind: string;
   text: string;
+  from: number;
+  to: number;
 }
 export interface Decor {
   type: 's_decor';

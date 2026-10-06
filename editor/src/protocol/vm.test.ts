@@ -68,7 +68,7 @@ describe('живая VM', () => {
     ]);
     expect(fields('s_item')).toEqual(['name', 'kind', 'detail']);
     expect(fields('s_decor')).toEqual(['view', 'revision', 'marks']);
-    expect(fields('s_mark')).toEqual(['node', 'kind', 'text']);
+    expect(fields('s_mark')).toEqual(['node', 'kind', 'text', 'from', 'to']);
     expect(fields('s_cursor')).toEqual(['view', 'node', 'piece', 'offset']);
     expect(fields('c_key')).toEqual(['view', 'key', 'mods']);
     expect(fields('c_pointer')).toEqual(['view', 'node', 'piece', 'offset']);

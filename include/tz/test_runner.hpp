@@ -216,6 +216,7 @@ struct test_runner {
     wire_client client, second; // [2] is the second client of the same VM.
     bool wire = path.extension() == ".wire";
     std::string last, why;
+    std::map<std::string, std::string> names; // `// let:` - memorized node
     for(std::size_t i = 0; i < lines.size(); ++i) {
       auto const & l = lines[i];
       if(l.starts_with("// program:")) {
@@ -239,8 +240,17 @@ struct test_runner {
         }
         continue;
       }
+      // `// let: имя @подстрока` is the node number now; `$имя` in expectation is the same
+      // (node saves id after editing)
+      if(wire && l.starts_with("// let:")) {
+        auto ws = words_of(std::string_view(l).substr(7));
+        if(ws.size() == 2) names[std::string(ws[0])] = client.resolve(cat("x ", ws[1])).substr(2);
+        continue;
+      }
       if(l.starts_with("// expect:")) {
         auto want_line = lines_joined(std::string_view(l).substr(10));
+        for(auto const & [name, id]: names | std::views::reverse) // blk2 - formerly blk
+          for(std::size_t k; (k = want_line.find("$" + name)) != std::string::npos;) want_line.replace(k, name.size() + 1, id);
         std::string_view want = want_line;
         if(!last.contains(want)) why += cat("    строка ", i + 1, ": нет ", in_quotes(want), " в выводе:\n", last);
         continue;

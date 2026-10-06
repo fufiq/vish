@@ -147,11 +147,15 @@ struct s_complete {
 // the layer - in its context), "error" - error in the place of use (with a trace),
 // "value" - known at compilation value in the layer, "dead" - in the context of the
 // layer was not executed. Decoration, not text; come in whole after every revision.
-//
+// [from, to] is the place inside the node text at the code points (parsing error
+// inside the raw block is an atom and displacement in it, §4.4); from ==to is the
+// entire node.
 struct s_mark {
   node_id node;
   std::string kind;
   std::string text;
+  uint32_t from = 0;
+  uint32_t to = 0;
 };
 struct s_decor {
   uint32_t view;

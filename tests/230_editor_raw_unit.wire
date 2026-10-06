@@ -1,0 +1,35 @@
+// The raw block is the editing unit of the editor (§4.4, §13.1): editing inside its
+// parentheses only examines its phase 1, the block node saves id, the result of parsing is a
+// derivative (the edit disables), the instruction is not touched with a call, the update is
+// only a block, both clients.
+// 
+//;
+// 
+// The cursor in the block is stable: the projection
+// block is the text as written.
+// program: editor_raw.tz
+open_view module
+[2] open_view module
+run
+// expect: output text="16\n" ok=true
+// let: blk @{1
+[2] pointer 1 @{1 0 7
+pointer 1 @{1 0 6
+key 1 0
+// expect: update view=1 revision=
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{1 2 30 x}"] note=""⏎текст:
+// expect: cursor view=1 node=$blk piece=0 offset=7
+// expect: курсор:   print(sum_of() {1 2 30‸ x});
+// second client: the same update of one block, its cursor shifted by editing
+// expect: другому клиенту:⏎update view=1
+// expect: курсор:   print(sum_of() {1 2 30 ‸x});
+// expect-not: kind="n_call"
+// expect-not: kind="n_hole"
+run
+// expect: output text="43\n" ok=true
+// Translation of the line inside the block - text as written, the same unit
+key 1 Enter
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{1 2 30\n x}"] note=""⏎текст:
+// expect-not: kind="n_call"
+run
+// expect: output text="43\n" ok=true

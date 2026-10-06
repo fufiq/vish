@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0030"; // 0030: anonymous structural literature (n construct.names); 0029: code parsing - raw block (n raw, n sym); 0028: source ct code mutations and rollback (j mutate, j rollback), ad link (n ref); 0027: [[state]] variable module (n var.attrs); 0026: struct - instance struct, extension (n extend.of, without n struct); 0025: point - operators .x and .[] (without n member, n field); 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n pack - {blocks} (without n pack); 0021:ntrict (without 00: 00: 00: 00: n n n
+constexpr std::string_view tzdb_magic = "TZDB0031"; // 0031: site after re-examination in place - raw block as a unit of editing (j place); 0030: anonymous structural literature (n construct.names); 0029: code parsing - raw block (n raw, n sym); 0028: mutations of ct-code with source and rollback (j mutate, j rollback), a link to the announcement (n ref); 0027: [[state]] variable module (n var.attrs); 0026: struct - instance struct, extension (n extend.of, without n struct); 0025: point - operators .x and .[] (without n member, n field); 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n pack - {blocks} (without n pack); 0021:ntrict (without 00: 00: 00: 00: n n n
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;
@@ -56,6 +56,7 @@ std::string describe_journal(std::vector<journal_entry> const & entries) {
       else if constexpr(std::is_same_v<T, j_link>) out += cat("связи   от #", op.root);
       else if constexpr(std::is_same_v<T, j_mutate>) out += op.source ? cat("мутация #", op.id, " ← ct #", op.source - 1) : cat("достройка #", op.id);
       else if constexpr(std::is_same_v<T, j_rollback>) out += op.source ? cat("откат   ct #", op.source - 1, " и позднейших") : std::string("откат   всех мутаций ct");
+      else if constexpr(std::is_same_v<T, j_place>) out += cat("место   #", op.id, " [", op.where.begin, "..", op.where.end, "]");
       else out += cat("импорт  текста ", op.text.size(), " байт");
     },
         e.op);

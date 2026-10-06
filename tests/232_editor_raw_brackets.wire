@@ -1,0 +1,18 @@
+// Broken brackets of the raw block - editing rises to the external unit (line), as in the
+// blocks; fixed - the block is again itself a unit.
+//
+// program: editor_chars.tz
+open_view module
+pointer 1 @{#ff 0 4
+key 1 (
+// unclosed bracket - a string of a hole, update - a block of function, not a raw block
+// expect: kind="n_hole" pieces=["print(color() {#ff(00aa});"] note="незакрытая скобка"
+// expect-not: kind="n_raw"
+key 1 Backspace
+// expect: kind="n_raw" pieces=["{#ff00aa}"]
+// let: blk @{#ff
+key 1 1
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{#ff100aa}"] note=""⏎текст:
+key 1 Backspace
+run
+// expect: output text="rgb{r: 255, g: 0, b: 170}\n" ok=true
