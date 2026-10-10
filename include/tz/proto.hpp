@@ -83,7 +83,14 @@ struct c_trace {
   std::string stdin_text;
   std::string args;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take>;
+// projection presentation (§4.4, variant C): syntax recording module with key - print
+// recording and parsing editing rules of this representation; "" - by default (records by
+// scope, prelude - C-like projection, D3).
+struct c_projection {
+  uint32_t view;
+  std::string key;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection>;
 
 // --- VM customer ---
 

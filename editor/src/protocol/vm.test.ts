@@ -72,6 +72,7 @@ describe('живая VM', () => {
     expect(fields('s_cursor')).toEqual(['view', 'node', 'piece', 'offset']);
     expect(fields('c_key')).toEqual(['view', 'key', 'mods']);
     expect(fields('c_pointer')).toEqual(['view', 'node', 'piece', 'offset']);
+    expect(fields('c_projection')).toEqual(['view', 'key']);
   });
 
   it('hello, представление и курсор через сокет', async () => {
@@ -99,8 +100,25 @@ describe('живая VM', () => {
       });
       c.write(encodeClient({ type: 'c_hello', version: schema.version }));
       c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
+      for (let i = 0; i < 100 && got.length < 4; ++i) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const view = got.at(1);
+      if (view?.type !== 's_view') throw new Error('нет представления');
+      // first lines - comments of the program (§4.0): cursor - on the line main() {
+      const fn = view.nodes.find((n) => n.kind === 'n_fn');
+      if (!fn) throw new Error('нет функции');
+      c.write(
+        encodeClient({
+          type: 'c_pointer',
+          view: 1,
+          node: fn.id,
+          piece: 0,
+          offset: 0,
+        }),
+      );
       c.write(encodeClient({ type: 'c_key', view: 1, key: 'End', mods: 0 }));
-      for (let i = 0; i < 100 && got.length < 5; ++i) {
+      for (let i = 0; i < 100 && got.length < 6; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
       // after submission - check-ins (check session)
@@ -110,13 +128,12 @@ describe('живая VM', () => {
         's_cursor',
         's_decor',
         's_cursor',
+        's_cursor',
       ]);
       const decor = got.at(3);
       expect(
         decor?.type === 's_decor' && decor.marks.map((m) => m.kind),
       ).toContain('type');
-      const view = got.at(1);
-      if (view?.type !== 's_view') throw new Error('нет представления');
       expect(projectionText(view)).toBe(
         execFileSync(tz, ['fmt', program], { encoding: 'utf8' }),
       );
@@ -132,8 +149,8 @@ describe('живая VM', () => {
       for (const m of got) {
         if (m.type === 's_update') for (const n of m.nodes) nodes.set(n.id, n);
       }
-      expect(projectionText({ ...view, nodes: [...nodes.values()] })).toBe(
-        'main() {\n  y = 2;\n  s = "привет, мир";\n  print(s);\n}\n',
+      expect(projectionText({ ...view, nodes: [...nodes.values()] })).toContain(
+        '\nmain() {\n  y = 2;\n  s = "привет, мир";\n  print(s);\n}\n',
       );
       // cursor - immediately after `;` : before translating a line in a piece of ";\n" block
       await new Promise((r) => setTimeout(r, 30)); // tail: cursor, addition
@@ -145,7 +162,7 @@ describe('живая VM', () => {
       expect(kids?.kind).toBe('n_block');
       expect(typed).toMatchObject({ piece: 2, offset: 1 });
       c.end();
-      const end = got.at(4);
+      const end = got.at(5);
       // end of the first line - before translating the line in a piece "{\n" of the block
       const block = view.nodes.find((n) => n.kind === 'n_block');
       expect(end).toMatchObject({ node: block?.id, piece: 0, offset: 1 });

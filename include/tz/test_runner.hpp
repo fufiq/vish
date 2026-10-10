@@ -17,6 +17,8 @@
 // // fmt-ct-has: text is in projection after elaboration (tz fmt-ct)
 // // fmt-ct-lacks: text not in it
 // // fmt-has: text in projection (with holes) has a string
+// // fmt-projection: projection key - record module (tz fmt-projection, §4.5 )
+// // fmt-projection-has: text ... in its text there is a line
 // // store-roundtrip save to .tzdb, download: same projection and same output
 #pragma once
 
@@ -158,7 +160,7 @@ struct test_runner {
   }
   struct expect {
     std::vector<std::string> args, stdin_lines, out, out2, errors, instances, check, check_lacks, check_errors;
-    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, fmt_has, fmt_ct_has, fmt_ct_lacks, unknown;
+    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, fmt_has, fmt_ct_has, fmt_ct_lacks, fmt_projection, fmt_projection_has, unknown;
     bool fmt_stable = false;
     bool machine = false; // The same program is a process machine: the same output
     std::vector<std::string> machine_dump; // dump step: dump, restore to new base, count
@@ -184,7 +186,7 @@ struct test_runner {
       std::vector<std::string> args_line;
       if(take("args:", args_line)) {
         for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
-      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has) || take("fmt-ct-has:", e.fmt_ct_has) || take("fmt-ct-lacks:", e.fmt_ct_lacks)) {
+      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has) || take("fmt-projection-has:", e.fmt_projection_has) || take("fmt-projection:", e.fmt_projection) || take("fmt-ct-has:", e.fmt_ct_has) || take("fmt-ct-lacks:", e.fmt_ct_lacks)) {
       } else if(take("machine-dump:", e.machine_dump)) {
         e.machine = true;
       } else if(body == "machine") {
@@ -225,6 +227,7 @@ struct test_runner {
         std::vector<diagnostic> ignored;
         root = parse_program(db, f.text(), file.parent_path(), ignored); // use k; modules next to the program
         session.emplace(db, root, file.filename().string());
+        session->dir = file.parent_path().string();
         if(wire) {
           int fds[2];
           if(!os::socket_pair(fds)) return "socketpair не удался";
@@ -320,6 +323,19 @@ struct test_runner {
     ast_db const * db = nullptr;
     std::string mismatch; // pieced text ) projection (tz fmt)
 
+    // text without comments (`//…` to the end of the line, `/*…*/`): no string context chunks
+    static std::string without_comments(std::string_view t) {
+      std::string out;
+      for(std::size_t i = 0; i < t.size();) {
+        if(t.substr(i).starts_with("//")) i = std::min(t.find('\n', i), t.size());
+        else if(t.substr(i).starts_with("/*")) {
+          std::size_t e = t.find("*/", i + 2);
+          i = e == std::string_view::npos ? t.size() : e + 2;
+        }
+        else out += t[i++];
+      }
+      return out;
+    }
     // @substring is the number of the first node in whose own text it is: scripts do
     // not depend on node numbers (they shift from prelude).
     std::string resolve(std::string const & line) {
@@ -345,11 +361,14 @@ struct test_runner {
           want = want.substr(0, colon);
         }
         std::string found = "#?";
+        bool notes = false; // Search for comments, if not in the code
+        uint32_t want_nth = nth;
         auto rec = [&](auto && self, node_id n) -> void {
           auto const * x = node(n);
           if(!x || found != "#?") return;
+          bool ctx = !notes && (x->kind == "n_module" || x->kind == "n_block"); // text of the context - with comments: they are not node
           for(auto const & pc: x->pieces)
-            if(auto const * t = std::get_if<std::string>(&pc); t && t->contains(want)) {
+            if(auto const * t = std::get_if<std::string>(&pc); t && (ctx ? without_comments(*t) : *t).contains(want)) {
               if(--nth == 0) found = cat("#", n.value);
               break;
             }
@@ -357,19 +376,38 @@ struct test_runner {
             if(auto const * c = std::get_if<node_id>(&pc)) self(self, *c);
         };
         rec(rec, root);
+        if(found == "#?") {
+          notes = true;
+          nth = want_nth;
+          rec(rec, root);
+        }
         out += found;
       }
       return out;
     }
 
     std::string exchange(editor_server & server, std::string const & line) {
-      os::write_all(fd, proto::frame(proto::parse_client(resolve(line))));
+      proto::client_msg m = proto::parse_client(resolve(line));
+      // projection representation (§4.4): text reconciliation - according to it, if the module is found
+      auto * pj = std::get_if<proto::c_projection>(&m);
+      std::string was;
+      if(pj) {
+        was = projection_key[pj->view];
+        projection_key[pj->view] = pj->key;
+      }
+      os::write_all(fd, proto::frame(m));
       ++sent;
       while(peer->handled < sent || !server.settled(*peer)) server.step();
       for(auto & p: server.peers) // Sending to other customers should also go away.
         while(!server.settled(p)) server.step();
-      return collect();
+      std::string out = collect();
+      if(pj && !pj->key.empty()) { // No Module - the previous projection
+        auto it = db->strings.index.find(pj->key);
+        if(it == db->strings.index.end() || !find_module(*db, it->second)) projection_key[pj->view] = was;
+      }
+      return out;
     }
+    std::map<uint32_t, std::string> projection_key; // projection presentation (module key)
 
     std::string collect() {
       in += os::read_ready(fd);
@@ -413,6 +451,8 @@ struct test_runner {
       if(db->is<n_module>(root)) inner = db->as<n_module>(root).inner;
       printer pr(*db, views[view].kind == "module" ? printer::filter([&](node_id n) { return !std::ranges::contains(inner, n.value); }) : printer::filter{});
       pr.layouts = &scratch;
+      if(auto k = projection_key.find(view); k != projection_key.end() && !k->second.empty())
+        if(auto it = db->strings.index.find(k->second); it != db->strings.index.end()) pr.projection = find_module(*db, it->second);
       if(std::string want = pr.print(root); t != want) mismatch = cat("собрано:\n", t, "\nпроекция:\n", want);
       return cat("текст:\n", t, "\n");
     }
@@ -454,6 +494,23 @@ struct test_runner {
     }
   };
 
+  // projection text without a test cap: comments are typed (§4.5), and the expectation
+  // of fmt-has from the cap would otherwise be found in the cap itself.
+  static std::string without_header(std::string const & text, std::string_view src) {
+    size_t lines = 0;
+    for(std::string_view l: lines_of(src)) {
+      if(!l.starts_with("//")) break;
+      ++lines;
+    }
+    size_t at = 0;
+    for(size_t k = 0; k < lines && at < text.size(); ++k) {
+      if(!std::string_view(text).substr(at).starts_with("//")) return text;
+      at = std::min(text.find('\n', at), text.size());
+      if(at < text.size()) ++at;
+    }
+    return text.substr(at);
+  }
+
   std::string run_one(std::filesystem::path const & path) {
     if(path.extension() == ".session" || path.extension() == ".wire") return run_session(path);
     os::mapped_file file(path.string());
@@ -475,14 +532,26 @@ struct test_runner {
       if(once != twice) return "    проекция нестабильна: fmt∘fmt ≠ fmt\n";
     }
     if(!e.fmt_has.empty()) {
-      std::string text = printer(db).print(root);
+      std::string text = without_header(printer(db).print(root), src);
       for(auto & want: e.fmt_has)
         if(!text.contains(want)) return cat("    нет в проекции: ", in_quotes(want), "\n", text);
+    }
+    for(auto const & key: e.fmt_projection) { // projection is a key recording module like use k (§4.5)
+      ast_db pdb; // projection module is not included in the executable program
+      std::vector<diagnostic> ignored;
+      node_id proot = parse_program(pdb, src, path.parent_path(), ignored);
+      ignored = preload_uses(pdb, cat("use ", key, ";"), path.parent_path());
+      printer pr(pdb);
+      if(auto it = pdb.strings.index.find(key); it != pdb.strings.index.end()) pr.projection = find_module(pdb, it->second);
+      if(!pr.projection) return cat("    нет модуля проекции ", key, "\n");
+      std::string text = without_header(pr.print(proot), src);
+      for(auto & want: e.fmt_projection_has)
+        if(!text.contains(want)) return cat("    нет в проекции ", key, ": ", in_quotes(want), "\n", text);
     }
     if((!e.fmt_ct_has.empty() || !e.fmt_ct_lacks.empty()) && errors.empty()) { // projection after elaboration (tz fmt --ct)
       std::string text;
       try {
-        text = elaborated_text(db, root, path.filename().string());
+        text = without_header(elaborated_text(db, root, path.filename().string()), src);
       } catch(diagnostic const & d) {
         return cat("    ошибка элаборации: ", render(d, path.filename().string(), db));
       }

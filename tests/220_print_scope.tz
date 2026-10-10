@@ -1,0 +1,69 @@
+// out: 1 2 6 5
+// out: 3 4
+// out: 7
+// fmt-stable
+// store-roundtrip
+// fmt-has:   when (x > 1)
+// fmt-has:     return 1;
+// fmt-has:   otherwise
+// fmt-has:     return 2;
+// fmt-has: sum_of(1, 2, 3), sum_of(5)
+// fmt-has: syntax when [[space]] (c) [[indent]] {yes} [[line]] otherwise [[indent]] {no} => n_if{c, yes, no};
+// fmt-has: syntax sum_of(xs, ...) => sum_all(xs);
+// fmt-has:     again {
+// fmt-has:   forever {
+// fmt-has:     hush k;
+// Записи печати по области видимости (§4.4, вариант C — решение автора
+// 2026-10-05): одна запись syntax описывает и разбор, и печать; узел печатается
+// по записи, видимой в его месте — ближайший контекст первым (блок, модуль, `use`,
+// тело конструкции для её блоков), прелюдия — последней. 
+// 
+// 
+// Пометки раскладки — только печать: [[space]],
+// [[glued]], [[line]], [[indent]]; часть-список (xs, ...) — место array{…}. *Моё:*
+// запись — от следующей строки; в контексте — первая подходящая по порядку.
+use geo.print;
+
+syntax when [[space]] (c) [[indent]] {yes} [[line]] otherwise [[indent]] {no} => n_if{c, yes, no};
+syntax sum_of(xs, ...) => sum_all(xs);
+
+sum_all(xs) {
+  s = 0;
+  for(x : xs) s += x;
+  s
+}
+
+pick(x) {
+  if(x > 1) return 1; else return 2;
+}
+
+quiet(expr body) {
+  syntax hush {[[value]] v}; => n_return{v};
+  body;
+}
+
+first(k) {
+  quiet {
+    return k;
+  }
+  0
+}
+
+main() {
+  print(pick(2), pick(0), sum_of(1, 2, 3), sum_of(5));
+  n = 0;
+  loop {
+    n += 1;
+    if(n > 2) break;
+  }
+  {
+    syntax again {body} => n_loop{body};
+    i = 0;
+    loop {
+      i += 1;
+      if(i > 3) break;
+    }
+    print(n, i);
+  }
+  print(first(7));
+}

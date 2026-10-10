@@ -194,6 +194,7 @@ struct vm_session {
     for(node_id item: db.as<n_module>(root).items)
       if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) {
         db.replace(item, db[fresh].kind);
+        db.adopt_notes(fresh, item); // Commentary on the new text - the preserved id
         db.link_parents(root);
         return cat("функция ", fn_name, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
       }
@@ -208,6 +209,7 @@ struct vm_session {
   ast_db & db;
   node_id root;
   std::string name;
+  std::string dir; // program directory: key modules (use k, projection); empty - name directory
   // The machine code lives throughout the session: instance checks the revisions of the
   // functions included in it (including embedded ones), and after editing it is recompiled.
   // There are no de-optimizations - this is a recompilation of the new version (§10, M1).

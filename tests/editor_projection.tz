@@ -1,0 +1,10 @@
+// Программа для сценария 225_editor_projection.wire (сама по себе — обычный тест).
+// out: 3 6
+main() {
+  n = 0;
+  loop {
+    n += 1;
+    if(n > 2) break;
+  }
+  print(n, ((n + n) + n) - 3);
+}

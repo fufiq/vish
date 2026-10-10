@@ -33,6 +33,7 @@ struct parser {
     toks = lx.run();
     diags = std::move(lx.errors); // token::err - Diag numbers
     if(!diags.empty()) lex_error = diags.front().what();
+    take_comments(lx.comments, 0);
     match_brackets();
   }
 
@@ -50,7 +51,103 @@ struct parser {
     }
     for(auto const & d: lx.errors) diags.push_back(diagnostic(d.what(), {d.where.begin + range.begin, d.where.end + range.begin}));
     if(!diags.empty()) lex_error = diags.front().what();
+    take_comments(lx.comments, range.begin);
     match_brackets();
+  }
+
+  // --- Comments: Context Elements (§4.0) ---
+  //
+  // Author's Solution (2026-10-05): Comments and empty lines are in the language, not lost
+  // projection. *My:* Comment is the text of a person with a context element (node_note): the
+  // lines before the element, the tail of its line, the lines before the end of the context;
+  // within the expression, the line before the element. The `/* дыра: … */` parsing hole does
+  // not print:
+//.
+  void take_comments(std::vector<span> const & cs, uint32_t shift) {
+    for(span c: cs) {
+      c.begin += shift;
+      c.end += shift;
+      if(src.substr(c.begin, c.end - c.begin).starts_with("/* дыра:")) continue;
+      comments.push_back(c);
+    }
+    claimed.assign(comments.size(), 0);
+  }
+  uint32_t first_comment(uint32_t at) const {
+    return uint32_t(std::ranges::partition_point(comments, [&](span c) { return c.begin < at; }) - comments.begin());
+  }
+  uint32_t newlines(uint32_t a, uint32_t b) const {
+    uint32_t n = 0;
+    for(uint32_t k = a; k < b && k < src.size(); ++k) n += src[k] == '\n';
+    return n;
+  }
+  // The comments of subtree n are the contexts inserted first. Hole, raw block and native
+  // type the text as written - their comments are already in it.
+  void attach(node_id n) {
+    span w = db[n].where;
+    if(w.source != source) return;
+    if(db.is<n_hole>(n) || db.is<n_raw>(n) || db.is<n_native>(n)) {
+      for(uint32_t i = first_comment(w.begin); i < comments.size() && comments[i].begin < w.end; ++i) claimed[i] = 1;
+      return;
+    }
+    db.for_each_child(n, [&](node_id c) { attach(c); });
+    if(db.is<n_block>(n)) assign(n, db.as<n_block>(n).items, w.begin, w.end);
+    else if(db.is<n_module>(n)) assign(n, db.as<n_module>(n).items, 0, uint32_t(src.size()));
+  }
+  // parsing root: The remaining comments are the root (an element with no context).
+  void attach_root(node_id n) {
+    if(comments.empty() || !n) return;
+    attach(n);
+    if(!db.is_context(n)) assign({}, {n}, 0, uint32_t(src.size()));
+  }
+  // Commentaries of the context of ctx (empty - the string of the set: the end - to the tail of the
+  // latter) in [from, to], not yet taken by the nested: on the line of the end of the element - its tail,
+  // on its lines or inside the element - the lines in front of it, after the last - before the end.
+  void assign(node_id ctx, node_list const & items, uint32_t from, uint32_t to) {
+    std::vector<node_note> ns(items.size() + 1);
+    std::vector<uint32_t> last(items.size() + 1, ~uint32_t{0}); // end of last comment before k
+    std::vector<std::vector<std::string>> inner(items.size()); // Comments on the element k
+    bool any = false;
+    for(uint32_t i = first_comment(from); i < comments.size() && comments[i].begin < to; ++i) {
+      if(claimed[i]) continue;
+      claimed[i] = 1;
+      any = true;
+      span c = comments[i];
+      std::string text(src.substr(c.begin, c.end - c.begin));
+      uint32_t k = uint32_t(std::ranges::partition_point(items, [&](node_id x) { return db[x].where.begin <= c.begin; }) - items.begin());
+      if(k > 0 && c.begin < db[items[k - 1]].where.end) { // inside the element (in expression) - the line in front of it
+        inner[k - 1].push_back(std::move(text));
+        continue;
+      }
+      bool tail = k > 0 && last[k] == ~uint32_t{0} && newlines(db[items[k - 1]].where.end, c.begin) == 0;
+      if(!ctx && k == items.size() && k > 0) tail = true;
+      if(tail) {
+        std::string & t = ns[k - 1].tail;
+        t += t.empty() ? text : cat(" ", text);
+        continue;
+      }
+      auto & lines = k < items.size() ? ns[k].lead : ns[k].end;
+      if(last[k] != ~uint32_t{0})
+        for(uint32_t n = newlines(last[k], c.begin); n > 1; --n) lines.push_back("");
+      lines.push_back(std::move(text));
+      last[k] = c.end;
+    }
+    if(!any) return;
+    for(uint32_t k = 0; k < items.size(); ++k) // Empty lines between comments and elements
+      if(last[k] != ~uint32_t{0})
+        for(uint32_t n = newlines(last[k], db[items[k]].where.begin); n > 1; --n) ns[k].lead.push_back("");
+    for(uint32_t k = 0; k < items.size(); ++k) ns[k].lead.insert(ns[k].lead.end(), inner[k].begin(), inner[k].end());
+    if(ctx && db.is<n_block>(ctx) && last.back() != ~uint32_t{0})
+      for(uint32_t n = newlines(last.back(), to - 1); n > 1; --n) ns.back().end.push_back("");
+    auto merge = [&](node_id x, node_note const & add) {
+      if(add.lead.empty() && add.tail.empty() && add.end.empty()) return;
+      node_note now = db.note_of(x) ? *db.note_of(x) : node_note{};
+      if(!add.lead.empty()) now.lead = add.lead;
+      if(!add.tail.empty()) now.tail = now.tail.empty() ? add.tail : cat(add.tail, " ", now.tail);
+      if(!add.end.empty()) now.end = add.end;
+      db.set_note(x, std::move(now));
+    };
+    for(uint32_t k = 0; k < items.size(); ++k) merge(items[k], ns[k]);
+    if(ctx) merge(ctx, ns.back());
   }
 
   // --- designs declared code (§4.4) ---
@@ -305,6 +402,7 @@ struct parser {
     trim_blank(m.blank);
     auto id = db.add(std::move(m), {start, here().where.end});
     db.link_parents(id);
+    attach_root(id);
     return id;
   }
 
@@ -325,6 +423,7 @@ struct parser {
       node_id n = as_block ? block() : item();
       if(!at_end()) return {};
       db.link_parents(n);
+      attach_root(n);
       return n;
     } catch(diagnostic const &) {
       return {};
@@ -365,6 +464,10 @@ struct parser {
       value = !module_level && at_end() && last_was_value;
     }
     for(node_id n: out) db.link_parents(n);
+    if(!comments.empty()) { // line comments - its elements (without elements - disappear: debt)
+      for(node_id n: out) attach(n);
+      assign({}, out, 0, uint32_t(src.size()));
+    }
     return out;
   }
 
@@ -1044,12 +1147,16 @@ struct parser {
     return db.add(n_ident{name}, {start, toks[pos - 1].where.end});
   }
 
-  // Translation of lines between the previous token and the current (for empty lines).
+  // Translations of lines between the previous lexeme and the current one (for empty lines)
+  // - before the first interval comment (comment lines are not empty; the tail of the line
+  // of the previous lexeme is omitted): empty lines after it - in node_note.
   uint32_t newlines_before() const {
     if(pos == 0 || pos >= toks.size()) return 0;
-    uint32_t n = 0;
-    for(uint32_t k = toks[pos - 1].where.end; k < toks[pos].where.begin && k < src.size(); ++k) n += src[k] == '\n';
-    return n;
+    uint32_t from = toks[pos - 1].where.end, to = toks[pos].where.begin;
+    uint32_t i = first_comment(from);
+    if(i < comments.size() && comments[i].begin < to && newlines(from, comments[i].begin) == 0) from = comments[i++].end;
+    if(i < comments.size() && comments[i].begin < to) to = comments[i].begin;
+    return newlines(from, to);
   }
   // empty lines beyond canonical `canon` line translations
   uint32_t blank_lines(uint32_t canon) const {
@@ -1294,12 +1401,30 @@ struct parser {
     f.name = ident();
     f.form.push_back(f.name);
     while(!is_op("=>") && !at_end()) {
-      if(is_open('(')) {
+      if(is_open('[') && is_open('[', 1)) { // [[line]] part - layout mark: print only
+        advance();
+        advance();
+        for(;;) {
+          if(here().kind != tok::ident || !layout_mark_name(here().text)) throw diagnostic("пометки раскладки записи — line, indent, space, glued", here().where);
+          f.form.push_back(db.strings.intern(cat("[", here().text, "]")));
+          advance();
+          if(!is_op(",")) break;
+          eat_op(",");
+        }
+        expect_close(']');
+        expect_close(']');
+        if(is_op("=>") || at_end()) throw diagnostic("пометка раскладки — перед частью записи", here().where);
+      } else if(is_open('(')) {
         bool glued = here().glued; // return(цель) vs. return (x)
         advance();
         f.params.push_back(param());
+        bool list = is_op(",") && is_op("...", 1); // (xs, ...) - part-list
+        if(list) {
+          eat_op(",");
+          eat_op("...");
+        }
         expect_close(')');
-        f.form.push_back(db.strings.intern(glued ? "()" : "("));
+        f.form.push_back(db.strings.intern(cat(glued ? "()" : "(", list ? "..." : "")));
       } else if(is_op(";")) { // end of instruction: ; (or before )
         advance();
         f.form.push_back(db.strings.intern(";"));
@@ -1348,11 +1473,8 @@ struct parser {
     auto it = rules.syntaxes.find(db.strings.intern(here().text).value);
     if(it == rules.syntaxes.end()) return std::nullopt;
     std::vector<node_id> live(it->second.rbegin(), it->second.rend());
-    auto piece = [&](node_id d, std::size_t k) -> std::string_view {
-      auto const & form = db.as<n_fn>(d).form;
-      return k < form.size() ? db.strings.text(form[k]) : std::string_view();
-    };
-    auto is_param = [](std::string_view p) { return p == "(" || p == "()" || p == "{" || p == "{="; };
+    auto piece = [&](node_id d, std::size_t k) { return form_piece(db, db.as<n_fn>(d), k); }; // The parsing layout is not visible.
+    auto is_param = [](std::string_view p) { return form_paren(p) || p == "{" || p == "{="; };
     bool records = std::ranges::all_of(live, [&](node_id d) { auto r = record_of(db, d); return r && r->kind >= 0; });
     uint32_t saved = pos;
     bool committed = false;
@@ -1396,13 +1518,26 @@ struct parser {
             if(fits(piece(d, k))) v.push_back(d);
           return v;
         };
-        if(auto v = with([&](std::string_view p) { return (p == "(" || p == "()") && is_open('(') && (p == "(" || here().glued); }); !v.empty()) {
+        if(auto v = with([&](std::string_view p) { return form_paren(p) && is_open('(') && (!p.starts_with("()") || here().glued); }); !v.empty()) {
           live = std::move(v);
           committed = records;
           tail_statement = false;
+          uint32_t p0 = here().where.begin;
           advance();
-          args.push_back(expression());
+          // (x) is one expression; (xs, ...) is a comma list, place is array {…}
+          auto lists = [&](bool list) { std::erase_if(live, [&](node_id d) { return form_list(piece(d, k)) != list; }); };
+          node_list items;
+          if(!is_close(')')) items.push_back(expression());
+          while(is_op(",")) {
+            eat_op(",");
+            items.push_back(expression());
+          }
+          bool one = items.size() == 1 && std::ranges::any_of(live, [&](node_id d) { return !form_list(piece(d, k)); });
+          lists(!one);
+          if(live.empty()) throw diagnostic(items.empty() ? "ожидалось выражение" : "ожидалось одно выражение в скобках", here().where);
           expect_close(')');
+          if(one) args.push_back(items[0]);
+          else args.push_back(db.add(n_construct{db.add(n_ident{db.strings.intern("array")}, {p0, p0 + 1}), std::move(items), {}}, {p0, toks[pos - 1].where.end}));
           ++k;
           continue;
         }
@@ -2109,6 +2244,8 @@ struct parser {
   ast_db & db;
   uint32_t source = 0;
   std::string_view src;
+  std::vector<span> comments; // text comments in order (without marking holes)
+  std::vector<uint8_t> claimed; // Comment already given to node
   std::vector<token> toks;
   std::string lex_error; // The first error of the lexer: the line of the editor's set - the whole hole
   bool bracket_error = false; // unpaired brackets (editor's unit - to outer brackets)

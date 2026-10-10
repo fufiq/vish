@@ -36,7 +36,7 @@ const layersBar = byId('layers');
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
 const mergePanel = byId('merge');
-let gotoMode: 'goto' | 'merge' = 'goto';
+let gotoMode: 'goto' | 'merge' | 'projection' = 'goto';
 const statusLine = byId('status');
 const runPanel = byId('run');
 const runStdin = byId('run-stdin') as HTMLTextAreaElement;
@@ -232,12 +232,14 @@ function showMerge(
 }
 
 // Ctrl+P is the signature string; it is sent by Enter, Escape is closed.
-function openGoto(mode: 'goto' | 'merge' = 'goto'): void {
+function openGoto(mode: 'goto' | 'merge' | 'projection' = 'goto'): void {
   gotoMode = mode;
   gotoInput.placeholder =
     mode === 'goto'
       ? 'перейти или добавить: foo(i64)'
-      : 'слить с базой: путь.tzdb';
+      : mode === 'merge'
+        ? 'слить с базой: путь.tzdb'
+        : 'проекция: ключ модуля записей (пусто — по умолчанию)';
   gotoForm.hidden = false;
   gotoInput.value = '';
   gotoInput.focus();
@@ -247,6 +249,13 @@ gotoForm.addEventListener('submit', (e) => {
   gotoForm.hidden = true;
   if (gotoMode === 'merge' && gotoInput.value.trim() !== '') {
     send({ type: 'c_merge', path: gotoInput.value.trim() });
+  } else if (gotoMode === 'projection' && active) {
+    // projection Presentation (§4.4): Print Records and parsing Rules - Key Module
+    send({
+      type: 'c_projection',
+      view: active.data.view,
+      key: gotoInput.value.trim(),
+    });
   } else if (active && gotoInput.value.trim() !== '') {
     send({ type: 'c_goto', view: active.data.view, text: gotoInput.value });
   }
@@ -279,6 +288,10 @@ for (const pane of [app, side]) {
     }
     if (e.ctrlKey && e.key === 'm') {
       openGoto('merge');
+      return;
+    }
+    if (e.ctrlKey && e.key === 'j') {
+      openGoto('projection');
       return;
     }
     if (e.ctrlKey && e.key === 's') {

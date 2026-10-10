@@ -6277,7 +6277,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -6508,6 +6508,14 @@ struct interpreter {
         return value(printer(db).print(c));
       }
       if(n == "code_glued") return value(raw_glued(c)); // atom close to the previous one in a raw block
+      if(n == "code_comment") { // comments on the element (§4.0): the lines in front of it and the tail - the text as written
+        std::string t;
+        if(auto const * x = db.note_of(c)) {
+          for(auto const & l: x->lead) t += cat(t.empty() ? "" : "\n", l);
+          if(!x->tail.empty()) t += cat(t.empty() ? "" : "\n", x->tail);
+        }
+        return value(std::move(t));
+      }
       if(n == "code_id") return value(int64_t(c.value)); // node number - compare node
       if(n == "code_parent") return code_value(db[c].parent); // The root is empty; the root is empty.
       if(n == "code_module") return code_value(module_of(c)); // module where the node is written (extension control, §9.1)
@@ -6825,6 +6833,70 @@ struct interpreter {
   uint64_t effects = 0;
   uint64_t checks = 0; // run-time - parsing check (observation: node can throw)
 };
+
+// Selection of printing code in language (§4.4, variant C): the net function of the fn
+// module over the print descriptors is values and code.
+// 
+// Purity (my): no execution effects (output, I/O), no code change and emit; otherwise, as
+// with error or non-bool, -1 and reason: printing takes a conservative choice.
+//
+int language_choice(ast_db const & cdb, choice_vms & pool, node_id fn, std::vector<choice_arg> const & args, std::string & why) {
+  static thread_local bool busy = false; // printing within selection (code_text) - no choice
+  if(busy) {
+    why = "выбор печати внутри выбора печати";
+    return -1;
+  }
+  ast_db & db = const_cast<ast_db &>(cdb); // Derivatives of node - Argument Names (Derive) - not code editing
+  node_id m = fn;
+  while(m && !db.is<n_module>(m)) m = db[m].parent;
+  if(!m) {
+    why = "функция выбора вне модуля";
+    return -1;
+  }
+  struct busy_hold {
+    busy_hold() { busy = true; }
+    ~busy_hold() { busy = false; }
+  } hold;
+  std::size_t mutations = db.mutations.size();
+  try {
+    auto at = std::ranges::find(pool.mods, m);
+    if(at == pool.mods.end()) { // one interpreter per module per print
+      pool.vms.emplace_back(db, m, std::vector<std::string>{}, mode::run);
+      pool.mods.push_back(m);
+      at = pool.mods.end() - 1;
+    }
+    interpreter & vm = *std::next(pool.vms.begin(), at - pool.mods.begin());
+    if(vm.setup_error) throw *vm.setup_error;
+    uint64_t effects = vm.effects;
+    std::size_t emitted = vm.emitted.size();
+    scope * s = vm.new_scope(vm.globals);
+    interpreter::scope_hold sh{vm, s};
+    node_list names;
+    auto const & params = db.as<n_fn>(fn).params;
+    for(std::size_t i = 0; i < args.size(); ++i) {
+      symbol n = vm.sym(cat("__choice", i));
+      value v = std::visit([&](auto const & a) -> value {
+        using T = std::remove_cvref_t<decltype(a)>;
+        if constexpr(std::is_same_v<T, node_id>) return vm.code_value(a);
+        else return value(a);
+      },
+          args[i]);
+      s->declare(n, std::move(v));
+      auto & id = vm.hook_idents[n.value];
+      if(!id) id = db.derive(n_ident{n}, {}, vm.derived_nodes);
+      names.push_back(id);
+    }
+    if(params.size() != args.size()) throw diagnostic(cat("ожидалось параметров: ", args.size()), db[fn].where);
+    auto f = vm.call_overloaded({fn}, names, s, 0, {db[fn].where, std::string(db.strings.text(db.as<n_fn>(fn).name)), 0, 0});
+    if(f.kind == interpreter::flow_kind::thr) why = cat("исключение: ", vm.show_v(f.v));
+    else if(vm.effects != effects || vm.emitted.size() != emitted || db.mutations.size() != mutations) why = "не чистая (эффект, изменение кода или emit)";
+    else if(!f.normal() || !f.v.is<bool>()) why = "ожидался итог bool";
+    else return f.v.as<bool>() ? 1 : 0;
+  } catch(diagnostic const & d) {
+    why = d.what();
+  }
+  return -1;
+}
 
 } // namespace tz
 

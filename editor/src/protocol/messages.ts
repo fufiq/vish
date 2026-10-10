@@ -76,6 +76,12 @@ export interface Take {
   key: string;
   theirs: boolean;
 }
+// projection Presentation: Syntax entries module by key;' - by default.
+export interface ProjectionPick {
+  type: 'c_projection';
+  view: number;
+  key: string;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -88,7 +94,8 @@ export type ClientMsg =
   | Save
   | Trace
   | Merge
-  | Take;
+  | Take
+  | ProjectionPick;
 
 export interface ServerHello {
   type: 's_hello';

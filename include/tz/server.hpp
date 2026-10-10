@@ -10,6 +10,7 @@
 #include "proto.hpp"
 #include "complete.hpp"
 #include "merge.hpp"
+#include "modules.hpp"
 #include "parser.hpp"
 #include "session.hpp"
 
@@ -44,6 +45,7 @@ struct editor_view {
   uint32_t word_begin = 0;
   std::string kind = "module"; // Module - Module without internal elements; fn - one function
   std::string layer; // Presentation Layer: Key instance, "all contexts"
+  node_id projection; // projection (§4.4): Module of print records and rules parsing edits; empty - default
   // transition list (F12, Ctrl+P): by item - function or signature "add"
   struct nav_target {
     node_id fn;
@@ -458,6 +460,8 @@ struct editor_server {
       parser pr(session.db, edited, cat("<ввод #", edits, ">"));
       // parsing Rules: Contexts around the unit declared before it (§4.4)
       if(u.kind != 2) pr.place(session.db[u.node].parent, u.node);
+      else pr.place({});
+      projection_rules(pr, v);
       node_id fresh = u.kind == 2 ? pr.parse_module() : pr.parse_unit(u.kind == 0);
       if(!fresh || (u.kind == 0 && !session.db.is<n_block>(fresh))) continue;
       if(u.kind != 2) { // f(…) is a reference to the module function
@@ -478,6 +482,7 @@ struct editor_server {
           nm.inner = session.db.as<n_module>(session.root).inner;
         }
         session.db.replace(target, std::move(k));
+        session.db.adopt_notes(fresh, target); // Commentary on the new text - the preserved id
         if(rules_changed) {
           auto const & items = session.db.as<n_module>(session.root).items;
           reparse_after(session.root, std::size_t(std::ranges::find(items, target) - items.begin()) + 1);
@@ -591,15 +596,18 @@ struct editor_server {
     }
     bool blank_text = std::ranges::all_of(ins, [](char ch) { return ch == ' ' || ch == '\n' || ch == '\t'; });
     if(count == 0 && (a != b || blank_text)) return false; // erasure and gaps in the gap - through brackets
+    if(count == 0 && in_comment(v, c, k, a)) return false; // Quotation in comments (§4.0) - also in brackets
     auto old = items_range(v, c, k, count, a);
     std::string_view was = v.text_of(old);
     uint32_t base = v.byte_at[old.first];
     std::string edited = count ? cat(was.substr(0, v.byte_at[a] - base), ins, was.substr(v.byte_at[b] - base)) : ins;
     parser pr(db, edited, cat("<ввод #", edits, ">"));
     pr.place(c, k < items.size() ? items[k] : node_id{}); // Rules of Place (§4.4)
+    projection_rules(pr, v);
     bool value = false;
     auto fresh = pr.parse_line(module_level, value);
     if(!fresh) return false;
+    if(fresh->empty() && !pr.comments.empty()) return false; // The line became a comment - it is at the neighboring element: through brackets
     if(module_level) { // & f(…) - a reference to the module function (and the one just typed)
       node_list items = db.as<n_module>(session.root).items;
       items.insert(items.end(), fresh->begin(), fresh->end());
@@ -654,7 +662,10 @@ struct editor_server {
     for(node_id x: *fresh) now_rules += parser::rule_trace(db, x);
     bool rules_changed = was_rules != now_rules;
     auto mutate = [&] {
-      if(count && first_fresh) db.replace(items[k], db[first_fresh].kind);
+      if(count && first_fresh) {
+        db.replace(items[k], db[first_fresh].kind);
+        db.adopt_notes(first_fresh, items[k]);
+      }
       if(db.is<n_block>(c)) {
         n_block nb = db.as<n_block>(c);
         nb.items = list;
@@ -686,6 +697,22 @@ struct editor_server {
     };
     apply(v, c, mutate, before, after, edited, {count ? a - old.first : 0, count ? b - old.first : 0, code_points(ins)}, caret);
     return true;
+  }
+
+  // Place a in the gap before the element k of the container c - inside the comment: in
+  // the interval only spaces and comments (§4.0), `//` - to the end of the line.
+  bool in_comment(editor_view const & v, node_id c, uint32_t k, uint32_t a) const {
+    node_list const items = items_of(session.db, c);
+    uint32_t from = k > 0 ? v.range[v.layout_of(items[k - 1])].second : (c == session.root ? 0 : v.range[v.layout_of(c)].first + 1);
+    std::string_view t = std::string_view(v.text).substr(v.byte_at[from], v.byte_at[a] - v.byte_at[from]);
+    bool line = false, block = false;
+    for(std::size_t i = 0; i < t.size(); ++i) {
+      if(line) line = t[i] != '\n';
+      else if(block) block = !(t[i] == '*' && i + 1 < t.size() && t[i + 1] == '/' && ++i);
+      else if(t.substr(i).starts_with("//")) line = true;
+      else if(t.substr(i).starts_with("/*")) block = true;
+    }
+    return line || block;
   }
 
   std::string items_trace(node_id block) const {
@@ -736,6 +763,7 @@ struct editor_server {
         pr.resolve_refs(all);
       }
       db.replace(x, db[(*fresh)[0]].kind);
+      db.adopt_notes((*fresh)[0], x);
       reparsed.push_back(x);
       if(fresh->size() == 1) continue;
       // disintegrated: the rest - in context after (the value of the block - as it was)
@@ -1116,6 +1144,32 @@ struct editor_server {
     if(auto fl = session.layers.find(v.root.value); fl != session.layers.end())
       for(auto const & [key, l]: fl->second) out.layers.push_back({key, l.ct ? "кт" : "рт"});
     send(p, out);
+  }
+
+  // projection presentation (§4.4, variant C - author's decision 2026-10-05): a group of
+  // records syntax - module; the presentation prints from his records and disassembles edits
+  // according to his rules (print on the record R is disassembled by the same R). The module is
+  // searched by key next to the program, like use k.
+// *My:* projection is the module, the choice is in the presentation.
+  void handle(peer & p, proto::c_projection const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    node_id mod;
+    if(!m.key.empty()) {
+      auto dir = session.dir.empty() ? std::filesystem::path(session.name).parent_path() : std::filesystem::path(session.dir);
+      auto errors = preload_uses(session.db, cat("use ", m.key, ";"), dir);
+      if(auto it = session.db.strings.index.find(m.key); it != session.db.strings.index.end()) mod = find_module(session.db, it->second);
+      if(!mod) return send(p, proto::s_error{cat("нет модуля проекции ", m.key)});
+      if(!errors.empty()) return send(p, proto::s_error{cat("проекция ", m.key, ": ", errors.front().what())});
+    }
+    v->projection = mod;
+    v->cursor = 0;
+    show_view(p, *v);
+  }
+  // Rules parsing projection representation - on top of the rules of the place (the last - the first).
+  void projection_rules(parser & pr, editor_view const & v) {
+    if(!v.projection) return;
+    for(node_id x: session.db.as<n_module>(v.projection).items) pr.learn_item(x);
   }
 
   void handle(peer & p, proto::c_layer const & m) {
@@ -1546,6 +1600,7 @@ struct editor_server {
     // The presentation of the module does not show the internal elements - "not littering"
     printer pr(session.db, v.kind == "module" ? printer::filter([&](node_id n) { return !is_inner(n); }) : printer::filter{});
     pr.layouts = &v.layouts;
+    pr.projection = v.projection;
     pr.print(v.root);
     v.at.assign(session.db.size(), ~uint32_t{0});
     for(uint32_t k = 0; k < v.layouts.size(); ++k) v.at[v.layouts[k].node.value] = k;

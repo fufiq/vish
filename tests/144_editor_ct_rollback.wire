@@ -18,7 +18,7 @@ key 1 8
 pointer 1 @ct:2 0 0
 key 1 x
 // expect: struct point { i64 x; i64 y; }
-// expect-not: z =
+// expect-not: i64 z = 8; }
 // ct again - the field is back
 key 1 Backspace
 // expect: struct point { i64 x; i64 y; i64 z = 8; }

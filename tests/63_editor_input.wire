@@ -53,8 +53,8 @@ key 1 {
 // expect: другому клиенту:
 // expect: prxint(s);
 // края: Backspace в начале и Delete в конце — ничего; Ctrl+буква — не ввод
-pointer 1 @main 0 0
+pointer 1 @Программа 0 0
 key 1 Backspace
-// expect: курсор: ‸main() {
+// expect: курсор: ‸// Программа для сценария 62
 key 1 a 2
 // expect: клавиша не обработана: a

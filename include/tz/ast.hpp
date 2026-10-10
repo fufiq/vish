@@ -342,7 +342,22 @@ struct j_place {
   uint32_t id;
   span where;
 };
-using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place>;
+// Comments (§4.0, author's decision 2026-10-05: ): the text of a person with an element of
+// context is a layout in the database, as empty lines (blank); the execution does not see it.
+// lead - the lines before the element (comments as written, "" - an empty line between them),
+// tail - the comment at the end of the line of the element, end - at the context (block, module):
+// the lines before its end. There is no logic in the comments:
+//
+struct node_note {
+  std::vector<std::string> lead;
+  std::string tail;
+  std::vector<std::string> end;
+};
+struct j_note {
+  uint32_t id;
+  node_note note;
+};
+using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place, j_note>;
 
 struct journal_entry {
   uint64_t revision;
@@ -909,12 +924,41 @@ struct ast_db {
           rollback(op.source);
         } else if constexpr(std::is_same_v<T, j_place>) {
           place(node_id(op.id), op.where);
+        } else if constexpr(std::is_same_v<T, j_note>) {
+          set_note(node_id(op.id), op.note);
         } else {
           record_import(op.text, op.label);
         }
       },
           e.op);
     }
+  }
+
+  // node (node_note) comments: Empty, no. Write in journal (as blank).
+  node_note const * note_of(node_id n) const {
+    if(notes.empty()) return nullptr;
+    auto it = notes.find(n.value);
+    return it == notes.end() ? nullptr : &it->second;
+  }
+  void set_note(node_id n, node_note x) {
+    bool empty = x.lead.empty() && x.tail.empty() && x.end.empty();
+    if(empty && !notes.contains(n.value)) return;
+    if(empty) notes.erase(n.value);
+    else notes[n.value] = x;
+    log({j_note{n.value, std::move(x)}});
+  }
+  // Node to saved id, and disassembled anew as from: the text of the unit - without lines in
+  // front of it and the tail (they are in the gap of context), so found new parsing inside it is
+  // added to them; the end of the context - all in its text - is replaced.
+  //
+  void adopt_notes(node_id from, node_id to) {
+    node_note const * f = note_of(from);
+    if(!f || from == to) return;
+    node_note x = note_of(to) ? *note_of(to) : node_note{};
+    x.lead.insert(x.lead.end(), f->lead.begin(), f->lead.end());
+    if(!f->tail.empty()) x.tail = x.tail.empty() ? f->tail : cat(f->tail, " ", x.tail);
+    x.end = f->end;
+    set_note(to, std::move(x));
   }
 
   // Node - context (module, block): heir to n_context
@@ -1016,6 +1060,11 @@ struct ast_db {
   std::vector<reborn_rec> reborn;
   std::vector<uint64_t> birth; // The tact of birth or taking again: “created by this elaboration”
   uint64_t births = 0;
+  // Choices of printing by code in the language (§4.4, variant C): the key is the selection function,
+  // its revision, base edits and arguments → the result (0/1, -1 - error: conservative choice). A pure
+  // function is one sum to the same arguments; printing does not change the base, so mutable.
+  mutable std::unordered_map<std::string, int8_t> print_choices;
+  std::unordered_map<uint32_t, node_note> notes; // Node → comments (layout)
 };
 
 // The parsing rule of the decl blocks is: `syntax {r} => f(r);` in her body. The ad repeats the
@@ -1137,6 +1186,27 @@ struct record_info {
   std::vector<uint32_t> slot; // parameter k → place in the body (field node / call argument)
   uint32_t places = 0; // body-place
 };
+
+// Marking layout in the syntax record (§4.4, projection): `[[line]] else` - part from the
+// new line, `[[indent]] {x}` - body-non-block from the new line deeper, `[[space]]` -
+// through the space, `[[glued]]` - close. Print only: parsing does not see gaps. In the form
+// - before its part, the text "[name]".
+bool form_mark(std::string_view p) { return p.size() > 2 && p[0] == '['; }
+bool layout_mark_name(std::string_view w) { return w == "line" || w == "indent" || w == "space" || w == "glued"; }
+// Part-list `(xs, ...)`: elements by comma, space by array {…} (§4.4).
+bool form_list(std::string_view p) { return p.ends_with("..."); }
+// Part in brackets: (x), close to (x), list (xs, ...).
+bool form_paren(std::string_view p) { return !p.empty() && p[0] == '('; }
+// k-th part of the record without layout marks (empty - no such).
+std::string_view form_piece(ast_db const & db, n_fn const & f, std::size_t k) {
+  for(symbol s: f.form) {
+    auto p = db.strings.text(s);
+    if(form_mark(p)) continue;
+    if(k == 0) return p;
+    --k;
+  }
+  return {};
+}
 
 std::optional<record_info> record_of(ast_db const & db, node_id fn) {
   if(!db.is<n_fn>(fn)) return std::nullopt;

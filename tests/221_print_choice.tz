@@ -1,0 +1,59 @@
+// out: 1 2 7
+// out: 9 3
+// fmt-stable
+// store-roundtrip
+// fmt-has:   when(x > 1) r = 1; otherwise r = 2;
+// fmt-has:   when(x > 5) {
+// fmt-has:   } otherwise r = 0;
+// fmt-has: mul3(a, b, c) => (a * b) * c;
+// fmt-has: add4(a, b, c, d) => ((a + b) + c) + d;
+// fmt-has:   (x + y) + z
+// Выбор печати кодом на языке (§4.4, вариант C — решение автора 2026-10-05):
+// где у узла несколько записей или нужно решение (скобки), его принимает чистая
+// функция на языке — только выбирает, печать — по выбранной записи (её же разбор).
+// [[prefer(f)]] у записи — запись берётся, если f(узел); иначе — следующая
+// подходящая. operand_parens — скобки вокруг операнда: своя функция в модуле
+// ближе прелюдии. Ошибка функции выбора — консервативно (скобки ставятся) с
+// примечанием печати.  
+// *Моё:* имя prefer, функция скобок по имени,
+// описатели-аргументы.
+[[prefer(plain_then)]] syntax when (c) {yes}; otherwise {no} => n_if{c, yes, no};
+syntax when (c) {yes} otherwise {no} => n_if{c, yes, no};
+
+// ветка «то» — не блок: форма с `;` (как в C)
+plain_then(n) => {
+  n_if{_, t, _} = n;
+  code_kind(t) != n_block
+};
+
+// своя функция скобок модуля: скобки у любого вложенного инфикса, и у того же
+// ассоциативного (печать по дереву, как написано: ((a + b) + c) + d)
+operand_parens(str kind, str op, bool left, str parent_op, bool assoc) => (kind != "");
+
+pick(x) {
+  r = 0;
+  when(x > 1) r = 1; otherwise r = 2;
+  r
+}
+
+big(x) {
+  r = 0;
+  when(x > 5) {
+    r = x;
+  } otherwise r = 0;
+  r
+}
+
+sub3(a, b, c) => (a - b) - c;
+// функция выбора блока упала — скобки консервативно, примечание печати
+sum3(x, y, z) {
+  operand_parens(str kind, str op, bool left, str parent_op, bool assoc) => throw "нет";
+  (x + y) + z
+}
+mul3(a, b, c) => (a * b) * c;
+add4(a, b, c, d) => ((a + b) + c) + d;
+
+main() {
+  print(pick(2), pick(0), big(7));
+  print(sub3(20, 8, 3), mul3(1, 1, 3) + add4(0, 0, 0, sum3(0, 0, 0)));
+}

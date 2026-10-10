@@ -49,14 +49,22 @@ struct lexer {
         glued = false;
         continue;
       }
-      if(c == '/' && peek(1) == '/') {
+      if(c == '/' && peek(1) == '/') { // Comment - not a lexeme, but not lost: layout (§4.0)
+        uint32_t start = pos;
         skip_line();
+        uint32_t end = pos;
+        if(end > start && src[end - 1] == '\r') --end; // text as written, without \r
+        comments.push_back({start, end});
         glued = false;
         continue;
       }
-      if(c == '/' && peek(1) == '*' && skip_block_comment()) {
-        glued = false;
-        continue;
+      if(c == '/' && peek(1) == '*') {
+        uint32_t start = pos;
+        if(skip_block_comment()) {
+          comments.push_back({start, pos});
+          glued = false;
+          continue;
+        }
       }
 
       uint32_t start = pos;
@@ -167,6 +175,7 @@ struct lexer {
   std::string_view src;
   uint32_t pos = 0;
   std::vector<diagnostic> errors; // Reasons for token-holes (token::err)
+  std::vector<span> comments; // Comments in order: `//…` to the end of the line, `/*…*/`
 };
 
 } // namespace tz

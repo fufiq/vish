@@ -1,0 +1,43 @@
+// projection presentation (§4.4, variant C - author's decision 2026-10-05): group of records syntax
+// - module; presentation selects projection (projection type key), prints from its records (and its
+// functions of brackets) and disassembles edits according to its rules: printing on the record R is
+// parsed by the same R. node the same - only the text changes. Empty key - projection by default
+// (records by scope, prelude - C-like, D3). The client text is checked with projection after each
+// response.
+//
+// program: editor_projection.tz
+open_view module
+// expect:   loop {
+// expect:     if(n > 2) break;
+// expect:   print(n, (n + n + n) - 3);
+projection 1 geo.words
+// expect:   forever {
+// expect:     when(n > 2) break;
+// expect:   print(n, ((n + n) + n) - 3);
+// editing in projection - parsing from her records: the same n_if
+pointer 1 @2 0 0
+key 1 Delete
+key 1 5
+// expect:     when(n > 5) break;
+// expect: kind="n_if"
+// expect-not: n_hole
+// a new line with the words projection - the kernel node
+pointer 1 @print 0 0
+key 1 f
+key 1 o
+key 1 r
+key 1 e
+key 1 v
+key 1 e
+key 1 r
+key 1 \s
+key 1 {
+key 1 }
+// expect:   forever {}⏎  print(n, ((n + n) + n) - 3);
+// expect: kind="n_loop" pieces=["forever " #
+projection 1 нет.такой
+// expect: нет модуля проекции нет.такой
+projection 1
+// expect:   loop {
+// expect:     if(n > 5) break;
+// expect:   loop {}⏎  print(n, (n + n + n) - 3);

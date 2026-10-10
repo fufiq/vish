@@ -7,8 +7,12 @@
 
 #include "ast.hpp"
 
+#include <deque>
 #include <functional>
+#include <list>
+#include <map>
 #include <optional>
+#include <unordered_map>
 
 namespace tz {
 
@@ -18,6 +22,17 @@ struct node_layout {
   node_id node;
   std::vector<piece> pieces;
 };
+
+// Argument of the print selection function (§4.4, variant C): a descriptor value or code.
+using choice_arg = std::variant<bool, std::string, node_id>;
+// Interpreters of the functions of selecting one print - by function module (interp.hpp).
+struct interpreter;
+struct choice_vms {
+  std::list<interpreter> vms; // list: items do not move, type declared below
+  node_list mods;
+};
+// Calling the pure fn selection function in the language (interp.hpp): 1/0; -1 - error (why).
+int language_choice(ast_db const & db, choice_vms & pool, node_id fn, std::vector<choice_arg> const & args, std::string & why);
 
 struct printer {
   // keep(n) == False - node drops out of projection (slice).
@@ -107,7 +122,7 @@ struct printer {
 
   // --- instruction ---
 
-  void print_node(node_id, n_module const & m) {
+  void print_node(node_id module, n_module const & m) {
     if(m.name) {
       attrs(m.attrs); // [[extension]] module k;
       out += cat("module ", str(m.name), ";\n");
@@ -119,9 +134,36 @@ struct printer {
       if(!first) out += '\n';
       if(!first) blank_lines(m.blank, k);
       first = false;
+      node_note const * nt = comments ? db.note_of(i) : nullptr;
+      if(nt) note_lines(nt->lead, true);
       item(i);
       if(!db.is<n_fn>(i)) terminate(i);
+      if(nt && !nt->tail.empty()) out += cat(" ", nt->tail);
       out += '\n';
+    }
+    if(node_note const * nt = comments ? db.note_of(module) : nullptr; nt && !nt->end.empty()) { // comments at the end of the module
+      if(!first) out += '\n';
+      note_lines(nt->end, true);
+    }
+  }
+
+  // Comments (node_note, §4.0) - text as written: lines in front of an element or the end of
+  // context - each on its line in the indentation of the place (""" is an empty line), the
+  // tail - through a space at the end of the line of the element. Printing a comment - like a
+  // literal, basic level.
+  void note_lines(std::vector<std::string> const & ls, bool module) {
+    for(auto const & l: ls) {
+      if(module) {
+        out += cat(l, "\n");
+        continue;
+      }
+      if(l.empty()) {
+        out += '\n';
+        if(layouts) out.append(indent * 2, ' ');
+        continue;
+      }
+      line();
+      out += l;
     }
   }
 
@@ -143,8 +185,12 @@ struct printer {
         auto const & p = db.as<n_param>(f.params[k]);
         if(piece == "{=") out += cat("{[[value]] ", str(p.name), "}");
         else if(piece == "{") out += cat("{", str(p.name), "}");
-        else params({f.params[k]});
-      }, true);
+        else if(form_list(piece)) { // (xs, ...) - part-list
+          out += '(';
+          item(f.params[k]);
+          out += ", ...)";
+        } else params({f.params[k]});
+      }, [](std::size_t) { return false; }, true);
       out += " => ";
       item(f.body);
       if(!db.is<n_block>(f.body)) out += ';';
@@ -202,71 +248,290 @@ struct printer {
     }
   }
 
-  // Syntax form: word through the space, (...) - close to the word, {…} - through the
-  // space, `;` - close; hole(k, часть) prints the k-th hole ("(", "()), "{" - body, "{="
-  // - slot value). In the announcement (decl) brackets - as written: "()" close, "("
-  // through the space.
-  void form(std::vector<symbol> const & pieces, auto && hole, bool decl = false) {
+  // Write the syntax form in parts: the word - through the space, (...) - close to the
+  // word, {…} - through the space, `;` - close. The layout marks in front of the part
+  // (§4.4, projection) change the interval: [[space]] - space, [[glued]] - close, [[line]]
+  // - from a new line, [[indent]] - non-block place from a new line to a deeper level (the
+  // block recedes itself). hole(k, часть) prints the kth place, block(k) the k place is
+  // occupied by the block. In the announcement (decl) brackets - as written ("()" close,
+  // "(" through the space), notes - the text [[…]].
+  void form(std::vector<symbol> const & pieces, auto && hole, auto && block, bool decl = false) {
     std::size_t k = 0;
-    for(std::size_t i = 0; i < pieces.size(); ++i) {
-      auto p = str(pieces[i]);
-      bool paren = p == "(" || p == "()";
-      bool after_word = i && lexer::is_ident_start(str(pieces[i - 1])[0]);
-      bool glued = p == "()" || (!decl && p == "(" && after_word);
-      if(i && !glued && p != ";") out += ' ';
-      if(paren || p == "{" || p == "{=") hole(k++, p);
+    std::string_view prev;
+    std::vector<std::string_view> marks;
+    for(symbol s: pieces) {
+      auto p = str(s);
+      if(form_mark(p)) {
+        marks.push_back(p.substr(1, p.size() - 2));
+        continue;
+      }
+      bool place = form_paren(p) || p == "{" || p == "{=";
+      bool after_word = !prev.empty() && lexer::is_ident_start(prev[0]);
+      bool glued = p.starts_with("()") || (!decl && form_paren(p) && after_word);
+      bool space = !prev.empty() && !glued && p != ";", newline = false, deeper = false;
+      if(decl && !marks.empty()) {
+        out += prev.empty() ? "[[" : " [[";
+        for(std::size_t i = 0; i < marks.size(); ++i) out += cat(i ? ", " : "", marks[i]);
+        out += "]]";
+        space = !p.starts_with("()");
+      } else
+        for(auto m: marks) {
+          if(m == "space" || m == "glued") space = m == "space";
+          else if(m == "line") newline = true;
+          else if(m == "indent") deeper = place && !block(k);
+        }
+      marks.clear();
+      prev = p;
+      if(deeper) {
+        ++indent;
+        line();
+        hole(k++, p);
+        --indent;
+        continue;
+      }
+      if(newline) line();
+      else if(space) out += ' ';
+      if(place) hole(k++, p);
       else out += p;
     }
   }
 
-  // prelude entries (§4.4): kernel node and kernel call are printed on the first
-  // suitable record -, the record - in prelude.
-  std::vector<std::pair<node_id, record_info>> const & records() {
-    if(!records_built) {
-      records_built = true;
-      if(db.prelude)
-        for(node_id f: db.as<n_module>(db.prelude).items)
-          if(auto r = record_of(db, f)) record_list.push_back({f, *r});
-    }
-    return record_list;
+  // The place of writing in its part: (x) - in brackets, (xs, ...) - elements array {…}
+  // through the comma, {x} - block or expression as is.
+  void part(std::string_view piece, node_id x) {
+    if(!form_paren(piece)) return item(x);
+    out += '(';
+    if(form_list(piece) && db.is<n_construct>(x) && kept(x)) {
+      if(layouts) enter(x);
+      auto const & xs = db.as<n_construct>(x).items;
+      for(std::size_t i = 0; i < xs.size(); ++i) {
+        if(i) out += ", ";
+        item(xs[i]);
+      }
+      if(layouts) leave();
+    } else item(x);
+    out += ')';
   }
-  // Write node n: Body locations а node field (call arguments); empty no.
-  std::pair<node_id, record_info> const * record_for(node_id n) {
+  bool block_like(node_id x) const { return db.is<n_block>(x) || db.is<n_raw>(x); }
+
+  // - Printing by field of visibility;§4.4)
+  // -------------------------------------------------------------------------------------------- The
+  // kernel nodesk and the kernel call are printed from the syntax record visible in the place of the
+  // nodesk: context from the nodesk to the nearest first (in context - declared to the element on the
+  // way, the first suitable in order of the announcement), `use k` - records of the module k at the
+  // use point, blocks of calling the structure - recordings from its body, prelude - the last.
+//  
+//;.
+  // Printing from the record R is analyzed by the same R - reversibility by construction.
+  using rec = std::pair<node_id, record_info>;
+  struct ctx_rec {
+    uint32_t at; // context number
+    uint32_t rec; // room
+  };
+
+  int rec_of_decl(node_id d) {
+    auto [it, fresh] = rec_index.try_emplace(d.value, -1);
+    if(fresh)
+      if(auto r = record_of(db, d)) {
+        rec_pool.push_back({d, *r});
+        it->second = int(rec_pool.size() - 1);
+      }
+    return it->second;
+  }
+  // Context element entries: syntax recording, entries in the name extension { … }, use k.
+  void item_recs(node_id x, std::vector<uint32_t> & out) {
+    if(db.is<n_fn>(x)) {
+      if(int r = rec_of_decl(x); r >= 0) out.push_back(uint32_t(r));
+    } else if(db.is<n_extend>(x)) {
+      for(node_id f: db.as<n_extend>(x).items)
+        if(db.is<n_fn>(f))
+          if(int r = rec_of_decl(f); r >= 0) out.push_back(uint32_t(r));
+    } else if(db.is<n_use>(x)) {
+      node_id m = find_module(db, db.as<n_use>(x).key);
+      if(!m || std::ranges::contains(using_now, m)) return;
+      using_now.push_back(m);
+      for(node_id y: db.as<n_module>(m).items) item_recs(y, out);
+      using_now.pop_back();
+    }
+  }
+  std::vector<ctx_rec> const & context_recs(node_id c) {
+    auto [it, fresh] = ctx_recs.try_emplace(c.value);
+    if(fresh) {
+      auto const & xs = db.context_items(c);
+      std::vector<uint32_t> rs;
+      for(uint32_t k = 0; k < xs.size(); ++k) {
+        item_at[xs[k].value] = k;
+        rs.clear();
+        item_recs(xs[k], rs);
+        for(uint32_t r: rs) it->second.push_back({k, r});
+      }
+    }
+    return it->second;
+  }
+  // Records from the body of a structure for its blocks (as the rules parsing, §4.4).
+  std::vector<uint32_t> const & body_recs(node_id d) {
+    auto [it, fresh] = decl_body_recs.try_emplace(d.value);
+    if(fresh && db.is<n_fn>(d) && db.is<n_block>(db.as<n_fn>(d).body)) {
+      std::vector<uint32_t> rs;
+      for(node_id x: db.as<n_block>(db.as<n_fn>(d).body).items) item_recs(x, rs);
+      decl_body_recs[d.value] = std::move(rs);
+    }
+    return decl_body_recs[d.value];
+  }
+  // Announcements of the call construct c, which have records in the body: the syntax form is its
+  // announcement, otherwise functions with the name of the called (living elements of contexts).
+  node_list call_rec_decls(node_id c) {
+    auto const & k = db.as<n_call>(c);
+    if(k.form) return {node_id(k.form - 1)};
+    if(!body_scan) {
+      body_scan = true;
+      for(uint32_t i = 0; i < db.size(); ++i) {
+        node_id f(i);
+        if(!db.is<n_fn>(f) || !db.is<n_block>(db.as<n_fn>(f).body) || !db.as<n_fn>(f).form.empty() || !db[f].parent) continue;
+        node_id up = db[f].parent;
+        bool live = db.is_context(up) ? std::ranges::contains(db.context_items(up), f) : db.is<n_extend>(up) && std::ranges::contains(db.as<n_extend>(up).items, f);
+        if(live && !body_recs(f).empty()) rec_bodies[db.as<n_fn>(f).name.value].push_back(f);
+      }
+    }
+    if(rec_bodies.empty() || !db.is<n_ident>(k.callee)) return {};
+    auto it = rec_bodies.find(db.as<n_ident>(k.callee).name.value);
+    return it == rec_bodies.end() ? node_list{} : it->second;
+  }
+  // a is a call block (as in parsing: block, block with parameters, tail; clause - and in
+  // pack): the call itself, otherwise empty.
+  node_id block_call(node_id c, node_id a) const {
+    if(db.is<n_construct>(c) && db[c].parent && db.is<n_call>(db[c].parent) && !db.as<n_call>(db[c].parent).words.empty())
+      return std::ranges::contains(db.as<n_construct>(c).items, a) ? db[c].parent : node_id{};
+    if(!db.is<n_call>(c) || !std::ranges::contains(db.as<n_call>(c).args, a)) return {};
+    bool block = block_like(a) || (db.is<n_lambda>(a) && db.as<n_lambda>(a).block);
+    return block || (db.as<n_call>(c).tail && db.as<n_call>(c).args.back() == a) ? c : node_id{};
+  }
+
+  // Write fits node: view and occupied places (node fields or call arguments) and, if the
+  // record has [[prefer(f)]], f(узел) in the language: "form selection" of one node (`if …
+  // else` or `if …; else`). Error f - no entry is taken (conservatively: next suitable, no
+  // condition).
+  bool fits(node_id n, rec const & x) {
+    if(!shape_fits(n, x)) return false;
+    for(node_id a: db.as<n_fn>(x.first).attrs) {
+      if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "prefer") continue;
+      auto const & args = db.as<n_call>(a).args;
+      node_id fn = args.size() == 1 && db.is<n_ident>(args[0]) ? visible_fn(str(db.as<n_ident>(args[0]).name), x.first) : node_id{};
+      if(!fn) {
+        notes.push_back("печать: prefer(f) — функция f не найдена; запись не выбрана");
+        return false;
+      }
+      if(choose(fn, {n}) != 1) return false;
+    }
+    return true;
+  }
+  bool shape_fits(node_id n, rec const & x) const {
+    auto const & [f, r] = x;
+    if(r.kind >= 0) {
+      if(int(db[n].kind.index()) != r.kind) return false;
+      for(uint32_t p = 0; p < r.places; ++p)
+        if(bool(node_place(db[n].kind, p)) != std::ranges::contains(r.slot, p)) return false;
+      return true;
+    }
+    if(!db.is<n_call>(n)) return false;
+    auto const & c = db.as<n_call>(n);
+    return db.is<n_ident>(c.callee) && db.as<n_ident>(c.callee).name == db.as<n_fn>(f).name && c.words.empty() && !c.tagged && !c.form && c.args.size() == r.places;
+  }
+  // node, which can be printed by writing: all fields are node (n_if, n_return...) or call.
+  bool record_kind(node_id n) const {
+    static std::vector<int8_t> const able = [] {
+      std::vector<int8_t> v;
+      for(int k = 0; k < int(std::variant_size_v<node_kind>); ++k) v.push_back(node_code_fields(k) >= 0);
+      return v;
+    }();
+    return db.is<n_call>(n) || able[db[n].kind.index()];
+  }
+
+  // Syntax form call (c.form - link to the ad, it was chosen by parsing): the record - the ad
+  // itself, places - arguments in the order of parts (view -2). Print, `;` after instruction and
+  // layout marking are the same as node records.
+  rec const * form_call(node_id n) {
+    auto const & c = db.as<n_call>(n);
+    node_id d(c.form - 1);
+    if(c.form - 1 >= db.size() || !db.is<n_fn>(d) || db.as<n_fn>(d).form.empty()) return nullptr;
+    auto [it, fresh] = rec_index.try_emplace(d.value | 0x80000000u, -1);
+    if(fresh) {
+      record_info r{-2, {}, uint32_t(db.as<n_fn>(d).params.size())};
+      for(uint32_t k = 0; k < r.places; ++k) r.slot.push_back(k);
+      rec_pool.push_back({d, std::move(r)});
+      it->second = int(rec_pool.size() - 1);
+    }
+    rec const & x = rec_pool[it->second];
+    return c.args.size() == x.second.places ? &x : nullptr; // The number of seats is not the same.
+  }
+
+  // Write node n (body locations а node field or call arguments); empty - no.
+  rec const * record_for(node_id n) {
+    if(!record_kind(n)) return nullptr;
+    if(db.is<n_call>(n) && db.as<n_call>(n).form) return form_call(n);
     node_id up = db[n].parent; // hide(x) in syntax hide {x} => hide(x) - as written
     // (Form-call body - normal code: `=> if(c) a else b`, not n_if {…})
     if(up && db.is<n_fn>(up) && !db.as<n_fn>(up).form.empty() && db.as<n_fn>(up).body == n && record_of(db, up)) return nullptr;
-    for(auto const & rec: records()) {
-      auto const & [f, r] = rec;
-      if(r.kind >= 0) {
-        if(int(db[n].kind.index()) != r.kind) continue;
-        bool fits = true;
-        for(uint32_t p = 0; p < r.places && fits; ++p)
-          fits = bool(node_place(db[n].kind, p)) == std::ranges::contains(r.slot, p);
-        if(fits) return &rec;
-      } else if(db.is<n_call>(n)) {
-        auto const & c = db.as<n_call>(n);
-        if(db.is<n_ident>(c.callee) && db.as<n_ident>(c.callee).name == db.as<n_fn>(f).name && c.words.empty() && !c.tagged && !c.form && c.args.size() == r.places) return &rec;
-      }
+    if(auto it = found.find(n.value); it != found.end()) return it->second < 0 ? nullptr : &rec_pool[it->second];
+    int r = -1;
+    if(projection) // projection Presentation - First: Its Records Replace Place Records
+      for(auto const & x: context_recs(projection))
+        if(fits(n, rec_pool[x.rec])) {
+          r = int(x.rec);
+          found[n.value] = r;
+          return &rec_pool[r];
+        }
+    node_id top = n;
+    for(node_id at = n, c = up; c && r < 0; at = c, c = db[c].parent) {
+      top = c;
+      if(db.is_context(c)) {
+        auto const & rs = context_recs(c);
+        if(rs.empty()) continue;
+        auto pos = item_at.find(at.value);
+        if(pos == item_at.end()) continue;
+        for(auto const & x: rs)
+          if(x.at < pos->second && fits(n, rec_pool[x.rec])) {
+            r = int(x.rec);
+            break;
+          }
+      } else if(node_id call = block_call(c, at))
+        for(node_id d: call_rec_decls(call)) {
+          for(uint32_t x: body_recs(d))
+            if(fits(n, rec_pool[x])) {
+              r = int(x);
+              break;
+            }
+          if(r >= 0) break;
+        }
     }
-    return nullptr;
+    if(r < 0 && db.prelude && top != db.prelude)
+      for(auto const & x: context_recs(db.prelude))
+        if(fits(n, rec_pool[x.rec])) {
+          r = int(x.rec);
+          break;
+        }
+    found[n.value] = r;
+    return r < 0 ? nullptr : &rec_pool[r];
   }
-  void print_record(node_id n, std::pair<node_id, record_info> const & rec) {
-    auto const & [f, r] = rec;
-    form(db.as<n_fn>(f).form, [&](std::size_t k, std::string_view piece) {
-      bool block = piece[0] == '{';
-      node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]];
-      if(!block) out += '(';
-      item(x);
-      if(!block) out += ')';
-    });
+  void print_record(node_id n, rec const & x) {
+    auto const & [f, r] = x;
+    auto at = [&](std::size_t k) { return r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]]; };
+    form(db.as<n_fn>(f).form, [&](std::size_t k, std::string_view piece) { part(piece, at(k)); }, [&](std::size_t k) { return block_like(at(k)); });
   }
   // node itself sets `;` (return x; break;)
   bool self_terminated(node_id n) {
     auto rec = record_for(n);
     return rec && str(db.as<n_fn>(rec->first).form.back()) == ";";
   }
-  bool records_built = false;
-  std::vector<std::pair<node_id, record_info>> record_list;
+  std::deque<rec> rec_pool; // records encountered by the seal (links are stable)
+  std::unordered_map<uint32_t, int> rec_index; // Advertisement → Record Number (-1 - Not Record)
+  std::unordered_map<uint32_t, std::vector<ctx_rec>> ctx_recs; // the context of the recording of its elements
+  std::unordered_map<uint32_t, uint32_t> item_at; // Context Element → Its Number
+  std::unordered_map<uint32_t, std::vector<uint32_t>> decl_body_recs; // construction
+  std::unordered_map<uint32_t, node_list> rec_bodies; // designs with records in the body
+  bool body_scan = false;
+  std::unordered_map<uint32_t, int> found; // Node → its record (-1 - no)
+  node_list using_now; // Modules whose records are taken (use cycle)
 
   void params(node_list const & ps) {
     out += '(';
@@ -406,12 +671,13 @@ struct printer {
     }
   }
 
-  void print_node(node_id, n_block const & b) {
+  void print_node(node_id block, n_block const & b) {
     std::vector<uint32_t> at; // Numbers of output elements in b.items
     for(uint32_t k = 0; k < b.items.size(); ++k)
       if(kept(b.items[k])) at.push_back(k);
     uint32_t tail = uint32_t(b.items.size());
-    if(at.empty() && (tail >= b.blank.size() || b.blank[tail] == 0)) {
+    node_note const * end = comments ? db.note_of(block) : nullptr;
+    if(at.empty() && (tail >= b.blank.size() || b.blank[tail] == 0) && (!end || end->end.empty())) {
       out += "{}";
       return;
     }
@@ -419,12 +685,16 @@ struct printer {
     ++indent;
     for(uint32_t k: at) {
       blank_lines(b.blank, k);
+      node_note const * nt = comments ? db.note_of(b.items[k]) : nullptr;
+      if(nt) note_lines(nt->lead, false);
       line();
       item(b.items[k]);
       bool value = b.has_value && k + 1 == b.items.size();
       if(!value) terminate(b.items[k]);
+      if(nt && !nt->tail.empty()) out += cat(" ", nt->tail);
     }
     blank_lines(b.blank, tail);
+    if(end) note_lines(end->end, false);
     --indent;
     line();
     out += '}';
@@ -615,18 +885,78 @@ struct printer {
     return c.ops[0];
   }
 
-  // Brackets - where without them, parsing would give another tree: there are no
-  // priorities, so around any nested infix, except the left operand of the same
-  // associative operator (a + b + c is a chain, its tree is one).
+  // The brackets around the operand select the pure `operand_parens` function visible
+  // in place (prelude - default):
+// Arguments --
+  // Describers: the type of operand ("infix", "chain", "if", "), its operator, whether
+  // left, the operator of the parent and whether it is associative in place (only when the
+  // operand is the same operator). There is no function or it has fallen - conservative:
+  // brackets for any infix and if (so parsing gives the same tree).
   void operand(node_id child, bool left, symbol parent_op) {
-    bool infix = (db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && !db.is_index(child) && !db.is_field(child)) || db.is<n_chain>(child);
-    bool paren = infix || db.is<n_if>(child);
-    symbol child_op = db.is<n_op>(child) ? db.as<n_op>(child).op : db.is<n_chain>(child) ? same_op(db.as<n_chain>(child)) : symbol{};
-    if(infix && left && parent_op && child_op == parent_op && associative(parent_op, child)) paren = false;
+    bool infix_op = db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && !db.is_index(child) && !db.is_field(child);
+    std::string_view kind = infix_op ? "infix" : db.is<n_chain>(child) ? "chain" : db.is<n_if>(child) ? "if" : "";
+    bool paren = !kind.empty();
+    if(paren) {
+      symbol child_op = infix_op ? db.as<n_op>(child).op : db.is<n_chain>(child) ? same_op(db.as<n_chain>(child)) : symbol{};
+      bool assoc = left && parent_op && child_op == parent_op && kind != "if" && associative(parent_op, child);
+      if(node_id fn = visible_fn("operand_parens", child))
+        if(int c = choose(fn, {std::string(kind), std::string(child_op ? str(child_op) : ""), left, std::string(parent_op ? str(parent_op) : ""), assoc}); c >= 0) paren = c;
+    }
     if(paren) out += '(';
     item(child);
     if(paren) out += ')';
   }
+
+  // Selection of code in the language (§4.4, variant C)
+  // --------------------------------------------------------------------------------------------------------- Where the
+  // printing needs a solution (bracket, the shape of the nodeciration), it takes a pure function on the language: it only
+  // selectselects (bool), printselected. Error or impurity (effect, code change) - conservative choice and notes.
+
+  // The name function seen in place at: contexts from place up, nearest first (the
+  // function is visible in its entire context), prelude last; empty - no.
+  node_id visible_fn(std::string_view name, node_id at) {
+    auto in = [&](node_id c) {
+      auto [it, fresh] = fn_in_ctx.try_emplace({c.value, std::string(name)});
+      if(fresh)
+        for(node_id x: db.context_items(c))
+          if(db.is<n_fn>(x) && db.as<n_fn>(x).form.empty() && str(db.as<n_fn>(x).name) == name) it->second = x;
+      return it->second;
+    };
+    if(projection)
+      if(node_id f = in(projection)) return f;
+    node_id top = at;
+    for(node_id c = db[at].parent; c; c = db[c].parent) {
+      top = c;
+      if(db.is_context(c))
+        if(node_id f = in(c)) return f;
+    }
+    if(db.prelude && top != db.prelude) return in(db.prelude);
+    return {};
+  }
+  // The result of the function of selecting fn over args (0/1); -1 is an error (note in notes).
+  // Cash - in the database: function, its revision, base edits, arguments (node - with revision).
+  int choose(node_id fn, std::vector<choice_arg> const & args) {
+    std::string key = cat(fn.value, "@", db.node_revision(fn), "/", db.edits);
+    for(auto const & a: args) {
+      if(auto b = std::get_if<bool>(&a)) key += *b ? "|1" : "|0";
+      else if(auto s = std::get_if<std::string>(&a)) key += cat("|s", *s);
+      else key += cat("|n", std::get<node_id>(a).value, "@", db.node_revision(std::get<node_id>(a)));
+    }
+    if(auto it = db.print_choices.find(key); it != db.print_choices.end()) return it->second;
+    std::string why;
+    int r = language_choice(db, vms, fn, args, why);
+    if(r < 0) notes.push_back(cat("печать: ", str(db.as<n_fn>(fn).name), " — ", why, "; выбрано консервативно"));
+    db.print_choices[key] = int8_t(r);
+    return r;
+  }
+  std::map<std::pair<uint32_t, std::string>, node_id> fn_in_ctx; // (context, name) → function of choice
+  std::vector<std::string> notes; // Printing Notes (Errors of Selection Functions)
+  choice_vms vms; // Interpreters of Selection Functions - at the Time of Printing
+  bool comments = true; // Post comments (slice and residual program are not)
+  // projection (§4.4, variant C): A module is a group of syntax records (and selection
+  // functions); its records are the first, before the location records. Empty - by default:
+  // entries by scope, prelude - C-like projection (D3).
+  node_id projection;
 
   // [[associative]] in the operator, visible in place lexically: module elements and prelude,
   // the operators of the blocks declared above. The context of the execution (using operator
@@ -652,19 +982,6 @@ struct printer {
   // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
   void print_node(node_id call, n_call const & c) {
     if(c.tagged) return tagged(c); // hide x, try_compile { … } - prelude records (record_for)
-    if(c.form && c.form - 1 < db.size() && db.is<n_fn>(node_id(c.form - 1)) && !db.as<n_fn>(node_id(c.form - 1)).form.empty()) {
-      auto const & pieces = db.as<n_fn>(node_id(c.form - 1)).form;
-      std::size_t shown = 0;
-      form(pieces, [&](std::size_t k, std::string_view piece) {
-        bool block = piece[0] == '{';
-        if(k >= c.args.size()) return;
-        if(!block) out += '(';
-        item(c.args[k]);
-        if(!block) out += ')';
-        shown = k + 1;
-      });
-      if(shown == c.args.size()) return;
-    }
     item(c.callee);
     auto word = [&](uint32_t i) { return c.words.empty() ? symbol{} : c.words[i]; };
     uint32_t n = uint32_t(c.args.size());

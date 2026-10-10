@@ -64,7 +64,9 @@ struct residual_view {
     printer::substitution subst;
     subst.node = [this](node_id n) { return fold_if(n); };
     subst.text = [this](node_id n) { return fold_value(n); };
-    return printer(db, [this](node_id n) { return keep(n); }, subst).print(module);
+    printer pr(db, [this](node_id n) { return keep(n); }, subst);
+    pr.comments = false; // Comments - on the written text; in the derivative program can lie (my)
+    return pr.print(module);
   }
   bool keep(node_id n) const {
     node_id p = db[n].parent;
@@ -253,10 +255,12 @@ struct slice_view {
           changed = true;
         }
     }
-    return printer(db, [&](node_id n) {
+    printer pr(db, [&](node_id n) {
       if(db[n].parent && db.is<n_module>(db[n].parent)) return n == fn;
       return !is_statement(db, n) || kept.contains(n) || has_kept_descendant(n);
-    }).print(module);
+    });
+    pr.comments = false; // residual program
+    return pr.print(module);
   }
   struct stmt {
     node_id node;

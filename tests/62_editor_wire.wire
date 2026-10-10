@@ -13,7 +13,7 @@ open_view module
 // expect: view view=1
 // expect: kind="n_str" pieces=["\"привет, мир\""]
 // expect: kind="n_block" pieces=["{\n  " #
-// expect: курсор: ‸main() {
+// expect: курсор: ‸// Программа для сценария 62
 // указатель внутрь строки — курсор в координатах узла, смещение в кодовых точках
 pointer 1 @привет 0 7
 // expect: offset=7
