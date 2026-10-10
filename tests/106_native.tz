@@ -5,9 +5,9 @@
 // store-roundtrip
 // native "cpp" { … } (§3.3): 
 // 
-// text_hex, text_fixed, parse_int — тела на C++ в
-// прелюдии, собранные в VM (tz native, build.sh); раньше — встроенные функции
-// интерпретатора. Символ 'c' — байт (i64), как s[k].
+// text_fixed — тело на C++ в прелюдии, собранное в VM
+// (tz native, build.sh); text_hex и parse_int — уже на языке поверх примитива
+// text_byte (M6). Символ 'c' — байт (i64), как s[k].
 main() {
   s = "a";
   print('a', '\n', s[0] == 'a');

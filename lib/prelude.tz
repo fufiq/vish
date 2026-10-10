@@ -545,12 +545,29 @@ format_with(plain f, x) => text(x);
 // native "cpp" { … } собран в VM (tz native,
 // build.sh); #x — параметр значением VM. Неизвестный при разборе аргумент —
 // стёртое значение результата (как у встроенных).
-text_hex(i64 n, i64 width) => native "cpp" {
-  if(!#n.known() || !#width.known()) return erase(value(std::string("x")));
-  char buf[32];
-  snprintf(buf, sizeof buf, "%0*llx", int(#width.as<int64_t>()), static_cast<unsigned long long>(#n.as<int64_t>()));
-  return value(std::string(buf));
-};
+// Цифры — на языке над примитивом text_byte: 
+// 
+// Примитивы — только то, чего нет в ядре: байт →
+// строка (text_byte) и запись f64 (text_fixed, text).
+hex_digit(i64 d) => text_byte(if(d < 10) '0' + d else 'a' + (d - 10));
+
+// text_hex(n, width) — шестнадцатеричная запись n как 64 бит без знака, нулями до width.
+text_hex(i64 n, i64 width) {
+  s = "";
+  k = n;
+  w = 0;
+  loop {
+    s = hex_digit(k & 15) + s;
+    k = (k >> 4) & 0x0fffffffffffffff; // сдвиг без знака
+    w = w + 1;
+    if(k == 0) break;
+  }
+  while(w < width) {
+    s = "0" + s;
+    w = w + 1;
+  }
+  s
+}
 
 text_fixed(f64 x, i64 digits) => native "cpp" {
   if(!#x.known() || !#digits.known()) return erase(value(std::string("x")));
@@ -579,29 +596,36 @@ fmt(...parts) {
 }
 
 // parse_int(s) — result{ok, value, error}: цифры без знака.
-parse_int(str s) => native "cpp" {
-  auto make = [&](bool good, int64_t v, std::string err) {
-    agg_v r{vm.types.named("result"), {}};
-    r.fields.push_back({vm.sym("ok"), value(good)});
-    r.fields.push_back({vm.sym("value"), value(v)});
-    r.fields.push_back({vm.sym("error"), value(std::move(err))});
-    return value(std::move(r));
-  };
-  if(!#s.known()) return erase(make(true, 0, ""));
-  auto text = #s.as<str_v>().view();
-  int64_t v = 0;
-  bool good = !text.empty();
-  for(char ch: text) {
-    if(ch < '0' || ch > '9') {
+struct result { bool ok; i64 value; str error; }
+parse_int(str s) {
+  good = s.size > 0;
+  v = 0;
+  for(k : range(s.size)) {
+    ch = s[k];
+    if((ch < '0') || (ch > '9')) {
       good = false;
       break;
     }
-    v = v * 10 + (ch - '0');
+    v = (v * 10) + (ch - '0');
   }
-  return make(good, good ? v : 0, good ? "" : cat("не число: ", in_quotes(text)));
-};
+  if(good) result{true, v, ""} else result{false, 0, "не число: \"" + s + "\""}
+}
 
-// text(x) — текст значения (байты): число — десятичная запись.
+// text(x) — текст значения (байты): строка — сама, число — десятичная запись.
+text(str s) => s;
+text(bool b) => if(b) "true" else "false";
+text(i64 n) {
+  s = "";
+  k = n;
+  loop {
+    d = k % 10;
+    s = text_byte('0' + (if(d < 0) -d else d)) + s; // от минимального i64 — без смены знака
+    k = k / 10;
+    if(k == 0) break;
+  }
+  if(n < 0) "-" + s else s
+}
+// Остальное (f64, тип, агрегат) — примитив: запись f64 и имя типа ядру не выразить.
 text(x) => native "cpp" {
   if(!#x.known()) return erase(value(std::string("x")));
   return #x.is<str_v>() ? value(#x.as<str_v>()) : value(vm.show_v(#x));
@@ -614,12 +638,11 @@ text_byte(i64 b) => native "cpp" {
 };
 
 // fill(n, x) — массив из n копий x.
-fill(i64 n, x) => native "cpp" {
-  if(!#n.known() || !#x.known()) return erase(value(array_v::of({#x.known() ? #x : *shape_of(#x)})));
-  array_v r;
-  for(int64_t i = 0; i < #n.as<int64_t>(); ++i) r.push(#x);
-  return value(std::move(r));
-};
+fill(i64 n, x) {
+  r = array{};
+  for(i : range(n)) r.push(x);
+  r
+}
 
 is_err(result r) => !r.ok;
 

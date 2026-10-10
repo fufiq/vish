@@ -695,8 +695,14 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     if(ok) shadow = a64->run(f, param_types, sargs);
   }
   jit_fault = 0;
-  jit_vm = this;
-  auto entry = reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
+  // The nested input (VM service calculates the node → compilation → the compiler in the language with
+  // its interpreter executes its machine code) rearranges jit_vm; the output is the same, otherwise the
+  // next service call from the external code takes the interpreter, which no longer exists.
+  struct restore_vm {
+    interpreter * outer;
+    ~restore_vm() { jit_vm = outer; }
+  } restore{std::exchange(jit_vm, this)};
+  auto entry =reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
   uint64_t bits;
   jit_call_mem mem;
   if(code->by_lang) { // Compiler code in language: array - cell address (data and size code reads from it), behind the arguments - error slots
