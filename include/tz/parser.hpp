@@ -1552,7 +1552,12 @@ struct parser {
           // body: block (with the rules of body forms - as in the structure; raw - if the form
           // disassembles it with the code) or expression (branch)
           if(literal) args.push_back(record());
-          else args.push_back(is_open('{') && !record_ahead() ? ruled_block(live) : expression());
+          else if(is_open('{') && !record_ahead()) args.push_back(ruled_block(live));
+          else { // Branch without brackets - instruction: the tail of the structure at its beginning (if(c) for(x : xs) s);
+            uint32_t head_saved = std::exchange(statement_head, here().where.begin);
+            args.push_back(expression());
+            statement_head = head_saved;
+          }
           ++k;
           continue;
         }

@@ -1,0 +1,19 @@
+// out: 3 3 6 100
+// machine
+// fmt-stable
+// store-roundtrip
+// Ветка if без скобок — инструкция: хвост конструкции в её начале разрешён, как в
+// блоке (§4.4:).
+// Было. Печать — без `;`.
+main() {
+  xs = array{1, 2};
+  a = 0;
+  if(true) for(x : xs) a = a + x;
+  b = 0;
+  if(false) b = 7; else for(x : xs) b = b + x;
+  c = 0;
+  if(true) while(c < 5) c = c + 2;
+  d = 0;
+  if(false) for(x : xs) d = d + x; else d = 100;
+  print(a, b, c, d);
+}

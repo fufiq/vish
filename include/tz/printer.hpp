@@ -729,7 +729,9 @@ struct printer {
     if(last == ";") return true;
     if((last != "{" && last != "{=") || r.slot.empty()) return false;
     node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot.back()) : db.as<n_call>(n).args[r.slot.back()];
-    return db.is<n_block>(x) || db.is<n_raw>(x) || closed(x);
+    // branch - construction with tail-instruction or clauses (if(c) for(x : xs) s;) puts `;` itself
+    bool self_closing = db.is<n_call>(x) && (db.as<n_call>(x).tail || !db.as<n_call>(x).words.empty());
+    return db.is<n_block>(x) || db.is<n_raw>(x) || self_closing || closed(x);
   }
 
   void print_node(node_id n, n_extend const & e) {
