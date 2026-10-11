@@ -3886,61 +3886,77 @@ struct interpreter {
       if(unknown(f.v)) open = true;
       shapes.push_back(f.v);
     }
-    // dp[i][j] - parsing of atoms i..j: type, number of trees (1 or "many"), root
-    struct entry {
-      value shape;
-      uint32_t count;
-      int32_t op = -1; // operator number at the root; -1 - atom
-      uint32_t li = 0, ri = 0; // parsing left and right
-    };
-    std::vector<std::vector<std::vector<entry>>> dp(k, std::vector<std::vector<entry>>(k));
-    for(uint32_t i = 0; i < k; ++i) dp[i][i].push_back({shapes[i], 1});
-    std::string why;
-    for(uint32_t len = 2; len <= k; ++len)
-      for(uint32_t i = 0; i + len - 1 < k; ++i) {
-        uint32_t j = i + len - 1;
-        for(uint32_t m = i; m < j; ++m) { // operator m - between atoms m and m + 1
-          bool assoc = assoc_of[m] == '1';
-          for(uint32_t li = 0; li < dp[i][m].size(); ++li)
-            for(uint32_t ri = 0; ri < dp[m + 1][j].size(); ++ri) {
-              entry const & r = dp[m + 1][j][ri];
-              if(assoc && r.op >= 0 && c.ops[uint32_t(r.op)] == c.ops[m]) continue; // a + (b + c) ≡ (a + b) + c
-              auto res = probe_apply(p, c.ops[m], dp[i][m][li].shape, r.shape, why);
-              if(!res) continue;
-              uint32_t cnt = std::min(2u, dp[i][m][li].count * r.count);
-              auto & cell = dp[i][j];
-              auto same = std::ranges::find_if(cell, [&](entry const & e) { return types.describe(e.shape) == types.describe(*res); });
-              if(same != cell.end()) same->count = 2; // other parsing of the same type
-              else cell.push_back({*res, cnt, int32_t(m), li, ri});
-            }
+    // brute force - in language (chain_resolve prelude, M6 step 4):
+// Here are the types of atoms, the sample.
+    // operator over types (chain_probe, chain_key) and node of the selected tree
+    if(chain_helper) fail("разбор цепочки в коде разбора цепочек (chain_resolve): там каждое выражение — один оператор в скобках", db[n].where);
+    if(!chain_fn)
+      for(uint32_t i = db.size(); i-- > 0;)
+        if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "chain_resolve") {
+          chain_fn = node_id(i);
+          break;
         }
-      }
-    auto const & top = dp[0][k - 1];
-    uint32_t total = 0;
-    for(auto const & e: top) total += e.count;
-    // atom with (recursion): only a single agreed tree is taken - `(k == n) || f(…)` : `bool ||
-    // ⊥` fits (right - expr), `i64 || ⊥` does not; otherwise the type is still derived as
-    // before; such a tree is not cached (*my*)
-    if(open && total != 1) return {};
-    chain_open = open;
-    if(total == 0) fail(cat("ни один разбор цепочки не инстанцируется", why.empty() ? "" : cat(": ", why)), db[n].where);
-    if(total > 1) {
+    if(!chain_fn) fail("нет chain_resolve в прелюдии — цепочку не разобрать", db[n].where);
+    chain_job job{&p, std::move(shapes), c.ops, {}};
+    chain_jobs.push_back(&job);
+    struct pop_job {
+      std::vector<chain_job *> & jobs;
+      ~pop_job() { jobs.pop_back(); }
+    } pop{chain_jobs};
+    std::vector<value> ops, assoc;
+    for(symbol o: c.ops) ops.push_back(value(std::string(str(o))));
+    for(char a: assoc_of) assoc.push_back(value(a == '1'));
+    interpreter & lang = chain_lang();
+    value r = lang.analyze_instance(chain_fn, {value(int64_t(k)), value(array_v::of(std::move(ops))), value(array_v::of(std::move(assoc))), value(open)});
+    auto field = [&](std::string_view f) -> value const & {
+      for(auto const & [s, v]: r.as<agg_v>().fields)
+        if(str(s) == f) return v;
+      fail(cat("chain_resolve: нет поля ", f), db[n].where);
+    };
+    int64_t status = field("status").as<int64_t>();
+    if(status == 1) return {}; // atom with and not one tree - the type is still bred
+    chain_open = open; // tree with an atom is not cached (*my*)
+    if(status == 2) fail(cat("ни один разбор цепочки не инстанцируется", job.why.empty() ? "" : cat(": ", job.why)), db[n].where);
+    if(status == 3) {
       diagnostic d("цепочка операторов неоднозначна: подходят несколько разборов — расставьте скобки", db[n].where);
-      for(auto const & e: top) d.note(cat("разбор типа ", types.describe(e.shape)), db[n].where);
+      auto const & notes = field("notes").as<array_v>();
+      for(uint32_t i = 0; i < notes.size(); ++i) d.note(cat("разбор типа ", notes.get(i).as<str_v>().view()), db[n].where);
       throw d;
     }
-    // the only tree in node (one per chain and types: cache above)
-    auto build = [&](auto & self, uint32_t i, uint32_t j, uint32_t e) -> node_id {
-      entry const & x = dp[i][j][e];
-      if(x.op < 0) return c.atoms[i];
-      uint32_t m = uint32_t(x.op);
-      node_id l = self(self, i, m, x.li);
-      node_id r = self(self, m + 1, j, x.ri);
-      node_id t = db.derive(n_op{c.ops[m], {l, r}}, {db[l].where.begin, db[r].where.end}, derived_nodes);
+    // only tree in node (one per chain and types: cache above); prefix: -1 atom | m left right
+    auto const & tree = field("tree").as<array_v>();
+    uint32_t pos = 0;
+    auto build = [&](auto & self) -> node_id {
+      int64_t m = tree.get(pos++).as<int64_t>();
+      if(m < 0) return c.atoms[uint32_t(tree.get(pos++).as<int64_t>())];
+      node_id l = self(self);
+      node_id r = self(self);
+      node_id t = db.derive(n_op{c.ops[uint32_t(m)], {l, r}}, {db[l].where.begin, db[r].where.end}, derived_nodes);
       db[t].parent = n;
       return t;
     };
-    return build(build, 0, k - 1, 0);
+    return build(build);
+  }
+
+  // The search of the chain is going on: types (number - index), operators, the reason for the failure of the last sample.
+  struct chain_job {
+    interpreter * p;
+    std::vector<value> shapes;
+    std::vector<symbol> ops;
+    std::string why;
+  };
+  std::vector<chain_job *> chain_jobs;
+  interpreter * chain_subject = nullptr; // Whose helper (chain_probe, chain_key)
+  bool chain_helper = false;
+  node_id chain_fn;
+  std::deque<interpreter> chain_langs;
+  interpreter & chain_lang() {
+    if(chain_langs.empty()) {
+      chain_langs.emplace_back(db, db.prelude ? db.prelude : mod, std::vector<std::string>{"chain"}, mode::run);
+      chain_langs.back().chain_helper = true;
+      chain_langs.back().chain_subject = this;
+    }
+    return chain_langs.back();
   }
 
   bool op_associative(symbol op) { // Module elements and prelude
@@ -6452,6 +6468,21 @@ struct interpreter {
     // body context of a function embedded in a c node from the ctx context
     if(n == "inline_context" && a.size() == 2 && a[0].is<int64_t>())
       return value(int64_t(inline_context(uint64_t(a[0].as<int64_t>()), code_node(a[1], where).value)));
+    // brute-force (M6, step 4): type of application of operator m to types l, r is type number or
+    // -1 (not instance); line type to compare parsing and messages
+    if((n == "chain_probe" || n == "chain_key") && chain_subject && !chain_subject->chain_jobs.empty()) {
+      auto & job = *chain_subject->chain_jobs.back();
+      auto num = [&](uint32_t i) { return a[i].is<int64_t>() ? a[i].as<int64_t>() : -1; };
+      if(n == "chain_key" && a.size() == 1 && num(0) >= 0 && uint64_t(num(0)) < job.shapes.size())
+        return value(chain_subject->types.describe(job.shapes[uint64_t(num(0))]));
+      if(n == "chain_probe" && a.size() == 3 && num(0) >= 0 && uint64_t(num(0)) < job.ops.size() && num(1) >= 0 && num(2) >= 0) {
+        value l = job.shapes[uint64_t(num(1))], r = job.shapes[uint64_t(num(2))];
+        auto res = chain_subject->probe_apply(*job.p, job.ops[uint64_t(num(0))], l, r, job.why);
+        if(!res) return value(int64_t(-1));
+        job.shapes.push_back(std::move(*res));
+        return value(int64_t(job.shapes.size() - 1));
+      }
+    }
     // Observation parsing for representation in language (M6, step 3b): node obs prelude (executed,
     // gave value, effect, left through return/break, the value is known and its literal, the
     // condition is bool); function - whether the program is needed; x = e - declared the name

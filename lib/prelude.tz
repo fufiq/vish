@@ -3304,3 +3304,89 @@ residual_plan(m) {
   rs_collect_into(m, used, hidden, folds, values);
   rs_plan{hidden, folds, values}
 }
+
+// Разбор цепочки операторов перебором (§4.4, M6 шаг 4 — с C++ на язык): 
+// 
+// Таблица
+// по отрезкам атомов: разборы отрезка — тип, число деревьев (1 или «много»), корень.
+// Примитивы VM: chain_probe(m, l, r) — тип применения оператора m к типам l, r (номер
+// типа или -1 — не инстанцируется, SFINAE), chain_key(h) — тип строкой. Итог —
+// ch_result: status 0 — дерево (tree — префиксом: -1 атом i | m левое правое),
+// 1 — тип ещё выводится, 2 — ни один разбор не инстанцируется, 3 — неоднозначно
+// (notes — типы разборов). Здесь нет цепочек (каждое выражение — один оператор в
+// скобках): разбор цепочек не разбирает сам себя.
+struct ch_entry { i64 cell; i64 shape; i64 count; i64 op; i64 li; i64 ri; }
+struct ch_result { i64 status; array tree; array notes; }
+
+ch_cell(i64 k, i64 i, i64 j) => (i * k) + j;
+
+// разборы клетки (i, j) — номера записей
+ch_in(ents, i64 c) {
+  r = array{};
+  for(x : range(ents.size)) if(ents[x].cell == c) r.push(x);
+  r
+}
+
+ch_build(ents, i64 x, acc) {
+  e = ents[x];
+  if(e.op < 0) {
+    acc.push(-1);
+    acc.push(e.li); // атом: его номер
+  } else {
+    acc.push(e.op);
+    ch_build(ents, e.li, acc);
+    ch_build(ents, e.ri, acc);
+  }
+}
+
+chain_resolve(i64 k, ops, assoc, bool open) {
+  ents = array{};
+  for(i : range(k)) ents.push(ch_entry{ch_cell(k, i, i), i, 1, -1, i, 0}); // тип атома i — номер i
+  len = 2;
+  while(len <= k) {
+    i = 0;
+    while((i + (len - 1)) < k) {
+      j = i + (len - 1);
+      cj = ch_cell(k, i, j);
+      m = i;
+      while(m < j) { // оператор m — между атомами m и m + 1
+        ls = ch_in(ents, ch_cell(k, i, m));
+        rs = ch_in(ents, ch_cell(k, m + 1, j));
+        for(li : ls) {
+          for(ri : rs) {
+            r = ents[ri];
+            skip = assoc[m] && ((r.op >= 0) && (ops[r.op] == ops[m])); // a + (b + c) ≡ (a + b) + c
+            if(!skip) {
+              t = chain_probe(m, ents[li].shape, r.shape);
+              if(t >= 0) {
+                cnt = ents[li].count * r.count;
+                if(cnt > 2) cnt = 2;
+                same = -1;
+                for(x : ch_in(ents, cj)) if(chain_key(ents[x].shape) == chain_key(t)) same = x;
+                if(same >= 0) ents[same].count = 2; // другой разбор того же типа
+                else ents.push(ch_entry{cj, t, cnt, m, li, ri});
+              }
+            }
+          }
+        }
+        m = m + 1;
+      }
+      i = i + 1;
+    }
+    len = len + 1;
+  }
+  top = ch_in(ents, ch_cell(k, 0, k - 1));
+  total = 0;
+  for(x : top) total = total + ents[x].count;
+  // атом с ⊥ (рекурсия): только единственное согласованное дерево, иначе тип ещё выводится
+  if(open && (total != 1)) return ch_result{1, array{}, array{}};
+  if(total == 0) return ch_result{2, array{}, array{}};
+  if(total > 1) {
+    notes = array{};
+    for(x : top) notes.push(chain_key(ents[x].shape));
+    return ch_result{3, array{}, notes};
+  }
+  tree = array{};
+  ch_build(ents, top[0], tree);
+  ch_result{0, tree, array{}}
+}
