@@ -584,10 +584,10 @@ format_with(plain f, x) => text(x);
 // 
 // Примитивы — только то, чего нет в ядре: байт →
 // строка (text_byte) и запись f64 (text_fixed, text).
-hex_digit(i64 d) => text_byte(if(d < 10) '0' + d else 'a' + (d - 10));
 
 // text_hex(n, width) — шестнадцатеричная запись n как 64 бит без знака, нулями до width.
 text_hex(i64 n, i64 width) {
+  hex_digit(i64 d) => text_byte(if(d < 10) '0' + d else 'a' + (d - 10));
   s = "";
   k = n;
   w = 0;
@@ -2940,137 +2940,142 @@ jit_compile(cg, f, types, type result) {
 // скрытые инструкции…} или array{} (нет функции или имени); печать с фильтром — у VM.
 struct sl_stmt { code node; array defs; array uses; }
 
-sl_has(xs, x) {
-  r = false;
-  for(y : xs) if(y == x) r = true;
-  r
-}
-sl_add(xs, x) => if(sl_has(xs, x)) false else {
-  xs.push(x);
-  true
-};
-sl_meets(a, b) {
-  r = false;
-  for(x : a) if(sl_has(b, x)) r = true;
-  r
-}
-sl_same(a, b) => given(a) && (given(b) && (code_id(a) == code_id(b)));
+// Служебные функции среза — в сущности sl (вызов снаружи — sl.f(…)): видимость —
+// сущностью, без отдельного механизма 
+//.
+sl() {
+  has(xs, x) => {
+    r = false;
+    for(y : xs) if(y == x) r = true;
+    r
+  };
+  add(xs, x) => if(has(xs, x)) false else {
+    xs.push(x);
+    true
+  };
+  meets(a, b) => {
+    r = false;
+    for(x : a) if(has(b, x)) r = true;
+    r
+  };
+  same(a, b) => given(a) && (given(b) && (code_id(a) == code_id(b)));
 
-// хвост конструкции-инструкции: while(c) x = 1; — x = 1 это инструкция
-sl_tail(call, n) {
-  n_call{_, args, _, tail, _, _} = call;
-  tail && ((args.size > 0) && sl_same(args[args.size - 1], n))
-}
+  // хвост конструкции-инструкции: while(c) x = 1; — x = 1 это инструкция
+  tail_of(call, n) => {
+    n_call{_, args, _, tail, _, _} = call;
+    tail && ((args.size > 0) && same(args[args.size - 1], n))
+  };
 
-// инструкция — элемент блока/модуля или тело конструкции/ветки, не являющееся блоком
-sl_statement(n) {
-  p = code_parent(n);
-  k = if(given(p)) code_kind(p) else unit;
-  if(!given(p)) false
-  else if((k == n_block) || (k == n_module)) true
-  else if(k == n_call) sl_tail(p, n) && (code_kind(n) != n_lambda)
-  else if(k == n_lambda) {
-    n_lambda{_, body, block} = p;
-    block && sl_same(body, n)
-  } else if(k == n_if) {
-    n_if{_, yes, no} = p;
-    (sl_same(yes, n) || sl_same(no, n)) && sl_statement(p)
-  } else false
-}
+  // инструкция — элемент блока/модуля или тело конструкции/ветки, не являющееся блоком
+  statement(n) => {
+    p = code_parent(n);
+    k = if(given(p)) code_kind(p) else unit;
+    if(!given(p)) false
+    else if((k == n_block) || (k == n_module)) true
+    else if(k == n_call) tail_of(p, n) && (code_kind(n) != n_lambda)
+    else if(k == n_lambda) {
+      n_lambda{_, body, block} = p;
+      block && same(body, n)
+    } else if(k == n_if) {
+      n_if{_, yes, no} = p;
+      (same(yes, n) || same(no, n)) && statement(p)
+    } else false
+  };
 
-sl_assign(str op) => (op == "=") || ((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/="))));
+  assign(str op) => (op == "=") || ((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/="))));
 
-// имена, читаемые выражением (без вложенных блоков: у них свои инструкции); параметры
-// блока конструкции видны только в блоке — конструкция попадает в срез как охватывающая
-sl_uses(n, names) {
-  if(given(n)) {
+  // имена, читаемые выражением (без вложенных блоков: у них свои инструкции); параметры
+  // блока конструкции видны только в блоке — конструкция попадает в срез как охватывающая
+  reads(n, names) => {
+    if(given(n)) {
+      k = code_kind(n);
+      if(k == n_ident) add(names, code_name(n));
+      else if((k != n_block) && (k != n_lambda)) {
+        for(c : code_items(n)) {
+          if(!((k == n_call) && tail_of(n, c))) reads(c, names);
+        }
+      }
+    }
+  };
+
+  analyze(n) => {
+    defs = array{};
+    uses = array{};
     k = code_kind(n);
-    if(k == n_ident) sl_add(names, code_name(n));
-    else if((k != n_block) && (k != n_lambda)) {
+    if(k == n_var) {
+      n_var{name, _, init, _, _, _, _, _} = n;
+      add(defs, name);
+      reads(init, uses);
+    } else if(k == n_if) {
+      n_if{c, _, _} = n;
+      reads(c, uses);
+    } else if((k == n_loop) || ((k == n_break) || (k == n_continue))) {
+      // цикл попадает в срез как охватывающая конструкция сохранённых инструкций
+    } else if((k == n_op) && {
+      n_op{op, _, _} = n;
+      assign(op)
+    }) {
+      n_op{op, args, _} = n;
+      t = args[0];
+      loop {
+        if(code_kind(t) != n_op) break;
+        n_op{o, xs, pf} = t;
+        if((o != "[]") || ((xs.size != 2) || pf)) break;
+        reads(xs[1], uses);
+        t = xs[0];
+      }
+      if(code_kind(t) == n_ident) {
+        add(defs, code_name(t));
+        if((op != "=") || !same(t, args[0])) add(uses, code_name(t));
+      }
+      reads(args[1], uses);
+    } else {
+      reads(n, uses);
+      // вызов может изменить аргументы-алиасы (§6.2); у конструкции (for, while)
+      // действие — в её блоке, он режется отдельно
+      if(k == n_call) {
+        n_call{_, args, words, tail, _, _} = n;
+        if(!tail && (words.size == 0)) {
+          for(a : args) if(code_kind(a) == n_ident) add(defs, code_name(a));
+        }
+      }
+    }
+    sl_stmt{n, defs, uses}
+  };
+
+  // все инструкции тела, и в локальных функциях и лямбдах: что не сохранено — скрыто
+  statements(n, all) => {
+    if(given(n)) {
+      if(statement(n)) all.push(n);
+      for(c : code_items(n)) statements(c, all);
+    }
+  };
+
+  // обойти тело: для каждой инструкции — что она определяет и что использует
+  collect(n, stmts) => {
+    if(given(n)) {
+      if(statement(n) && (code_kind(n) != n_block)) stmts.push(analyze(n));
       for(c : code_items(n)) {
-        if(!((k == n_call) && sl_tail(n, c))) sl_uses(c, names);
+        skip = code_kind(c) == n_fn;
+        if(code_kind(c) == n_lambda) {
+          n_lambda{_, _, block} = c;
+          skip = !block;
+        }
+        if(!skip) collect(c, stmts);
       }
     }
-  }
-}
+  };
 
-sl_analyze(n) {
-  defs = array{};
-  uses = array{};
-  k = code_kind(n);
-  if(k == n_var) {
-    n_var{name, _, init, _, _, _, _, _} = n;
-    sl_add(defs, name);
-    sl_uses(init, uses);
-  } else if(k == n_if) {
-    n_if{c, _, _} = n;
-    sl_uses(c, uses);
-  } else if((k == n_loop) || ((k == n_break) || (k == n_continue))) {
-    // цикл попадает в срез как охватывающая конструкция сохранённых инструкций
-  } else if((k == n_op) && {
-    n_op{op, _, _} = n;
-    sl_assign(op)
-  }) {
-    n_op{op, args, _} = n;
-    t = args[0];
-    loop {
-      if(code_kind(t) != n_op) break;
-      n_op{o, xs, pf} = t;
-      if((o != "[]") || ((xs.size != 2) || pf)) break;
-      sl_uses(xs[1], uses);
-      t = xs[0];
-    }
-    if(code_kind(t) == n_ident) {
-      sl_add(defs, code_name(t));
-      if((op != "=") || !sl_same(t, args[0])) sl_add(uses, code_name(t));
-    }
-    sl_uses(args[1], uses);
-  } else {
-    sl_uses(n, uses);
-    // вызов может изменить аргументы-алиасы (§6.2); у конструкции (for, while)
-    // действие — в её блоке, он режется отдельно
-    if(k == n_call) {
-      n_call{_, args, words, tail, _, _} = n;
-      if(!tail && (words.size == 0)) {
-        for(a : args) if(code_kind(a) == n_ident) sl_add(defs, code_name(a));
-      }
-    }
-  }
-  sl_stmt{n, defs, uses}
+  kept_has(kept, n) => {
+    r = false;
+    for(x : kept) if(code_id(x) == code_id(n)) r = true;
+    r
+  };
+  keep(kept, n) => if(kept_has(kept, n)) false else {
+    kept.push(n);
+    true
+  };
 }
-
-// все инструкции тела, и в локальных функциях и лямбдах: что не сохранено — скрыто
-sl_all(n, all) {
-  if(given(n)) {
-    if(sl_statement(n)) all.push(n);
-    for(c : code_items(n)) sl_all(c, all);
-  }
-}
-
-// обойти тело: для каждой инструкции — что она определяет и что использует
-sl_collect(n, stmts) {
-  if(given(n)) {
-    if(sl_statement(n) && (code_kind(n) != n_block)) stmts.push(sl_analyze(n));
-    for(c : code_items(n)) {
-      skip = code_kind(c) == n_fn;
-      if(code_kind(c) == n_lambda) {
-        n_lambda{_, _, block} = c;
-        skip = !block;
-      }
-      if(!skip) sl_collect(c, stmts);
-    }
-  }
-}
-
-sl_kept_has(kept, n) {
-  r = false;
-  for(x : kept) if(code_id(x) == code_id(n)) r = true;
-  r
-}
-sl_keep(kept, n) => if(sl_kept_has(kept, n)) false else {
-  kept.push(n);
-  true
-};
 
 slice_hidden(m, str fn_name, str var) {
   fs = array{};
@@ -3081,10 +3086,10 @@ slice_hidden(m, str fn_name, str var) {
   stmts = array{};
   all = array{};
   n_fn{_, _, _, body, _, _, _, _, _} = f;
-  sl_collect(body, stmts);
-  sl_all(body, all);
+  sl.collect(body, stmts);
+  sl.statements(body, all);
   named = false;
-  for(s : stmts) if(sl_has(s.defs, var) || sl_has(s.uses, var)) named = true;
+  for(s : stmts) if(sl.has(s.defs, var) || sl.has(s.uses, var)) named = true;
   if(!named) return array{};
   kept = array{};
   forward = array{var};
@@ -3094,24 +3099,24 @@ slice_hidden(m, str fn_name, str var) {
   while(changed) {
     changed = false;
     for(s : stmts)
-      if(!sl_kept_has(kept, s.node) && sl_meets(s.uses, forward)) {
+      if(!sl.kept_has(kept, s.node) && sl.meets(s.uses, forward)) {
         kept.push(s.node);
-        for(d : s.defs) sl_add(forward, d);
+        for(d : s.defs) sl.add(forward, d);
         changed = true;
       }
   }
   // назад: откуда берутся x и всё, что используют сохранённые инструкции
   for(s : stmts) {
-    if(sl_kept_has(kept, s.node)) {
-      for(u : s.uses) sl_add(backward, u);
+    if(sl.kept_has(kept, s.node)) {
+      for(u : s.uses) sl.add(backward, u);
     }
   }
   changed = true;
   while(changed) {
     changed = false;
     for(s : stmts)
-      if(sl_meets(s.defs, backward) && sl_keep(kept, s.node)) {
-        for(u : s.uses) sl_add(backward, u);
+      if(sl.meets(s.defs, backward) && sl.keep(kept, s.node)) {
+        for(u : s.uses) sl.add(backward, u);
         changed = true;
       }
   }
@@ -3123,11 +3128,11 @@ slice_hidden(m, str fn_name, str var) {
     for(k : kept) snapshot.push(k);
     for(k : snapshot) {
       p = code_parent(k);
-      while(given(p) && !sl_same(p, f)) {
-        if(sl_statement(p) && sl_keep(kept, p)) {
+      while(given(p) && !sl.same(p, f)) {
+        if(sl.statement(p) && sl.keep(kept, p)) {
           for(s : stmts) {
-            if(sl_same(s.node, p)) {
-              for(u : s.uses) sl_add(backward, u);
+            if(sl.same(s.node, p)) {
+              for(u : s.uses) sl.add(backward, u);
             }
           }
           changed = true;
@@ -3136,8 +3141,8 @@ slice_hidden(m, str fn_name, str var) {
       }
     }
     for(s : stmts)
-      if(sl_meets(s.defs, backward) && sl_keep(kept, s.node)) {
-        for(u : s.uses) sl_add(backward, u);
+      if(sl.meets(s.defs, backward) && sl.keep(kept, s.node)) {
+        for(u : s.uses) sl.add(backward, u);
         changed = true;
       }
   }
@@ -3145,13 +3150,13 @@ slice_hidden(m, str fn_name, str var) {
   shown = array{};
   for(k : kept) {
     p = k;
-    while(given(p) && !sl_same(p, f)) {
-      sl_keep(shown, p);
+    while(given(p) && !sl.same(p, f)) {
+      sl.keep(shown, p);
       p = code_parent(p);
     }
   }
   r = array{f};
-  for(n : all) if(!sl_kept_has(shown, n)) r.push(n);
+  for(n : all) if(!sl.kept_has(shown, n)) r.push(n);
   r
 }
 
@@ -3166,177 +3171,180 @@ struct rs_fold { code at; code other; }
 struct rs_value { code at; str text; }
 struct rs_plan { array hidden; array folds; array values; }
 
-rs_kind_in(c, kinds) {
-  r = false;
-  k = code_kind(c);
-  for(t : kinds) if(t == k) r = true;
-  r
-}
+// Служебные функции остаточной программы — в сущности rs (снаружи — rs.f(…)), как sl.
+rs() {
+  kind_in(c, kinds) => {
+    r = false;
+    k = code_kind(c);
+    for(t : kinds) if(t == k) r = true;
+    r
+  };
 
-// цель присваивания: x в x = e, x += e
-rs_lvalue(n) {
-  p = code_parent(n);
-  r = false;
-  if(given(p) && (code_kind(p) == n_op)) {
-    n_op{op, args, _} = p;
-    r = sl_assign(op) && sl_same(args[0], n);
-  }
-  r
-}
+  // цель присваивания: x в x = e, x += e
+  lvalue(n) => {
+    p = code_parent(n);
+    r = false;
+    if(given(p) && (code_kind(p) == n_op)) {
+      n_op{op, args, _} = p;
+      r = sl.assign(op) && sl.same(args[0], n);
+    }
+    r
+  };
 
-rs_require(n) => (code_kind(n) == n_call) && {
-  n_call{c, args, words, _, _, _} = n;
-  (words.size == 0) && ((args.size > 0) && ((code_kind(c) == n_ident) && (code_name(c) == "require")))
-};
+  is_require(n) => (code_kind(n) == n_call) && {
+    n_call{c, args, words, _, _, _} = n;
+    (words.size == 0) && ((args.size > 0) && ((code_kind(c) == n_ident) && (code_name(c) == "require")))
+  };
 
-// не заменять: цель присваивания, вызываемое, объявления и параметры
-rs_foldable_position(n) {
-  p = code_parent(n);
-  if(rs_kind_in(n, array{n_var, n_fn, n_param, n_lambda, n_block, n_return, n_loop, n_break, n_continue}) || (rs_require(n) || is_clause_pack(n))) false
-  else if(!given(p)) false
-  else if((code_kind(p) == n_call) && {
-    n_call{c, _, _, _, _, _} = p;
-    sl_same(c, n)
-  }) false
-  else if((code_kind(p) == n_var) && {
-    n_var{_, t, _, _, _, _, _, _} = p;
-    sl_same(t, n)
-  }) false
-  else if((code_kind(p) == n_construct) && {
-    n_construct{t, _, _} = p;
-    sl_same(t, n)
-  }) false
-  else !rs_lvalue(n)
-}
+  // не заменять: цель присваивания, вызываемое, объявления и параметры
+  foldable_position(n) => {
+    p = code_parent(n);
+    if(kind_in(n, array{n_var, n_fn, n_param, n_lambda, n_block, n_return, n_loop, n_break, n_continue}) || (is_require(n) || is_clause_pack(n))) false
+    else if(!given(p)) false
+    else if((code_kind(p) == n_call) && {
+      n_call{c, _, _, _, _, _} = p;
+      sl.same(c, n)
+    }) false
+    else if((code_kind(p) == n_var) && {
+      n_var{_, t, _, _, _, _, _, _} = p;
+      sl.same(t, n)
+    }) false
+    else if((code_kind(p) == n_construct) && {
+      n_construct{t, _, _} = p;
+      sl.same(t, n)
+    }) false
+    else !lvalue(n)
+  };
 
-// значение узла литералом — или "" (свёртки нет)
-rs_fold_value(n) {
-  r = "";
-  if(!sl_statement(n) && rs_foldable_position(n)) {
-    o = view_obs(n);
-    if(o.found && (o.seen && (!o.diverted && (!o.effect && (o.has_literal && !rs_kind_in(n, array{n_int, n_float, n_str})))))) r = o.literal;
-  }
-  r
-}
+  // значение узла литералом — или "" (свёртки нет)
+  fold_value(n) => {
+    r = "";
+    if(!sl.statement(n) && foldable_position(n)) {
+      o = view_obs(n);
+      if(o.found && (o.seen && (!o.diverted && (!o.effect && (o.has_literal && !kind_in(n, array{n_int, n_float, n_str})))))) r = o.literal;
+    }
+    r
+  };
 
-// условие if: 0 — неизвестно, 1 — ложь, 2 — истина
-rs_cond(n) {
-  n_if{c, _, _} = n;
-  o = view_obs(c);
-  if(!o.found || (!o.seen || (o.effect || !o.is_bool))) 0 else if(o.truth) 2 else 1
-}
+  // условие if: 0 — неизвестно, 1 — ложь, 2 — истина
+  cond_of(n) => {
+    n_if{c, _, _} = n;
+    o = view_obs(c);
+    if(!o.found || (!o.seen || (o.effect || !o.is_bool))) 0 else if(o.truth) 2 else 1
+  };
 
-// развилка с известным условием — её ветка (array{} — свёртки нет)
-rs_fold_if(n) {
-  r = array{};
-  if(code_kind(n) == n_if) {
-    c = rs_cond(n);
-    n_if{_, yes, no} = n;
-    if(c == 2) r.push(yes);
-    if((c == 1) && given(no)) r.push(no);
-  }
-  r
-}
-rs_drops(n) => (code_kind(n) == n_if) && ((rs_cond(n) == 1) && {
-  n_if{_, _, no} = n;
-  !given(no)
-});
+  // развилка с известным условием — её ветка (array{} — свёртки нет)
+  fold_if(n) => {
+    r = array{};
+    if(code_kind(n) == n_if) {
+      c = cond_of(n);
+      n_if{_, yes, no} = n;
+      if(c == 2) r.push(yes);
+      if((c == 1) && given(no)) r.push(no);
+    }
+    r
+  };
+  drops(n) => (code_kind(n) == n_if) && ((cond_of(n) == 1) && {
+    n_if{_, _, no} = n;
+    !given(no)
+  });
 
-// инструкция-выражение, которая ничего не делает при этих входах: результат известен
-// и отброшен, рантайм-эффектов нет, изменяемых параметров нет
-rs_pure_noop(n) {
-  r = rs_kind_in(n, array{n_call, n_op, n_ident});
-  if(r && (code_kind(n) == n_op)) {
-    n_op{op, _, _} = n;
-    if(sl_assign(op)) r = false;
-  }
-  if(r) {
-    o = view_obs(n);
-    if(!o.found || (!o.seen || (o.effect || (o.diverted || !o.known)))) r = false;
-  }
-  if(r && (code_kind(n) == n_call)) {
-    n_call{c, _, _, _, _, _} = n;
-    if(code_kind(c) == n_ident) {
-      name = code_name(c);
-      for(item : code_items(code_module(n))) {
-        if((code_kind(item) == n_fn) && (code_name(item) == name)) {
-          n_fn{_, params, _, _, _, _, _, _, _} = item;
-          for(p : params) {
-            n_param{_, _, mode, _, _, _, _} = p;
-            if((mode == 1) || ((mode == 2) || (mode == 3))) r = false; // mut, own, out
+  // инструкция-выражение, которая ничего не делает при этих входах: результат известен
+  // и отброшен, рантайм-эффектов нет, изменяемых параметров нет
+  pure_noop(n) => {
+    r = kind_in(n, array{n_call, n_op, n_ident});
+    if(r && (code_kind(n) == n_op)) {
+      n_op{op, _, _} = n;
+      if(sl.assign(op)) r = false;
+    }
+    if(r) {
+      o = view_obs(n);
+      if(!o.found || (!o.seen || (o.effect || (o.diverted || !o.known)))) r = false;
+    }
+    if(r && (code_kind(n) == n_call)) {
+      n_call{c, _, _, _, _, _} = n;
+      if(code_kind(c) == n_ident) {
+        name = code_name(c);
+        for(item : code_items(code_module(n))) {
+          if((code_kind(item) == n_fn) && (code_name(item) == name)) {
+            n_fn{_, params, _, _, _, _, _, _, _} = item;
+            for(p : params) {
+              n_param{_, _, mode, _, _, _, _} = p;
+              if((mode == 1) || ((mode == 2) || (mode == 3))) r = false; // mut, own, out
+            }
           }
         }
       }
     }
-  }
-  r
-}
+    r
+  };
 
-rs_dead_init(init) => {
-  o = view_obs(init);
-  !o.found || !o.effect
-};
+  dead_init(init) => {
+    o = view_obs(init);
+    !o.found || !o.effect
+  };
 
-rs_keep(n, used) {
-  p = code_parent(n);
-  k = code_kind(n);
-  if((k == n_fn) && (given(p) && (code_kind(p) == n_module))) (code_name(n) == "main") || view_live(n)
-  else if(!sl_statement(n)) true
-  else if({
-    o = view_obs(n);
-    !o.found || !o.present
-  }) false // не исполнялась при этих входах
-  else if((k == n_var) && {
-    n_var{name, _, init, _, _, _, _, _} = n;
-    !sl_has(used, name) && rs_dead_init(init)
-  }) false // мёртвая переменная: её нигде не читают, инициализация без эффекта
-  else if(view_declares(n) && {
-    n_op{_, args, _} = n;
-    !sl_has(used, code_name(args[0])) && rs_dead_init(args[1])
-  }) false // x = e, объявившее x, которое не читают
-  else if(rs_pure_noop(n)) false
-  else !rs_drops(n) // if(ложь) без else — ничего не остаётся
-}
-
-// имена, которые читаются в остаточной программе: не свёрнутые, не в выброшенном
-rs_used(n, used) {
-  if(given(n)) {
+  keep(n, used) => {
     p = code_parent(n);
     k = code_kind(n);
-    o = view_obs(n);
-    ignoring_dead = o.found && o.present;
-    folds = rs_fold_if(n);
-    if((k == n_fn) && ((given(p) && (code_kind(p) == n_module)) && !rs_keep(n, used))) {
-    } else if(sl_statement(n) && ((k != n_var) && (!view_declares(n) && ((k != n_fn) && (!ignoring_dead || rs_pure_noop(n)))))) {
-    } else if(rs_fold_value(n).size > 0) {
-    } else if(folds.size > 0) rs_used(folds[0], used)
-    else if(rs_drops(n)) {
-    } else {
-      if((k == n_ident) && !rs_lvalue(n)) sl_add(used, code_name(n));
-      for(c : code_items(n)) rs_used(c, used);
-    }
-  }
-}
+    if((k == n_fn) && (given(p) && (code_kind(p) == n_module))) (code_name(n) == "main") || view_live(n)
+    else if(!sl.statement(n)) true
+    else if({
+      o = view_obs(n);
+      !o.found || !o.present
+    }) false // не исполнялась при этих входах
+    else if((k == n_var) && {
+      n_var{name, _, init, _, _, _, _, _} = n;
+      !sl.has(used, name) && dead_init(init)
+    }) false // мёртвая переменная: её нигде не читают, инициализация без эффекта
+    else if(view_declares(n) && {
+      n_op{_, args, _} = n;
+      !sl.has(used, code_name(args[0])) && dead_init(args[1])
+    }) false // x = e, объявившее x, которое не читают
+    else if(pure_noop(n)) false
+    else !drops(n) // if(ложь) без else — ничего не остаётся
+  };
 
-// поле структуры, переданной в функцию, меняется в копии — списки отдельными массивами
-rs_collect_into(n, used, hidden, folds, values) {
-  if(given(n)) {
-    if(!rs_keep(n, used)) hidden.push(n);
-    fs = rs_fold_if(n);
-    if(fs.size > 0) folds.push(rs_fold{n, fs[0]});
-    v = rs_fold_value(n);
-    if(v.size > 0) values.push(rs_value{n, v});
-    for(c : code_items(n)) rs_collect_into(c, used, hidden, folds, values);
-  }
+  // имена, которые читаются в остаточной программе: не свёрнутые, не в выброшенном
+  gather(n, used) => {
+    if(given(n)) {
+      p = code_parent(n);
+      k = code_kind(n);
+      o = view_obs(n);
+      ignoring_dead = o.found && o.present;
+      folds = fold_if(n);
+      if((k == n_fn) && ((given(p) && (code_kind(p) == n_module)) && !keep(n, used))) {
+      } else if(sl.statement(n) && ((k != n_var) && (!view_declares(n) && ((k != n_fn) && (!ignoring_dead || pure_noop(n)))))) {
+      } else if(fold_value(n).size > 0) {
+      } else if(folds.size > 0) gather(folds[0], used)
+      else if(drops(n)) {
+      } else {
+        if((k == n_ident) && !lvalue(n)) sl.add(used, code_name(n));
+        for(c : code_items(n)) gather(c, used);
+      }
+    }
+  };
+
+  // поле структуры, переданной в функцию, меняется в копии — списки отдельными массивами
+  collect_into(n, used, hidden, folds, values) => {
+    if(given(n)) {
+      if(!keep(n, used)) hidden.push(n);
+      fs = fold_if(n);
+      if(fs.size > 0) folds.push(rs_fold{n, fs[0]});
+      v = fold_value(n);
+      if(v.size > 0) values.push(rs_value{n, v});
+      for(c : code_items(n)) collect_into(c, used, hidden, folds, values);
+    }
+  };
 }
 
 residual_plan(m) {
   used = array{};
-  rs_used(m, used);
+  rs.gather(m, used);
   hidden = array{};
   folds = array{};
   values = array{};
-  rs_collect_into(m, used, hidden, folds, values);
+  rs.collect_into(m, used, hidden, folds, values);
   rs_plan{hidden, folds, values}
 }
 
@@ -3353,40 +3361,37 @@ residual_plan(m) {
 struct ch_entry { i64 cell; i64 shape; i64 count; i64 op; i64 li; i64 ri; }
 struct ch_result { i64 status; array tree; array notes; }
 
-ch_cell(i64 k, i64 i, i64 j) => (i * k) + j;
-
-// разборы клетки (i, j) — номера записей
-ch_in(ents, i64 c) {
-  r = array{};
-  for(x : range(ents.size)) if(ents[x].cell == c) r.push(x);
-  r
-}
-
-ch_build(ents, i64 x, acc) {
-  e = ents[x];
-  if(e.op < 0) {
-    acc.push(-1);
-    acc.push(e.li); // атом: его номер
-  } else {
-    acc.push(e.op);
-    ch_build(ents, e.li, acc);
-    ch_build(ents, e.ri, acc);
-  }
-}
-
 chain_resolve(i64 k, ops, assoc, bool open) {
+  cell(i64 kk, i64 i, i64 j) => (i * kk) + j;
+  // разборы клетки (i, j) — номера записей
+  in_cell(es, i64 c) => {
+    r = array{};
+    for(x : range(es.size)) if(es[x].cell == c) r.push(x);
+    r
+  };
+  build(es, i64 x, acc) => {
+    e = es[x];
+    if(e.op < 0) {
+      acc.push(-1);
+      acc.push(e.li); // атом: его номер
+    } else {
+      acc.push(e.op);
+      build(es, e.li, acc);
+      build(es, e.ri, acc);
+    }
+  };
   ents = array{};
-  for(i : range(k)) ents.push(ch_entry{ch_cell(k, i, i), i, 1, -1, i, 0}); // тип атома i — номер i
+  for(i : range(k)) ents.push(ch_entry{cell(k, i, i), i, 1, -1, i, 0}); // тип атома i — номер i
   len = 2;
   while(len <= k) {
     i = 0;
     while((i + (len - 1)) < k) {
       j = i + (len - 1);
-      cj = ch_cell(k, i, j);
+      cj = cell(k, i, j);
       m = i;
       while(m < j) { // оператор m — между атомами m и m + 1
-        ls = ch_in(ents, ch_cell(k, i, m));
-        rs = ch_in(ents, ch_cell(k, m + 1, j));
+        ls = in_cell(ents, cell(k, i, m));
+        rs = in_cell(ents, cell(k, m + 1, j));
         for(li : ls) {
           for(ri : rs) {
             r = ents[ri];
@@ -3397,7 +3402,7 @@ chain_resolve(i64 k, ops, assoc, bool open) {
                 cnt = ents[li].count * r.count;
                 if(cnt > 2) cnt = 2;
                 same = -1;
-                for(x : ch_in(ents, cj)) if(chain_key(ents[x].shape) == chain_key(t)) same = x;
+                for(x : in_cell(ents, cj)) if(chain_key(ents[x].shape) == chain_key(t)) same = x;
                 if(same >= 0) ents[same].count = 2; // другой разбор того же типа
                 else ents.push(ch_entry{cj, t, cnt, m, li, ri});
               }
@@ -3410,7 +3415,7 @@ chain_resolve(i64 k, ops, assoc, bool open) {
     }
     len = len + 1;
   }
-  top = ch_in(ents, ch_cell(k, 0, k - 1));
+  top = in_cell(ents, cell(k, 0, k - 1));
   total = 0;
   for(x : top) total = total + ents[x].count;
   // атом с ⊥ (рекурсия): только единственное согласованное дерево, иначе тип ещё выводится
@@ -3422,7 +3427,7 @@ chain_resolve(i64 k, ops, assoc, bool open) {
     return ch_result{3, array{}, notes};
   }
   tree = array{};
-  ch_build(ents, top[0], tree);
+  build(ents, top[0], tree);
   ch_result{0, tree, array{}}
 }
 
@@ -3438,23 +3443,23 @@ chain_resolve(i64 k, ops, assoc, bool open) {
 // перегруженных вызовов: выбор перегрузки не выбирает сам себя.
 struct ov_pick { array order; i64 reach; bool ambiguous; i64 tied; }
 
-ov_score(f) {
-  s = if(f[0] == 1) 0 else 1;
-  s = s + f[1];
-  i = 2;
-  while(i < f.size) {
-    k = f[i];
-    if(k >= 100) s = s + (1 + (k - 100));
-    else s = s + k;
-    i = i + 1;
-  }
-  s
-}
 
 overload_pick(feats, maybes, bool checking) {
+  score(f) => {
+    s = if(f[0] == 1) 0 else 1;
+    s = s + f[1];
+    i = 2;
+    while(i < f.size) {
+      k = f[i];
+      if(k >= 100) s = s + (1 + (k - 100));
+      else s = s + k;
+      i = i + 1;
+    }
+    s
+  };
   n = feats.size;
   scores = array{};
-  for(f : feats) scores.push(ov_score(f));
+  for(f : feats) scores.push(score(f));
   order = array{};
   for(i : range(n)) { // вставка — после всех с весом не меньше: порядок равных сохраняется
     pos = order.size;
@@ -3524,15 +3529,6 @@ fit_rule(got, want, strict, subtype, record, want_struct, empty, is_code, want_n
   else 0
 }
 
-str_starts(s, p) {
-  r = s.size >= p.size;
-  k = 0;
-  while(r && (k < p.size)) {
-    if(s[k] != p[k]) r = false;
-    k = k + 1;
-  }
-  r
-}
 
 // join_rule: альтернатива y (тип ty) и значение x (тип tx) другого пути. Проход 1 —
 // пустой массив: тип элементов поздний, array<?> ⊔ array<T> = array<T> (рт); проход 2 —
@@ -3540,10 +3536,19 @@ str_starts(s, p) {
 // 0 — не эта альтернатива, 1 — x уже есть, 2 — y стирается до типа, 3 — y := тип x.
 // Другое состояние (ct-поле, hide) — всегда другая альтернатива.
 join_rule(pass, ty, tx, same_state, same_value) {
+  starts(s, p) => {
+    r = s.size >= p.size;
+    k = 0;
+    while(r && (k < p.size)) {
+      if(s[k] != p[k]) r = false;
+      k = k + 1;
+    }
+    r
+  };
   if(!same_state) 0
   else if(pass == 1) {
-    if((tx == "array<?>") && str_starts(ty, "array<")) 2
-    else if((ty == "array<?>") && str_starts(tx, "array<")) 3
+    if((tx == "array<?>") && starts(ty, "array<")) 2
+    else if((ty == "array<?>") && starts(tx, "array<")) 3
     else 0
   } else if(ty != tx) 0
   else if(same_value) 1

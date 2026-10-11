@@ -1889,6 +1889,30 @@ struct interpreter {
     return ok();
   }
 
+  // The entity body area is a function for calling its functions from the outside (entity .f(…)):
+  // its local functions are declared, as the block itself would declare them, the neighbors see
+  // each other. Encapsulation - entity, without a separate mechanism:
+// 
+//.
+  scope * entity_scope(symbol owner) {
+    auto [it, fresh] = entity_scopes.try_emplace(owner.value, nullptr);
+    if(fresh) {
+      scope * s = new_scope(globals);
+      if(auto fs = functions.find(owner); fs != functions.end())
+        for(node_id f: fs->second)
+          if(db.is<n_block>(db.as<n_fn>(f).body))
+            for(node_id item: db.as<n_block>(db.as<n_fn>(f).body).items)
+              if(db.is<n_fn>(item) && !db.as<n_fn>(item).scoped) {
+                symbol name = db.as<n_fn>(item).name;
+                if(value * cell = s->find(name); cell && cell->is<fn_v>() && cell->as<fn_v>().env == s) cell->as<fn_v>().set.push_back(item);
+                else s->declare(name, value(fn_v{{}, item, s, {item}}));
+              }
+      it->second = s;
+    }
+    return it->second;
+  }
+  std::unordered_map<uint32_t, scope *> entity_scopes;
+
   flow eval_node(node_id n, n_fn const & f, scope * env, uint32_t) {
     if(f.scoped) { // using operator ... - to the end of the frame of the function-context, for all executable
       overrides.push_back({f.name, n, frames.empty() ? symbol{} : frames.back().name});
@@ -5562,8 +5586,9 @@ struct interpreter {
           std::vector<node_id> fit;
           for(node_id s: set)
             if(db.as<n_fn>(s).params.size() == c.args.size()) fit.push_back(s);
-          if(fit.size() == 1) return call_value(value(fn_v{{}, fit[0], globals, {}}), c.args, env, frame, where, n.value);
-          if(!set.empty()) return call_value(value(fn_v{m.name, {}, globals, set}), c.args, env, frame, where, n.value);
+          scope * home = entity_scope(owner); // entity neighbors are visible to each other.
+          if(fit.size() == 1) return call_value(value(fn_v{{}, fit[0], home, {}}), c.args, env, frame, where, n.value);
+          if(!set.empty()) return call_value(value(fn_v{m.name, {}, home, set}), c.args, env, frame, where, n.value);
         }
       }
       node_list args{m.object};

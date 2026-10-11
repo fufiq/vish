@@ -1,0 +1,25 @@
+// out: true false [1, 2] 5 true
+// fmt-stable
+// Функции в теле сущности-функции, вызванные снаружи как сущность.f(…), видят
+// соседей лексически — как в самом блоке. Инкапсуляция — сущностью: 
+// 
+// Было: 
+//  внутри kit.add. Локальная функция в блоке — f(…) => …; (f(…) { } в
+// блоке — вызов с блоком).
+kit() {
+  has(xs, x) => {
+    r = false;
+    for(y : xs) if(y == x) r = true;
+    r
+  };
+  add(xs, x) => if(has(xs, x)) false else {
+    xs.push(x);
+    true
+  };
+  count(i64 n) => if(n == 0) 0 else 1 + count(n - 1);
+}
+
+main() {
+  v = array{1};
+  print(kit.add(v, 2), kit.add(v, 2), v, kit.count(5), kit.has(v, 1));
+}
