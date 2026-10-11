@@ -198,166 +198,37 @@ struct residual_view {
 
 // --- срез -----------------------------------------------------------------------------
 //
-// Instructions of a function that use a variable (and everything that is computed from
-// it), plus what it depends on, to keep slice executable. Covering if/for/while are
-// stored along with the terms.
+// slice logic is in language (slice_hidden prelude, M6 step 3): This is
+// the entrance and the filter print.
 struct slice_view {
-  slice_view(ast_db const & db) : db(db) {}
+  slice_view(ast_db & db) : db(db) {}
 
   // Empty string - no function or variable found.
   std::string print(node_id module, std::string_view fn_name, std::string_view var) {
-    node_id fn;
-    for(node_id item: db.as<n_module>(module).items)
-      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) fn = item;
-    if(!fn) return {};
-
-    collect(db.as<n_fn>(fn).body);
-    for(node_id p: db.as<n_fn>(fn).params) param_names.insert(db.as<n_param>(p).name);
-
-    std::set<symbol> forward{find_symbol(var)}, backward{find_symbol(var)};
-    if(!*forward.begin()) return {};
-    // Forward: Who uses x and all that is computed
-    for(bool changed = true; changed;) {
-      changed = false;
-      for(auto & s: stmts)
-        if(!kept.contains(s.node) && intersects(s.uses, forward)) {
-          kept.insert(s.node);
-          for(symbol d: s.defs) changed |= forward.insert(d).second;
-          changed = true;
-        }
-    }
-    // Back: Where does x come from and everything that saves instructions use?
-    for(auto & s: stmts)
-      if(kept.contains(s.node))
-        for(symbol u: s.uses) backward.insert(u);
-    for(bool changed = true; changed;) {
-      changed = false;
-      for(auto & s: stmts)
-        if(intersects(s.defs, backward) && kept.insert(s.node).second) {
-          for(symbol u: s.uses) backward.insert(u);
-          changed = true;
-        }
-    }
-    // control structures around and their conditions
-    for(bool changed = true; changed;) {
-      changed = false;
-      for(node_id k: std::vector<node_id>(kept.begin(), kept.end()))
-        for(node_id p = db[k].parent; p && p != fn; p = db[p].parent)
-          if(is_statement(db, p) && kept.insert(p).second) {
-            for(auto & s: stmts)
-              if(s.node == p)
-                for(symbol u: s.uses) backward.insert(u);
-            changed = true;
-          }
-      for(auto & s: stmts)
-        if(intersects(s.defs, backward) && kept.insert(s.node).second) {
-          for(symbol u: s.uses) backward.insert(u);
-          changed = true;
-        }
-    }
+    node_id sh;
+    for(uint32_t i = db.size(); i-- > 0;)
+      if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "slice_hidden") {
+        sh = node_id(i);
+        break;
+      }
+    if(!sh) return {};
+    // root - prelude : slice - pure analysis, program code (ct, emit) is not executed
+    interpreter vm(db, db.prelude ? db.prelude : module, {"slice"}, mode::run);
+    value r = vm.analyze_instance(sh, {vm.code_value(module), value(std::string(fn_name)), value(std::string(var))});
+    if(!r.is<array_v>() || r.as<array_v>().size() == 0) return {};
+    auto const & xs = r.as<array_v>();
+    node_id fn = vm.code_node(xs.get(0), db[module].where);
+    std::set<node_id> hidden;
+    for(uint32_t k = 1; k < xs.size(); ++k) hidden.insert(vm.code_node(xs.get(k), db[module].where));
     printer pr(db, [&](node_id n) {
       if(db[n].parent && db.is<n_module>(db[n].parent)) return n == fn;
-      return !is_statement(db, n) || kept.contains(n) || has_kept_descendant(n);
+      return !hidden.contains(n);
     });
     pr.comments = false; // residual program
     return pr.print(module);
   }
-  struct stmt {
-    node_id node;
-    std::set<symbol> defs, uses;
-  };
 
-  symbol find_symbol(std::string_view name) const {
-    for(auto & s: stmts) {
-      for(symbol d: s.defs)
-        if(db.strings.text(d) == name) return d;
-      for(symbol u: s.uses)
-        if(db.strings.text(u) == name) return u;
-    }
-    return {};
-  }
-
-  static bool intersects(std::set<symbol> const & a, std::set<symbol> const & b) {
-    for(symbol x: a)
-      if(b.contains(x)) return true;
-    return false;
-  }
-
-  bool has_kept_descendant(node_id n) const {
-    for(node_id k: kept)
-      for(node_id p = db[k].parent; p; p = db[p].parent)
-        if(p == n) return true;
-    return false;
-  }
-
-  // Bypass the body: For each instruction, what it defines and uses.
-  void collect(node_id n) {
-    if(!n) return;
-    if(is_statement(db, n) && !db.is<n_block>(n)) {
-      stmt s{n, {}, {}};
-      analyze(n, s);
-      stmts.push_back(std::move(s));
-    }
-    // nested instructions (block bodies, branches, cycles)
-    db.for_each_child(n, [&](node_id c) {
-      if(!(db.is<n_lambda>(c) && !db.as<n_lambda>(c).block) && !db.is<n_fn>(c)) collect(c);
-    });
-  }
-
-  void analyze(node_id n, stmt & s) {
-    if(db.is<n_var>(n)) {
-      s.defs.insert(db.as<n_var>(n).name);
-      uses(db.as<n_var>(n).init, s.uses);
-    } else if(db.is<n_if>(n)) {
-      uses(db.as<n_if>(n).cond, s.uses);
-    } else if(db.is<n_loop>(n) || db.is<n_break>(n) || db.is<n_continue>(n)) {
-      // The cycle enters slice as encompassing the construction of stored instructions.
-    } else if(db.is<n_op>(n) && is_assign(db.as<n_op>(n))) {
-      auto const & o = db.as<n_op>(n);
-      node_id t = o.args[0];
-      while(db.is_index(t)) {
-        uses(db.index_of(t).index, s.uses);
-        t = db.index_of(t).object;
-      }
-      if(db.is<n_ident>(t)) {
-        s.defs.insert(db.as<n_ident>(t).name);
-        if(db.strings.text(o.op) != "=" || t != o.args[0]) s.uses.insert(db.as<n_ident>(t).name);
-      }
-      uses(o.args[1], s.uses);
-    } else {
-      uses(n, s.uses);
-      // The call can change the arguments - alias (§6.2); the design (for, while) action -
-      // in its block, it is cut separately.
-      if(db.is<n_call>(n) && !db.as<n_call>(n).tail && db.as<n_call>(n).words.empty())
-        for(node_id a: db.as<n_call>(n).args)
-          if(db.is<n_ident>(a)) s.defs.insert(db.as<n_ident>(a).name);
-    }
-  }
-
-  bool is_assign(n_op const & o) const {
-    auto op = db.strings.text(o.op);
-    return op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=";
-  }
-
-  // Names readable by the expression (without nested instructions-blocks).
-  void uses(node_id n, std::set<symbol> & out) const {
-    if(!n) return;
-    if(db.is<n_ident>(n)) {
-      out.insert(db.as<n_ident>(n).name);
-      return;
-    }
-    if(db.is<n_block>(n) || db.is<n_lambda>(n)) return; // blocks have their own instructions
-    // the parameters of the construction block are visible only in the block:
-    // `for(auto x : xs)` - the construction falls into slice as covering, not by name
-    db.for_each_child(n, [&](node_id c) {
-      if(!(db.is<n_call>(n) && is_tail(db, n, c))) uses(c, out);
-    });
-  }
-
-  ast_db const & db;
-  std::vector<stmt> stmts;
-  std::set<node_id> kept;
-  std::set<symbol> param_names;
+  ast_db & db;
 };
 
 } // namespace tz
