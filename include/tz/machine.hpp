@@ -1127,6 +1127,7 @@ struct process_machine {
   void eval_node(node_id n, n_ident const & x) {
     m_task & t = top();
     place p = find(t.scope, x.name);
+    if(foreign_module_var(p, x.name, n)) p = {}; // Visibility hygiene and reading like an interpreter
     if(p.scope == m_none) {
       std::string_view s = helper.str(x.name);
       if(s == "true" || s == "false") return finish(mval{s == "true"});
@@ -1589,11 +1590,7 @@ struct process_machine {
       place p = op == "=" ? find_lexical(t.scope, name) : find(t.scope, name); // x = e is a name that does not cause
       // Visibility hygiene (as interpreter::foreign_global): the variable module of the program is not
       // visible to the code of the module that does not see it (the body of the construction prelude).
-      if(op == "=" && p.scope == st.globals && db.is<n_module>(root)) {
-        node_id m = helper.module_of(n);
-        bool module_var = std::ranges::any_of(db.as<n_module>(root).items, [&](node_id i) { return db.is<n_var>(i) && db.as<n_var>(i).name == name; });
-        if(module_var && m && m != root && !helper.definition_sees(m, root)) p = {};
-      }
+      if(op == "=" && foreign_module_var(p, name, n)) p = {};
       if(p.scope == m_none) {
         if(op != "=") throw diagnostic(cat("неизвестное имя ", helper.str(name)), db[lhs].where);
         declare(t.scope, name, std::move(rhs)); // x = e is an announcement if there is no name.
@@ -2199,6 +2196,14 @@ struct process_machine {
         return true;
       }
     return false;
+  }
+  // The program module variable found in the module domain is foreign to the module code that the
+  // program does not see (the structure body prelude): like interpreter::foreign_global.
+  bool foreign_module_var(place p, symbol name, node_id at) {
+    if(p.scope != st.globals || !db.is<n_module>(root)) return false;
+    bool module_var = std::ranges::any_of(db.as<n_module>(root).items, [&](node_id i) { return db.is<n_var>(i) && db.as<n_var>(i).name == name; });
+    node_id m = helper.module_of(at);
+    return module_var && m && m != root && !helper.definition_sees(m, root);
   }
   static bool elem_place(ast_db const & db, node_id x) { return db.is_index(x) && db.is<n_ident>(db.index_of(x).object); }
 

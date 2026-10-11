@@ -435,8 +435,13 @@ struct interpreter {
   // The module of foreign code is not visible: x = e in the body of the construction prelude (k = i
   // in for) announces its own, and does not write in ct k programs. *My:* visibility is like that of
   // extension control (your module, its use, prelude); it is checked by "declar or assign".
-  bool foreign_global(value const * c, node_id at) {
+  bool foreign_global(value const * c, node_id at, scope * env, symbol name) {
     if(global_home.empty()) return false;
+    // alien - only the name found in the domain of modules: parameter - alias of the caller cell
+    // (text(runs) - n - alias of the run cell) - its name of the function
+    for(scope * e = env; e && e != globals; e = e->parent)
+      for(auto const & v: e->vars)
+        if(v.first == name) return false;
     auto it = global_home.find(c);
     if(it == global_home.end()) return false;
     node_id m = module_of(at);
@@ -1728,7 +1733,9 @@ struct interpreter {
   flow eval_node(node_id, n_str const & x, scope *, uint32_t) { return ok(value(x.value)); }
 
   flow eval_node(node_id n, n_ident const & x, scope * env, uint32_t) {
-    if(value * cell = find(env, x.name)) {
+    value * found = find(env, x.name);
+    if(found && foreign_global(found, n, env, x.name)) found = nullptr; // Hygiene Visibility and Reading: An Alien Module Variable - as No Name
+    if(value * cell = found) {
       // ct-variable outside the ct-code: the value at the time of execution in canonical
       // order instantiation (§7.3 para. 2), in place - as ct e.
 // 
@@ -5245,7 +5252,7 @@ struct interpreter {
       // x = e and no name x is an announcement with type output
       if(op == "=" && db.is<n_ident>(o.args[0]) && [&] {
             value * c = env->find(db.as<n_ident>(o.args[0]).name);
-            return !c || foreign_global(c, n);
+            return !c || foreign_global(c, n, env, db.as<n_ident>(o.args[0]).name);
           }()) {
         symbol name = db.as<n_ident>(o.args[0]).name;
         if(checking()) implicit_decls.insert(n.value);
