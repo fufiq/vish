@@ -49,20 +49,44 @@ syntax try_compile {body} => try_compile(body);
 // там же); [[associative]] — инвариант из
 // логики: a + b + c — одно дерево. Тело из одного встроенного примитива —
 // операция VM (интерпретатор и машинный код исполняют её напрямую).
-[[associative]] operator (a) + (b) => add(a, b);
-operator (a) - (b) => sub(a, b);
-[[associative]] operator (a) * (b) => mul(a, b);
-operator (a) / (b) => div(a, b);
-operator (a) % (b) => rem(a, b);
-operator (a) == (b) => eq(a, b);
-operator (a) != (b) => ne(a, b);
-operator (a) < (b) => lt(a, b);
-operator (a) > (b) => gt(a, b);
-operator (a) <= (b) => le(a, b);
-operator (a) >= (b) => ge(a, b);
+// Числа — теги над машинными примитивами (O15, решение автора 2026-10-11), какие
+// операции у какого типа — объявления здесь, по типам: 
+// 
+// Нет объявления для этих
+// типов — операции нет: i64 + f64 — ошибка, пока программа не объявит своё
+// operator (i64 a) + (f64 b). *Моё:* у оператора-примитива — только «тип равен».
+[[associative]] operator (i64 a) + (i64 b) => add(a, b);
+[[associative]] operator (f64 a) + (f64 b) => add(a, b);
+[[associative]] operator (str a) + (str b) => add(a, b);
+operator (i64 a) - (i64 b) => sub(a, b);
+operator (f64 a) - (f64 b) => sub(a, b);
+[[associative]] operator (i64 a) * (i64 b) => mul(a, b);
+[[associative]] operator (f64 a) * (f64 b) => mul(a, b);
+operator (i64 a) / (i64 b) => div(a, b);
+operator (f64 a) / (f64 b) => div(a, b);
+operator (i64 a) % (i64 b) => rem(a, b);
+operator (i64 a) == (i64 b) => eq(a, b);
+operator (f64 a) == (f64 b) => eq(a, b);
+operator (str a) == (str b) => eq(a, b);
+operator (bool a) == (bool b) => eq(a, b);
+operator (type a) == (type b) => eq(a, b);
+operator (i64 a) != (i64 b) => ne(a, b);
+operator (f64 a) != (f64 b) => ne(a, b);
+operator (str a) != (str b) => ne(a, b);
+operator (bool a) != (bool b) => ne(a, b);
+operator (type a) != (type b) => ne(a, b);
+operator (i64 a) < (i64 b) => lt(a, b);
+operator (f64 a) < (f64 b) => lt(a, b);
+operator (i64 a) > (i64 b) => gt(a, b);
+operator (f64 a) > (f64 b) => gt(a, b);
+operator (i64 a) <= (i64 b) => le(a, b);
+operator (f64 a) <= (f64 b) => le(a, b);
+operator (i64 a) >= (i64 b) => ge(a, b);
+operator (f64 a) >= (f64 b) => ge(a, b);
 [[associative]] operator (bool a) && (expr bool b) => and(a, b);
 [[associative]] operator (bool a) || (expr bool b) => or(a, b);
-operator -(a) => neg(a);
+operator -(i64 a) => neg(a);
+operator -(f64 a) => neg(a);
 // биты i64 — для кодирования инструкций на языке (§10.4)
 [[associative]] operator (i64 a) & (i64 b) => band(a, b);
 [[associative]] operator (i64 a) | (i64 b) => bor(a, b);

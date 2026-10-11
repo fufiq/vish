@@ -5301,6 +5301,7 @@ struct interpreter {
   value unary(std::string_view op, value const & x, span where) {
     if(unknown(x)) return x;
     if(!x.known()) return erase(unary(op, *shape_or_fail(x, where), where));
+    if(!op_declared(op, x, nullptr)) fail(cat("оператор ", op, " не определён для ", types.describe(x)), where);
     if(op == "!") return value(!truthy(x, where));
     if(op == "-") {
       if(x.is<int64_t>()) return value(int64_t(0 - uint64_t(x.as<int64_t>())));
@@ -5385,8 +5386,67 @@ struct interpreter {
     return arith(op, a, b, where);
   }
 
+  // Whether a primitive operator is declared for these types (O15, M6 step 8): what operations are
+  // in which type - prelude ads by type (see below).
+// ); the machine performs only what is declared. *Mine: *
+  // Primitive operator - only "type equal" (without i64 → f64); the result is a pair of types.
+  bool op_declared(std::string_view op, value const & a, value const * b) {
+    // fast path - built-in types and primitive operators: table [operator][type][type]; 0 - not yet
+    // asked, 1 - not, 2 - announced; unary - their rows
+    uint32_t ta = types.of(a).value, tb = b ? types.of(*b).value : 0;
+    int oi = -1;
+    if(ta < 16 && tb < 16 && !op.empty() && op.size() <= 2) {
+      char c0 = op[0], c1 = op.size() > 1 ? op[1] : 0;
+      if(!b) oi = !c1 && c0 == '-' ? 16 : !c1 && c0 == '!' ? 17 : -1;
+      else if(!c1) {
+        switch(c0) {
+          case '+': oi = 0; break;
+          case '-': oi = 1; break;
+          case '*': oi = 2; break;
+          case '/': oi = 3; break;
+          case '%': oi = 4; break;
+          case '<': oi = 7; break;
+          case '>': oi = 8; break;
+          case '&': oi = 11; break;
+          case '|': oi = 12; break;
+          case '^': oi = 13; break;
+          default: break;
+        }
+      } else if(c1 == '=') oi = c0 == '=' ? 5 : c0 == '!' ? 6 : c0 == '<' ? 9 : c0 == '>' ? 10 : -1;
+      else if(c0 == c1) oi = c0 == '<' ? 14 : c0 == '>' ? 15 : -1;
+    }
+    if(oi >= 0) {
+      int8_t & c = declared_fast[oi][ta][tb];
+      if(!c) c = op_declared_slow(op, a, b) ? 2 : 1;
+      return c == 2;
+    }
+    return op_declared_slow(op, a, b);
+  }
+  int8_t declared_fast[18][16][16] = {};
+  bool op_declared_slow(std::string_view op, value const & a, value const * b) {
+    uint64_t packed = 0;
+    for(char ch: op.substr(0, 3)) packed = (packed << 8) | uint8_t(ch);
+    uint64_t key = (packed << 40) | (uint64_t(types.of(a).value & 0xFFFFF) << 20) | (b ? types.of(*b).value & 0xFFFFF : 0xFFFFF);
+    auto [it, fresh] = declared_ops.try_emplace(key, false);
+    if(fresh) {
+      std::string ta = types.describe(a), tb = b ? types.describe(*b) : std::string();
+      auto accepts = [&](node_id p, std::string const & t) {
+        node_id ty = db.as<n_param>(p).type;
+        return !ty || (db.is<n_ident>(ty) && str(db.as<n_ident>(ty).name) == t);
+      };
+      if(auto fs = functions.find(sym(cat(b ? "infix" : "prefix", op))); fs != functions.end())
+        for(node_id fn: fs->second) {
+          auto const & ps = db.as<n_fn>(fn).params;
+          if(intrinsic_operator(fn) && ps.size() == (b ? 2u : 1u) && accepts(ps[0], ta) && (!b || accepts(ps[1], tb))) it->second = true;
+        }
+    }
+    return it->second;
+  }
+  std::unordered_map<uint64_t, bool> declared_ops;
+
   value arith(std::string_view op, value const & a, value const & b, span where) {
-    // Strictly: without implicit i64 <-> f64 (§5.8)
+    // Strictly: without implicit i64 <-> f64 (§5.8) - no operation if it is not in the ads
+    if(!op_declared(op, a, &b)) fail(cat("оператор ", op, " не определён для ", types.describe(a), " и ", types.describe(b)), where);
     if(a.is<int64_t>() && b.is<int64_t>()) return int_op(op, a.as<int64_t>(), b.as<int64_t>(), where);
     if(a.is<double>() && b.is<double>()) return float_op(op, a.as<double>(), b.as<double>(), where);
     if(a.is<str_v>() && b.is<str_v>()) {
