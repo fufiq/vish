@@ -68,6 +68,7 @@ struct m_alias {
   uint32_t slot = 0;
   uint32_t index = m_none;
   uint64_t gen = 0;
+  uint32_t field = m_none; // variable aggregate field: b.xs to variable parameter (§6.2)
 };
 struct mval {
   std::variant<m_unit, bool, int64_t, double, m_str, m_type, m_arr, m_agg, m_fn, m_thunk, m_alias> v;
@@ -210,7 +211,7 @@ struct m_state {
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "TZPROC04";
+  std::string magic = "TZPROC05";
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -365,6 +366,14 @@ struct process_machine {
   mval & follow(m_alias al) {
     mval * c = &st.scopes[al.scope].vars[al.slot].v;
     if(c->is<m_alias>()) c = &follow(c->as<m_alias>());
+    if(al.field != m_none) { // path by field number - allowed at each request, there is nothing to hang
+      if(!c->is<m_agg>() || al.field >= c->as<m_agg>().fields.size()) {
+        diagnostic d("ссылка на поле использована после замены агрегата", here(), diag_kind::runtime);
+        d.type = "invalidated_alias";
+        throw d;
+      }
+      return c->as<m_agg>().fields[al.field].v;
+    }
     if(al.index == m_none) return *c;
     if(!c->is<m_arr>() || c->as<m_arr>().gen != al.gen) {
       diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
@@ -1832,6 +1841,7 @@ struct process_machine {
         writes = writes || (i < ps.size() && db.as<n_param>(ps[i]).mode != param_mode::expr && db.as<n_param>(ps[i]).mode != param_mode::own && helper.writes_param(f, i));
       }
       if(writes && elem_place(db, args[i])) return push_elem_ref(args[i], t.scope, t.frame);
+      if(writes && field_alias(args[i], t.scope)) continue; // variable field - alias by field number
       return push_eval(args[i], t.scope, t.frame); // the value (or alias of the place) on the stack
     }
     t.phase = 2;
@@ -2167,6 +2177,29 @@ struct process_machine {
     if(al.index != m_none) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where); // interpreter-like
     finish(mval{m_alias{al.scope, al.slot, uint32_t(k), arr.as<m_arr>().gen}});
   }
+  // b.f in the variable parameter - alias on the field (as an array element): "parameter - alias"
+  // (§6.2). Only the field of the variable (a.b.c)
+  bool field_alias(node_id x, uint32_t scope) {
+    if(!db.is_member(x) || !db.is<n_ident>(db.member_of(x).object)) return false;
+    place p = find(scope, db.as<n_ident>(db.member_of(x).object).name);
+    if(p.scope == m_none) return false;
+    m_alias al{p.scope, p.slot};
+    if(st.scopes[p.scope].vars[p.slot].v.is<m_alias>()) {
+      al = st.scopes[p.scope].vars[p.slot].v.as<m_alias>();
+      if(al.index != m_none || al.field != m_none) return false; // field of an element or field - value n
+    }
+    mval & agg = follow(al);
+    if(!agg.is<m_agg>()) return false;
+    symbol name = db.member_of(x).name;
+    auto const & fs = agg.as<m_agg>().fields;
+    for(uint32_t k = 0; k < fs.size(); ++k)
+      if(fs[k].name == name) {
+        al.field = k;
+        fib().vals.push_back(mval{al});
+        return true;
+      }
+    return false;
+  }
   static bool elem_place(ast_db const & db, node_id x) { return db.is_index(x) && db.is<n_ident>(db.index_of(x).object); }
 
   void eval_node(node_id n, n_var const & v) {
@@ -2432,7 +2465,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(std::string_view(h.magic) != "TZPROC04") throw diagnostic("не дамп процесса tz", {});
+    if(std::string_view(h.magic) != "TZPROC05") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }

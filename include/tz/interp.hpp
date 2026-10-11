@@ -2733,6 +2733,12 @@ struct interpreter {
       return false;
     };
     if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee) && via(db.as<n_ident>(db.as<n_call>(n).callee).name, db.as<n_call>(n).args)) return true;
+    if(db.is<n_call>(n) && db.is_member(db.as<n_call>(n).callee)) { // a.f(b) f(a, b) (§4.5): a is the first argument
+      auto const & m = db.member_of(db.as<n_call>(n).callee);
+      node_list args{m.object};
+      args.insert(args.end(), db.as<n_call>(n).args.begin(), db.as<n_call>(n).args.end());
+      if(via(m.name, args)) return true;
+    }
     if(db.is<n_op>(n) && !user_ops.empty()) {
       auto const & o = db.as<n_op>(n);
       symbol f = db.strings.intern(cat(o.args.size() == 2 ? "infix" : o.postfix ? "postfix"
@@ -6228,6 +6234,7 @@ struct interpreter {
         throw_sinks.push_back(&escaped);
         try {
           r = run_frame(fn.body, inner, fn.name, fn.outline, site.frame);
+          if(r.kind != flow_kind::thr) write_back_fields(f, fn.params, args, env, inner, site);
         } catch(...) {
           throw_sinks.pop_back();
           throw;
@@ -6358,6 +6365,23 @@ struct interpreter {
         }
       }
       inner->declare(p.name, vals[i]);
+    }
+  }
+
+  // Field to variable parameter (§6.2: "parameter - alias", the change is output): copy at the input,
+  // write in the caller field at the output. *My:* is observed as a alias place, but without reference
+  // to the inside of the aggregate, which would hang if the summoned (through the environment of the
+  // caller, O4) replaces the aggregate as a whole - "no UB" (§3.5); when excluded - does not write.
+  void write_back_fields(node_id f, node_list const & params, node_list const & args, scope * env, scope * inner, call_site const & site) {
+    for(uint32_t i = 0; i < params.size() && i < args.size(); ++i) {
+      auto const & p = db.as<n_param>(params[i]);
+      if(p.mode == param_mode::expr || p.mode == param_mode::own || p.pack || (p.type && db.is<n_pat>(p.type))) continue;
+      if(!db.is_member(args[i]) || !writes_param(f, i)) continue;
+      value * now = inner->find(p.name);
+      if(!now || now->is<thunk_v>()) continue;
+      value v = *now;
+      flow w = assign(args[i], "=", std::move(v), env, site.frame, db[args[i]].where);
+      if(!w.normal()) fail("запись поля-аргумента после вызова не завершилась", db[args[i]].where);
     }
   }
 

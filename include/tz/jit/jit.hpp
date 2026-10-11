@@ -753,6 +753,12 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
                                                                                                               : "require_failed";
     fail_rt(type, what, db[at].where);
   }
+  // field to variable parameter: the machine code changed the copy - in the caller field (as in invoke)
+  for(uint32_t i = 0; i < vals.size() && i < args.size(); ++i)
+    if(cells[i] == &vals[i] && db.is_member(args[i]) && writes_param(f, i)) {
+      flow w = assign(args[i], "=", vals[i], env, 0, db[args[i]].where);
+      if(!w.normal()) fail("запись поля-аргумента после вызова не завершилась", db[args[i]].where);
+    }
   emit({report_event::instance, key, {}, {}, {}, {}});
   switch(code->result) {
     case jt::i64_: return ok(value(int64_t(bits)));
