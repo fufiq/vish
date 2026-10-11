@@ -429,6 +429,20 @@ struct interpreter {
     return it->second.contains(other.value);
   }
 
+  // Hygiene - appearance, not renaming:
+// 
+// Variable
+  // The module of foreign code is not visible: x = e in the body of the construction prelude (k = i
+  // in for) announces its own, and does not write in ct k programs. *My:* visibility is like that of
+  // extension control (your module, its use, prelude); it is checked by "declar or assign".
+  bool foreign_global(value const * c, node_id at) {
+    if(global_home.empty()) return false;
+    auto it = global_home.find(c);
+    if(it == global_home.end()) return false;
+    node_id m = module_of(at);
+    return m && m != it->second && !definition_sees(m, it->second);
+  }
+
   // entity operator node: infix+/prefix-/postfix++.
   symbol operator_entity(n_op const & o) {
     uint32_t k = o.args.size() == 2 ? 1 : o.postfix ? 2
@@ -572,7 +586,9 @@ struct interpreter {
           --ct_depth;
           if(f.kind == flow_kind::thr) uncaught(f);
           if(!f.v.known()) fail(cat("ct ", str(v.name), ": значение должно быть известно при компиляции"), db[item].where);
-          ct_cells.insert(globals->declare(v.name, f.v));
+          value * cell = globals->declare(v.name, f.v);
+          ct_cells.insert(cell);
+          global_home[cell] = m;
           ct_names.push_back(v.name);
         }
         if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) declare_state(item); // [[state]] x = e
@@ -697,7 +713,7 @@ struct interpreter {
     if(checking() || !root->owns_state) { // parsing - run-time (value from past launches); assistants (compiler in language) - without a file
       flow f = eval(v.init, globals, 0);
       if(f.kind == flow_kind::thr) uncaught(f);
-      globals->declare(v.name, checking() ? erase(f.v) : f.v);
+      global_home[globals->declare(v.name, checking() ? erase(f.v) : f.v)] = module_of(item);
       return;
     }
     address_space & lv = program_state(db[item].where);
@@ -722,6 +738,7 @@ struct interpreter {
       r.name[str(v.name).size()] = 0;
     }
     globals->alias(v.name, cell);
+    global_home[cell] = module_of(item);
     root->state_cells.insert(cell);
   }
 
@@ -5097,7 +5114,10 @@ struct interpreter {
     if(assign_op) {
       TZ_TRY(rhs, eval(o.args[1], env, frame));
       // x = e and no name x is an announcement with type output
-      if(op == "=" && db.is<n_ident>(o.args[0]) && !env->find(db.as<n_ident>(o.args[0]).name)) {
+      if(op == "=" && db.is<n_ident>(o.args[0]) && [&] {
+            value * c = env->find(db.as<n_ident>(o.args[0]).name);
+            return !c || foreign_global(c, n);
+          }()) {
         symbol name = db.as<n_ident>(o.args[0]).name;
         if(checking()) implicit_decls.insert(n.value);
         if(checking())
@@ -6789,6 +6809,9 @@ struct interpreter {
   std::map<uint32_t, std::vector<uint32_t>> resolved_calls; // call node → selected overload (by instance)
   std::vector<std::tuple<span, std::string, std::string>> ct_order; // policeman
   std::set<value const *> ct_cells; // ct-variable module
+  // The variable module → the module that declared it: visible to its code and the code of the
+  // modules that see it (use, prelude) - hygiene by visibility (foreign_global).
+  std::unordered_map<value const *, node_id> global_home;
   std::vector<symbol> ct_names;
   uint32_t ct_depth = 0;
   // elaboration: the ct module is executed - the source of code mutations (node ct { } / ct x = e)

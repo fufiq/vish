@@ -1,0 +1,22 @@
+// out: 6 3 10
+// jit-compiled: total
+// machine
+// fmt-stable
+// Гигиена — видимостью: 
+// ct k программы не виден
+// телу for прелюдии: там k = i объявляет своё имя, а не пишет в ct-переменную
+// программы (было:).
+ct k = 3;
+ct i = 7;
+
+total(n) {
+  s = 0;
+  for(x : range(n)) s = s + x;
+  s
+}
+
+main() {
+  s = 0;
+  for(x : array{1, 2, 3}) s = s + x;
+  print(s, k, total(5));
+}
