@@ -666,15 +666,47 @@ bool same_shape(value const & a, value const & b) {
 
 // Register of types: closed system of types VM - id instead of strings (§5.1, §9.2).
 struct type_registry {
+  // Machine representations (§5.8, O15): the kernel only knows them, the names of the tags
+  // prelude (struct i64 { __int64 value; }):
+// 
+//;.
+  static constexpr std::string_view machine_names[] = {"", "__bool", "__int64", "__float64", "__bytes"};
+  static constexpr uint32_t m_bool = 1, m_int = 2, m_float = 3, m_bytes = 4;
+
   type_registry() {
-    for(auto n: {"unit", "bool", "i64", "f64", "str", "type", "array", "fn", "expr", "tuple"}) intern_builtin(n);
+    for(auto n: {"unit", "__bool", "__int64", "__float64", "__bytes", "type", "array", "fn", "expr", "tuple"}) intern_builtin(n);
   }
 
   type_id builtin(std::string_view name) const {
     for(uint32_t i = 0; i < names.size(); ++i)
       if(names[i] == name) return type_id(i);
+    for(uint32_t i = 1; i < std::size(machine_names); ++i) // presentation - and under his own name
+      if(machine_names[i] == name) return type_id(i);
     return {};
   }
+  // Presentation by name ( int64...); 0 is not representation.
+  static uint32_t machine(std::string_view name) {
+    for(uint32_t i = 1; i < std::size(machine_names); ++i)
+      if(machine_names[i] == name) return i;
+    return 0;
+  }
+  // The prelude tag gives the view a name; false is the name of another type.
+  bool bind_tag(uint32_t m, std::string_view name) {
+    if(names[m] == name) return true;
+    if(names[m] != machine_names[m]) return false; // There is already a tag (the other type above it is not yet)
+    if(type_id other = builtin(name); other && other.value != m) return false;
+    names[m] = std::string(name);
+    tag_names[m] = std::string(name);
+    return true;
+  }
+  // Presentation tag name for code without registry (JIT, machine): prelude one on VM.
+  static inline std::string tag_names[5];
+  static std::string_view tag(uint32_t m) { return tag_names[m].empty() ? machine_names[m] : std::string_view(tag_names[m]); }
+  // Tag names (in C++ - representations only): bool, i64, f64, str prelude.
+  std::string_view bool_name() const { return names[m_bool]; }
+  std::string_view int_name() const { return names[m_int]; }
+  std::string_view float_name() const { return names[m_float]; }
+  std::string_view str_name() const { return names[m_bytes]; }
 
   type_id named(std::string_view name) { // nominal
     if(auto t = builtin(name)) return t;

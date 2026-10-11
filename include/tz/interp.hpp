@@ -524,6 +524,15 @@ struct interpreter {
     if(db.is<n_fn>(item)) functions[db.as<n_fn>(item).name].push_back(item);
     else if(db.is_struct(item)) {
       auto const & st = db.as<n_extend>(item);
+      // Tag above machine representation: struct i64 { __int64 value; } (§5.8, O15) - name of the
+      // presentation, not aggregate: value is the machine number itself
+      // 
+      if(st.items.size() == 1 && db.is<n_var>(st.items[0]) && db.is<n_ident>(db.as<n_var>(st.items[0]).type) && str(db.as<n_var>(st.items[0]).name) == "value" && !is_node_kind(str(st.name)))
+        if(uint32_t m = type_registry::machine(str(db.as<n_ident>(db.as<n_var>(st.items[0]).type).name))) {
+          if(!types.bind_tag(m, str(st.name)))
+            fail(cat("тег ", str(st.name), ": у представления ", type_registry::machine_names[m], " уже есть тег ", types.name(type_id(m)), " (или имя занято другим типом)"), db[item].where);
+          return;
+        }
       structs[st.name] = item;
       if(st.base) types.set_parent(types.named(str(st.name)), types.named(str(st.base)));
     }
@@ -1638,7 +1647,7 @@ struct interpreter {
   std::optional<bool> known_bool(value const & v, span where) {
     if(v.is<bool>()) return v.as<bool>();
     if(unknown(v)) return std::nullopt;
-    if(v.is<rt_v>() && types.describe(v) == "bool") return std::nullopt;
+    if(v.is<rt_v>() && types.describe(v) == types.bool_name()) return std::nullopt;
     if(v.is<split_v>()) return std::nullopt;
     fail(cat("условие должно быть bool, получено ", types.describe(v)), where);
   }
@@ -2129,7 +2138,7 @@ struct interpreter {
   bool numeric_pair(value const & v, std::string_view want) const {
     value const * x = shape_of(v);
     if(!x) return false;
-    return (want == "f64" && x->is<int64_t>()) || (want == "i64" && x->is<double>());
+    return (want == types.float_name() && x->is<int64_t>()) || (want == types.int_name() && x->is<double>());
   }
 
   // Anonymous aggregate {x: 1, y: 2} (§4.3): type - by structure, type name - recording fields.
@@ -2151,9 +2160,9 @@ struct interpreter {
 // *Mine:* Only i64 and f64 (bool, str, y)
   // There are no {} arrays, an error like zero(T).
   bool empty_record(value const & v) const { return is_record(v) && shape_of(v)->as<agg_v>().fields.empty(); }
-  static bool scalar_default(std::string_view want, value & out) {
-    if(want == "i64") out = value(int64_t(0));
-    else if(want == "f64") out = value(double(0));
+  bool scalar_default(std::string_view want, value & out) const {
+    if(want == types.int_name()) out = value(int64_t(0));
+    else if(want == types.float_name()) out = value(double(0));
     else return false;
     return true;
   }
@@ -2220,8 +2229,8 @@ struct interpreter {
   // The place holds the value of the type: struct is its name, otherwise it is empty (*my:* type of place is the type of its meaning).
   std::string place_type(value const & cur) const {
     value const * x = shape_of(cur);
-    if(x && x->is<int64_t>()) return "i64";
-    if(x && x->is<double>()) return "f64";
+    if(x && x->is<int64_t>()) return std::string(types.int_name());
+    if(x && x->is<double>()) return std::string(types.float_name());
     if(!x || !x->is<agg_v>() || types.anonymous(x->as<agg_v>().type)) return {};
     return std::string(types.name(x->as<agg_v>().type));
   }
@@ -3136,19 +3145,19 @@ struct interpreter {
       });
       f = std::move(xs);
     } else if constexpr(std::is_same_v<field_t, symbol>) {
-      need(v.is<str_v>(), "str");
+      need(v.is<str_v>(), types.str_name());
       f = v.as<str_v>().view().empty() ? symbol{} : sym(v.as<str_v>().view());
     } else if constexpr(std::is_same_v<field_t, std::string>) {
-      need(v.is<str_v>(), "str");
+      need(v.is<str_v>(), types.str_name());
       f = std::string(v.as<str_v>().view());
     } else if constexpr(std::is_same_v<field_t, bool>) {
-      need(v.is<bool>(), "bool");
+      need(v.is<bool>(), types.bool_name());
       f = v.as<bool>();
     } else if constexpr(std::is_floating_point_v<field_t>) {
-      need(v.is<double>() || v.is<int64_t>(), "f64");
+      need(v.is<double>() || v.is<int64_t>(), types.float_name());
       f = v.is<double>() ? v.as<double>() : double(v.as<int64_t>());
     } else {
-      need(v.is<int64_t>(), "i64");
+      need(v.is<int64_t>(), types.int_name());
       f = field_t(v.as<int64_t>());
     }
   }
@@ -3635,7 +3644,7 @@ struct interpreter {
     // index type - property of instance, not values: place of use instantiation error
     // (§13.4), including when array and index is run-time
     auto index_type = [&](value const & x) {
-      if(std::string t = types.describe(x); t != "i64") fail(cat("индекс должен быть i64, получено ", t), where);
+      if(std::string t = types.describe(x); t != types.int_name()) fail(cat("индекс должен быть ", types.int_name(), ", получено ", t), where);
     };
     if(idx.is<split_v>())
       for(auto const & a: idx.as<split_v>().alts) index_type(a);
@@ -5380,7 +5389,7 @@ struct interpreter {
     if(unknown(a) || unknown(b)) return value(rt_v{}); // type is still being removed (recursion)
     if(!a.known() || !b.known()) {
       // whole division into run-time - the divider can drop div_by_zero - "painting"
-      if(checking() && (op == "/" || op == "%") && !b.known() && types.describe(b) == "i64") rt_check("div_by_zero", where);
+      if(checking() && (op == "/" || op == "%") && !b.known() && types.describe(b) == types.int_name()) rt_check("div_by_zero", where);
       return erase(arith(op, *shape_or_fail(erase(a), where), *shape_or_fail(erase(b), where), where));
     }
     return arith(op, a, b, where);
@@ -6603,7 +6612,7 @@ struct interpreter {
       return value(array_v::of(std::move(vs)));
     }
     if(n == "static_level" && a.size() == 1 && a[0].is<fn_v>() && a[0].as<fn_v>().name) return static_level(a[0].as<fn_v>().name, where);
-    if(n == "f64_bits" && a.size() == 1 && types.describe(a[0]) == "f64") // bits f64 - i64 (constant in machine code)
+    if(n == "f64_bits" && a.size() == 1 && types.describe(a[0]) == types.float_name()) // bits f64 - i64 (constant in machine code)
       return a[0].known() ? value(std::bit_cast<int64_t>(a[0].as<double>())) : erase(value(int64_t(1)));
     if(n == "given" && a.size() == 1) { // node field is not () and is not an empty node
       value const * x = shape_of(a[0]);
@@ -6796,13 +6805,13 @@ struct interpreter {
     }
     if(n == "zero" && a.size() == 1 && a[0].is<type_v>()) {
       auto t = types.name(a[0].as<type_v>().type);
-      if(t == "i64") return value(int64_t(0));
-      if(t == "f64") return value(double(0));
+      if(t == types.int_name()) return value(int64_t(0));
+      if(t == types.float_name()) return value(double(0));
       fail(cat("zero не определён для ", t), where);
     }
     if(n == "range" && a.size() == 1) {
       value r;
-      if(!a[0].known() && types.describe(a[0]) == "i64") r = erase(value(array_v::of({value(int64_t(0))})));
+      if(!a[0].known() && types.describe(a[0]) == types.int_name()) r = erase(value(array_v::of({value(int64_t(0))})));
       else if(a[0].is<int64_t>()) {
         array_v xs;
         for(int64_t i = 0; i < a[0].as<int64_t>(); ++i) xs.push(value(i));
@@ -6835,7 +6844,7 @@ struct interpreter {
         if(bad) fail_rt("overflow", cat("переполнение i64: ", x, " ", op, " ", y), where);
         return value(r);
       }
-      if(checking() && types.describe(a[0]) == "i64" && types.describe(a[1]) == "i64") rt_check("overflow", where); // run-time - may throw
+      if(checking() && types.describe(a[0]) == types.int_name() && types.describe(a[1]) == types.int_name()) rt_check("overflow", where); // run-time - may throw
       return binary(op, a[0], a[1], where);
     }
     if((n == "and" || n == "or") && a.size() == 2) {
@@ -6859,7 +6868,7 @@ struct interpreter {
     }
     if(n == "is_index" && a.size() == 2) { // 0 <= k < size(xs): The test that makes k a safe index
       if(unknown(a[0]) || unknown(a[1])) return value(rt_v{}); // type
-      if(types.describe(a[0]) != "i64") fail(cat("is_index: индекс должен быть i64, получено ", types.describe(a[0])), where);
+      if(types.describe(a[0]) != types.int_name()) fail(cat("is_index: индекс должен быть ", types.int_name(), ", получено ", types.describe(a[0])), where);
       if(a[0].is<int64_t>() && a[1].is<array_v>()) {
         int64_t k = a[0].as<int64_t>();
         return value(k >= 0 && uint64_t(k) < a[1].as<array_v>().size());
@@ -6868,9 +6877,9 @@ struct interpreter {
         fail(cat("is_index: ожидался массив, получено ", types.describe(a[1])), where);
       return erase(value(true));
     }
-    if(n == "f64" && a.size() == 1 && types.describe(a[0]) == "i64")
+    if(n == types.float_name() && a.size() == 1 && types.describe(a[0]) == types.int_name())
       return a[0].known() ? value(double(a[0].as<int64_t>())) : erase(value(double(1)));
-    if(n == "i64" && a.size() == 1 && types.describe(a[0]) == "f64")
+    if(n == types.int_name() && a.size() == 1 && types.describe(a[0]) == types.float_name())
       return a[0].known() ? value(int64_t(a[0].as<double>())) : erase(value(int64_t(1)));
     if(n == "read_floats") {
       rt_effect();

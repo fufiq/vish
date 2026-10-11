@@ -101,18 +101,20 @@ jit_service_result jit_vm_service(uint64_t op, uint64_t id, uint64_t bits, uint6
 enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, handle, ct, other }; // range - range(n) : in the slot only n; stream is its number
 // clang-format on
 
-std::string_view jt_name(jt t) {
+// instance tag names are prelude tag names (§5.8, O15): JIT has representations only.
+std::string jt_name(jt t) {
+  auto i = type_registry::tag(type_registry::m_int), f = type_registry::tag(type_registry::m_float), b = type_registry::tag(type_registry::m_bool);
   switch(t) {
     case jt::unit: return "unit";
-    case jt::i64_: return "i64";
-    case jt::f64_: return "f64";
-    case jt::bool_: return "bool";
-    case jt::arr_i64: return "array<i64>";
-    case jt::arr_f64: return "array<f64>";
+    case jt::i64_: return std::string(i);
+    case jt::f64_: return std::string(f);
+    case jt::bool_: return std::string(b);
+    case jt::arr_i64: return cat("array<", i, ">");
+    case jt::arr_f64: return cat("array<", f, ">");
     case jt::range_: return "range";
-    case jt::stream_i64: return "stream<i64>";
-    case jt::stream_f64: return "stream<f64>";
-    case jt::stream_bool: return "stream<bool>";
+    case jt::stream_i64: return cat("stream<", i, ">");
+    case jt::stream_f64: return cat("stream<", f, ">");
+    case jt::stream_bool: return cat("stream<", b, ">");
     case jt::handle: return "значение VM";
     case jt::ct: return "кт";
     default: return "?";
@@ -219,7 +221,7 @@ struct jit_machine {
   jit_fn * get(node_id fn, std::vector<jt> const & types, std::vector<value> const & extra = {}, type_registry * from = nullptr,
       std::string const & extra_key = "") {
     std::string key = cat(fn.value, "(");
-    for(jt t: types) key += std::string(jt_name(t)) + ",";
+    for(jt t: types) key += jt_name(t) + ",";
     key += extra_key;
     auto it = cache.find(key);
     if(it != cache.end() && still_valid(fns[it->second])) return fns[it->second].ok ? &fns[it->second] : nullptr;
@@ -247,7 +249,7 @@ struct jit_machine {
   }
   static std::string types_str(std::vector<jt> const & ts) {
     std::string s;
-    for(jt t: ts) s += (s.empty() ? "" : ", ") + std::string(jt_name(t));
+    for(jt t: ts) s += (s.empty() ? "" : ", ") + jt_name(t);
     return s;
   }
 

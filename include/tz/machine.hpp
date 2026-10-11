@@ -456,10 +456,10 @@ struct process_machine {
   std::string describe(mval const & x) {
     return std::visit([&](auto const & a) -> std::string {
       using T = std::remove_cvref_t<decltype(a)>;
-      if constexpr(std::is_same_v<T, bool>) return "bool";
-      else if constexpr(std::is_same_v<T, int64_t>) return "i64";
-      else if constexpr(std::is_same_v<T, double>) return "f64";
-      else if constexpr(std::is_same_v<T, m_str>) return "str";
+      if constexpr(std::is_same_v<T, bool>) return std::string(helper.types.bool_name());
+      else if constexpr(std::is_same_v<T, int64_t>) return std::string(helper.types.int_name());
+      else if constexpr(std::is_same_v<T, double>) return std::string(helper.types.float_name());
+      else if constexpr(std::is_same_v<T, m_str>) return std::string(helper.types.str_name());
       else if constexpr(std::is_same_v<T, m_unit>) return "unit";
       else if constexpr(std::is_same_v<T, m_type>) return "type";
       else if constexpr(std::is_same_v<T, m_arr>) {
@@ -1225,12 +1225,12 @@ struct process_machine {
       out = from_value(got, {});
       return 1;
     }
-    if(value z; !strict && is_record(v) && v.as<m_agg>().fields.empty() && interpreter::scalar_default(want, z)) { // i64 n = {} — 0
+    if(value z; !strict && is_record(v) && v.as<m_agg>().fields.empty() && helper.scalar_default(want, z)) { // i64 n = {} — 0
       out = from_value(z, {});
       return 1;
     }
     if(strict || !numeric_pair(v, want)) return 0;
-    if(want == "f64") {
+    if(want == helper.types.float_name()) {
       int64_t i = v.as<int64_t>();
       double d = double(i);
       if(d < -9.2e18 || d > 9.2e18 || int64_t(d) != i) return 0;
@@ -1249,8 +1249,8 @@ struct process_machine {
     return from_value(helper.to_type(to_value(v), want, where), where);
   }
   std::string place_type(mval const & cur) const {
-    if(cur.is<int64_t>()) return "i64"; // x = {} у i64 — 0
-    if(cur.is<double>()) return "f64";
+    if(cur.is<int64_t>()) return std::string(helper.types.int_name()); // x = {} у i64 — 0
+    if(cur.is<double>()) return std::string(helper.types.float_name());
     if(!cur.is<m_agg>() || helper.types.anonymous(cur.as<m_agg>().type)) return {};
     return std::string(helper.types.name(cur.as<m_agg>().type));
   }
@@ -1261,7 +1261,7 @@ struct process_machine {
     if(!rt || !db.is<n_ident>(rt)) return v;
     return to_type(std::move(v), helper.str(db.as<n_ident>(rt).name), db[rt].where);
   }
-  static bool numeric_pair(mval const & v, std::string_view want) { return (want == "f64" && v.is<int64_t>()) || (want == "i64" && v.is<double>()); }
+  bool numeric_pair(mval const & v, std::string_view want) const { return (want == helper.types.float_name() && v.is<int64_t>()) || (want == helper.types.int_name() && v.is<double>()); }
 
   // Reference to the interface from the unpackable value: .field, .size, [literal]; failed
   // (no field, border) - nullopt: not unpacked.

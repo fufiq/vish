@@ -1247,10 +1247,11 @@ template<typename F>
 consteval char const * node_field_type() {
   if constexpr(std::is_same_v<F, node_id>) return "code";
   else if constexpr(std::is_same_v<F, node_list> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>>) return "array";
-  else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string>) return "str";
-  else if constexpr(std::is_same_v<F, bool>) return "bool";
-  else if constexpr(std::is_floating_point_v<F>) return "f64";
-  else return "i64";
+  // Numbers and text - machine representations (§5.8, O15): tag names - prelude
+  else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string>) return "__bytes";
+  else if constexpr(std::is_same_v<F, bool>) return "__bool";
+  else if constexpr(std::is_floating_point_v<F>) return "__float64";
+  else return "__int64";
 }
 
 // node AST - struct programs:
