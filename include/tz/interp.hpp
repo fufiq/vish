@@ -5702,12 +5702,64 @@ struct interpreter {
     return select_and_invoke(fns, vals, args, env, frame, site, base);
   }
 
+  // The result of the rule of specificity (overload_pick prelude): the order of candidates,
+  // how much to parse runtime - overload, ambiguity and how many are equal to the first.
+  struct overload_choice {
+    std::vector<uint32_t> order;
+    uint32_t reach = 0;
+    bool ambiguous = false;
+    uint32_t tied = 0;
+  };
+  std::unordered_map<std::string, overload_choice> overload_choices;
+  node_id overload_fn;
+  overload_choice const & choose_overload(std::vector<std::vector<int64_t> const *> const & feats, std::vector<bool> const & maybes, span where) {
+    std::string key = checking() ? "c" : "r";
+    for(std::size_t k = 0; k < feats.size(); ++k) {
+      key += maybes[k] ? '?' : '|';
+      for(int64_t x: *feats[k]) key += cat(x, ",");
+    }
+    if(auto it = overload_choices.find(key); it != overload_choices.end()) return it->second;
+    overload_choice out;
+    if(feats.size() == 1) out.order = {0}; // There is nothing to choose (and without language: choice does not choose itself)
+    else {
+      if(chain_helper) fail("выбор перегрузки в коде правил выбора (overload_pick, chain_resolve): там вызовы без перегрузок", where);
+      if(!overload_fn)
+        for(uint32_t i = db.size(); i-- > 0;)
+          if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "overload_pick") {
+            overload_fn = node_id(i);
+            break;
+          }
+      if(!overload_fn) fail("нет overload_pick в прелюдии — перегрузку не выбрать", where);
+      std::vector<value> fs, ms;
+      for(std::size_t k = 0; k < feats.size(); ++k) {
+        std::vector<value> xs;
+        for(int64_t x: *feats[k]) xs.push_back(value(x));
+        fs.push_back(value(array_v::of(std::move(xs))));
+        ms.push_back(value(bool(maybes[k])));
+      }
+      interpreter & lang = chain_lang();
+      value r = lang.analyze_instance(overload_fn, {value(array_v::of(std::move(fs))), value(array_v::of(std::move(ms))), value(checking())});
+      auto field = [&](std::string_view f) -> value const & {
+        for(auto const & [k, v]: r.as<agg_v>().fields)
+          if(str(k) == f) return v;
+        fail(cat("overload_pick: нет поля ", f), where);
+      };
+      auto const & order = field("order").as<array_v>();
+      for(uint32_t k = 0; k < order.size(); ++k) out.order.push_back(uint32_t(order.get(k).as<int64_t>()));
+      out.reach = uint32_t(field("reach").as<int64_t>());
+      out.ambiguous = field("ambiguous").as<bool>();
+      out.tied = uint32_t(field("tied").as<int64_t>());
+    }
+    if(out.order.size() == 1 && checking() && maybes[0]) out.reach = 1; // Like the rule: the only "may be"
+    return overload_choices.emplace(std::move(key), std::move(out)).first->second;
+  }
+
   flow select_and_invoke(std::vector<node_id> const & fns, std::vector<value> & vals, node_list const & args,
       scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr, bool repacked = false, bool open = false) {
     scope * base = parent ? parent : globals; // local set: its environment
     struct candidate {
       node_id fn;
-      int score;
+      std::vector<int64_t> feat; // Signs of specificity (overload_pick prelude)
       bool maybe = false; // Whether it is suitable - decide the value (unpacking run-time values in parsing)
       std::vector<std::pair<uint32_t, value>> conv; // argumentation
     };
@@ -5721,7 +5773,7 @@ struct interpreter {
         rejected.push_back(cat(describe_fn(f), ": ожидает ", tail ? "не меньше " : "", fn.params.size() - (tail ? 1 : 0), " аргументов"));
         continue;
       }
-      int score = tail ? 0 : 1; // The exact number of arguments is more specific than the tail...xs
+      std::vector<int64_t> feat{tail ? 1 : 0, 0}; // tail of ...xs leading to require, then parameters
       bool maybe = false;
       std::string why;
       std::vector<std::pair<uint32_t, value>> conv; // Converted arguments of the candidate (representable)
@@ -5746,7 +5798,7 @@ struct interpreter {
             why = cat("аргумент ", i + 1, " не распаковывается в ", printer(db).print(p.type));
             ++by_value;
           }
-          else score += 1 + int(pattern_checks(p.type));
+          else feat.push_back(100 + int64_t(pattern_checks(p.type)));
           maybe = maybe || r == unpacked::maybe;
         } else if(p.type && db.is<n_ident>(p.type)) {
           auto want = str(db.as<n_ident>(p.type).name);
@@ -5757,7 +5809,7 @@ struct interpreter {
             if(std::string rw; !p.strict && is_record(vals[i]) && structs.contains(sym(want)) && record_fit(vals[i], want, got, &rw) == fit::no) why += cat(" (", rw, ")");
             by_value += numeric_pair(vals[i], want) && !p.strict; // type fits, doesn't fit the value
           } else {
-            score += r == fit::exact ? 2 : 1; // "Type equals" is better than "can imagine."
+            feat.push_back(r == fit::exact ? 2 : 1); // "Type equals" or "can represent"
             maybe = maybe || r == fit::maybe;
             if(r != fit::exact) conv.push_back({i, got});
           }
@@ -5776,10 +5828,10 @@ struct interpreter {
           why = reason;
           by_value += reason == "require не выполнено";
         }
-        score += n_req;
+        feat[1] = n_req;
         maybe = maybe || unsure;
       }
-      if(why.empty()) good.push_back({f, score, maybe, std::move(conv)});
+      if(why.empty()) good.push_back({f, std::move(feat), maybe, std::move(conv)});
       else rejected.push_back(cat(describe_fn(f), ": ", why));
     }
 
@@ -5822,17 +5874,26 @@ struct interpreter {
       for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
       throw d;
     }
-    std::ranges::stable_sort(good, std::greater{}, &candidate::score);
+    // the rule of specificity - in language (overload_pick prelude, M6 step 5); the result
+    // by features is remembered: the rule is a pure function
+    std::vector<std::vector<int64_t> const *> feats;
+    std::vector<bool> maybes;
+    for(auto const & c: good) {
+      feats.push_back(&c.feat);
+      maybes.push_back(c.maybe);
+    }
+    overload_choice const & pick = choose_overload(feats, maybes, site.where);
+    {
+      std::vector<candidate> sorted;
+      for(uint32_t k: pick.order) sorted.push_back(std::move(good[k]));
+      good = std::move(sorted);
+    }
     // runtime - overload in terms of:
 // parsing candidates,
     // whose unpacking depends on the run-time-value, all are sorted out - by specificity,
     // to the first exactly suitable; the results merge like if branches.
-    if(checking() && good[0].maybe) {
-      std::vector<candidate> reach;
-      for(auto const & c: good) {
-        reach.push_back(c);
-        if(!c.maybe) break;
-      }
+    if(pick.reach > 0) {
+      std::vector<candidate> reach(good.begin(), good.begin() + pick.reach);
       if(reach.back().maybe && !covers_all_lengths(reach)) rt_check("unpack_failed", site.where); // Maybe none of them will.
       if(reach.size() > 1) {
         flow out;
@@ -5848,10 +5909,9 @@ struct interpreter {
         return out;
       }
     }
-    if(good.size() > 1 && good[0].score == good[1].score && !good[0].maybe && !good[1].maybe) {
+    if(pick.ambiguous) {
       diagnostic d(cat("неоднозначный вызов ", site.what), site.where);
-      for(auto & c: good)
-        if(c.score == good[0].score) d.note(cat("кандидат ", describe_fn(c.fn)), db[c.fn].where);
+      for(uint32_t k = 0; k < pick.tied; ++k) d.note(cat("кандидат ", describe_fn(good[k].fn)), db[good[k].fn].where);
       throw d;
     }
     // Which overload has chosen the challenge in this instance to move from

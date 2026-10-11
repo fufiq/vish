@@ -3390,3 +3390,76 @@ chain_resolve(i64 k, ops, assoc, bool open) {
   ch_build(ents, top[0], tree);
   ch_result{0, tree, array{}}
 }
+
+// Выбор перегрузки — правило специфичности (§5.4, M6 шаг 5 — с C++ на язык): «тип
+// равен» конкретнее «может представить» (
+//), точное число аргументов —
+// конкретнее хвоста ...xs, образец и ведущие require — условия кандидата. Признаки
+// кандидата считает VM (подходит ли тип, распаковка, require): array{хвост, require,
+// по параметрам: 0 — без типа, 1 — представим, 2 — тип равен, 100 + n — образец с n
+// проверками}. Здесь — вес признаков, порядок (устойчивый, по убыванию), рантайм-
+// перегрузка по значению в разборе (reach — сколько разбирать) и неоднозначность.
+// VM запоминает итог по признакам: правило — чистая функция. Без цепочек и без
+// перегруженных вызовов: выбор перегрузки не выбирает сам себя.
+struct ov_pick { array order; i64 reach; bool ambiguous; i64 tied; }
+
+ov_score(f) {
+  s = if(f[0] == 1) 0 else 1;
+  s = s + f[1];
+  i = 2;
+  while(i < f.size) {
+    k = f[i];
+    if(k >= 100) s = s + (1 + (k - 100));
+    else s = s + k;
+    i = i + 1;
+  }
+  s
+}
+
+overload_pick(feats, maybes, bool checking) {
+  n = feats.size;
+  scores = array{};
+  for(f : feats) scores.push(ov_score(f));
+  order = array{};
+  for(i : range(n)) { // вставка — после всех с весом не меньше: порядок равных сохраняется
+    pos = order.size;
+    found = false;
+    j = 0;
+    while(j < order.size) {
+      if(!found) {
+        if(scores[order[j]] < scores[i]) {
+          pos = j;
+          found = true;
+        }
+      }
+      j = j + 1;
+    }
+    next = array{};
+    for(x : range(order.size)) {
+      if(x == pos) next.push(i);
+      next.push(order[x]);
+    }
+    if(pos == order.size) next.push(i);
+    order = next;
+  }
+  // разбор: кандидаты, чья распаковка зависит от рт-значения, — все до первого точного
+  reach = 0;
+  if(checking && maybes[order[0]]) {
+    stop = false;
+    for(x : order) {
+      if(!stop) {
+        reach = reach + 1;
+        if(!maybes[x]) stop = true;
+      }
+    }
+  }
+  ambiguous = false;
+  if(n > 1) {
+    a = order[0];
+    b = order[1];
+    ambiguous = (scores[a] == scores[b]) && ((!maybes[a]) && (!maybes[b]));
+  }
+  tied = 0;
+  for(x : order) if(scores[x] == scores[order[0]]) tied = tied + 1;
+  ov_pick{order, reach, ambiguous, tied}
+}
