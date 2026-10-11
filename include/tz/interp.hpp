@@ -6452,6 +6452,31 @@ struct interpreter {
     // body context of a function embedded in a c node from the ctx context
     if(n == "inline_context" && a.size() == 2 && a[0].is<int64_t>())
       return value(int64_t(inline_context(uint64_t(a[0].as<int64_t>()), code_node(a[1], where).value)));
+    // Observation parsing for representation in language (M6, step 3b): node obs prelude (executed,
+    // gave value, effect, left through return/break, the value is known and its literal, the
+    // condition is bool); function - whether the program is needed; x = e - declared the name
+    if(n.starts_with("view_") && a.size() == 1 && view_subject) {
+      node_id c = code_node(a[0], where);
+      if(n == "view_live") return value(view_subject->live(c));
+      if(n == "view_declares") return value(view_subject->declares(c));
+      if(n == "view_obs") {
+        observation const * o = view_subject->observed(c);
+        auto lit = o ? view_subject->literal(o->v) : std::nullopt;
+        agg_v r{types.named("obs"), {}};
+        auto field = [&](std::string_view k, value x) { r.fields.push_back({sym(k), std::move(x)}); };
+        field("found", value(o != nullptr));
+        field("present", value(o && o->present));
+        field("seen", value(o && o->seen));
+        field("effect", value(o && o->effect));
+        field("diverted", value(o && o->diverted));
+        field("known", value(o && o->v.known()));
+        field("has_literal", value(lit.has_value()));
+        field("literal", value(lit ? *lit : std::string()));
+        field("is_bool", value(o && o->v.is<bool>()));
+        field("truth", value(o && o->v.is<bool>() && o->v.as<bool>()));
+        return value(std::move(r));
+      }
+    }
     // node type in the context of parsing instance embedding - value-type; () - not executed
     if(n == "jit_type" && a.size() == 2 && a[1].is<int64_t>()) {
       if(!jit_analysis) return value();
@@ -6718,6 +6743,9 @@ struct interpreter {
   // types and chain trees (jit_type, jit_chain).
 //.
   interpreter const * jit_analysis = nullptr;
+  // parsing, which reads the representation in the language (residual program, §13.2):
+  // view_obs/view_live/view_declares - his observations of node.
+  interpreter const * view_subject = nullptr;
   std::vector<value> subjects; // unpackable values - roots of addresses .f: subsample
   std::vector<node_id> module_order; // used modules (previously), then the
   std::map<uint32_t, std::set<symbol>> module_names; // use k. {a, b}: visible module names

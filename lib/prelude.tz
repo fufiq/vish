@@ -3119,3 +3119,188 @@ slice_hidden(m, str fn_name, str var) {
   for(n : all) if(!sl_kept_has(shown, n)) r.push(n);
   r
 }
+
+// Остаточная программа (§13.2, M6 шаг 3б — с C++ на язык): 
+// 
+// Разбор
+// (check) с заданными входами наблюдает узлы — view_obs/view_live/view_declares; здесь
+// решается, что убрать, какую ветку оставить и что заменить значением. Итог
+// residual_plan — rs_plan; печать с фильтром и подстановками — у VM (residual_view).
+struct obs { bool found; bool present; bool seen; bool effect; bool diverted; bool known; bool has_literal; str literal; bool is_bool; bool truth; }
+struct rs_fold { code at; code other; }
+struct rs_value { code at; str text; }
+struct rs_plan { array hidden; array folds; array values; }
+
+rs_kind_in(c, kinds) {
+  r = false;
+  k = code_kind(c);
+  for(t : kinds) if(t == k) r = true;
+  r
+}
+
+// цель присваивания: x в x = e, x += e
+rs_lvalue(n) {
+  p = code_parent(n);
+  r = false;
+  if(given(p) && (code_kind(p) == n_op)) {
+    n_op{op, args, _} = p;
+    r = sl_assign(op) && sl_same(args[0], n);
+  }
+  r
+}
+
+rs_require(n) => (code_kind(n) == n_call) && {
+  n_call{c, args, words, _, _, _} = n;
+  (words.size == 0) && ((args.size > 0) && ((code_kind(c) == n_ident) && (code_name(c) == "require")))
+};
+
+// не заменять: цель присваивания, вызываемое, объявления и параметры
+rs_foldable_position(n) {
+  p = code_parent(n);
+  if(rs_kind_in(n, array{n_var, n_fn, n_param, n_lambda, n_block, n_return, n_loop, n_break, n_continue}) || (rs_require(n) || is_clause_pack(n))) false
+  else if(!given(p)) false
+  else if((code_kind(p) == n_call) && {
+    n_call{c, _, _, _, _, _} = p;
+    sl_same(c, n)
+  }) false
+  else if((code_kind(p) == n_var) && {
+    n_var{_, t, _, _, _, _, _, _} = p;
+    sl_same(t, n)
+  }) false
+  else if((code_kind(p) == n_construct) && {
+    n_construct{t, _, _} = p;
+    sl_same(t, n)
+  }) false
+  else !rs_lvalue(n)
+}
+
+// значение узла литералом — или "" (свёртки нет)
+rs_fold_value(n) {
+  r = "";
+  if(!sl_statement(n) && rs_foldable_position(n)) {
+    o = view_obs(n);
+    if(o.found && (o.seen && (!o.diverted && (!o.effect && (o.has_literal && !rs_kind_in(n, array{n_int, n_float, n_str})))))) r = o.literal;
+  }
+  r
+}
+
+// условие if: 0 — неизвестно, 1 — ложь, 2 — истина
+rs_cond(n) {
+  n_if{c, _, _} = n;
+  o = view_obs(c);
+  if(!o.found || (!o.seen || (o.effect || !o.is_bool))) 0 else if(o.truth) 2 else 1
+}
+
+// развилка с известным условием — её ветка (array{} — свёртки нет)
+rs_fold_if(n) {
+  r = array{};
+  if(code_kind(n) == n_if) {
+    c = rs_cond(n);
+    n_if{_, yes, no} = n;
+    if(c == 2) r.push(yes);
+    if((c == 1) && given(no)) r.push(no);
+  }
+  r
+}
+rs_drops(n) => (code_kind(n) == n_if) && ((rs_cond(n) == 1) && {
+  n_if{_, _, no} = n;
+  !given(no)
+});
+
+// инструкция-выражение, которая ничего не делает при этих входах: результат известен
+// и отброшен, рантайм-эффектов нет, изменяемых параметров нет
+rs_pure_noop(n) {
+  r = rs_kind_in(n, array{n_call, n_op, n_ident});
+  if(r && (code_kind(n) == n_op)) {
+    n_op{op, _, _} = n;
+    if(sl_assign(op)) r = false;
+  }
+  if(r) {
+    o = view_obs(n);
+    if(!o.found || (!o.seen || (o.effect || (o.diverted || !o.known)))) r = false;
+  }
+  if(r && (code_kind(n) == n_call)) {
+    n_call{c, _, _, _, _, _} = n;
+    if(code_kind(c) == n_ident) {
+      name = code_name(c);
+      for(item : code_items(code_module(n))) {
+        if((code_kind(item) == n_fn) && (code_name(item) == name)) {
+          n_fn{_, params, _, _, _, _, _, _, _} = item;
+          for(p : params) {
+            n_param{_, _, mode, _, _, _, _} = p;
+            if((mode == 1) || ((mode == 2) || (mode == 3))) r = false; // mut, own, out
+          }
+        }
+      }
+    }
+  }
+  r
+}
+
+rs_dead_init(init) => {
+  o = view_obs(init);
+  !o.found || !o.effect
+};
+
+rs_keep(n, used) {
+  p = code_parent(n);
+  k = code_kind(n);
+  if((k == n_fn) && (given(p) && (code_kind(p) == n_module))) (code_name(n) == "main") || view_live(n)
+  else if(!sl_statement(n)) true
+  else if({
+    o = view_obs(n);
+    !o.found || !o.present
+  }) false // не исполнялась при этих входах
+  else if((k == n_var) && {
+    n_var{name, _, init, _, _, _, _, _} = n;
+    !sl_has(used, name) && rs_dead_init(init)
+  }) false // мёртвая переменная: её нигде не читают, инициализация без эффекта
+  else if(view_declares(n) && {
+    n_op{_, args, _} = n;
+    !sl_has(used, code_name(args[0])) && rs_dead_init(args[1])
+  }) false // x = e, объявившее x, которое не читают
+  else if(rs_pure_noop(n)) false
+  else !rs_drops(n) // if(ложь) без else — ничего не остаётся
+}
+
+// имена, которые читаются в остаточной программе: не свёрнутые, не в выброшенном
+rs_used(n, used) {
+  if(given(n)) {
+    p = code_parent(n);
+    k = code_kind(n);
+    o = view_obs(n);
+    ignoring_dead = o.found && o.present;
+    folds = rs_fold_if(n);
+    if((k == n_fn) && ((given(p) && (code_kind(p) == n_module)) && !rs_keep(n, used))) {
+    } else if(sl_statement(n) && ((k != n_var) && (!view_declares(n) && ((k != n_fn) && (!ignoring_dead || rs_pure_noop(n)))))) {
+    } else if(rs_fold_value(n).size > 0) {
+    } else if(folds.size > 0) rs_used(folds[0], used)
+    else if(rs_drops(n)) {
+    } else {
+      if((k == n_ident) && !rs_lvalue(n)) sl_add(used, code_name(n));
+      for(c : code_items(n)) rs_used(c, used);
+    }
+  }
+}
+
+// поле структуры, переданной в функцию, меняется в копии — списки отдельными массивами
+rs_collect_into(n, used, hidden, folds, values) {
+  if(given(n)) {
+    if(!rs_keep(n, used)) hidden.push(n);
+    fs = rs_fold_if(n);
+    if(fs.size > 0) folds.push(rs_fold{n, fs[0]});
+    v = rs_fold_value(n);
+    if(v.size > 0) values.push(rs_value{n, v});
+    for(c : code_items(n)) rs_collect_into(c, used, hidden, folds, values);
+  }
+}
+
+residual_plan(m) {
+  used = array{};
+  rs_used(m, used);
+  hidden = array{};
+  folds = array{};
+  values = array{};
+  rs_collect_into(m, used, hidden, folds, values);
+  rs_plan{hidden, folds, values}
+}
