@@ -2094,6 +2094,19 @@ struct interpreter {
     }
   }
   std::unordered_map<std::string, int64_t> fit_rules; // facts → relation (fit_rule)
+  // The threshold of static parsing is analysis_limit prelude (M6 step 7), once to the name.
+  enum limit_kind { loop_known, loop_types, recursion_widen, recursion_depth };
+  int64_t limits[4] = {}; // 0 - not yet asked
+  node_id limit_fn;
+  int64_t analysis_limit(limit_kind k) {
+    if(!limits[k]) {
+      static constexpr std::string_view names[] = {"loop_known", "loop_types", "recursion_widen", "recursion_depth"};
+      value r = lang_rule(limit_fn, "analysis_limit", {value(std::string(names[k]))}, {});
+      if(!r.is<int64_t>() || r.as<int64_t>() <= 0) fail(cat("analysis_limit(", names[k], "): ожидалось положительное число"), {});
+      limits[k] = r.as<int64_t>();
+    }
+    return limits[k];
+  }
   node_id fit_fn;
   // A rule in language (prelude function) in an auxiliary interpreter: a pure function of
   // facts, the result causing remembers. Rules don’t apply themselves: there are no chains,
@@ -2585,7 +2598,7 @@ struct interpreter {
       if(!loops.back().may_break) {
         if(f.kind == flow_kind::brk) return ok();
         if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
-        if(guard > 100000) fail("цикл не сошёлся при статическом разборе", db[n].where);
+        if(guard > analysis_limit(loop_known)) fail("цикл не сошёлся при статическом разборе", db[n].where);
         continue;
       }
       if(f.kind == flow_kind::ret) record_return(f);
@@ -2595,7 +2608,7 @@ struct interpreter {
   }
 
   flow abstract_loop(node_id body, scope * env, uint32_t frame, std::set<value *> cells, node_id n) {
-    for(uint32_t pass = 0; pass < 8; ++pass) {
+    for(int64_t pass = 0, passes = analysis_limit(loop_types); pass < passes; ++pass) {
       std::vector<std::string> before;
       for(value * c: cells) {
         *c = erase(*c);
@@ -6061,7 +6074,7 @@ struct interpreter {
     if(checking()) {
       types_key = active_key + "|";
       for(auto & v: vals) types_key += v.is<thunk_v>() ? cat("expr", v.as<thunk_v>().expr.value, "|") : types.describe(v) + "|";
-      if(auto it = active_depth.find(types_key); it != active_depth.end() && it->second >= 16) widen = true;
+      if(auto it = active_depth.find(types_key); it != active_depth.end() && it->second >= analysis_limit(recursion_widen)) widen = true;
       if(widen && !probing) // generalization - and the key, and values: otherwise the body considers the known
         for(auto & v: vals)
           if(!v.is<thunk_v>() && v.known()) v = erase(v);
@@ -6078,7 +6091,7 @@ struct interpreter {
         auto it = approx.find(active_key);
         return ok(it != approx.end() ? it->second : value(rt_v{}));
       }
-      if(frames.size() > 2000) fail("рекурсия не останавливается при статическом разборе", site.where);
+      if(int64_t(frames.size()) > analysis_limit(recursion_depth)) fail("рекурсия не останавливается при статическом разборе", site.where);
     }
 
     // Reactive cache: instance with unchanged dependencies is not rediscovered
