@@ -1044,6 +1044,62 @@ struct jc_gen { code w; i64 w_ctx; i64 w_top; i64 w_base; i64 w_ret; i64 region;
 // catch в машинном коде: тип (unit — любой), метка, переменная значения, глубина стека
 struct jc_catch { type ty; i64 label; bool binds; str name; i64 slot; i64 depth; }
 
+// Предфильтр JIT (M6, шаг 2 — с C++ на язык): чего машинный код заведомо не исполняет —
+// до разбора экземпляра, итог — array{} или array{узел, причина}; строку узла ставит VM.
+// Строки, агрегаты и вызовы ядра — не здесь: их вычисляет VM через службу (решение
+// пользователя 2026-10-01). 
+//.
+jit_precheck(f) {
+  n_fn{_, params, _, body, _, _, _, _, _} = f;
+  for(p : params) {
+    n_param{_, t, mode, pack, _, _, _} = p;
+    if(given(t) && (code_kind(t) == n_pat)) return array{p, "параметр-образец (распаковка) — интерпретатор"};
+    if(pack && (mode == 0)) return array{p, "хвост аргументов ...xs — интерпретатор"};
+  }
+  jit_rejects(body, code_module(f))
+}
+
+// ct-переменные модуля: читаются по месту в каноническом порядке (§7.3) — не путь исполнения
+jit_module_ct(m) {
+  names = array{};
+  for(x : code_items(m))
+    if(code_kind(x) == n_var) {
+      n_var{name, _, _, _, is_ct, _, _, _} = x;
+      if(is_ct) names.push(name);
+    }
+  names
+}
+
+jit_rejects(c, m) => jit_rejects_in(c, if(given(m) && (code_kind(m) == n_module)) jit_module_ct(m) else array{});
+
+jit_rejects_in(c, cts) {
+  if(!given(c)) return array{};
+  kind = code_kind(c);
+  up = code_parent(c);
+  if((kind == n_call) && (code_name(c) == "try_compile")) return array{c, "узел n_call"}; // try_compile { … } — проба разбора
+  if(kind == n_hole) return array{c, "узел n_hole"};
+  if((kind == n_pat) && (code_kind(up) != n_unpack)) return array{c, "узел n_pat"};
+  if((kind == n_spread) && (code_kind(up) != n_construct)) return array{c, "узел n_spread"}; // ... в array{…} — значение VM
+  if(kind == n_ct) return array{c, "ct — по месту вызова (канонический порядок)"};
+  if(kind == n_ident) {
+    nm = code_name(c);
+    for(x : cts) if(x == nm) return array{c, "ct-переменная модуля — по месту (канонический порядок)"};
+  }
+  for(x : code_items(c)) {
+    r = jit_rejects_in(x, cts);
+    if(r.size > 0) return r;
+  }
+  array{}
+}
+
+// Создаёт ли тело потоки (вызов stream(…)): типы элементов — после второго прохода разбора.
+jit_makes_streams(c) {
+  if(!given(c)) return false;
+  if((code_kind(c) == n_call) && (code_name(c) == "stream")) return true;
+  for(x : code_items(c)) if(jit_makes_streams(x)) return true;
+  false
+}
+
 jit_compile(cg, f, types, type result) {
   array{acc, second, acc_f, second_f, argbase, frame, stack, third, ca0, ca1, ca2, ca3, cret2, outer_r} = cg.model();
   ok = true;

@@ -262,13 +262,14 @@ struct jit_machine {
   // Compiler in language (jit_compile prelude or programs): function code, purpose, types
   // → bytes. Empty - does not know: the interpreter will perform.
   interpreter * an_for_lang = nullptr; // parsing instance: chain trees for compiler language
-  bool lang_compile(node_id fn, jit_fn & out) {
-    node_id lc;
+  // Compiler function in language by name: last declared (program can replace prelude)
+  node_id lang_fn(std::string_view name) const {
     for(uint32_t i = db.size(); i-- > 0;)
-      if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "jit_compile") {
-        lc = node_id(i);
-        break;
-      }
+      if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == name) return node_id(i);
+    return {};
+  }
+  bool lang_compile(node_id fn, jit_fn & out) {
+    node_id lc = lang_fn("jit_compile");
     if(!lc) return false;
     std::vector<value> types; // Types: Type-values, not strings
     auto type_value = [&](interpreter & in, jt t) { return value(type_v{in.types.named(jt_name(t))}); };
@@ -334,49 +335,33 @@ void finish(jit_fn & out, x64::assembler & a) {
 
 // Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth
 // disassembling (parsing can calculate a lot with compile-time).
-std::optional<std::pair<node_id, std::string>> jit_prefilter(ast_db const & db, node_id module, node_id n) {
-  if(!n) return std::nullopt;
-  // strings, aggregates and calls of kernel functions - VM values (service: node calculates
-  // VM, author's decision 2026-10-01); obviously not - unpacking, ct
-  if(db.try_compile_body(n) || db.is<n_hole>(n) || (db.is<n_pat>(n) && !db.is<n_unpack>(db[n].parent)) || (db.is<n_spread>(n) && !db.is<n_construct>(db[n].parent))) // ... in array {…}, the value of VM
-    return std::pair{n, cat("узел ", kind_name(db[n]))};
-  if(db.is<n_ct>(n)) return std::pair{n, std::string("ct — по месту вызова (канонический порядок)")};
-  // ct-variable module is read in place in canonical order (§7.3) - not the way of execution
-  if(db.is<n_ident>(n) && module && db.is<n_module>(module))
-    for(node_id item: db.as<n_module>(module).items)
-      if(db.is<n_var>(item) && db.as<n_var>(item).ct && db.as<n_var>(item).name == db.as<n_ident>(n).name)
-        return std::pair{n, std::string("ct-переменная модуля — по месту (канонический порядок)")};
-  std::optional<std::pair<node_id, std::string>> found;
-  db.for_each_child(n, [&](node_id c) { if (!found) found = jit_prefilter(db, module, c); });
-  return found;
-}
-
-// Does the body create threads (call stream(…), including prelude through module functions).
-bool jit_creates_streams(ast_db const & db, node_id n) {
-  if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee) && db.strings.text(db.as<n_ident>(db.as<n_call>(n).callee).name) == "stream") return true;
-  bool found = false;
-  db.for_each_child(n, [&](node_id c) { found = found || jit_creates_streams(db, c); });
-  return found;
-}
-
 template<typename A>
 void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   out.deps[fn.value] = db.node_revision(fn);
   out.deps[mod.value] = db.node_revision(mod);
-  for(node_id p: db.as<n_fn>(fn).params) {
-    if(db.as<n_param>(p).type && db.is<n_pat>(db.as<n_param>(p).type)) {
-      out.reason = "параметр-образец (распаковка) — интерпретатор";
-      return;
+  // Prefilter and “Does threads create” - prelude functions over code (M6, step 2: logic over
+  // AST - in language, C++ - input, place and cause):
+//  
+  bool streams = false;
+  try {
+    interpreter pre(db, mod, {"jit"}, mode::run);
+    if(node_id pc = lang_fn("jit_precheck")) {
+      value r = pre.analyze_instance(pc, {pre.code_value(fn)});
+      if(r.is<array_v>() && r.as<array_v>().size() == 2) {
+        node_id at = pre.code_node(r.as<array_v>().get(0), db[fn].where);
+        bool param = db.is<n_param>(at); // parameter - the reason without a string, as was
+        auto lc = locate(db.source(db[at].where.source), db[at].where.begin);
+        out.reason = param ? std::string(r.as<array_v>().get(1).as<str_v>().view()) : cat(r.as<array_v>().get(1).as<str_v>().view(), " (строка ", lc.line, ")");
+        return;
+      }
     }
-    if(db.as<n_param>(p).pack && db.as<n_param>(p).mode == param_mode::let) {
-      out.reason = "хвост аргументов ...xs — интерпретатор";
-      return;
+    if(node_id ms = lang_fn("jit_makes_streams")) {
+      value r = pre.analyze_instance(ms, {pre.code_value(db.as<n_fn>(fn).body)});
+      streams = r.is<bool>() && r.as<bool>();
     }
-  }
-  if(auto bad = jit_prefilter(db, mod, db.as<n_fn>(fn).body)) {
-    auto lc = locate(db.source(db[bad->first].where.source), db[bad->first].where.begin);
-    out.reason = cat(bad->second, " (строка ", lc.line, ")");
-    return;
+  } catch(diagnostic const &) {
+    // Program error (extension control, parsing hooks) is not a prefilter: it will be reported by
+    // parsing instance below, as before.
   }
   // Static parsing instance: Types and compile-time node (value-approach)
   for(jt t: out.params)
@@ -408,7 +393,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   // created) - the second pass starts with the types of the first, like the parsing program
   std::map<std::pair<uint64_t, uint64_t>, value> seeded;
   interpreter an(db, mod, {"jit"}, mode::check);
-  if(jit_creates_streams(db, db.as<n_fn>(fn).body)) {
+  if(streams) {
     interpreter first(db, mod, {"jit"}, mode::check);
     first.set_fuel(200000);
     auto shapes = shapes_for(first);
