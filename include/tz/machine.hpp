@@ -183,6 +183,12 @@ struct m_stream {
   m_list<uint32_t> readers, writers;
 };
 
+// Body area entity functions: its local functions declared (entity .f(…)).
+struct m_entity {
+  symbol owner;
+  uint32_t scope = m_none;
+};
+
 // The state of the process is everything that Dump writes.
 struct m_state {
   m_list<m_scope> scopes;
@@ -207,11 +213,12 @@ struct m_state {
   uint64_t array_gen = 0; // array-buffering
   m_list<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
   m_list<symbol> ct_vars; // ct-variable module (change - only ct-code)
+  m_list<m_entity> entities; // entity Body Area Functions for entity .f(…)
 };
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "TZPROC05";
+  std::string magic = "TZPROC06";
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -850,11 +857,17 @@ struct process_machine {
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
     node_id chosen = override_for(fns, args); // Operation in context (checked) - its redefinition
     bool plain = bool(chosen);
-    int best = -1;
     bool tie = false;
     uint32_t parent = std::exchange(invoke_parent, m_none); // local set: environment of the set
     uint32_t rejected = 0, by_value = 0; // All are cut off by meaning - an exception, like the interpreter.
     std::vector<std::pair<uint32_t, mval>> chosen_conv;
+    // Appropriate Candidates and Their Features - Rule of Specificity in the Interpreter (overload_pick)
+    struct good_one {
+      node_id fn;
+      std::vector<int64_t> feat;
+      std::vector<std::pair<uint32_t, mval>> conv;
+    };
+    std::vector<good_one> good;
     for(node_id fnode: fns) {
       auto const & fn = db.as<n_fn>(fnode);
       if(plain) continue;
@@ -863,7 +876,7 @@ struct process_machine {
         ++rejected;
         continue;
       }
-      int score = tail ? 0 : 1; // The exact number of arguments is more specific than the tail...xs
+      std::vector<int64_t> feat{tail ? 1 : 0, 0}; // interpreter-like signs
       bool fits = true;
       std::vector<std::pair<uint32_t, mval>> conv; // candidate's converted arguments
       for(uint32_t i = 0; i < fn.params.size() && fits; ++i) {
@@ -885,7 +898,7 @@ struct process_machine {
           if(!ok) {
             fits = false;
             ++by_value;
-          } else score += 1 + int(helper.pattern_checks(p.type));
+          } else feat.push_back(100 + int64_t(helper.pattern_checks(p.type)));
           continue;
         }
         if(p.type && db.is<n_ident>(p.type)) {
@@ -896,7 +909,7 @@ struct process_machine {
             fits = false;
             by_value += numeric_pair(deref(args[i]), helper.str(db.as<n_ident>(p.type).name)) && !p.strict;
           } else {
-            score += r;
+            feat.push_back(r); // 2 - Type equals, 1 - imagine
             if(r == 1) conv.push_back({i, got});
           }
         }
@@ -912,14 +925,21 @@ struct process_machine {
           ++by_value;
           continue;
         }
-        score += n;
+        feat[1] = n;
       }
-      if(score > best) {
-        best = score;
-        chosen = fnode;
-        chosen_conv = std::move(conv);
-        tie = false;
-      } else if(score == best) tie = true;
+      good.push_back({fnode, std::move(feat), std::move(conv)});
+    }
+    if(!plain && !good.empty()) {
+      std::vector<std::vector<int64_t> const *> feats;
+      std::vector<bool> maybes;
+      for(auto const & g: good) {
+        feats.push_back(&g.feat);
+        maybes.push_back(false); // machine
+      }
+      auto const & pick = helper.choose_overload(feats, maybes, where);
+      chosen = good[pick.order[0]].fn;
+      chosen_conv = std::move(good[pick.order[0]].conv);
+      tie = pick.ambiguous;
     }
     // cortege, like the interpreter: no one directly approached
     if(!chosen && !repacked) {
@@ -1227,29 +1247,13 @@ struct process_machine {
   int type_fit(mval const & v, std::string_view want, bool strict, mval & out) {
     out = v;
     std::string have = describe(v);
-    if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2;
-    if(!strict && helper.types.is_a(have, want)) return 1; // base
-    if(!strict && v.is<m_agg>() && helper.types.anonymous(v.as<m_agg>().type) && helper.structs.contains(helper.sym(want))) { // {x: …} where struct is expected
-      value got;
-      if(helper.record_fit(to_value(v), want, got) == interpreter::fit::no) return 0;
-      out = from_value(got, {});
-      return 1;
-    }
-    if(value z; !strict && is_record(v) && v.as<m_agg>().fields.empty() && helper.scalar_default(want, z)) { // i64 n = {} — 0
-      out = from_value(z, {});
-      return 1;
-    }
-    if(strict || !numeric_pair(v, want)) return 0;
-    if(want == helper.types.float_name()) {
-      int64_t i = v.as<int64_t>();
-      double d = double(i);
-      if(d < -9.2e18 || d > 9.2e18 || int64_t(d) != i) return 0;
-      out = mval{d};
-      return 1;
-    }
-    double d = v.as<double>();
-    if(!(d >= -9.2e18 && d <= 9.2e18) || std::trunc(d) != d) return 0;
-    out = mval{int64_t(d)};
+    if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2; // identity is here
+    // The ratio of unequal types is the same rule as that of the interpreter (fit_rule prelude, M6)
+    value got;
+    auto r = helper.type_fit(to_value(v), want, strict, got);
+    if(r == interpreter::fit::no) return 0;
+    if(r == interpreter::fit::exact) return 2;
+    out = from_value(got, {});
     return 1;
   }
   // Anonymous literature in a place of a known type (as in the interpreter, §4.3).
@@ -1721,6 +1725,7 @@ struct process_machine {
     if(node_id b = db.try_compile_body(n)) return eval_try_compile(b);
     m_task & t = top();
     if(t.phase == 0) {
+      if(auto set = entity_members(n, t.scope); !set.empty()) return eval_call_args(n, set, c.args, false); // essence. f(...)
       if(db.is_member(c.callee)) { // a.f(b) ≡ f(a, b) (§4.5)
         auto const & m = db.member_of(c.callee);
         node_list args{m.object};
@@ -1785,9 +1790,46 @@ struct process_machine {
     call_args_step(n);
   }
 
-  node_list call_args(node_id n) const {
+  // entity .f(…): the object is the name of the function - entity (not variable), f - its local
+  // functions; neighbors are visible to each other (as in the interpreter - entity_scope).
+  std::vector<node_id> entity_members(node_id n, uint32_t scope) {
+    if(!db.is<n_call>(n) || !db.is_member(db.as<n_call>(n).callee)) return {};
+    auto const & m = db.member_of(db.as<n_call>(n).callee);
+    if(!db.is<n_ident>(m.object) || find(scope, db.as<n_ident>(m.object).name).scope != m_none) return {};
+    auto it = helper.functions.find(db.as<n_ident>(m.object).name);
+    if(it == helper.functions.end()) return {};
+    std::vector<node_id> set;
+    for(node_id f: it->second)
+      if(db.is<n_block>(db.as<n_fn>(f).body))
+        for(node_id s: db.as<n_block>(db.as<n_fn>(f).body).items)
+          if(db.is<n_fn>(s) && !db.as<n_fn>(s).scoped && db.as<n_fn>(s).name == m.name) set.push_back(s);
+    return set;
+  }
+  uint32_t entity_scope(symbol owner) {
+    for(auto const & e: st.entities)
+      if(e.owner == owner) return e.scope;
+    uint32_t sc = new_scope(st.globals);
+    for(node_id f: helper.functions.at(owner))
+      if(db.is<n_block>(db.as<n_fn>(f).body))
+        for(node_id item: db.as<n_block>(db.as<n_fn>(f).body).items)
+          if(db.is<n_fn>(item) && !db.as<n_fn>(item).scoped) {
+            symbol name = db.as<n_fn>(item).name;
+            bool added = false;
+            for(auto & v: st.scopes[sc].vars)
+              if(v.name == name && v.v.is<m_fn>()) {
+                v.v.as<m_fn>().set.push_back(item);
+                added = true;
+              }
+            if(!added) declare(sc, name, mval{m_fn{{}, {}, sc, {item}}});
+          }
+    st.entities.push_back({owner, sc});
+    return sc;
+  }
+
+  node_list call_args(node_id n) {
     if(db.is<n_op>(n)) return db.as<n_op>(n).args;
     auto const & c = db.as<n_call>(n);
+    if(db.is_member(c.callee) && !entity_members(n, top().scope).empty()) return c.args; // entity .f(…) without an object
     if(db.is_member(c.callee)) {
       node_list args{db.member_of(c.callee).object};
       args.insert(args.end(), c.args.begin(), c.args.end());
@@ -1799,6 +1841,10 @@ struct process_machine {
   // overload of the call n: local set (from the caller area) or module function; env is the
   // local set environment (m_none is the global area).
   std::vector<node_id> overloads_of(node_id n, node_id any, uint32_t scope, uint32_t * env = nullptr) {
+    if(auto set = entity_members(n, scope); !set.empty()) {
+      if(env) *env = entity_scope(db.as<n_ident>(db.member_of(db.as<n_call>(n).callee).object).name);
+      return set;
+    }
     symbol local; // Local dial: call by name or operator declared in the block
     if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) local = db.as<n_ident>(db.as<n_call>(n).callee).name;
     else if(db.is<n_op>(n) && helper.local_ops.contains(db.as<n_fn>(any).name.value)) local = db.as<n_fn>(any).name;
@@ -2470,7 +2516,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(std::string_view(h.magic) != "TZPROC05") throw diagnostic("не дамп процесса tz", {});
+    if(std::string_view(h.magic) != "TZPROC06") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }
