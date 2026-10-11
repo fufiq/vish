@@ -1585,29 +1585,41 @@ struct interpreter {
       alts[0] = x;
       return;
     }
-    // Empty array - late element type: array<?> й array<T> = array<T> (run-time)
-    auto late = [&](value const & v) { return types.describe(v) == "array<?>"; };
-    auto arr = [&](value const & v) { return types.describe(v).starts_with("array<"); };
-    for(auto & y: alts) {
-      if(state_of(y) != state_of(x)) continue;
-      if(late(x) && arr(y)) {
-        y = erase(y);
-        return;
+    // merging rule - in language (join_rule prelude, M6 step 6): passage 1 - late type of empty
+    // array elements, passage 2 - same compile-time / same type; facts - at VM
+    std::string tx = types.describe(x);
+    std::vector<std::string> tys; // Types of alternatives - once on both passes
+    tys.reserve(alts.size());
+    for(auto const & y: alts) tys.push_back(types.describe(y));
+    std::string key;
+    for(int64_t pass = 1; pass <= 2; ++pass)
+      for(std::size_t k = 0; k < alts.size(); ++k) {
+        auto & y = alts[k];
+        std::string const & ty = tys[k];
+        bool same_state = state_of(y) == state_of(x);
+        bool same_value = pass == 2 && same_state && ty == tx && y.known() && x.known() && show_v(y) == show_v(x);
+        key.clear();
+        key += char('0' + pass);
+        key += char('0' + same_state * 2 + same_value);
+        key += ty;
+        key += '|';
+        key += tx;
+        auto it = join_rules.find(key);
+        if(it == join_rules.end()) {
+          value r = lang_rule(join_fn, "join_rule", {value(pass), value(ty), value(tx), value(same_state), value(same_value)}, {});
+          it = join_rules.emplace(key, r.as<int64_t>()).first;
+        }
+        switch(it->second) {
+          case 1: return; // calculus
+          case 2: y = erase(y); return; // same type, run-time
+          case 3: y = erase(x); return; // array<?> ⊔ array<T>
+          default: break;
+        }
       }
-      if(late(y) && arr(x)) {
-        y = erase(x);
-        return;
-      }
-    }
-    for(auto & y: alts) {
-      if(types.describe(y) != types.describe(x)) continue;
-      if(state_of(y) != state_of(x)) continue; // Another state (ct field, hide) - another alternative
-      if(y.known() && x.known() && show_v(y) == show_v(x)) return; // calculus
-      y = erase(y); // same type, run-time
-      return;
-    }
     alts.push_back(x);
   }
+  std::unordered_map<std::string, int64_t> join_rules; // Facts → merger (join_rule)
+  node_id join_fn;
 
   // Apply f to each split value alternative.
   value lift(value const & x, auto && f) {
@@ -2028,38 +2040,77 @@ struct interpreter {
   enum class fit { no, exact, representable, maybe };
   fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
     out = v;
-    if(want == "auto" || types.describe(v) == want || types.name(types.of(v)) == want) return fit::exact;
-    if(value const * x = want.starts_with("n_") ? shape_of(v) : nullptr; x && code_agg(*x) && (is_node_kind(want) || want == std::meta::identifier_of(^^n_context))) {
-      // N if c receives the node code n if, n context c and the heirs
-      if(!v.known()) return strict ? fit::no : fit::maybe;
-      node_id c = code_node(v, {});
-      std::string k(kind_name(db[c]));
-      return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
-    }
-    if(!strict && types.is_a(types.name(types.of(v)), want)) return fit::representable; // base
-    if(!strict && is_record(v) && structs.contains(sym(want))) return record_fit(v, want, out); // {x: …} where struct is expected
-    if(!strict && empty_record(v) && scalar_default(want, out)) return fit::representable; // i64 n = {} — 0
-    if(strict || !numeric_pair(v, want)) return fit::no;
+    std::string got_desc = types.describe(v);
+    std::string_view got(types.name(types.of(v)));
+    if(want == "auto" || got_desc == want || got == want) return fit::exact; // sameness
+    // Type ratio in language (fit_rule prelude, M6 step 6), facts in VM
     value const * x = shape_of(v);
-    if(want == "f64") {
-      if(!v.known()) {
-        out = erase(value(1.0));
+    bool want_node = want.starts_with("n_") && (is_node_kind(want) || want == std::meta::identifier_of(^^n_context));
+    bool is_code = want_node && x && code_agg(*x);
+    bool subtype = types.is_a(got, want);
+    bool record = is_record(v), empty = record && empty_record(v), want_struct = record && structs.contains(sym(want));
+    std::string key;
+    key += char('0' + strict + 2 * subtype + 4 * record + 8 * want_struct + 16 * empty + 32 * is_code + 64 * want_node);
+    key += got;
+    key += '|';
+    key += want;
+    auto it = fit_rules.find(key);
+    if(it == fit_rules.end()) {
+      value r = lang_rule(fit_fn, "fit_rule", {value(std::string(got)), value(std::string(want)), value(strict), value(subtype), value(record), value(want_struct), value(empty), value(is_code), value(want_node)}, {});
+      it = fit_rules.emplace(std::move(key), r.as<int64_t>()).first;
+    }
+    switch(it->second) {
+      case 2: return fit::representable; // base
+      case 3: return record_fit(v, want, out); // {x: …} where struct is expected
+      case 4: return scalar_default(want, out) ? fit::representable : fit::no; // i64 n = {} — 0
+      case 5: { // i64 - f64 without loss
+        if(!v.known()) {
+          out = erase(value(1.0));
+          return fit::representable;
+        }
+        int64_t i = x->as<int64_t>();
+        double d = double(i);
+        if(d < -9.2e18 || d > 9.2e18 || int64_t(d) != i) return fit::no;
+        out = value(d);
         return fit::representable;
       }
-      int64_t i = x->as<int64_t>();
-      double d = double(i);
-      if(d < -9.2e18 || d > 9.2e18 || int64_t(d) != i) return fit::no;
-      out = value(d);
-      return fit::representable;
+      case 6: { // f64 → i64 - the whole
+        if(!v.known()) {
+          out = erase(value(int64_t(1)));
+          return fit::maybe;
+        }
+        double d = x->as<double>();
+        if(!(d >= -9.2e18 && d <= 9.2e18) || std::trunc(d) != d) return fit::no;
+        out = value(int64_t(d));
+        return fit::representable;
+      }
+      case 7: { // N if c receives the node code n if, n context c and the heirs
+        if(!v.known()) return strict ? fit::no : fit::maybe;
+        node_id c = code_node(v, {});
+        std::string k(kind_name(db[c]));
+        return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
+      }
+      default: return fit::no;
     }
-    if(!v.known()) {
-      out = erase(value(int64_t(1)));
-      return fit::maybe;
-    }
-    double d = x->as<double>();
-    if(!(d >= -9.2e18 && d <= 9.2e18) || std::trunc(d) != d) return fit::no;
-    out = value(int64_t(d));
-    return fit::representable;
+  }
+  std::unordered_map<std::string, int64_t> fit_rules; // facts → relation (fit_rule)
+  node_id fit_fn;
+  // A rule in language (prelude function) in an auxiliary interpreter: a pure function of
+  // facts, the result causing remembers. Rules don’t apply themselves: there are no chains,
+  // overloads, and type transformations in their code - otherwise, an explanation error.
+  value lang_rule(node_id & fn, std::string_view name, std::vector<value> args, span where) {
+    // bootstrap: rule code also needs rules (for array rejects overload for flow - array → stream
+    // ratio); they are considered by the assistant of the next level, fit_rule and join_rule have
+    // no cycles and overloads inside - depth is finite
+    if(helper_depth >= 3) fail(cat("правило ", name, " понадобилось в коде правил на глубине ", helper_depth, ": в overload_pick, chain_resolve, fit_rule, join_rule — без цепочек и лишних перегрузок"), where);
+    if(!fn)
+      for(uint32_t i = db.size(); i-- > 0;)
+        if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == name) {
+          fn = node_id(i);
+          break;
+        }
+    if(!fn) fail(cat("нет ", name, " в прелюдии"), where);
+    return in_helper(fn, std::move(args));
   }
   // Numbers between which there is "imaginable": i64 . f64.
   bool numeric_pair(value const & v, std::string_view want) const {
@@ -3906,8 +3957,7 @@ struct interpreter {
     std::vector<value> ops, assoc;
     for(symbol o: c.ops) ops.push_back(value(std::string(str(o))));
     for(char a: assoc_of) assoc.push_back(value(a == '1'));
-    interpreter & lang = chain_lang();
-    value r = lang.analyze_instance(chain_fn, {value(int64_t(k)), value(array_v::of(std::move(ops))), value(array_v::of(std::move(assoc))), value(open)});
+    value r = in_helper(chain_fn, {value(int64_t(k)), value(array_v::of(std::move(ops))), value(array_v::of(std::move(assoc))), value(open)});
     auto field = [&](std::string_view f) -> value const & {
       for(auto const & [s, v]: r.as<agg_v>().fields)
         if(str(s) == f) return v;
@@ -3948,12 +3998,23 @@ struct interpreter {
   std::vector<chain_job *> chain_jobs;
   interpreter * chain_subject = nullptr; // Whose helper (chain_probe, chain_key)
   bool chain_helper = false;
+  int helper_depth = 0; // Rule interpreter level (0 is not an assistant)
   node_id chain_fn;
   std::deque<interpreter> chain_langs;
+  // Calling the rule in the assistant is the default memory level: the assistant lives longer than
+  // the context of the with_alloc(r) program, its values should not be in pages r (§12.2).
+  value in_helper(node_id fn, std::vector<value> args) {
+    struct default_level {
+      address_space * saved = std::exchange(current_space, nullptr);
+      ~default_level() { current_space = saved; }
+    } level;
+    return chain_lang().analyze_instance(fn, std::move(args));
+  }
   interpreter & chain_lang() {
     if(chain_langs.empty()) {
       chain_langs.emplace_back(db, db.prelude ? db.prelude : mod, std::vector<std::string>{"chain"}, mode::run);
       chain_langs.back().chain_helper = true;
+      chain_langs.back().helper_depth = helper_depth + 1;
       chain_langs.back().chain_subject = this;
     }
     return chain_langs.back();
@@ -5737,8 +5798,7 @@ struct interpreter {
         fs.push_back(value(array_v::of(std::move(xs))));
         ms.push_back(value(bool(maybes[k])));
       }
-      interpreter & lang = chain_lang();
-      value r = lang.analyze_instance(overload_fn, {value(array_v::of(std::move(fs))), value(array_v::of(std::move(ms))), value(checking())});
+      value r = in_helper(overload_fn, {value(array_v::of(std::move(fs))), value(array_v::of(std::move(ms))), value(checking())});
       auto field = [&](std::string_view f) -> value const & {
         for(auto const & [k, v]: r.as<agg_v>().fields)
           if(str(k) == f) return v;

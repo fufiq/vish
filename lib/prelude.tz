@@ -3463,3 +3463,54 @@ overload_pick(feats, maybes, bool checking) {
   for(x : order) if(scores[x] == scores[order[0]]) tied = tied + 1;
   ov_pick{order, reach, ambiguous, tied}
 }
+
+// Отношения типов и слияние путей (§5.8, §5.5, M6 шаг 6 — с C++ на язык): 
+// 
+// 
+// 
+// 
+//. Факты о значении и типах (подтип, запись, struct, код) и преобразования
+// значений — у VM; «тип равен» VM решает сама (тождество). Итоги запоминаются по фактам.
+// Без цепочек и без преобразований типов внутри: правила не применяют сами себя.
+
+// fit_rule: подходит ли значение типа got месту типа want, если типы не равны.
+// 0 — нет, 2 — наследник вместо базы (как есть), 3 — запись {x: …} → struct, 4 — {} →
+// ноль числа, 5 — i64 → f64 (без потерь), 6 — f64 → i64 (целое), 7 — по виду узла кода.
+// 
+// explicit — только равный тип.
+fit_rule(got, want, strict, subtype, record, want_struct, empty, is_code, want_node) {
+  if(is_code && want_node) 7
+  else if(strict) 0
+  else if(subtype) 2
+  else if(record && want_struct) 3
+  else if(empty && ((want == "i64") || (want == "f64"))) 4
+  else if((got == "i64") && (want == "f64")) 5
+  else if((got == "f64") && (want == "i64")) 6
+  else 0
+}
+
+str_starts(s, p) {
+  r = s.size >= p.size;
+  k = 0;
+  while(r && (k < p.size)) {
+    if(s[k] != p[k]) r = false;
+    k = k + 1;
+  }
+  r
+}
+
+// join_rule: альтернатива y (тип ty) и значение x (тип tx) другого пути. Проход 1 —
+// пустой массив: тип элементов поздний, array<?> ⊔ array<T> = array<T> (рт); проход 2 —
+// одинаковые кт — кт, один тип — рт, разные типы — расщепление (без variant).
+// 0 — не эта альтернатива, 1 — x уже есть, 2 — y стирается до типа, 3 — y := тип x.
+// Другое состояние (ct-поле, hide) — всегда другая альтернатива.
+join_rule(pass, ty, tx, same_state, same_value) {
+  if(!same_state) 0
+  else if(pass == 1) {
+    if((tx == "array<?>") && str_starts(ty, "array<")) 2
+    else if((ty == "array<?>") && str_starts(tx, "array<")) 3
+    else 0
+  } else if(ty != tx) 0
+  else if(same_value) 1
+  else 2
+}
