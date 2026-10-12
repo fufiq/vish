@@ -3,6 +3,7 @@ import type {
   Decor,
   Cursor,
   NodeId,
+  Selection,
   Update,
   View,
   ViewNode,
@@ -23,6 +24,8 @@ export class ViewElement {
   readonly byId = new Map<NodeId, ASTNode>();
   readonly caret = document.createElement('div');
   readonly popup = document.createElement('ul');
+  // Selection - rectangles on top of the text (the text is also in Shadow DOM node)
+  readonly selectionLayer = document.createElement('div');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -36,7 +39,13 @@ export class ViewElement {
     this.caret.className = 'tz-caret';
     this.popup.className = 'tz-complete';
     this.popup.hidden = true;
-    host.replaceChildren(this.root, this.caret, this.popup);
+    this.selectionLayer.className = 'tz-selection';
+    host.replaceChildren(
+      this.selectionLayer,
+      this.root,
+      this.caret,
+      this.popup,
+    );
   }
 
   #build(id: NodeId): ASTNode {
@@ -61,11 +70,73 @@ export class ViewElement {
     const fresh = this.#build(u.node);
     if (!old || old === this.root) {
       this.root = fresh;
-      this.host.replaceChildren(fresh, this.caret, this.popup);
-      return;
+      this.host.replaceChildren(
+        this.selectionLayer,
+        fresh,
+        this.caret,
+        this.popup,
+      );
+    } else {
+      fresh.slot = old.slot;
+      old.replaceWith(fresh);
     }
-    fresh.slot = old.slot;
-    old.replaceWith(fresh);
+    // node, which saved id, - with the same labels until the next check (VM saves id
+    // node when dialing)
+    if (this.#decor) this.showMarks(this.#decor);
+  }
+
+  #decor: Decor | undefined;
+  #selection: Selection | undefined;
+
+  // Texts of pieces in order projection : (node, piece) → Text.
+  #texts(): { node: NodeId; piece: number; text: Text }[] {
+    const out: { node: NodeId; piece: number; text: Text }[] = [];
+    const walk = (id: NodeId): void => {
+      const n = this.nodes.get(id);
+      const el = this.byId.get(id);
+      if (!n || !el) return;
+      n.pieces.forEach((p, i) => {
+        if (typeof p !== 'string') {
+          walk(p);
+          return;
+        }
+        const t = el.textOf(i);
+        if (t) out.push({ node: id, piece: i, text: t });
+      });
+    };
+    if (this.root) walk(this.root.nodeId);
+    return out;
+  }
+
+  // Selection from second end (VM) to cursor: rectangles of lines of text.
+  showSelection(s: Selection): void {
+    this.#selection = s;
+    this.selectionLayer.replaceChildren();
+    const c = this.#cursor;
+    const cn = c?.node ?? null;
+    if (s.node === null || !c || cn === null) return;
+    const texts = this.#texts();
+    const at = (node: NodeId, piece: number) =>
+      texts.findIndex((t) => t.node === node && t.piece === piece);
+    let a = { i: at(s.node, s.piece), off: s.offset };
+    let b = { i: at(cn, c.piece), off: c.offset };
+    if (a.i < 0 || b.i < 0) return;
+    if (a.i > b.i || (a.i === b.i && a.off > b.off)) [a, b] = [b, a];
+    const origin = this.host.getBoundingClientRect();
+    for (const [i, { text: t }] of texts.entries()) {
+      if (i < a.i || i > b.i) continue;
+      const range = document.createRange();
+      range.setStart(t, i === a.i ? utf16Offset(t.data, a.off) : 0);
+      range.setEnd(t, i === b.i ? utf16Offset(t.data, b.off) : t.length);
+      for (const r of range.getClientRects()) {
+        const box = document.createElement('div');
+        box.style.left = `${String(r.left - origin.left + this.host.scrollLeft)}px`;
+        box.style.top = `${String(r.top - origin.top + this.host.scrollTop)}px`;
+        box.style.width = `${String(Math.max(r.width, 4))}px`;
+        box.style.height = `${String(r.height)}px`;
+        this.selectionLayer.append(box);
+      }
+    }
   }
 
   // Place VM (node, piece, offset in code points) → rectangle of the symbol in
@@ -107,6 +178,7 @@ export class ViewElement {
     this.caret.style.top = `${String(box.top)}px`;
     this.caret.style.height = `${String(box.height)}px`;
     this.caret.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (this.#selection) this.showSelection(this.#selection);
   }
 
   #marked = new Set<ASTNode>();
@@ -141,6 +213,7 @@ export class ViewElement {
   // Check marks: old ones are removed, sent. Returns the first error for the status
   // string.
   showMarks(d: Decor): string | undefined {
+    this.#decor = d;
     for (const el of this.#marked) {
       el.setMarks({});
       el.removeAttribute('error-range');

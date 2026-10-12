@@ -128,12 +128,31 @@ struct printer {
       out += cat("module ", str(m.name), ";\n");
     }
     bool first = !m.name;
-    for(uint32_t k = 0; k < m.items.size(); ++k) {
+    bool joined = false; // after the draft: the separator of the following element - in its text
+    bool top = layouts && open.size() == 1; // module
+    if(top) {
+      chunk_at.assign(m.items.size(), ~uint32_t{0});
+      content_at.assign(m.items.size(), ~uint32_t{0});
+    }
+    for(uint32_t k = 0; k <= m.items.size(); ++k) {
+      if(top && draft && k == draft->at) {
+        draft_begin = uint32_t(out.size());
+        verbatim_group_text(m.items);
+        draft_end = uint32_t(out.size());
+        first = false;
+        joined = true;
+        k += draft->count;
+        if(k > m.items.size()) break;
+      }
+      if(k == m.items.size()) break;
       node_id i = m.items[k];
       if(!kept(i)) continue;
-      if(!first) out += '\n';
-      if(!first) blank_lines(m.blank, k);
+      if(top) chunk_at[k] = uint32_t(out.size());
+      if(!first && !joined) out += '\n';
+      if(!first && !joined) blank_lines(m.blank, k);
+      if(top) content_at[k] = uint32_t(out.size());
       first = false;
+      joined = false;
       node_note const * nt = comments ? db.note_of(i) : nullptr;
       if(nt) note_lines(nt->lead, true);
       item(i);
@@ -141,6 +160,7 @@ struct printer {
       if(nt && !nt->tail.empty()) out += cat(" ", nt->tail);
       out += '\n';
     }
+    if(top) items_end = uint32_t(out.size());
     if(node_note const * nt = comments ? db.note_of(module) : nullptr; nt && !nt->end.empty()) { // comments at the end of the module
       if(!first) out += '\n';
       note_lines(nt->end, true);
@@ -1100,6 +1120,83 @@ struct printer {
   // For the editor (layout), the hole is only your text: the reason is the node note,
   // the scenery, not the editable text.
   void print_node(node_id, n_hole const & h) { out += layouts ? h.text : cat("/* дыра: ", h.reason, " */ ", h.text); }
+
+  // --- Draft editor: typed text as is ---
+  //
+  // Author's decision (2026-10-12): the text of the module element that rules is exactly as
+  // typed; the canon is when leaving the element. The draft is also projection: the layout
+  // of its node is built according to their places in the typed text (where parsing), and
+  // not by print - the editor's DOM remains the AST tree.
+  struct verbatim_group {
+    uint32_t at = 0; // first element of the draft module (number in items)
+    uint32_t count = 0; // draft
+    uint32_t source = 0; // Import of typed text: places node - in it
+  };
+  verbatim_group const * draft = nullptr;
+  // places in the output (module layout): by element number - the beginning of its piece
+  // (with a separator) and the beginning of its lines (~0 - not output); end of elements
+  // (until the comments of the end of the module); draft text [draft_begin , draft_end )
+  std::vector<uint32_t> chunk_at, content_at;
+  uint32_t items_end = 0, draft_begin = 0, draft_end = 0;
+
+  void verbatim_group_text(node_list const & items) {
+    std::string_view src = db.source(draft->source);
+    uint32_t pos = 0;
+    for(uint32_t k = draft->at; k < draft->at + draft->count && k < items.size(); ++k) {
+      span w = db[items[k]].where;
+      if(w.source != draft->source || w.begin < pos || w.end > src.size()) continue;
+      out += src.substr(pos, w.begin - pos);
+      verbatim(items[k], src);
+      pos = w.end;
+    }
+    out += src.substr(pos);
+  }
+
+  // The knot is typed: a piece of it between children is as written; children without their
+  // place in this text (born parsing) are not shown separately. whole - your node text - all
+  // typed text (root of the function representation).
+  void verbatim(node_id n, std::string_view src, bool whole = false) {
+    span w = db[n].where;
+    span own = whole ? span{0, uint32_t(src.size()), w.source} : w;
+    if(!layouts) {
+      out += src.substr(own.begin, own.end - own.begin);
+      return;
+    }
+    if(whole) { // children in the place node, the whole text
+      enter(n);
+      if(w.end <= src.size() && w.begin <= w.end) {
+        out += src.substr(0, w.begin);
+        verbatim_inside(n, src, w);
+        out += src.substr(w.end);
+      } else out += src;
+      leave();
+      return;
+    }
+    enter(n);
+    verbatim_inside(n, src, w);
+    leave();
+  }
+  void verbatim_inside(node_id n, std::string_view src, span w) {
+    if(db.is<n_raw>(n) || db.is<n_native>(n) || db.is<n_hole>(n)) { // Text as written - sheet as in projection
+      out += src.substr(w.begin, w.end - w.begin);
+      return;
+    }
+    std::vector<node_id> kids;
+    db.for_each_child(n, [&](node_id c) {
+      span cw = db[c].where;
+      if(cw.source == w.source && cw.begin >= w.begin && cw.end <= w.end && cw.begin < cw.end) kids.push_back(c);
+    });
+    std::ranges::stable_sort(kids, {}, [&](node_id c) { return db[c].where.begin; });
+    uint32_t pos = w.begin;
+    for(node_id c: kids) {
+      span cw = db[c].where;
+      if(cw.begin < pos) continue;
+      out += src.substr(pos, cw.begin - pos);
+      verbatim(c, src);
+      pos = cw.end;
+    }
+    out += src.substr(pos, w.end - pos);
+  }
 
   ast_db const & db;
   symbol fn_name; // name for the head of the following function (overload)

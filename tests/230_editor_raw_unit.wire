@@ -5,8 +5,9 @@
 // 
 //;
 // 
-// The cursor in the block is stable: the projection
-// block is the text as written.
+// The cursor in the block is stable: the projection block is the text as written. The draft
+// element (author's decision 2026-10-12) is disassembled in its entirety, but the update is
+// the narrowest: id node is preserved, only the block has changed.
 // program: editor_raw.tz
 open_view module
 [2] open_view module
@@ -27,9 +28,9 @@ key 1 0
 // expect-not: kind="n_hole"
 run
 // expect: output text="43\n" ok=true
-// Translation of the line inside the block - text as written, the same unit
+// translation of a line inside the block (with a line indentation) - text as written, the same unit
 key 1 Enter
-// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{1 2 30\n x}"] note=""⏎текст:
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{1 2 30\n   x}"] note=""⏎текст:
 // expect-not: kind="n_call"
 run
 // expect: output text="43\n" ok=true

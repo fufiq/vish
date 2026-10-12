@@ -53,6 +53,30 @@ struct editor_view {
   };
   std::vector<nav_target> targets; // not empty - open list - transition, not addition
 
+  // Draft (author's decision 2026-10-12): the elements of the module that rule - the
+  // text exactly as typed; in the representation of the function - it itself.
+  struct draft_state {
+    bool open = false;
+    node_list items; // elements of the draft module (representation of the function is its root)
+    node_id next; // module element after draft (empty - at the end)
+    uint32_t source = 0; // Import of typed text: places node - in it
+    std::vector<uint32_t> blank; // Empty parsing lines for the canon
+    std::vector<std::string> rest; // comments after the last element - the following
+  } draft;
+  struct snapshot {
+    std::string text;
+    uint32_t caret; // byte
+  };
+  std::vector<snapshot> undo, redo; // drawback
+  bool typing = false; // It's a set of words: rollback in a word, not a letter.
+  // layout of the module (printer): bytes of text by element number, end of elements, draft
+  std::vector<uint32_t> chunk_at, content_at;
+  uint32_t items_end = 0, draft_begin = 0, draft_end = 0;
+  static constexpr uint32_t none = ~uint32_t{0};
+  uint32_t anchor = none; // second end of allocation (place)
+  uint32_t goal = none; // column
+  mutable bool selection_sent = false;
+
   uint32_t layout_of(node_id n) const { return n.value < at.size() ? at[n.value] : ~uint32_t{0}; }
   std::string_view text_of(std::pair<uint32_t, uint32_t> r) const {
     return std::string_view(text).substr(byte_at[r.first], byte_at[r.second] - byte_at[r.first]);
@@ -121,7 +145,7 @@ uint32_t code_points(std::string_view s) {
 }
 
 struct editor_server {
-  enum op : uint64_t { op_accept = 1, op_recv, op_send };
+  enum op : uint64_t { op_accept = 1, op_recv, op_send, op_timer };
 
   struct peer {
     int fd = -1;
@@ -175,6 +199,9 @@ struct editor_server {
     std::size_t i = c.tag & 0xFFFFFFFFFFFFFF;
     bool more = c.flags & IORING_CQE_F_MORE;
     switch(o) {
+      case op_timer:
+        on_timer();
+        break;
       case op_accept:
         if(c.res >= 0) add_peer(c.res);
         if(!more) ring.accept_all(listen_fd, tag(op_accept, 0));
@@ -279,7 +306,10 @@ struct editor_server {
   }
 
   void handle(peer & p, proto::c_close_view const & m) {
-    if(editor_view * v = find(p, m.view)) v->root = {};
+    if(editor_view * v = find(p, m.view)) {
+      finalize(p, *v);
+      v->root = {};
+    }
   }
 
   // The keys interpret the view: with an open addition - a list (arrows, Enter -
@@ -302,43 +332,760 @@ struct editor_server {
       if(m.key == "Enter") { // Accept: the typed word is replaced by the selected name
         std::string name = v->items[v->selected].name;
         close_completion(p, *v);
-        return edit(*v, v->word_begin, v->cursor, name);
+        return replace(p, *v, v->word_begin, v->cursor, name);
       }
       if(m.key == "Escape") return close_completion(p, *v);
     }
-    if(m.key == " " && (m.mods & mod_ctrl)) return complete(p, *v, true);
-    if(m.key == "F12") return goto_call(p, *v);
-    if(m.key == "ArrowRight") {
-      if(v->cursor + 1 < v->places.size()) ++v->cursor;
-    } else if(m.key == "ArrowLeft") {
-      if(v->cursor > 0) --v->cursor;
-    } else if(m.key == "Home" || m.key == "End") {
-      v->cursor = line_edge(*v, m.key == "End");
-    } else if(m.key == "Escape") {
-    } else if(m.key == "Backspace" && v->cursor > 0) {
-      // indentation (only spaces to the left) - erase the translation of the line as
-      // a whole: the empty line disappears, the line joins the previous one
-      uint32_t s = v->cursor;
-      while(s > 0 && v->lead[s - 1] == ' ') --s;
-      bool indent = s > 0 && v->lead[s - 1] == '\n';
-      edit(*v, indent ? s - 1 : v->cursor - 1, v->cursor, "");
-      return complete(p, *v, false);
-    } else if(m.key == "Delete" && v->cursor + 1 < v->places.size()) {
+    finalize_peer(p, v); // the key to another representation - drafts of others to the canon
+    bool shift = m.mods & 1, ctrl = m.mods & mod_ctrl;
+    if(m.key == " " && ctrl) return complete(p, *v, true);
+    if(m.key == "F12") {
+      finalize(p, *v);
+      return goto_call(p, *v);
+    }
+    bool vert = false;
+    if(auto t = motion(*v, m, vert)) return move_to(p, *v, *t, shift, vert);
+    auto [s, e] = selection(*v);
+    if(m.key == "Escape") { // release; draft - to the canon
       close_completion(p, *v);
-      return edit(*v, v->cursor, v->cursor + 1, "");
-    } else if(m.key == "Backspace" || m.key == "Delete") { // edge of the text - nothing
-    } else if(m.key == "Enter") {
-      // new line, as in all editors (author's decision): empty line - layout in AST
-      // (blank); in an empty block `{}` - two translations
-      bool empty_block = v->cursor > 0 && v->lead[v->cursor - 1] == '{' && v->lead[v->cursor] == '}';
-      close_completion(p, *v);
-      return edit(*v, v->cursor, v->cursor, empty_block ? "\n\n" : "\n", 1);
-    } else if(code_points(m.key) == 1 && !(m.mods & (mod_ctrl | mod_alt | mod_meta))) {
-      edit(*v, v->cursor, v->cursor, m.key);
-      return complete(p, *v, false);
-    } else return send(p, proto::s_error{cat("клавиша не обработана: ", m.key)});
+      v->anchor = none;
+      if(v->draft.open) return finalize(p, *v);
+      return send_cursor(p, *v);
+    }
+    if(ctrl && (m.key == "a" || m.key == "A" || m.key == "ф")) {
+      v->anchor = 0;
+      return move_to(p, *v, uint32_t(v->places.size() - 1), true);
+    }
+    if(ctrl && (m.key == "c" || m.key == "C" || m.key == "с")) return copy(p, *v, false);
+    if(ctrl && (m.key == "x" || m.key == "X" || m.key == "ч")) return copy(p, *v, true);
+    if(ctrl && (m.key == "z" || m.key == "Z" || m.key == "я")) return undo(p, *v, shift);
+    if(ctrl && (m.key == "y" || m.key == "Y" || m.key == "н")) return undo(p, *v, true);
     close_completion(p, *v);
-    send_cursor(p, *v);
+    if(m.key == "Backspace" || m.key == "Delete") {
+      if(s != e) return replace(p, *v, s, e, "");
+      bool back = m.key == "Backspace";
+      if(back && s == 0) return send_cursor(p, *v);
+      if(!back && s + 1 >= v->places.size()) return send_cursor(p, *v);
+      uint32_t a = back ? s - 1 : s, b = back ? s : s + 1;
+      if(back && !ctrl) { // indent, up to the previous indentation column
+        uint32_t ls = line_start(*v, s);
+        if(s > ls && std::ranges::all_of(std::string_view(v->lead).substr(ls, s - ls), [](char c) { return c == ' '; })) a = s - ((s - ls) % 2 ? 1 : 2);
+      }
+      if(ctrl) back ? a = word_left(*v, s) : b = word_right(*v, s);
+      replace(p, *v, a, b, "");
+      if(back) complete(p, *v, false);
+      return;
+    }
+    if(m.key == "Enter") return newline(p, *v);
+    if(m.key == "Tab") return indent(p, *v, shift);
+    if(code_points(m.key) == 1 && !(m.mods & (mod_ctrl | mod_alt | mod_meta))) return type_text(p, *v, m.key);
+    send(p, proto::s_error{cat("клавиша не обработана: ", m.key)});
+  }
+
+  // --- draft: set as in a regular editor ---
+  //
+  // User Solutions (2026-10-12): Keys go to VM
+// the text of the module element, which
+  // `;`, spaces and empty lines are set by a person, not projection. Each edit disassembles the
+  // draft as a whole (written - node, unwritten - holes in their lines, unpaired bracket -
+  // indentation, §4.1); layout - in places node in the typed text, the DOM remains the AST
+  // tree. Checking and tags - on a pause of 1 sec; canon - when leaving the module element
+  // (cursor outside it, Escape, save, launch, other presentation).
+  //
+//.
+
+  static constexpr uint32_t pause_ms = 1000;
+  bool timers = true; // Tests: pause with idle team, no clock
+  uint64_t edited_at = 0; // last-draft
+  bool check_pending = false, timer_armed = false;
+  static constexpr uint32_t none = editor_view::none;
+
+  // Number of the first draft element in the items of the module (empty - insertion place).
+  uint32_t group_at(editor_view const & v) const {
+    auto const & items = session.db.as<n_module>(session.root).items;
+    node_id first = v.draft.items.empty() ? v.draft.next : v.draft.items[0];
+    if(first)
+      if(auto it = std::ranges::find(items, first); it != items.end()) return uint32_t(it - items.begin());
+    uint32_t k = 0; // In the end, before the internal elements.
+    while(k < items.size() && !is_inner(items[k])) ++k;
+    return k;
+  }
+  std::optional<printer::verbatim_group> draft_group(editor_view const & v) const {
+    if(!v.draft.open || v.kind != "module") return std::nullopt;
+    return printer::verbatim_group{group_at(v), uint32_t(v.draft.items.size()), v.draft.source};
+  }
+
+  uint32_t place_of_byte(editor_view const & v, uint32_t b) const {
+    return uint32_t(std::ranges::lower_bound(v.byte_at, b) - v.byte_at.begin());
+  }
+  // The beginning of the lines of the first deduced element with the number j; no - the end of the elements.
+  uint32_t content_from(editor_view const & v, uint32_t j) const {
+    for(; j < v.content_at.size(); ++j)
+      if(v.content_at[j] != none) return v.content_at[j];
+    return v.items_end;
+  }
+
+  // The unit of the draft around the place: the place [from, to), the elements of the module
+  // [k0, k1); the last (the end of the text of the elements is its place).
+  struct region {
+    uint32_t from, to, k0, k1;
+    bool last;
+    bool contains(uint32_t p) const { return p >= from && (p < to || (p == to && last)); }
+  };
+  std::optional<region> unit_of(editor_view const & v, uint32_t place) const {
+    uint32_t end = uint32_t(v.places.size() - 1);
+    if(v.kind != "module") return region{0, end, 0, 0, true};
+    auto const & items = session.db.as<n_module>(session.root).items;
+    uint32_t pb = v.byte_at[place];
+    if(v.draft.open) {
+      uint32_t at = group_at(v), c = uint32_t(v.draft.items.size());
+      region r{place_of_byte(v, v.draft_begin), place_of_byte(v, v.draft_end), at, at + c, v.draft_end == v.items_end};
+      if(r.contains(place)) return r;
+    }
+    std::optional<uint32_t> k; // element: the last one whose lines start no further than the place
+    for(uint32_t j = 0; j < v.content_at.size(); ++j)
+      if(v.content_at[j] != none && v.content_at[j] <= pb) k = j;
+    if(!k) {
+      bool any = std::ranges::any_of(v.content_at, [](uint32_t c) { return c != none; });
+      if(any || (v.draft.open && v.draft_begin < v.draft_end)) return std::nullopt; // module-cap
+      uint32_t at = 0;
+      while(at < items.size() && !is_inner(items[at])) ++at;
+      uint32_t e = place_of_byte(v, v.items_end);
+      return region{e, e, at, at, true};
+    }
+    uint32_t to = content_from(v, *k + 1);
+    if(v.draft.open && v.draft_begin > v.chunk_at[*k] && v.draft_begin < to) to = v.draft_begin; // draft
+    region r{place_of_byte(v, v.chunk_at[*k]), place_of_byte(v, to), *k, *k + 1, to == v.items_end};
+    if(!r.contains(place)) return std::nullopt; // end-of-module comments
+    return r;
+  }
+  std::optional<region> draft_region(editor_view const & v) const {
+    if(!v.draft.open) return std::nullopt;
+    if(v.kind != "module") return region{0, uint32_t(v.places.size() - 1), 0, 0, true};
+    uint32_t at = group_at(v);
+    return region{place_of_byte(v, v.draft_begin), place_of_byte(v, v.draft_end), at, at + uint32_t(v.draft.items.size()), v.draft_end == v.items_end};
+  }
+
+  // Draft covering places [a, b]: open or expand
+//.
+  // An element in another client's draft - the edit is rejected (refused).
+  std::optional<region> open_draft(peer & p, editor_view & v, uint32_t a, uint32_t b, bool & refused) {
+    auto ra = unit_of(v, a), rb = unit_of(v, b);
+    if(!ra || !rb) return std::nullopt;
+    region r{std::min(ra->from, rb->from), std::max(ra->to, rb->to), std::min(ra->k0, rb->k0), std::max(ra->k1, rb->k1), ra->last || rb->last};
+    node_list group;
+    if(v.kind == "module") {
+      auto const & items = session.db.as<n_module>(session.root).items;
+      group.assign(items.begin() + r.k0, items.begin() + r.k1);
+    } else group = {v.root};
+    for(auto & q: peers)
+      for(auto & w: q.views)
+        if(&w != &v && w.root && w.draft.open)
+          for(node_id x: w.draft.items)
+            if(std::ranges::contains(group, x)) {
+              if(&q != &p) {
+                refused = true;
+                return std::nullopt;
+              }
+              finalize(q, w); // His other vision is to the canon.
+            }
+    if(v.draft.open && v.draft.items == group) return r;
+    v.draft.open = true; // new draft or extension of the open
+    v.draft.items = group;
+    if(v.kind == "module") {
+      auto const & items = session.db.as<n_module>(session.root).items;
+      v.draft.next = r.k1 < items.size() && !is_inner(items[r.k1]) ? items[r.k1] : node_id{};
+    }
+    return r;
+  }
+
+  // Edit places [a, b) on ins in the draft; caret - cursor after editing (code points inside
+  // ins). 0 - place not in the module element (cap, end comments): normal editing; -1 -
+  // rejected.
+  int draft_edit(peer & p, editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret) {
+    bool refused = false;
+    auto r = open_draft(p, v, a, b, refused);
+    if(refused) {
+      send(p, proto::s_error{"элемент правит другой клиент"});
+      return -1;
+    }
+    if(!r) return 0;
+    uint32_t base = v.byte_at[r->from];
+    std::string text = v.text.substr(base, v.byte_at[r->to] - base);
+    uint32_t ia = v.byte_at[a] - base, ib = v.byte_at[b] - base;
+    std::string edited = cat(std::string_view(text).substr(0, ia), ins, std::string_view(text).substr(ib));
+    std::size_t cb = 0; // cursor-byte
+    for(uint32_t n = 0; n < caret && cb < ins.size(); ++n) cb += cp_len(ins, cb);
+    bool word = a == b && code_points(ins) == 1 && ident_char(ins[0]);
+    if(!(word && v.typing)) {
+      v.undo.push_back({text, v.byte_at[v.cursor] - base});
+      if(v.undo.size() > 500) v.undo.erase(v.undo.begin());
+    }
+    v.typing = word;
+    v.redo.clear();
+    hint = {v.places[a], b - a, code_points(ins), true};
+    commit_draft(p, v, edited, uint32_t(ia + cb), r->from, r->to);
+    return 1;
+  }
+
+  // Disassemble the text of the draft and put its elements in the module (id elements of the same
+  // type are saved); send out the layout. From is the beginning of the draft before editing.
+  void commit_draft(peer & p, editor_view & v, std::string const & text, uint32_t caret_at, uint32_t from, uint32_t to) {
+    auto & db = session.db;
+    ++edits;
+    parser pr(db, text, cat("<черновик #", edits, ">"));
+    node_list old = v.draft.items;
+    reparsed.clear();
+    parser::draft_items d;
+    if(v.kind != "module") {
+      pr.place(db[v.root].parent, v.root);
+      projection_rules(pr, v);
+      d = pr.parse_draft(true);
+      node_list all = db.as<n_module>(session.root).items;
+      all.insert(all.end(), d.items.begin(), d.items.end());
+      pr.resolve_refs(all);
+      if(d.items.size() == 1 && db.is<n_fn>(d.items[0])) {
+        if(!db.is<n_fn>(v.root)) { // It was a hole, a function again.
+          db.replace(v.root, db[d.items[0]].kind);
+          db.place(v.root, db[d.items[0]].where);
+          db.set_note(v.root, db.note_of(d.items[0]) ? *db.note_of(d.items[0]) : node_note{});
+        } else graft(v.root, d.items[0]);
+      } else { // ceased to be a function, a hole (the same node), until it became again.
+        db.replace(v.root, n_hole{text, "не функция"});
+        db.place(v.root, span{0, uint32_t(text.size()), pr.source});
+      }
+      v.draft.items = {v.root};
+    } else {
+      uint32_t at = group_at(v), count = uint32_t(old.size());
+      pr.place(session.root, count ? old[0] : v.draft.next); // Rules of Place (§4.4)
+      projection_rules(pr, v);
+      d = pr.parse_draft(true);
+      n_module m = db.as<n_module>(session.root);
+      {
+        node_list all = m.items; // f(…) is a reference to the module function
+        all.insert(all.end(), d.items.begin(), d.items.end());
+        pr.resolve_refs(all);
+      }
+      // The draft declared other parsing rules - the following elements are re-examined:
+      // 
+      std::string was_rules, now_rules;
+      for(node_id x: old) was_rules += parser::rule_trace(db, x);
+      for(node_id x: d.items) now_rules += parser::rule_trace(db, x);
+      node_list ids;
+      for(uint32_t i = 0; i < d.items.size(); ++i) {
+        node_id f = d.items[i];
+        if(i >= count) ids.push_back(f);
+        else if(db[old[i]].kind.index() == db[f].kind.index()) ids.push_back(graft(old[i], f)); // node of the same kind - the same id
+        else { // module element saves id and when changing the view: editing the source of the ct code rolls back its changes (§7.4 )
+          db.replace(old[i], db[f].kind);
+          db.place(old[i], db[f].where);
+          db.set_note(old[i], db.note_of(f) ? *db.note_of(f) : node_note{});
+          ids.push_back(old[i]);
+        }
+      }
+      m.items.erase(m.items.begin() + at, m.items.begin() + at + count);
+      m.items.insert(m.items.begin() + at, ids.begin(), ids.end());
+      if(!m.blank.empty()) {
+        m.blank.resize(std::max<std::size_t>(m.blank.size(), at + count + 1), 0);
+        m.blank.erase(m.blank.begin() + at, m.blank.begin() + at + count);
+        m.blank.insert(m.blank.begin() + at, ids.size(), 0);
+        parser::trim_blank(m.blank);
+      }
+      // The module changes only if its elements are changed: editing inside the element does not
+      // touch the rest (and does not roll back their changes with the ct code, §7.4).
+      if(m.items != db.as<n_module>(session.root).items || m.blank != db.as<n_module>(session.root).blank) db.replace(session.root, std::move(m));
+      v.draft.items = ids;
+      db.link_parents(session.root);
+      if(was_rules != now_rules) {
+        reparse_after(session.root, at + ids.size());
+        reparse_users(session.root);
+      }
+    }
+    v.draft.source = pr.source;
+    v.draft.blank = std::move(d.blank);
+    v.draft.rest = std::move(d.rest);
+    db.link_parents(session.root);
+    close_traces();
+    broadcast(v, from, to, caret_at);
+    hint.valid = false;
+    schedule_check();
+  }
+
+  // node of the new subtree, which coincided in place and appearance with the old ones, get the old id:
+  // 
+// Labels, cursors of other clients and layers
+  // going through the set. Children's lists are matched from the beginning and end -
+  // inserting or deleting in the middle doesn't shift neighbors.
+  node_id graft(node_id o, node_id n) {
+    auto & db = session.db;
+    if(!o || !n || o == n || db[o].kind.index() != db[n].kind.index()) return n;
+    node_kind k = db[n].kind;
+    node_kind const was = db[o].kind;
+    auto same = [&](node_id a, node_id b) { return a && b && db[a].kind.index() == db[b].kind.index(); };
+    std::visit([&](auto & x) {
+      using T = std::remove_cvref_t<decltype(x)>;
+      T const & y = std::get<T>(was);
+      template for(constexpr auto m: fields_of<T>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if constexpr(std::is_same_v<field_t, node_id>) x.[:m:] = graft(y.[:m:], x.[:m:]);
+        else if constexpr(std::is_same_v<field_t, node_list>) {
+          auto & xs = x.[:m:];
+          auto const & ys = y.[:m:];
+          std::size_t a = 0, b = 0;
+          for(; a < xs.size() && a < ys.size() && same(ys[a], xs[a]); ++a) xs[a] = graft(ys[a], xs[a]);
+          for(; b < xs.size() - a && b < ys.size() - a && same(ys[ys.size() - 1 - b], xs[xs.size() - 1 - b]); ++b)
+            xs[xs.size() - 1 - b] = graft(ys[ys.size() - 1 - b], xs[xs.size() - 1 - b]);
+        }
+      }
+    }, k);
+    db.replace(o, std::move(k));
+    db.place(o, db[n].where);
+    db.set_note(o, db.note_of(n) ? *db.note_of(n) : node_note{});
+    return o;
+  }
+
+  // Edit the author in coordinates node (up to parsing): cursors of other clients in the same piece
+  // are shifted by it, as in a conventional editor.
+  struct edit_hint {
+    caret at;
+    uint32_t removed = 0, inserted = 0;
+    bool valid = false;
+  } hint;
+
+  void close_traces() {
+    for(auto & q: peers)
+      if(q.debugging) {
+        q.debugging = false;
+        send(q, proto::s_trace{false, 0, 0, {}, {}, {}, {}});
+      }
+  }
+
+  // New layout for all performances. The author (av, draft) - cursor on caret bytes from the
+  // beginning of the draft; changed only inside the draft - updating its elements, otherwise -
+  // the module as a whole. The rest is the cursor in the same place node.
+  void broadcast(editor_view & av, uint32_t old_from, uint32_t old_to, uint32_t caret_at) {
+    for(auto & q: peers)
+      for(auto & w: q.views) {
+        if(!w.root) continue;
+        std::string was = w.text;
+        auto was_root = w.layouts.empty() ? std::vector<piece>{} : w.layouts[0].pieces;
+        bool mine = &w == &av;
+        uint32_t ob = mine && !w.byte_at.empty() ? w.byte_at[std::min<uint32_t>(old_from, uint32_t(w.byte_at.size() - 1))] : 0;
+        uint32_t oe = mine && !w.byte_at.empty() ? w.byte_at[std::min<uint32_t>(old_to, uint32_t(w.byte_at.size() - 1))] : 0;
+        caret keep = w.places.empty() ? caret{} : w.places[w.cursor];
+        uint32_t keep_byte = w.byte_at.empty() ? 0 : w.byte_at[w.cursor];
+        node_list tops = av.draft.items; // corrected elements and reconstructed - their layouts before editing
+        for(node_id x: reparsed)
+          if(!std::ranges::any_of(tops, [&](node_id y) { return within(x, y); })) tops.push_back(x);
+        std::vector<std::string> before;
+        for(node_id x: tops) before.push_back(signature(w, x));
+        std::map<uint32_t, std::string> own_before; // own chunks of node - for the narrowest update
+        for(node_id x: tops)
+          if(w.layout_of(x) != ~uint32_t{0})
+            for(auto const & n: subtree(w, x)) own_before[n.id.value] = own_signature(n);
+        layout(w);
+        if(mine) {
+          uint32_t start = w.kind == "module" ? w.draft_begin : 0;
+          w.cursor = std::min<uint32_t>(place_of_byte(w, start + caret_at), uint32_t(w.places.size() - 1));
+          w.anchor = w.goal = none;
+        } else {
+          if(hint.valid && keep.node == hint.at.node && keep.piece == hint.at.piece && keep.offset >= hint.at.offset)
+            keep.offset = keep.offset >= hint.at.offset + hint.removed ? keep.offset - hint.removed + hint.inserted : hint.at.offset + hint.inserted;
+          w.cursor = std::min<uint32_t>(place_of_byte(w, keep_byte), uint32_t(w.places.size() - 1));
+          for(uint32_t k = 0; k < w.places.size(); ++k)
+            if(w.places[k].node == keep.node && w.places[k].piece == keep.piece && w.places[k].offset == keep.offset) w.cursor = k;
+          if(w.anchor != none) w.anchor = std::min<uint32_t>(w.anchor, uint32_t(w.places.size() - 1));
+        }
+        if(!mine && w.text == was) continue;
+        // the root is the same (its pieces are the same texts and elements): updates only
+        // the draft elements and redisassembled according to the new rules n
+        bool inside = !w.layouts.empty() && w.layouts[0].pieces == was_root;
+        if(mine && w.kind == "module")
+          inside = inside && std::string_view(was).substr(0, ob) == std::string_view(w.text).substr(0, w.draft_begin) &&
+                   std::string_view(was).substr(oe) == std::string_view(w.text).substr(w.draft_end);
+        // one update: one element has changed - it, otherwise - the root (the client does not see
+        // the intermediate mixture)
+        node_list changed;
+        for(uint32_t i = 0; i < tops.size(); ++i)
+          if(w.layout_of(tops[i]) != ~uint32_t{0} && signature(w, tops[i]) != before[i] &&
+             !std::ranges::any_of(tops, [&](node_id y) { return y != tops[i] && w.layout_of(y) != ~uint32_t{0} && within(tops[i], y); }))
+            changed.push_back(tops[i]);
+        if(inside && changed.size() == 1) {
+          node_id at = narrowest(w, changed[0], own_before);
+          send(q, proto::s_update{w.id, session.db.revision, at, subtree(w, at)});
+        }
+        else if(!inside || !changed.empty()) send(q, proto::s_update{w.id, session.db.revision, w.root, subtree(w, w.root)});
+        if(!mine) close_completion(q, w);
+        send_cursor(q, w);
+      }
+  }
+
+  // The layout of the node subtree in the view is for comparison before and after editing.
+  std::string signature(editor_view const & w, node_id x) const {
+    std::string out;
+    if(w.layout_of(x) == ~uint32_t{0}) return out;
+    for(auto const & n: subtree(w, x)) {
+      out += cat("#", n.id.value, n.kind, "[");
+      for(auto const & pc: n.pieces) {
+        if(auto const * t = std::get_if<std::string>(&pc)) out += cat("\"", *t, "\"");
+        else out += cat("#", std::get<node_id>(pc).value);
+      }
+      out += cat("]", n.note, ";");
+    }
+    return out;
+  }
+
+  static std::string own_signature(proto::s_node const & n) {
+    std::string out = cat(n.kind, "[");
+    for(auto const & pc: n.pieces) {
+      if(auto const * t = std::get_if<std::string>(&pc)) out += cat("\"", *t, "\"");
+      else out += cat("#", std::get<node_id>(pc).value);
+    }
+    return out + cat("]", n.note);
+  }
+  // The deepest node, outside of which the layout has not changed: their pieces are the same,
+  // and the subtree of exactly one child has changed - the descent into it (editing in a damp
+  // block - updating only the block).
+  node_id narrowest(editor_view const & w, node_id x, std::map<uint32_t, std::string> const & own_before) const {
+    std::map<uint32_t, bool> memo;
+    auto changed = [&](auto && self, node_id n) -> bool {
+      if(auto it = memo.find(n.value); it != memo.end()) return it->second;
+      uint32_t k = w.layout_of(n);
+      bool c = k == ~uint32_t{0};
+      if(!c) {
+        auto it = own_before.find(n.value);
+        c = it == own_before.end() || it->second != own_signature(wire_node(w.layouts[k]));
+        if(!c)
+          for(auto const & pc: w.layouts[k].pieces)
+            if(auto const * ch = std::get_if<node_id>(&pc); ch && self(self, *ch)) c = true;
+      }
+      return memo[n.value] = c;
+    };
+    for(;;) {
+      uint32_t k = w.layout_of(x);
+      auto it = own_before.find(x.value);
+      if(k == ~uint32_t{0} || it == own_before.end() || it->second != own_signature(wire_node(w.layouts[k]))) return x;
+      node_id only;
+      uint32_t n = 0;
+      for(auto const & pc: w.layouts[k].pieces)
+        if(auto const * ch = std::get_if<node_id>(&pc); ch && changed(changed, *ch)) {
+          only = *ch;
+          ++n;
+        }
+      if(n != 1) return x;
+      x = only;
+    }
+  }
+
+  void schedule_check() {
+    check_pending = true;
+    edited_at = os::uring::now_ms();
+    if(timers && !timer_armed) {
+      ring.timeout(pause_ms, tag(op_timer, 0));
+      timer_armed = true;
+    }
+  }
+  void on_timer() {
+    timer_armed = false;
+    if(!check_pending) return;
+    uint64_t now = os::uring::now_ms();
+    if(now - edited_at >= pause_ms) return idle();
+    ring.timeout(uint32_t(pause_ms - (now - edited_at)), tag(op_timer, 0));
+    timer_armed = true;
+  }
+  // Set pause: check (reactive check) and tags for all submissions.
+  void idle() {
+    if(!check_pending) return;
+    check_pending = false;
+    recheck();
+    for(auto & q: peers)
+      for(auto & w: q.views)
+        if(w.root) send_marks(q, w);
+  }
+
+  // Canon: the draft leaves, the presentation is printed projection. The course and
+  // highlighting - until the draft in the same places, inside - aligning the typed text with
+  // the canonical, then with a shift.
+  void finalize(peer & p, editor_view & v) {
+    if(!v.draft.open) return;
+    auto & db = session.db;
+    bool module = v.kind == "module";
+    uint32_t ob = module ? v.draft_begin : 0, oe = module ? v.draft_end : uint32_t(v.text.size());
+    uint32_t at = module ? group_at(v) : 0, count = uint32_t(v.draft.items.size());
+    std::string was = v.text;
+    uint32_t cur = v.byte_at[v.cursor], anc = v.anchor != none ? v.byte_at[v.anchor] : none;
+    if(module) {
+      n_module m = db.as<n_module>(session.root);
+      bool next = v.draft.next && at + count < m.items.size() && m.items[at + count] == v.draft.next;
+      m.blank.resize(std::max<std::size_t>(m.blank.size(), m.items.size() + 1), 0);
+      for(uint32_t i = 0; i < count && i < v.draft.blank.size(); ++i) m.blank[at + i] = at + i == 0 ? 0 : v.draft.blank[i];
+      if(next && !v.draft.blank.empty()) m.blank[at + count] = v.draft.blank.back();
+      parser::trim_blank(m.blank);
+      if(m.blank != db.as<n_module>(session.root).blank) db.replace(session.root, std::move(m));
+      if(!v.draft.rest.empty()) { // comments after the draft with their lines - the next element
+        node_id to = next ? v.draft.next : session.root;
+        node_note nt = db.note_of(to) ? *db.note_of(to) : node_note{};
+        auto & lines = next ? nt.lead : nt.end;
+        lines.insert(lines.begin(), v.draft.rest.begin(), v.draft.rest.end());
+        db.set_note(to, std::move(nt));
+      }
+      db.link_parents(session.root);
+    }
+    v.draft = {};
+    v.undo.clear();
+    v.redo.clear();
+    v.typing = false;
+    recheck(false); // elaboration - to layout: the canon shows the changed ct-code
+    layout(v);
+    uint32_t ne = module ? content_from(v, at + count) : uint32_t(v.text.size());
+    if(module && ne < ob) ne = ob;
+    auto map = [&](uint32_t x) -> uint32_t {
+      if(x < ob) return place_of_byte(v, x);
+      if(x >= oe && !(x == oe && oe == uint32_t(was.size()))) return place_of_byte(v, x - oe + ne);
+      uint32_t cp = code_points(std::string_view(was).substr(ob, x - ob));
+      uint32_t got = align(std::string_view(was).substr(ob), cp, std::string_view(v.text).substr(ob));
+      return std::min<uint32_t>(place_of_byte(v, ob) + got, uint32_t(v.places.size() - 1));
+    };
+    v.cursor = map(cur);
+    v.anchor = anc != none ? map(anc) : none;
+    for(auto & q: peers)
+      for(auto & w: q.views) {
+        if(!w.root) continue;
+        if(&w != &v) {
+          std::string t = w.text;
+          caret keep = w.places.empty() ? caret{} : w.places[w.cursor];
+          layout(w);
+          for(uint32_t k = 0; k < w.places.size(); ++k)
+            if(w.places[k].node == keep.node && w.places[k].piece == keep.piece && w.places[k].offset == keep.offset) w.cursor = k;
+          if(w.text == t) continue;
+        }
+        send(q, proto::s_update{w.id, session.db.revision, w.root, subtree(w, w.root)});
+        send_cursor(q, w);
+      }
+    close_completion(p, v);
+    check_pending = true;
+    idle();
+  }
+  void finalize_peer(peer & p, editor_view const * except = nullptr) {
+    for(auto & w: p.views)
+      if(w.root && &w != except) finalize(p, w);
+  }
+  void finalize_all() {
+    for(auto & q: peers) finalize_peer(q);
+  }
+
+  // Edit [a, b) on ins: in the draft, otherwise (module cap) - in parentheses parsing.
+  void replace(peer & p, editor_view & v, uint32_t a, uint32_t b, std::string const & ins, uint32_t caret = ~uint32_t{0}) {
+    caret = std::min(caret, code_points(ins));
+    v.anchor = v.goal = none;
+    int r = draft_edit(p, v, a, b, ins, caret);
+    if(r == 0) {
+      v.typing = false;
+      edit(v, a, b, ins, caret);
+    }
+  }
+
+  // --- cursor ---
+
+  uint32_t line_start(editor_view const & v, uint32_t k) const {
+    while(k > 0 && v.lead[k - 1] != '\n') --k;
+    return k;
+  }
+  uint32_t line_end(editor_view const & v, uint32_t k) const {
+    while(k + 1 < v.places.size() && v.lead[k] != '\n') ++k;
+    return k;
+  }
+  static int char_class(char c) { return c == ' ' || c == '\n' || c == '\t' ? 0 : ident_char(c) || (static_cast<unsigned char>(c) & 0x80) ? 1 : 2; }
+  uint32_t word_left(editor_view const & v, uint32_t k) const {
+    while(k > 0 && char_class(v.lead[k - 1]) == 0) --k;
+    if(k == 0) return 0;
+    int c = char_class(v.lead[k - 1]);
+    while(k > 0 && char_class(v.lead[k - 1]) == c) --k;
+    return k;
+  }
+  uint32_t word_right(editor_view const & v, uint32_t k) const {
+    uint32_t end = uint32_t(v.places.size() - 1);
+    while(k < end && char_class(v.lead[k]) == 0) ++k;
+    if(k == end) return end;
+    int c = char_class(v.lead[k]);
+    while(k < end && char_class(v.lead[k]) == c) ++k;
+    return k;
+  }
+  // Line up (dir < 0) or down on lines - in the goal column.
+  uint32_t vertical(editor_view & v, int dir, uint32_t lines) const {
+    uint32_t ls = line_start(v, v.cursor);
+    uint32_t col = v.goal != none ? v.goal : v.cursor - ls;
+    v.goal = col;
+    for(uint32_t n = 0; n < lines; ++n) {
+      if(dir < 0) {
+        if(ls == 0) return n == 0 ? 0 : std::min(ls + col, line_end(v, ls));
+        ls = line_start(v, ls - 1);
+      } else {
+        uint32_t le = line_end(v, ls);
+        if(le + 1 >= v.places.size()) return n == 0 ? le : std::min(ls + col, le);
+        ls = le + 1;
+      }
+    }
+    return std::min(ls + col, line_end(v, ls));
+  }
+  std::pair<uint32_t, uint32_t> selection(editor_view const & v) const {
+    if(v.anchor == none) return {v.cursor, v.cursor};
+    return {std::min(v.anchor, v.cursor), std::max(v.anchor, v.cursor)};
+  }
+
+  // The cursor to place t (shift - allocation stretches); outside the draft - the canon.
+  void move_to(peer & p, editor_view & v, uint32_t t, bool shift, bool keep_goal = false) {
+    if(shift) {
+      if(v.anchor == none) v.anchor = v.cursor;
+    } else v.anchor = none;
+    v.cursor = std::min<uint32_t>(t, uint32_t(v.places.size() - 1));
+    if(!keep_goal) v.goal = none;
+    v.typing = false;
+    close_completion(p, v);
+    if(auto r = draft_region(v); r && !(r->contains(v.cursor) && (v.anchor == none || r->contains(v.anchor)))) return finalize(p, v);
+    send_cursor(p, v);
+  }
+
+  // Motion key: new cursor location; vertical - column remembered
+  std::optional<uint32_t> motion(editor_view & v, proto::c_key const & m, bool & vert) const {
+    bool ctrl = m.mods & mod_ctrl;
+    uint32_t end = uint32_t(v.places.size() - 1);
+    auto [s, e] = selection(v);
+    bool collapse = v.anchor != none && !(m.mods & 1);
+    vert = false;
+    if(m.key == "ArrowLeft") return collapse && !ctrl ? s : ctrl ? word_left(v, v.cursor) : v.cursor > 0 ? v.cursor - 1 : 0;
+    if(m.key == "ArrowRight") return collapse && !ctrl ? e : ctrl ? word_right(v, v.cursor) : std::min(v.cursor + 1, end);
+    if(m.key == "Home") {
+      if(ctrl) return 0u;
+      uint32_t ls = line_start(v, v.cursor), fs = ls;
+      while(fs < end && v.lead[fs] == ' ') ++fs;
+      return v.cursor == fs ? ls : fs;
+    }
+    if(m.key == "End") return ctrl ? end : line_end(v, v.cursor);
+    vert = true;
+    if(m.key == "ArrowUp") return vertical(v, -1, 1);
+    if(m.key == "ArrowDown") return vertical(v, 1, 1);
+    if(m.key == "PageUp") return vertical(v, -1, 30);
+    if(m.key == "PageDown") return vertical(v, 1, 30);
+    return std::nullopt;
+  }
+
+  // Type of text (letter, insert): replaces the selection; `}` in indentation - a level less.
+  void type_text(peer & p, editor_view & v, std::string const & t) {
+    auto [s, e] = selection(v);
+    if(t == "}" && s == e) {
+      uint32_t ls = line_start(v, s);
+      bool indent = s > ls && std::ranges::all_of(std::string_view(v.lead).substr(ls, s - ls), [](char c) { return c == ' '; });
+      if(indent) return replace(p, v, ls, s, cat(std::string((s - ls) >= 2 ? s - ls - 2 : 0, ' '), "}"));
+    }
+    replace(p, v, s, e, t);
+    if(code_points(t) == 1) complete(p, v, false);
+  }
+
+  // Enter: line translation with line indentation; after `{` - deeper, between `{` and `}` -
+  // two lines, cursor - on the middle.
+  void newline(peer & p, editor_view & v) {
+    auto [s, e] = selection(v);
+    uint32_t ls = line_start(v, s), ind = 0;
+    while(ls + ind < s && v.lead[ls + ind] == ' ') ++ind;
+    uint32_t b = s;
+    while(b > ls && v.lead[b - 1] == ' ') --b;
+    bool open = b > ls && v.lead[b - 1] == '{';
+    uint32_t f = e;
+    while(f + 1 < v.places.size() && v.lead[f] == ' ') ++f;
+    bool close = open && v.lead[f] == '}';
+    std::string pad(ind + (open ? 2 : 0), ' ');
+    if(close) return replace(p, v, s, f, cat("\n", pad, "\n", std::string(ind, ' ')), 1 + uint32_t(pad.size()));
+    replace(p, v, s, e, cat("\n", pad));
+  }
+
+  // Tab / Shift + Tab: indentation of the selection lines by 2 (without highlighting Tab -
+  // spaces to the next column of indentation).
+  void indent(peer & p, editor_view & v, bool out) {
+    auto [s, e] = selection(v);
+    if(!out && s == e) {
+      uint32_t col = s - line_start(v, s);
+      return replace(p, v, s, s, std::string(2 - col % 2, ' '));
+    }
+    uint32_t a = line_start(v, s), b = line_end(v, e > s && v.lead[e - 1] == '\n' ? e - 1 : e);
+    std::string text = v.text.substr(v.byte_at[a], v.byte_at[b] - v.byte_at[a]), done;
+    for(auto l: std::views::split(std::string_view(text), '\n')) {
+      std::string_view line(l.begin(), l.end());
+      if(!done.empty() || &*l.begin() != text.data()) done += '\n';
+      if(out) {
+        uint32_t n = 0;
+        while(n < 2 && n < line.size() && line[n] == ' ') ++n;
+        done += line.substr(n);
+      } else done += line.empty() ? std::string(line) : cat("  ", line);
+    }
+    replace(p, v, a, b, done);
+  }
+
+  void copy(peer & p, editor_view & v, bool cut) {
+    auto [s, e] = selection(v);
+    if(s == e) { // single-line
+      s = line_start(v, s);
+      e = std::min<uint32_t>(line_end(v, e) + 1, uint32_t(v.places.size() - 1));
+    }
+    send(p, proto::s_clipboard{v.text.substr(v.byte_at[s], v.byte_at[e] - v.byte_at[s])});
+    if(cut) replace(p, v, s, e, "");
+  }
+
+  // Recoil and repeat - inside the draft (rollback of the adopted - on the journal base, later).
+  void undo(peer & p, editor_view & v, bool again) {
+    auto & from = again ? v.redo : v.undo;
+    auto & to = again ? v.undo : v.redo;
+    auto r = draft_region(v);
+    if(!r || from.empty()) return send(p, proto::s_error{again ? "повторять нечего" : "откат — внутри черновика: откатывать нечего"});
+    uint32_t base = v.byte_at[r->from];
+    to.push_back({v.text.substr(base, v.byte_at[r->to] - base), v.byte_at[v.cursor] - base});
+    auto snap = std::move(from.back());
+    from.pop_back();
+    v.typing = false;
+    v.anchor = v.goal = none;
+    commit_draft(p, v, snap.text, snap.caret, r->from, r->to);
+  }
+
+  std::optional<uint32_t> place_of(editor_view const & v, node_id node, uint32_t piece, uint32_t offset) const {
+    for(uint32_t k = 0; k < v.places.size(); ++k) {
+      caret const & c = v.places[k];
+      if(c.node != node || c.piece != piece) continue;
+      // The end of the piece is the place after its last symbol.
+      if(c.offset == offset || (offset && c.offset + 1 == offset && (k + 1 == v.places.size() || v.places[k + 1].node != c.node || v.places[k + 1].piece != c.piece)))
+        return c.offset == offset ? k : k + 1;
+    }
+    return std::nullopt;
+  }
+
+  void handle(peer & p, proto::c_input const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    finalize_peer(p, v);
+    close_completion(p, *v);
+    v->typing = false;
+    type_text(p, *v, m.text);
+  }
+
+  void handle(peer & p, proto::c_select const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    finalize_peer(p, v);
+    auto t = place_of(*v, m.node, m.piece, m.offset);
+    if(!t) return send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
+    if(m.clicks == 2) { // word
+      uint32_t a = *t, b = *t;
+      int c = char_class(v->lead[a]);
+      while(a > 0 && char_class(v->lead[a - 1]) == c) --a;
+      while(b + 1 < v->places.size() && char_class(v->lead[b]) == c) ++b;
+      v->cursor = a;
+      return move_to(p, *v, b, true);
+    }
+    if(m.clicks >= 3) { // line
+      v->cursor = line_start(*v, *t);
+      v->anchor = none;
+      return move_to(p, *v, std::min<uint32_t>(line_end(*v, *t) + 1, uint32_t(v->places.size() - 1)), true);
+    }
+    move_to(p, *v, *t, true);
   }
 
   // --- complement ---
@@ -913,17 +1660,10 @@ struct editor_server {
   void handle(peer & p, proto::c_pointer const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
-    // The end of the piece is the place after its last symbol.
-    for(uint32_t k = 0; k < v->places.size(); ++k) {
-      caret const & c = v->places[k];
-      if(c.node != m.node || c.piece != m.piece) continue;
-      if(c.offset == m.offset || (m.offset && c.offset + 1 == m.offset && (k + 1 == v->places.size() || v->places[k + 1].node != c.node || v->places[k + 1].piece != c.piece))) {
-        v->cursor = c.offset == m.offset ? k : k + 1;
-        close_completion(p, *v);
-        return send_cursor(p, *v);
-      }
-    }
-    send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
+    finalize_peer(p, v);
+    auto t = place_of(*v, m.node, m.piece, m.offset);
+    if(!t) return send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
+    move_to(p, *v, *t, false);
   }
 
   // --- Checking tags: Types and errors in place ---
@@ -1154,6 +1894,7 @@ struct editor_server {
   void handle(peer & p, proto::c_projection const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    finalize_peer(p);
     node_id mod;
     if(!m.key.empty()) {
       auto dir = session.dir.empty() ? std::filesystem::path(session.name).parent_path() : std::filesystem::path(session.dir);
@@ -1306,6 +2047,7 @@ struct editor_server {
   void handle(peer & p, proto::c_goto const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    finalize_peer(p);
     std::string_view t = m.text;
     while(!t.empty() && t.front() == ' ') t.remove_prefix(1);
     while(!t.empty() && t.back() == ' ') t.remove_suffix(1);
@@ -1406,6 +2148,7 @@ struct editor_server {
   // --- start-up ---
 
   void handle(peer & p, proto::c_run const & m) {
+    finalize_peer(p); // Launch and Preservation - Accepted Text
     session.stdin_lines.clear();
     for(auto l: lines_of(m.stdin_text)) session.stdin_lines.emplace_back(l);
     std::vector<std::string> args;
@@ -1417,6 +2160,7 @@ struct editor_server {
 
   // .tzdb next to the program: stats.tz → stats.tzdb §3.1)
   void handle(peer & p, proto::c_save const &) {
+    finalize_peer(p); // Launch and Preservation - Accepted Text
     std::string path = session.name;
     if(path.ends_with(".tz")) path += "db";
     else if(!path.ends_with(".tzdb")) path += ".tzdb";
@@ -1436,6 +2180,7 @@ struct editor_server {
   std::string trace_output, trace_error;
 
   void handle(peer & p, proto::c_trace const & m) {
+    finalize_peer(p); // Launch and Preservation - Accepted Text
     session.stdin_lines.clear();
     for(auto l: lines_of(m.stdin_text)) session.stdin_lines.emplace_back(l);
     std::vector<std::string> args;
@@ -1554,6 +2299,7 @@ struct editor_server {
   }
 
   void handle(peer & p, proto::c_merge const & m) {
+    finalize_all();
     std::string path = m.path;
     if(!path.starts_with('/')) // programme
       if(auto slash = session.name.rfind('/'); slash != std::string::npos) path = session.name.substr(0, slash + 1) + path;
@@ -1570,6 +2316,7 @@ struct editor_server {
   }
 
   void handle(peer & p, proto::c_take const & m) {
+    finalize_all();
     auto it = std::ranges::find(pending.conflicts, m.key, &merge_conflict::key);
     if(it == pending.conflicts.end()) return send(p, proto::s_error{cat("нет конфликта ", m.key)});
     if(m.theirs) {
@@ -1589,6 +2336,11 @@ struct editor_server {
   void send_cursor(peer & p, editor_view const & v) {
     caret c = v.places.empty() ? caret{} : v.places[v.cursor];
     send(p, proto::s_cursor{v.id, c.node, c.piece, c.offset});
+    bool sel = v.anchor != none && v.anchor != v.cursor && v.anchor < v.places.size();
+    if(!sel && !v.selection_sent) return;
+    caret a = sel ? v.places[v.anchor] : caret{};
+    send(p, proto::s_select{v.id, a.node, a.piece, a.offset});
+    v.selection_sent = sel;
   }
 
   // --- layout ---
@@ -1601,7 +2353,15 @@ struct editor_server {
     printer pr(session.db, v.kind == "module" ? printer::filter([&](node_id n) { return !is_inner(n); }) : printer::filter{});
     pr.layouts = &v.layouts;
     pr.projection = v.projection;
-    pr.print(v.root);
+    auto group = draft_group(v);
+    if(group) pr.draft = &*group;
+    if(v.kind == "fn" && v.draft.open && session.db[v.root].where.source == v.draft.source) pr.verbatim(v.root, session.db.source(v.draft.source), true);
+    else pr.print(v.root);
+    v.chunk_at = std::move(pr.chunk_at);
+    v.content_at = std::move(pr.content_at);
+    v.items_end = pr.items_end;
+    v.draft_begin = pr.draft_begin;
+    v.draft_end = pr.draft_end;
     v.at.assign(session.db.size(), ~uint32_t{0});
     for(uint32_t k = 0; k < v.layouts.size(); ++k) v.at[v.layouts[k].node.value] = k;
     v.places.clear();

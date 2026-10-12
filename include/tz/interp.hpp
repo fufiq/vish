@@ -138,6 +138,11 @@ struct check_cache {
     std::vector<report_event> events;
     std::vector<std::tuple<uint32_t, value, bool, bool, bool, bool>> journal; // Observations (the latter in a folded call)
     bool effect = false;
+    // Types known in parsing: Values store type numbers - repeat only if the new parsing registry
+    // starts the same way (correction elsewhere could register types in a different order)
+    //
+    uint32_t types_count = 0;
+    uint64_t types_hash = 0;
   };
   std::map<std::string, entry> entries;
   uint32_t hits = 0, recomputed = 0;
@@ -6338,6 +6343,8 @@ struct interpreter {
         ++cache->recomputed;
         cache->recomputed_names.push_back(std::string(str(fn.name)));
         check_cache::entry e{r.v, std::move(mine), std::move(recorded), {}, last_rt_effect};
+        e.types_count = uint32_t(types.names.size());
+        e.types_hash = types_prefix_hash(e.types_count);
         for(std::size_t i = journal_mark; i < journal.size(); ++i)
           e.journal.emplace_back(journal[i].node, journal[i].v, journal[i].seen, journal[i].diverted, journal[i].effect, journal[i].folded);
         cache->entries[memo_key] = std::move(e);
@@ -6355,10 +6362,20 @@ struct interpreter {
   std::optional<flow> try_jit(node_id f, std::vector<value> & vals, node_list const & args, scope * env,
       std::string const & key);
 
-  bool valid(check_cache::entry const & e) const {
+  bool valid(check_cache::entry const & e) {
     for(auto const & [node, rev]: e.deps)
       if(db.node_revision(node_id(node)) != rev) return false;
-    return true;
+    return e.types_count <= types.names.size() && types_prefix_hash(e.types_count) == e.types_hash;
+  }
+  std::unordered_map<uint32_t, uint64_t> types_prefix; // hash of the first n registry names (the registry is only growing)
+  uint64_t types_prefix_hash(uint32_t n) {
+    if(auto it = types_prefix.find(n); it != types_prefix.end()) return it->second;
+    uint64_t h = 1469598103934665603ull;
+    for(uint32_t i = 0; i < n; ++i) {
+      for(char c: types.names[i]) h = (h ^ uint8_t(c)) * 1099511628211ull;
+      h = (h ^ 0xff) * 1099511628211ull;
+    }
+    return types_prefix[n] = h;
   }
 
   // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell. open

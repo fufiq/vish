@@ -100,9 +100,11 @@ struct parser {
     if(!db.is_context(n)) assign({}, {n}, 0, uint32_t(src.size()));
   }
   // Commentaries of the context of ctx (empty - the string of the set: the end - to the tail of the
-  // latter) in [from, to], not yet taken by the nested: on the line of the end of the element - its tail,
-  // on its lines or inside the element - the lines in front of it, after the last - before the end.
-  void assign(node_id ctx, node_list const & items, uint32_t from, uint32_t to) {
+  // latter) in [from, to], not yet taken by the nested: on the line of the end of the element - its
+  // tail, on its lines or inside the element - the lines in front of it, after the last - before the
+  // end. rest - draft editor: comments with their lines after the last element of the line of the
+  // set - not the tail of the latter, but here (they - the next element).
+  void assign(node_id ctx, node_list const & items, uint32_t from, uint32_t to, std::vector<std::string> * rest = nullptr) {
     std::vector<node_note> ns(items.size() + 1);
     std::vector<uint32_t> last(items.size() + 1, ~uint32_t{0}); // end of last comment before k
     std::vector<std::vector<std::string>> inner(items.size()); // Comments on the element k
@@ -119,7 +121,7 @@ struct parser {
         continue;
       }
       bool tail = k > 0 && last[k] == ~uint32_t{0} && newlines(db[items[k - 1]].where.end, c.begin) == 0;
-      if(!ctx && k == items.size() && k > 0) tail = true;
+      if(!ctx && !rest && k == items.size() && k > 0) tail = true;
       if(tail) {
         std::string & t = ns[k - 1].tail;
         t += t.empty() ? text : cat(" ", text);
@@ -148,6 +150,7 @@ struct parser {
     };
     for(uint32_t k = 0; k < items.size(); ++k) merge(items[k], ns[k]);
     if(ctx) merge(ctx, ns.back());
+    else if(rest) *rest = std::move(ns.back().end);
   }
 
   // --- designs declared code (§4.4) ---
@@ -471,6 +474,95 @@ struct parser {
     return out;
   }
 
+  // Draft: Instruction without `;`, followed by a new line on the same or smaller indentation,
+  // is not written: it ends on its line (empty `;` with the cause - it will become one hole),
+  // and does not capture the next one -
+// (author's decision 2026-09-29). Only in
+  // Instruction contexts (`{…}` and text), not within `(…)` and `[…]`; line continuation
+  // is after `;`, `,`, opening, `}`, and `]]` attributes.
+  void end_unfinished_by_lines() {
+    struct level {
+      bool statements; // `{…}` or all text
+      uint32_t indent; // indentation of the beginning line of the current instruction (~0 - not started)
+    };
+    std::vector<level> st{{true, ~uint32_t{0}}};
+    std::vector<token> out;
+    bool added = false;
+    for(token const & t: toks) {
+      bool first = t.kind != tok::end && line_begin(t.where.begin) + indent_of(t.where.begin) == t.where.begin;
+      if(st.back().statements && first && st.back().indent != ~uint32_t{0} && t.kind != tok::close && !out.empty() && indent_of(t.where.begin) <= st.back().indent) {
+        token const & p = out.back();
+        bool attr = p.kind == tok::close && p.ch() == ']' && out.size() > 1 && out[out.size() - 2].kind == tok::close && out[out.size() - 2].ch() == ']';
+        bool cont = p.kind == tok::open || (p.kind == tok::close && p.ch() == '}') || attr || (p.kind == tok::op && (p.ch() == ';' || p.ch() == ','));
+        if(!cont) {
+          token semi;
+          semi.kind = tok::op;
+          semi.text = ";";
+          semi.where = {p.where.end, p.where.end};
+          semi.glued = true;
+          semi.err = uint32_t(diags.size());
+          diags.push_back(diagnostic("инструкция не дописана: нет ';' в конце строки", p.where));
+          out.push_back(semi);
+          st.back().indent = ~uint32_t{0};
+          added = true;
+        }
+      }
+      if(t.kind == tok::open) {
+        if(st.back().indent == ~uint32_t{0}) st.back().indent = indent_of(t.where.begin);
+        st.push_back({t.ch() == '{', ~uint32_t{0}});
+      } else if(t.kind == tok::close) {
+        if(st.size() > 1) st.pop_back();
+        if(t.ch() == '}') st.back().indent = ~uint32_t{0};
+      } else if(t.kind == tok::op && t.ch() == ';') st.back().indent = ~uint32_t{0};
+      else if(t.kind != tok::end && st.back().indent == ~uint32_t{0}) st.back().indent = indent_of(t.where.begin);
+      out.push_back(t);
+    }
+    if(!added) return;
+    toks = std::move(out);
+    rematch();
+  }
+
+  // Draft editor (author's decision 2026-10-12): elements of typed text as is. Unpaired when
+  // typing, the bracket closes by indentation (§4.1) - the edit does not rise to external
+  // brackets; the unwritten and non-lexemic (unclosed line - to the end of the line of text) -
+  // the hole of its instructions. Empty lines - for the canon when leaving: before the first
+  // element (the text of the draft begins after the line of the previous element), between the
+  // elements and after the last (before the next element of the module); comments with their
+  // own lines after the last - rest.
+  struct draft_items {
+    node_list items;
+    std::vector<uint32_t> blank; // empty lines before the element k; the last after the elements
+    std::vector<std::string> rest;
+  };
+  draft_items parse_draft(bool module_level) {
+    draft_items out;
+    auto gap_lines = [&](uint32_t from, uint32_t to) { // line translations before the first interval comment
+      uint32_t i = first_comment(from);
+      if(i < comments.size() && comments[i].begin < to) to = comments[i].begin;
+      return newlines(from, to);
+    };
+    end_unfinished_by_lines();
+    line_mode = true;
+    uint32_t end = 0;
+    while(!at_end()) {
+      if(out.items.empty()) {
+        uint32_t n = gap_lines(0, here().where.begin);
+        out.blank.push_back(n > 1 ? n - 1 : 0);
+      } else out.blank.push_back(blank_lines(2));
+      out.items.push_back(recover_statement([&] { return module_level ? item() : statement(); }));
+      end = toks[pos - 1].where.end;
+    }
+    uint32_t n = gap_lines(end, uint32_t(src.size()));
+    uint32_t canon = out.items.empty() ? 1 : 2;
+    out.blank.push_back(n > canon ? n - canon : 0);
+    for(node_id x: out.items) db.link_parents(x);
+    if(!comments.empty()) {
+      for(node_id x: out.items) attach(x);
+      assign({}, out.items, 0, uint32_t(src.size()), &out.rest);
+    }
+    return out;
+  }
+
   // parsing errors with import number in positions.
   std::vector<diagnostic> errors() const {
     std::vector<diagnostic> out;
@@ -491,6 +583,9 @@ struct parser {
     }
     if(!stack.empty()) bracket_error = true;
     if(bracket_error) close_by_indent();
+    rematch();
+  }
+  void rematch() {
     match.assign(toks.size(), ~uint32_t{0});
     std::vector<uint32_t> open;
     for(uint32_t i = 0; i < toks.size(); ++i) {
@@ -656,7 +751,13 @@ struct parser {
   node_id recover_statement(auto && f) {
     uint32_t start_tok = pos;
     try {
-      return f();
+      node_id r = f();
+      // draft: the instruction ended with an empty `;` end of the line - not written, the hole
+      if(pos > start_tok + 1 && toks[pos - 1].err != ~uint32_t{0} && toks[pos - 1].kind == tok::op && toks[pos - 1].where.begin == toks[pos - 1].where.end) {
+        uint32_t start = toks[start_tok].where.begin, end = toks[pos - 2].where.end;
+        return db.add(n_hole{std::string(src.substr(start, end - start)), diags[toks[pos - 1].err].what()}, {start, end});
+      }
+      return r;
     } catch(diagnostic const & d) {
       uint32_t start = toks[start_tok].where.begin;
       pos = start_tok;

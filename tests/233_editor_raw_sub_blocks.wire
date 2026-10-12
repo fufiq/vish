@@ -1,7 +1,7 @@
 // The edit in the subblock of the raw block is a unit of the same call block (*my:* text of the
 // subblock is part of the text of the block, the atoms are in it); the result (code_parse of the
 // subblock by the standard parsing) is recalculated at the next analysis. Broken brackets of the
-// subblock - to the line, the label - in place inside the block; fixed - again the block.
+// subblock - a mark in place inside the block; fixed - again the block.
 // program: 173_raw_sub_blocks.tz
 open_view module
 run
@@ -16,9 +16,10 @@ run
 key 1 Backspace
 key 1 Backspace
 key 1 Backspace
-// `)` without a pair - row redisassembled, error - in place inside the block
-// expect: kind="n_block" pieces=["{\n  "
+// `)` without a pair - the draft of the element is disassembled whole, the block is the same
+// node, the error is in place inside the block
 // expect: kind="n_raw" pieces=["{\n    first { print ~ 2); }\n
+idle
 // expect: kind="error" text="исполнение неразобранного фрагмента: непарная скобка
 // expect: from=14 to=25
 // let: blk2 @first

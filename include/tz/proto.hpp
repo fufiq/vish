@@ -19,7 +19,7 @@
 
 namespace tz::proto {
 
-constexpr uint32_t version = 1;
+constexpr uint32_t version = 2;
 
 // --- client ---
 
@@ -90,7 +90,21 @@ struct c_projection {
   uint32_t view;
   std::string key;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection>;
+// Enter the whole text: insert from the clipboard, IME - as a type from the keyboard.
+struct c_input {
+  uint32_t view;
+  std::string text;
+};
+// Selection by pointer: stretch or Shift+click - to the place (clicks 1); double click -
+// word, triple - line.
+struct c_select {
+  uint32_t view;
+  node_id node;
+  uint32_t piece;
+  uint32_t offset;
+  uint32_t clicks;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select>;
 
 // --- VM customer ---
 
@@ -212,7 +226,18 @@ struct s_trace {
   std::string output;
   std::string error;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge>;
+// Selection: second end (first cursor); node is empty - no allocation.
+struct s_select {
+  uint32_t view;
+  node_id node;
+  uint32_t piece;
+  uint32_t offset;
+};
+// Text in the clipboard (Ctrl+C, Ctrl+X): buffer - at the window.
+struct s_clipboard {
+  std::string text;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard>;
 
 // --- staff ---
 

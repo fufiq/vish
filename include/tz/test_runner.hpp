@@ -46,8 +46,10 @@ struct test_runner {
 
   int run(std::string const & dir) {
     std::vector<std::filesystem::path> files;
-    for(auto & e: std::filesystem::directory_iterator(dir))
-      if(e.path().extension() == ".tz" || e.path().extension() == ".session" || e.path().extension() == ".wire") files.push_back(e.path());
+    if(std::filesystem::is_regular_file(dir)) files.push_back(dir); // test
+    else
+      for(auto & e: std::filesystem::directory_iterator(dir))
+        if(e.path().extension() == ".tz" || e.path().extension() == ".session" || e.path().extension() == ".wire") files.push_back(e.path());
     std::ranges::sort(files);
     uint32_t passed = 0;
     auto show = [&](std::filesystem::path const & f, std::string const & why) {
@@ -232,12 +234,15 @@ struct test_runner {
           int fds[2];
           if(!os::socket_pair(fds)) return "socketpair не удался";
           server.emplace(*session);
+          server->timers = false; // set pause - idle team
           client.peer = &server->add_peer(fds[0]);
+          client.server = &*server;
           client.fd = fds[1];
           client.db = &db;
           int more[2];
           if(!os::socket_pair(more)) return "socketpair не удался";
           second.peer = &server->add_peer(more[0]);
+          second.server = &*server;
           second.fd = more[1];
           second.db = &db;
         }
@@ -265,6 +270,14 @@ struct test_runner {
         continue;
       }
       if(l.empty() || l.starts_with("//") || !session) continue;
+      if(wire && l == "idle") { // Set pause: check and tags (without hours)
+        server->idle();
+        for(auto & p: server->peers)
+          while(!server->settled(p)) server->step();
+        last = client.collect();
+        if(std::string also = second.collect(); !also.empty()) last += cat("другому клиенту:\n", also);
+        continue;
+      }
       if(wire) {
         bool two = l.starts_with("[2] ");
         wire_client & who = two ? second : client;
@@ -311,6 +324,7 @@ struct test_runner {
   struct wire_client {
     int fd = -1;
     editor_server::peer * peer = nullptr;
+    editor_server * server = nullptr;
     uint32_t sent = 0;
     std::string in;
     std::vector<proto::s_node> nodes; // node common to all representations (base node numbers)
@@ -445,6 +459,12 @@ struct test_runner {
     // the editor (layout: a hole - only your text).
     std::string checked_text(uint32_t view) {
       std::string t = text(root);
+      // draft (typed text) - projection of the VM presentation itself
+      for(auto const & w: peer->views)
+        if(w.id == view && w.root && w.draft.open) {
+          if(t != w.text) mismatch = cat("собрано:\n", t, "\nпредставление VM:\n", w.text);
+          return cat("текст:\n", t, "\n");
+        }
       std::vector<node_layout> scratch;
       // The presentation of the module does not show the internal elements
       std::vector<uint32_t> inner;

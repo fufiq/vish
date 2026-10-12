@@ -24,6 +24,7 @@ layer 2 scale(рт\sf64)
 pointer 2 @0.0 0 3
 key 2 1
 // expect: 0.01
+idle
 // expect: selected="scale(рт f64)"
 // “all” - labels in all contexts
 layer 2 

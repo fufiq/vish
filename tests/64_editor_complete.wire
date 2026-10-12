@@ -8,6 +8,7 @@ open_view module
 // name set - list itself, prefix before subsequence
 pointer 1 @read_floats 0 0
 key 1 End
+key 1 Enter
 key 1 p
 key 1 r
 // expect: курсор:   pr‸
@@ -30,6 +31,7 @@ key 1 Enter
 // expect: selected=0 items=⏎update
 // The typed matched the only option - there is nothing to show
 key 1 ;
+key 1 Enter
 key 1 m
 key 1 e
 // expect: name="mean"

@@ -127,6 +127,14 @@ function receive(m: ServerMsg): void {
     case 's_error':
       statusLine.textContent = `VM: ${m.text}`;
       return;
+    case 's_select':
+      views.get(m.view)?.showSelection(m);
+      return;
+    case 's_clipboard':
+      navigator.clipboard.writeText(m.text).catch((e: unknown) => {
+        statusLine.textContent = `буфер обмена: ${String(e)}`;
+      });
+      return;
   }
 }
 
@@ -273,6 +281,9 @@ for (const pane of [app, side]) {
     const v = [...views.values()].find((x) => x.host === pane);
     if (!v || (e.ctrlKey && e.shiftKey && e.key === 'I')) return;
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
+    if (e.isComposing || e.key === 'Process') return; // IME: Text by compositionen d d
+    // Ctrl+V - Insert: paste event carries buffer text (buffer - by window)
+    if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'м')) return;
     e.preventDefault();
     if (e.ctrlKey && e.key === 'p') {
       openGoto();
@@ -310,12 +321,50 @@ for (const pane of [app, side]) {
       (e.metaKey ? Mods.meta : 0);
     send({ type: 'c_key', view: v.data.view, key: e.key, mods });
   });
+  pane.addEventListener('paste', (e) => {
+    const v = [...views.values()].find((x) => x.host === pane);
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    e.preventDefault();
+    if (v && text !== '') send({ type: 'c_input', view: v.data.view, text });
+  });
+  pane.addEventListener('compositionend', (e) => {
+    const v = [...views.values()].find((x) => x.host === pane);
+    if (v && e.data !== '')
+      send({ type: 'c_input', view: v.data.view, text: e.data });
+  });
+  // click cursor; Shift + click and pull - highlight; double - word, triple - string
+  // (interprets VM)
+  let dragging = false;
+  let last = '';
   pane.addEventListener('mousedown', (e) => {
     const v = [...views.values()].find((x) => x.host === pane);
-    if (!v) return;
+    if (!v || e.button !== 0) return;
     e.preventDefault();
     activate(v);
     const at = v.placeAt(e.clientX, e.clientY);
-    if (at) send({ type: 'c_pointer', view: v.data.view, ...at });
+    if (!at) return;
+    dragging = true;
+    last = `${String(at.node)}/${String(at.piece)}/${String(at.offset)}`;
+    if (e.detail >= 2 || e.shiftKey)
+      send({
+        type: 'c_select',
+        view: v.data.view,
+        ...at,
+        clicks: e.shiftKey ? 1 : e.detail,
+      });
+    else send({ type: 'c_pointer', view: v.data.view, ...at });
+  });
+  pane.addEventListener('mousemove', (e) => {
+    const v = [...views.values()].find((x) => x.host === pane);
+    if (!v || !dragging || (e.buttons & 1) === 0) return;
+    const at = v.placeAt(e.clientX, e.clientY);
+    if (!at) return;
+    const key = `${String(at.node)}/${String(at.piece)}/${String(at.offset)}`;
+    if (key === last) return;
+    last = key;
+    send({ type: 'c_select', view: v.data.view, ...at, clicks: 1 });
+  });
+  pane.addEventListener('mouseup', () => {
+    dragging = false;
   });
 }

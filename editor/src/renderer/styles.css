@@ -253,3 +253,13 @@ body {
   padding: 2px 8px;
   cursor: pointer;
 }
+/* выделение — прямоугольники под текстом (слой в начале панели) */
+.tz-selection {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.tz-selection > div {
+  position: absolute;
+  background: color-mix(in srgb, var(--tz-caret) 22%, transparent);
+}

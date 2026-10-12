@@ -1,40 +1,58 @@
-// Enter is a new line, as in all editors (author's decision, 2026-09-29). Empty
-// lines - layout in AST (blank for the block and module): the execution does not
-// see them, projection prints, journal stores.
+// Enter - a new line, as in all editors (author's decision, 2026-09-29), with a line
+// indentation; after `{` - deeper, between `{` and `}` - two lines (author's decision
+// 2026-10-12: set - as in a conventional editor). The empty lines of the draft are as
+// typed; the canon stores them with a layout in AST (blank for the block and module):
+// the execution does not see them, projection prints.
 // program: editor_text.tz
 open_view module
-// at the end of the line - an empty line below, the cursor on it in the code column
+// at the end of the line - a new line below with a line indentation, the cursor on it
 pointer 1 @привет 0 0
 key 1 End
 key 1 Enter
 // expect: мир";⏎  ⏎  print(s);
-// expect: курсор:   ‸⏎
-// set on an empty line - instructions, there is no empty line
+// expect: курсор:   ‸
+// set on an empty line - as typed
 key 1 x
 key 1 =
 key 1 1
 key 1 ;
+// expect: мир";⏎  x=1;⏎  print(s);
+// expect: курсор:   x=1;‸
+// departure from the element - canon
+key 1 Escape
 // expect: мир";⏎  x = 1;⏎  print(s);
 // expect: курсор:   x = 1;‸
-// Backspace on an empty line - the line disappears, the cursor at the end of the previous line
+// Backspace in indentation - before the previous indentation column, at the
+// beginning of the line - joining the previous one: the empty line disappears
 key 1 Enter
+key 1 Backspace
+// expect: курсор: ‸
 key 1 Backspace
 // expect: x = 1;⏎  print(s);
 // expect: курсор:   x = 1;‸
 // at the beginning of the line - the empty line above, the cursor remains with the line of code
 pointer 1 @print 0 0
 key 1 Home
-key 1 Enter
-// expect: x = 1;⏎  ⏎  print(s);
 // expect: курсор: ‸  print(s);
-// Backspace in indentation - joining the previous one: an empty line leaves
-key 1 ArrowRight
-key 1 ArrowRight
+key 1 Enter
+// expect: x = 1;⏎⏎  print(s);
+// expect: курсор: ‸  print(s);
 key 1 Backspace
 // expect: x = 1;⏎  print(s);
-// In an empty {} block, the line inside
+// The canon keeps an empty line left behind.
+key 1 Enter
+key 1 Escape
+// expect: x = 1;⏎  ⏎  print(s);
+pointer 1 @print 0 0
+key 1 Home
+key 1 Backspace
+key 1 Escape
+// expect: x = 1;⏎  print(s);
+// in an empty block {} - a line inside with indentation; a new element of the module in
+// the main draft - a draft of two elements
+pointer 1 @print 0 0
 key 1 End
-key 1 ArrowRight
+key 1 ArrowDown
 key 1 End
 key 1 Enter
 key 1 Enter
@@ -45,24 +63,27 @@ key 1 {
 key 1 }
 key 1 ArrowLeft
 key 1 Enter
-// expect: g() {⏎  ⏎}
-// expect: курсор:   ‸⏎
-// Enter inside the expression - line transfer in projection does not store the string
-// - as a new block, not yet disassembled (author's decision): unwritten - a hole only
-// of his line, the next instruction is not captured
+// expect: g(){⏎  ⏎}
+// expect: курсор:   ‸
+// Canon: projection sets spaces, empty line in block remains
+key 1 Escape
+// expect: }⏎⏎g() {⏎  ⏎}
+// expect: курсор:   ‸
+// unwritten - a hole only of his line: the next instruction is not captured (author's
+// decision 2026-09-29: the line - as a new block)
 pointer 1 @x 0 0
 key 1 End
 key 1 Enter
 key 1 y
 key 1 =
-// expect: x = 1;⏎  y=;⏎  print(s);
+// expect: x = 1;⏎  y=⏎  print(s);
 // expect: kind="n_hole" pieces=["y="]
-// expect: курсор:   y=‸;
+// expect: курсор:   y=‸
 key 1 2
-// expect: x = 1;⏎  y = 2;⏎  print(s);
+// expect: kind="n_hole" pieces=["y=2"] note="инструкция не дописана: нет ';' в конце строки"
+// expect: курсор:   y=2‸
+key 1 ;
+// expect: x = 1;⏎  y=2;⏎  print(s);
 // expect-not: n_hole
-// set immediately after `;` - a new instruction on its line
-key 1 End
-key 1 z
-// expect: y = 2;⏎  z;⏎  print(s);
-// expect: курсор:   z‸;
+key 1 Escape
+// expect: x = 1;⏎  y = 2;⏎  print(s);

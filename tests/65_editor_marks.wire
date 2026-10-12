@@ -1,8 +1,9 @@
-// Editor Check Tags (M5, §13.1): After each edit, reactive session check; type of
-// announced name for all instance contexts:
+// Verification tags in the editor (M5, §13.1): by set pause (idle; user solution
+// 2026-10-12 - 1 s) - reactive session check; type of announced name - for all
+// contexts instance:
 // 
-//  
-// Error - in place, with a track instantiation (§13.4).
+// Error - in place, with a track
+// instantiation (§13.4).
 // program: editor_poly.tz
 open_view module
 // twice is called from i64 and f64 - both types
@@ -13,22 +14,26 @@ open_view module
 pointer 1 @0 0 0
 key 1 Delete
 key 1 i
+// expect-not: kind="type"
+idle
 // expect: kind="type" text="i64"
 // expect: kind="error" text="неизвестное имя i\n  в main"
 // corrected - no error, reactive check recalculated main (block correction changes
 // function revision - instance cache does not become obsolete)
 key 1 Backspace
 key 1 1
+idle
 // expect: kind="type" text="f64 | i64"
 // expect-not: kind="error"
-// unclosed line - the text does not disappear: only its own line is a hole (the line
-// of the set is like a new block, not yet disassembled), while there is no pair
+// unclosed line - the text does not disappear: only its own instruction (not a
+// lexeme - until the end of the line of text) is a hole until there is a pair
 pointer 1 @1 0 0
 key 1 Delete
 key 1 "
-// expect: kind="n_hole" pieces=["print(twice(xs[\"]))"] note="незакрытая строка"
-// expect: kind="type" text="array<f64>"
+// expect: kind="n_hole" pieces=["print(twice(xs[\"]));"] note="незакрытая строка"
 // expect: print(twice(xs["]));
+idle
+// expect: kind="type" text="array<f64>"
 key 1 "
 // expect-not: n_hole
 // expect: print(twice(xs[""]));

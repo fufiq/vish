@@ -62,6 +62,7 @@ key 1 e
 key 1 )
 key 1 ;
 // expect: label(xs.size);
+idle
 // expect: kind="error" text="неизвестная функция label(i64)
 key 1 ArrowLeft
 key 1 ArrowLeft

@@ -82,6 +82,22 @@ export interface ProjectionPick {
   view: number;
   key: string;
 }
+// Enter the whole text: insert from the clipboard, IME - as a type from the keyboard.
+export interface Input {
+  type: 'c_input';
+  view: number;
+  text: string;
+}
+// Selection by pointer: stretch or Shift+click - to the place (clicks 1); double
+// click - word, triple - line.
+export interface Select {
+  type: 'c_select';
+  view: number;
+  node: NodeId;
+  piece: number;
+  offset: number;
+  clicks: number;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -95,7 +111,9 @@ export type ClientMsg =
   | Trace
   | Merge
   | Take
-  | ProjectionPick;
+  | ProjectionPick
+  | Input
+  | Select;
 
 export interface ServerHello {
   type: 's_hello';
@@ -221,6 +239,19 @@ export interface MergeResult {
   taken: string[];
   conflicts: Conflict[];
 }
+// Exclusion: second end (first - cursor); node null - no allocation.
+export interface Selection {
+  type: 's_select';
+  view: number;
+  node: NodeId | null;
+  piece: number;
+  offset: number;
+}
+// Text in the clipboard (Ctrl+C, Ctrl+X): buffer - at the window.
+export interface Clipboard {
+  type: 's_clipboard';
+  text: string;
+}
 export type ServerMsg =
   | ServerHello
   | View
@@ -233,7 +264,9 @@ export type ServerMsg =
   | Output
   | Saved
   | TraceStep
-  | MergeResult;
+  | MergeResult
+  | Selection
+  | Clipboard;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

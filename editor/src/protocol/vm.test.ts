@@ -137,7 +137,8 @@ describe('живая VM', () => {
       expect(projectionText(view)).toBe(
         execFileSync(tz, ['fmt', program], { encoding: 'utf8' }),
       );
-      // entry at the end of the first line: `y=2;` → canonical `y = 2;` in the block
+      // input at the end of the first line: draft - text as typed (`y=2;`), leaving
+      // the element (Escape) - canonical `y = 2;` in the block
       for (const key of ['y', '=', '2', ';']) {
         c.write(encodeClient({ type: 'c_key', view: 1, key, mods: 0 }));
       }
@@ -146,10 +147,26 @@ describe('живая VM', () => {
         await new Promise((r) => setTimeout(r, 10));
       }
       const nodes = new Map(view.nodes.map((n) => [n.id, n]));
-      for (const m of got) {
-        if (m.type === 's_update') for (const n of m.nodes) nodes.set(n.id, n);
+      const text = () => {
+        for (const m of got) {
+          if (m.type === 's_update')
+            for (const n of m.nodes) nodes.set(n.id, n);
+        }
+        return projectionText({ ...view, nodes: [...nodes.values()] });
+      };
+      expect(text()).toContain('\nmain() {y=2;\n  s = "привет, мир";');
+      // tags - by pause set (1 s), without requesting a window
+      const decors = () => got.filter((m) => m.type === 's_decor').length;
+      const before = decors();
+      for (let i = 0; i < 200 && decors() === before; ++i) {
+        await new Promise((r) => setTimeout(r, 10));
       }
-      expect(projectionText({ ...view, nodes: [...nodes.values()] })).toContain(
+      expect(decors()).toBeGreaterThan(before);
+      c.write(encodeClient({ type: 'c_key', view: 1, key: 'Escape', mods: 0 }));
+      for (let i = 0; i < 100 && updates() < 5; ++i) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(text()).toContain(
         '\nmain() {\n  y = 2;\n  s = "привет, мир";\n  print(s);\n}\n',
       );
       // cursor - immediately after `;` : before translating a line in a piece of ";\n" block

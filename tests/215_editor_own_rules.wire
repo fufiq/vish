@@ -10,5 +10,7 @@ open_view module
 pointer 1 @syntax 0 12
 key 1 Backspace
 key 1 y
-// expect: kind="n_fn" pieces=["syntax twicy {body} again => "
+// expect: kind="n_fn" pieces=["syntax twicy " #
+// expect: syntax twicy {body} again => {
+idle
 // expect-not: kind="error"

@@ -33,8 +33,10 @@ key 1 r
 key 1 \s
 key 1 {
 key 1 }
+key 1 Enter
 // expect:   forever {}⏎  print(n, ((n + n) + n) - 3);
 // expect: kind="n_loop" pieces=["forever " #
+key 1 Escape
 projection 1 нет.такой
 // expect: нет модуля проекции нет.такой
 projection 1

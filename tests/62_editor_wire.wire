@@ -3,10 +3,10 @@
 // Сообщения идут через настоящий сокет и
 // io_uring; текст представления сверяется с проекцией (tz fmt) автоматически.
 // program: editor_text.tz
-hello 1
-// expect: hello version=1 program="editor_text.tz"
+hello 2
+// expect: hello version=2 program="editor_text.tz"
 hello 7
-// expect: error text="версия протокола 7 не поддерживается (VM: 1)"
+// expect: error text="версия протокола 7 не поддерживается (VM: 2)"
 open_view grid
 // expect: неизвестный вид представления: grid
 open_view module
@@ -24,7 +24,10 @@ key 1 End
 // expect: курсор:   s = "привет, мир";‸
 key 1 ArrowRight
 // expect: курсор: ‸  print(s);
+// Home — к началу кода строки, второй раз — к началу строки (как в редакторах)
 key 1 End
+key 1 Home
+// expect: курсор:   ‸print(s);
 key 1 Home
 // expect: курсор: ‸  print(s);
 // конец куска — место перед следующим куском
@@ -33,8 +36,8 @@ pointer 1 @print 0 5
 key 1 ArrowRight
 key 1 ArrowRight
 // expect: курсор:   print(s‸);
-key 1 Tab
-// expect: клавиша не обработана: Tab
+key 1 F9
+// expect: клавиша не обработана: F9
 key 2 ArrowRight
 // expect: нет представления 2
 close_view 1

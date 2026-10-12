@@ -11,12 +11,15 @@ open_view module
 // editing of the call location: "entry" → "entry" - instance other, the result of another
 pointer 1 @вход:2 0 5
 key 1 ы
-// expect: print("входы");⏎  print("тело");
 // expect: курсор:   instrument(code(greet), "входы‸");
+// elaboration
+idle
+// expect: print("входы");⏎  print("тело");
 // Source is no longer ct code (ct → xct): no change
 pointer 1 @ct:1 0 0
 key 1 x
 // expect-not: print("входы");⏎  print("тело");
 // again ct - the change is back
 key 1 Backspace
+idle
 // expect: print("входы");⏎  print("тело");

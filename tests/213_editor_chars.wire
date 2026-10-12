@@ -11,12 +11,15 @@ run
 pointer 1 @{#ff 0 4
 key 1 g
 // expect: курсор:   print(color() {#ffg‸00aa});
+idle
 // expect: kind="error" text="исполнение неразобранного фрагмента: разбор блока: ожидалась цифра по основанию 16
 key 1 Backspace
+idle
 // expect-not: kind="error"
 key 1 1
 key 1 2
 // expect: курсор:   print(color() {#ff12‸00aa});
+idle
 // expect: kind="error" text="исполнение неразобранного фрагмента: разбор блока: лишнее: ожидался конец блока
 key 1 Backspace
 key 1 Backspace

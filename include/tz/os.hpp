@@ -18,6 +18,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -335,6 +336,24 @@ struct uring {
   void write(int fd, char const * p, std::size_t n, uint64_t off, uint64_t tag) {
     io_uring_sqe * s = sqe();
     io_uring_prep_write(s, fd, p, unsigned(n), off);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  // Monoton time in milliseconds (set pauses).
+  static uint64_t now_ms() {
+    timespec t{};
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return uint64_t(t.tv_sec) * 1000 + uint64_t(t.tv_nsec) / 1000000;
+  }
+
+  // Timer: End with tag in ms milliseconds (res ==-ETIME). The term lives in a ring until
+  // completion - one per ring.
+  __kernel_timespec timer_at{};
+  void timeout(uint32_t ms, uint64_t tag) {
+    timer_at.tv_sec = ms / 1000;
+    timer_at.tv_nsec = long(ms % 1000) * 1000000;
+    io_uring_sqe * s = sqe();
+    io_uring_prep_timeout(s, &timer_at, 0, 0);
     io_uring_sqe_set_data64(s, tag);
     io_uring_submit(&ring);
   }
