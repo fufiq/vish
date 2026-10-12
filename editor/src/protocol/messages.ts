@@ -98,6 +98,18 @@ export interface Select {
   offset: number;
   clicks: number;
 }
+// Hover to the node: VM responds with a hint (s_hover).
+export interface HoverAsk {
+  type: 'c_hover';
+  view: number;
+  node: NodeId;
+}
+// Hint link: the function announcement is in the second panel, another is the cursor to it.
+export interface Open {
+  type: 'c_open';
+  view: number;
+  node: NodeId;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -113,7 +125,9 @@ export type ClientMsg =
   | Take
   | ProjectionPick
   | Input
-  | Select;
+  | Select
+  | HoverAsk
+  | Open;
 
 export interface ServerHello {
   type: 's_hello';
@@ -252,6 +266,32 @@ export interface Clipboard {
   type: 's_clipboard';
   text: string;
 }
+// Tip line: view, text, link (an ad node); [from, to] is the selected part of the text
+// (current parameter) in the code points.
+export interface HintLine {
+  type: 's_line';
+  kind: string;
+  text: string;
+  target: NodeId | null;
+  from: number;
+  to: number;
+}
+// Guidance on the knot; empty - nothing to show.
+export interface Hover {
+  type: 's_hover';
+  view: number;
+  node: NodeId | null;
+  lines: HintLine[];
+}
+// The tip of the set at the place: the shape of the design or signature; empty - to hide.
+export interface Hint {
+  type: 's_hint';
+  view: number;
+  node: NodeId | null;
+  piece: number;
+  offset: number;
+  lines: HintLine[];
+}
 export type ServerMsg =
   | ServerHello
   | View
@@ -266,7 +306,9 @@ export type ServerMsg =
   | TraceStep
   | MergeResult
   | Selection
-  | Clipboard;
+  | Clipboard
+  | Hover
+  | Hint;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

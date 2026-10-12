@@ -1,0 +1,13 @@
+// Программа для сценария 249_editor_hints.wire (сама по себе — обычный тест).
+// out: 7 10
+// квадрат числа
+sq(x) => x * x;
+
+when(c, expr yes) otherwise(expr no) => if(c) yes else no;
+
+pair(a, b) => a + b;
+
+main() {
+  total = pair(sq(2), 3);
+  print(total, when(total > 2) { 10 } otherwise { 20 });
+}

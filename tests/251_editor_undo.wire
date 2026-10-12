@@ -1,0 +1,50 @@
+// The rollback in the editor (§13.1 ): inside the draft - by pictures of the typed text (word -
+// one step); the adopted edit (draft closed) - by editing back: the elements are the same, the
+// text of the unit - as before the editing; repetition - the same (*my*: history - edits,
+// journal is not rewritten). The element changed after the edit - rejection.
+// program: editor_text.tz
+open_view module
+pointer 1 @привет 0 7
+key 1 x
+key 1 y
+key 1 \s
+key 1 z
+// expect: курсор:   s = "приветxy z‸, мир";
+// inside the draft: word - step, space - step
+key 1 z 2
+// expect: курсор:   s = "приветxy ‸, мир";
+key 1 z 2
+key 1 z 2
+// expect: курсор:   s = "привет‸, мир";
+// drafting
+key 1 y 2
+// expect: курсор:   s = "приветxy‸, мир";
+// Adopted edit: canon, then rollback - text until edited
+key 1 Escape
+// expect: s = "приветxy, мир";
+key 1 z 2
+// expect: s = "привет, мир";
+// expect-not: приветxy
+// expect: курсор:   s = "привет‸, мир";
+run
+// expect: output text="привет, мир\n" ok=true
+// repeat
+key 1 y 2
+// expect: s = "приветxy, мир";
+run
+// expect: output text="приветxy, мир\n" ok=true
+// After a new edit, there is nothing to repeat.
+pointer 1 @print 0 0
+key 1 p
+key 1 Escape
+key 1 y 2
+// expect: повторять нечего
+// rollback
+key 1 z 2
+// expect: курсор:   p‸rint(s);
+key 1 z 2
+// expect: s = "привет, мир";
+key 1 z 2
+// expect: откатывать нечего
+roundtrip
+// expect: roundtrip: совпадает

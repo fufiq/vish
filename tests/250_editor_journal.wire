@@ -1,0 +1,44 @@
+// Журнал при наборе (§3.1): черновик элемента разбирается каждой клавишей, но в
+// журнале его клавиши — одна правка: импорты набранного текста, кроме итога, —
+// пустые, узлы выпавших разборов — пустые дыры, правки одного узла подряд —
+// последняя, выпавшие подряд — один пропуск номеров (j_gap) (*моё*).
+// program: editor_text.tz
+open_view module
+journal
+pointer 1 @привет 0 7
+key 1 !
+key 1 Escape
+journal
+// expect: журнал: +18 записей
+// expect: текст импортов +214 байт
+// набор двадцати букв — рост почти тот же, что у одной (на сами буквы)
+pointer 1 @привет 0 7
+key 1 a
+key 1 b
+key 1 c
+key 1 d
+key 1 e
+key 1 f
+key 1 g
+key 1 h
+key 1 i
+key 1 j
+key 1 k
+key 1 l
+key 1 m
+key 1 n
+key 1 o
+key 1 p
+key 1 q
+key 1 r
+key 1 s
+key 1 t
+key 1 Escape
+journal
+// expect: журнал: +20 записей (j_gap 1, j_import 1,
+// expect: текст импортов +234 байт
+// журнал воспроизводится в ту же проекцию и тот же вывод
+roundtrip
+// expect: roundtrip: совпадает
+run
+// expect: output text="приветabcdefghijklmnopqrst!, мир\n" ok=true

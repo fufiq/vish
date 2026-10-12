@@ -221,6 +221,7 @@ struct test_runner {
     bool wire = path.extension() == ".wire";
     std::string last, why;
     std::map<std::string, std::string> names; // `// let:` - memorized node
+    std::pair<std::size_t, std::size_t> journal_seen{0, 0};
     for(std::size_t i = 0; i < lines.size(); ++i) {
       auto const & l = lines[i];
       if(l.starts_with("// program:")) {
@@ -270,6 +271,24 @@ struct test_runner {
         continue;
       }
       if(l.empty() || l.starts_with("//") || !session) continue;
+      if(wire && l == "journal") { // journal base growth since last time: records and bytes of import text
+        auto entries = db.journal();
+        std::size_t text = 0;
+        for(auto const & e: entries)
+          if(auto const * x = std::get_if<j_import>(&e.op)) text += x->text.size();
+        std::map<std::string, std::size_t> kinds; // species-based
+        for(std::size_t i = journal_seen.first; i < entries.size(); ++i)
+          std::visit([&](auto const & x) { ++kinds[std::string(std::meta::identifier_of(std::meta::remove_cvref(^^decltype(x))))]; }, entries[i].op);
+        std::string by;
+        for(auto const & [k, n]: kinds) by += cat(by.empty() ? "" : ", ", k, " ", n);
+        last = cat("журнал: +", entries.size() - journal_seen.first, " записей (", by, "), текст импортов +", text - journal_seen.second, " байт\n");
+        journal_seen = {entries.size(), text};
+        continue;
+      }
+      if(wire && l == "roundtrip") { // journal → New Base: Same projection
+        last = session->roundtrip();
+        continue;
+      }
       if(wire && l == "idle") { // Set pause: check and tags (without hours)
         server->idle();
         for(auto & p: server->peers)

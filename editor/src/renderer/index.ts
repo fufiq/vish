@@ -130,6 +130,22 @@ function receive(m: ServerMsg): void {
     case 's_select':
       views.get(m.view)?.showSelection(m);
       return;
+    case 's_hover': {
+      const v = views.get(m.view);
+      if (v && hoverAt)
+        v.showHover(m, hoverAt.x, hoverAt.y, (node) => {
+          v.hideHover();
+          send({ type: 'c_open', view: v.data.view, node });
+        });
+      return;
+    }
+    case 's_hint': {
+      const v = views.get(m.view);
+      v?.showHint(m, (node) => {
+        send({ type: 'c_open', view: v.data.view, node });
+      });
+      return;
+    }
     case 's_clipboard':
       navigator.clipboard.writeText(m.text).catch((e: unknown) => {
         statusLine.textContent = `буфер обмена: ${String(e)}`;
@@ -275,12 +291,19 @@ gotoInput.addEventListener('keydown', (e) => {
   activate(active);
 });
 
+// Guidance: Node under the pointer after pause - VM responds with a hint (type, value,
+// error, ads with links). The hint is held as long as the pointer is above it or above
+// the same node.
+let hoverAt: { x: number; y: number } | undefined;
+let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+let hoverNode = -1;
 // Keys - VM (except for developer tools and Ctrl+P - signature strings).
 for (const pane of [app, side]) {
   pane.addEventListener('keydown', (e) => {
     const v = [...views.values()].find((x) => x.host === pane);
     if (!v || (e.ctrlKey && e.shiftKey && e.key === 'I')) return;
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
+    v.hideHover();
     if (e.isComposing || e.key === 'Process') return; // IME: Text by compositionen d d
     // Ctrl+V - Insert: paste event carries buffer text (buffer - by window)
     if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'м')) return;
@@ -366,5 +389,30 @@ for (const pane of [app, side]) {
   });
   pane.addEventListener('mouseup', () => {
     dragging = false;
+  });
+  pane.addEventListener('mousemove', (e) => {
+    const v = [...views.values()].find((x) => x.host === pane);
+    if (!v || dragging) return;
+    if (e.composedPath().includes(v.tip)) {
+      clearTimeout(hoverTimer);
+      return;
+    }
+    const n = ViewElement.nodeOf(e);
+    if (n?.nodeId !== hoverNode) v.hideHover();
+    clearTimeout(hoverTimer);
+    if (!n) {
+      hoverNode = -1;
+      return;
+    }
+    hoverTimer = setTimeout(() => {
+      hoverNode = n.nodeId;
+      hoverAt = { x: e.clientX, y: e.clientY };
+      send({ type: 'c_hover', view: v.data.view, node: n.nodeId });
+    }, 400);
+  });
+  pane.addEventListener('mouseleave', () => {
+    clearTimeout(hoverTimer);
+    hoverNode = -1;
+    for (const v of views.values()) if (v.host === pane) v.hideHover();
   });
 }

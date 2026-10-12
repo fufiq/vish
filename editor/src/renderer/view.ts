@@ -2,6 +2,9 @@ import type {
   Complete,
   Decor,
   Cursor,
+  Hint,
+  HintLine,
+  Hover,
   NodeId,
   Selection,
   Update,
@@ -26,6 +29,9 @@ export class ViewElement {
   readonly popup = document.createElement('ul');
   // Selection - rectangles on top of the text (the text is also in Shadow DOM node)
   readonly selectionLayer = document.createElement('div');
+  // Instructions: guidance (at the pointer) and set (above the cursor)
+  readonly tip = document.createElement('div');
+  readonly hint = document.createElement('div');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -40,12 +46,92 @@ export class ViewElement {
     this.popup.className = 'tz-complete';
     this.popup.hidden = true;
     this.selectionLayer.className = 'tz-selection';
-    host.replaceChildren(
+    this.tip.className = 'tz-tip';
+    this.tip.hidden = true;
+    this.hint.className = 'tz-tip tz-hint';
+    this.hint.hidden = true;
+    host.replaceChildren(...this.#chrome(this.root));
+  }
+
+  #chrome(root: ASTNode): Node[] {
+    return [
       this.selectionLayer,
-      this.root,
+      root,
       this.caret,
       this.popup,
+      this.hint,
+      this.tip,
+    ];
+  }
+
+  // Lines of hint: view - signature, link - by click (open).
+  static #lines(
+    box: HTMLElement,
+    lines: readonly HintLine[],
+    open: (node: NodeId) => void,
+  ): void {
+    box.replaceChildren(
+      ...lines.map((l) => {
+        const row = document.createElement('div');
+        row.className = 'line';
+        row.dataset.kind = l.kind;
+        const kind = document.createElement('span');
+        kind.className = 'kind';
+        kind.textContent = l.kind;
+        const text = document.createElement('span');
+        text.className = 'text';
+        if (l.to > l.from) {
+          // eslint-disable-next-line @typescript-eslint/no-misused-spread
+          const cps = [...l.text];
+          const mark = document.createElement('b');
+          mark.textContent = cps.slice(l.from, l.to).join('');
+          text.append(
+            cps.slice(0, l.from).join(''),
+            mark,
+            cps.slice(l.to).join(''),
+          );
+        } else text.textContent = l.text;
+        row.append(kind, text);
+        const target = l.target;
+        if (target !== null) {
+          row.classList.add('link');
+          row.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            open(target);
+          });
+        }
+        return row;
+      }),
     );
+  }
+
+  // Guidance - at the pointer (x, y - coordinates of the window).
+  showHover(m: Hover, x: number, y: number, open: (n: NodeId) => void): void {
+    this.tip.hidden = m.lines.length === 0;
+    if (this.tip.hidden) return;
+    ViewElement.#lines(this.tip, m.lines, open);
+    const origin = this.host.getBoundingClientRect();
+    this.tip.style.left = `${String(x - origin.left + this.host.scrollLeft)}px`;
+    this.tip.style.top = `${String(y - origin.top + this.host.scrollTop + 18)}px`;
+  }
+  hideHover(): void {
+    this.tip.hidden = true;
+  }
+
+  // The tip of the set is above the place (the beginning of the word or call name).
+  showHint(m: Hint, open: (n: NodeId) => void): void {
+    const box = this.#box(m.node, m.piece, m.offset);
+    this.hint.hidden = m.lines.length === 0 || !box;
+    if (this.hint.hidden || !box) return;
+    ViewElement.#lines(this.hint, m.lines, open);
+    this.hint.style.left = `${String(box.left)}px`;
+    this.hint.style.top = `${String(box.top)}px`;
+  }
+
+  // AST node under the pointer (the deepest).
+  static nodeOf(e: Event): ASTNode | undefined {
+    return e.composedPath().find((x): x is ASTNode => x instanceof ASTNode);
   }
 
   #build(id: NodeId): ASTNode {
@@ -70,12 +156,7 @@ export class ViewElement {
     const fresh = this.#build(u.node);
     if (!old || old === this.root) {
       this.root = fresh;
-      this.host.replaceChildren(
-        this.selectionLayer,
-        fresh,
-        this.caret,
-        this.popup,
-      );
+      this.host.replaceChildren(...this.#chrome(fresh));
     } else {
       fresh.slot = old.slot;
       old.replaceWith(fresh);

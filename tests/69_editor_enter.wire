@@ -87,3 +87,7 @@ key 1 ;
 // expect-not: n_hole
 key 1 Escape
 // expect: x = 1;⏎  y = 2;⏎  print(s);
+// Canon and journal: playback - the same projection and the same conclusion (draft - one edit)
+key 1 Escape
+roundtrip
+// expect: roundtrip: совпадает

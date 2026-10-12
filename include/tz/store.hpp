@@ -10,7 +10,7 @@
 
 namespace tz {
 
-constexpr std::string_view tzdb_magic = "TZDB0033"; // 0033: comments - layout in the database (j note); 0032: control of extensions - n module.attrs instead of sealed; 0031: place of the node after reexamination on the spot - raw block as a unit of editing (j place); 0030: anonymous structural literal (n construct.names); 0029: code parsing - raw block (n raw, n sym); 0028: mutation of the ct code with the source and rollback (j mutate, j rollback), a link to the announcement (00 n ref): [[state]] variable module (n var.attrs); 0026: struct - instance struct, extension (n extend.of, without n struct); 0025: point - operators .x and .[] (without n member, n field); 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n pack - {blocks} (without n pack); 0021:ntrict (without 00: 00: 00: 00: n n n
+constexpr std::string_view tzdb_magic = "TZDB0034"; // 0034: skip node numbers and imports of dropped draft parsings (j gap); 0033: comments - layout in the database (j note); 0032: control of extensions - n module.attrs instead of sealed; 0031: place of the node after re-examination on site - raw block as a unit of editing (j place); 0030: anonymous structural literal (n construct.names); 0029: code parsing - raw block (n raw, n sym); 00: 00: muttation from the source (jt-re) and jt (from jm) from the source (jm) [[state]] variable module (n var.attrs); 0026: struct - instance struct, extension (n extend.of, without n struct); 0025: point - operators .x and .[] (without n member, n field); 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n pack - {blocks} (without n pack); 0021:ntrict (without 00: 00: 00: 00: n n n
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;
@@ -58,6 +58,7 @@ std::string describe_journal(std::vector<journal_entry> const & entries) {
       else if constexpr(std::is_same_v<T, j_note>) out += cat("комментарии #", op.id);
       else if constexpr(std::is_same_v<T, j_rollback>) out += op.source ? cat("откат   ct #", op.source - 1, " и позднейших") : std::string("откат   всех мутаций ct");
       else if constexpr(std::is_same_v<T, j_place>) out += cat("место   #", op.id, " [", op.where.begin, "..", op.where.end, "]");
+      else if constexpr(std::is_same_v<T, j_gap>) out += cat("пропуск узлов ", op.nodes, ", импортов ", op.imports);
       else out += cat("импорт  текста ", op.text.size(), " байт");
     },
         e.op);

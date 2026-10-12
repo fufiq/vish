@@ -263,3 +263,45 @@ body {
   position: absolute;
   background: color-mix(in srgb, var(--tz-caret) 22%, transparent);
 }
+/* подсказки: наведения и набора */
+.tz-tip {
+  position: absolute;
+  z-index: 3;
+  max-width: 60ch;
+  padding: 4px 8px;
+  background: var(--tz-popup);
+  border: 1px solid color-mix(in srgb, var(--tz-fg) 18%, transparent);
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  box-shadow: 0 2px 8px color-mix(in srgb, black 18%, transparent);
+}
+.tz-tip[hidden] {
+  display: none;
+}
+.tz-hint {
+  transform: translateY(calc(-100% - 2px));
+}
+.tz-tip .line {
+  display: flex;
+  gap: 8px;
+}
+.tz-tip .kind {
+  color: var(--tz-detail);
+  min-width: 9ch;
+}
+.tz-tip .line[data-kind='ошибка'] .text {
+  color: var(--tz-error);
+}
+.tz-tip .line[data-kind='тип'] .text {
+  color: var(--tz-type);
+}
+.tz-tip .line.link {
+  cursor: pointer;
+}
+.tz-tip .line.link .text {
+  text-decoration: underline dotted;
+}
+.tz-tip b {
+  color: var(--tz-caret);
+}

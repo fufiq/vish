@@ -23,3 +23,7 @@ key 1 x
 key 1 Backspace
 idle
 // expect: print("входы");⏎  print("тело");
+// Canon and journal: playback - the same projection and the same conclusion (draft - one edit)
+key 1 Escape
+roundtrip
+// expect: roundtrip: совпадает

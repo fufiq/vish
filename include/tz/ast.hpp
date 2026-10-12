@@ -15,6 +15,7 @@
 #include <deque>
 #include <optional>
 #include <unordered_map>
+#include <map>
 #include <set>
 #include <tuple>
 #include <variant>
@@ -357,7 +358,13 @@ struct j_note {
   uint32_t id;
   node_note note;
 };
-using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place, j_note>;
+// Pass: nodes empty node and imports empty imports - the numbers dropped parsing draft
+// editor (squash_log): the numbers of the others are the same.
+struct j_gap {
+  uint32_t nodes;
+  uint32_t imports;
+};
+using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place, j_note, j_gap>;
 
 struct journal_entry {
   uint64_t revision;
@@ -902,6 +909,73 @@ struct ast_db {
     return out;
   }
 
+  // The draft editor is closed (author's decision 2026-10-12: set - as is, parsing - each key): his
+  // keys in journal - one edit (*mine*). Records with revision after since: imports of typed text,
+  // except for the last (keep), are empty (import numbers are the same: node places refer to them);
+  // node of these imports, which fell out of wood, are empty holes (node numbers are the same), their
+  // edits are out; editing one node in a row (without ct code mutations and kickbacks between them)
+  // is the last. since - revision at the opening of the draft (its first import is recorded with it).
+  // The state of the program tree after playback is the same, journal grows by the total, not by
+  // every key.
+  void squash_log(uint64_t since, std::vector<uint32_t> const & drafts, uint32_t keep) {
+    std::size_t from = 0;
+    while(from < oplog.size() && oplog[from].second.revision < since) ++from;
+    if(from == oplog.size()) return;
+    std::size_t imports = 0;
+    for(std::size_t i = from; i < oplog.size(); ++i) imports += std::holds_alternative<j_import>(oplog[i].second.op);
+    uint32_t source = uint32_t(sources.size() - imports);
+    std::set<uint32_t> used; // draft imports referred to by node wood
+    for(uint32_t x = 0; x < nodes.size(); ++x)
+      if(std::ranges::contains(drafts, nodes[node_id(x)].where.source) && !used.contains(nodes[node_id(x)].where.source) && installed(node_id(x))) used.insert(nodes[node_id(x)].where.source);
+    auto draft_source = [&](uint32_t x) { return x != keep && std::ranges::contains(drafts, x) && !used.contains(x); };
+    auto garbage = [&](uint32_t id) {
+      node_id n(id);
+      return id < nodes.size() && std::ranges::contains(drafts, nodes[n].where.source) && !born.contains(id) && !installed(n);
+    };
+    std::vector<std::pair<uint32_t, journal_entry>> out(oplog.begin(), oplog.begin() + std::ptrdiff_t(from));
+    // last edit of node in the segment without mutations: (option type, id) → record number
+    std::map<std::pair<std::size_t, uint32_t>, std::size_t> last;
+    std::vector<bool> drop(oplog.size(), false);
+    std::vector<uint8_t> gap(oplog.size(), 0); // 1 is the node of the lost parsing, 2 is its import
+    for(std::size_t i = from; i < oplog.size(); ++i) {
+      auto & op = oplog[i].second.op;
+      if(std::holds_alternative<j_mutate>(op) || std::holds_alternative<j_rollback>(op)) {
+        last.clear();
+        continue;
+      }
+      auto one = [&](uint32_t id) {
+        if(garbage(id)) return void(drop[i] = true);
+        auto key = std::pair{op.index(), id};
+        if(auto it = last.find(key); it != last.end()) drop[it->second] = true;
+        last[key] = i;
+      };
+      if(auto * x = std::get_if<j_replace>(&op)) one(x->id);
+      else if(auto * x = std::get_if<j_place>(&op)) one(x->id);
+      else if(auto * x = std::get_if<j_note>(&op)) one(x->id);
+      else if(auto * x = std::get_if<j_link>(&op)) {
+        if(garbage(x->root)) drop[i] = true;
+        else one(x->root);
+      } else if(auto * x = std::get_if<j_add>(&op); x && garbage(x->id)) gap[i] = 1;
+      else if(std::holds_alternative<j_import>(op)) {
+        if(draft_source(source)) gap[i] = 2;
+        ++source;
+      }
+    }
+    // They have only one pass between them.
+    for(std::size_t i = from; i < oplog.size(); ++i) {
+      if(drop[i]) continue;
+      if(!gap[i]) {
+        out.push_back(std::move(oplog[i]));
+        continue;
+      }
+      if(out.size() <= from || !std::holds_alternative<j_gap>(out.back().second.op) || out.back().first != oplog[i].first)
+        out.push_back({oplog[i].first, journal_entry{oplog[i].second.revision, j_gap{0, 0}}});
+      auto & g = std::get<j_gap>(out.back().second.op);
+      (gap[i] == 1 ? g.nodes : g.imports) += 1;
+    }
+    oplog = std::move(out);
+  }
+
   // Play journal to an empty database.
   void replay(std::vector<journal_entry> const & entries) {
     for(auto const & e: entries) {
@@ -926,6 +1000,13 @@ struct ast_db {
           place(node_id(op.id), op.where);
         } else if constexpr(std::is_same_v<T, j_note>) {
           set_note(node_id(op.id), op.note);
+        } else if constexpr(std::is_same_v<T, j_gap>) {
+          for(uint32_t i = 0; i < op.nodes; ++i) {
+            pinned_source = 0;
+            add(n_hole{}, {});
+            pinned_source = ~uint32_t{0};
+          }
+          for(uint32_t i = 0; i < op.imports; ++i) record_import({}, {});
         } else {
           record_import(op.text, op.label);
         }

@@ -62,6 +62,9 @@ struct editor_view {
     uint32_t source = 0; // Import of typed text: places node - in it
     std::vector<uint32_t> blank; // Empty parsing lines for the canon
     std::vector<std::string> rest; // comments after the last element - the following
+    uint64_t since = 0; // revision of the base at the opening: journal after it - one edit
+    std::string before; // text of the unit before the draft (canon) - for rollback of the accepted
+    std::vector<uint32_t> sources; // importation
   } draft;
   struct snapshot {
     std::string text;
@@ -69,6 +72,14 @@ struct editor_view {
   };
   std::vector<snapshot> undo, redo; // drawback
   bool typing = false; // It's a set of words: rollback in a word, not a letter.
+  // Accepted edits (closed drafts): elements and their text before and after - rollback and
+  // repetition of accepted - editing back (*my*: history - edits, journal is not rewritten)
+  struct closed {
+    node_list items;
+    node_id next;
+    std::string before, after;
+  };
+  std::vector<closed> done, undone;
   // layout of the module (printer): bytes of text by element number, end of elements, draft
   std::vector<uint32_t> chunk_at, content_at;
   uint32_t items_end = 0, draft_begin = 0, draft_end = 0;
@@ -76,6 +87,7 @@ struct editor_view {
   uint32_t anchor = none; // second end of allocation (place)
   uint32_t goal = none; // column
   mutable bool selection_sent = false;
+  bool hint_shown = false; // The tip of the set is shown - to hide when there is nothing
 
   uint32_t layout_of(node_id n) const { return n.value < at.size() ? at[n.value] : ~uint32_t{0}; }
   std::string_view text_of(std::pair<uint32_t, uint32_t> r) const {
@@ -349,8 +361,13 @@ struct editor_server {
     if(m.key == "Escape") { // release; draft - to the canon
       close_completion(p, *v);
       v->anchor = none;
-      if(v->draft.open) return finalize(p, *v);
-      return send_cursor(p, *v);
+      if(v->draft.open) finalize(p, *v);
+      else send_cursor(p, *v);
+      if(v->hint_shown) { // tip-off
+        v->hint_shown = false;
+        send(p, proto::s_hint{v->id, {}, 0, 0, {}});
+      }
+      return;
     }
     if(ctrl && (m.key == "a" || m.key == "A" || m.key == "ф")) {
       v->anchor = 0;
@@ -374,7 +391,7 @@ struct editor_server {
       if(ctrl) back ? a = word_left(*v, s) : b = word_right(*v, s);
       replace(p, *v, a, b, "");
       if(back) complete(p, *v, false);
-      return;
+      return send_hint(p, *v);
     }
     if(m.key == "Enter") return newline(p, *v);
     if(m.key == "Tab") return indent(p, *v, shift);
@@ -490,6 +507,15 @@ struct editor_server {
               finalize(q, w); // His other vision is to the canon.
             }
     if(v.draft.open && v.draft.items == group) return r;
+    uint32_t gb = v.byte_at[r.from], ge = v.byte_at[r.to];
+    if(!v.draft.open) {
+      v.draft.since = session.db.revision;
+      v.draft.sources.clear();
+      v.draft.before = v.text.substr(gb, ge - gb);
+    } else if(auto was = draft_region(v)) { // extension: neighbors - their text to the draft
+      uint32_t wb = v.byte_at[was->from], we = v.byte_at[was->to];
+      v.draft.before = cat(std::string_view(v.text).substr(gb, wb - gb), v.draft.before, std::string_view(v.text).substr(we, ge - we));
+    }
     v.draft.open = true; // new draft or extension of the open
     v.draft.items = group;
     if(v.kind == "module") {
@@ -602,6 +628,7 @@ struct editor_server {
       }
     }
     v.draft.source = pr.source;
+    v.draft.sources.push_back(pr.source);
     v.draft.blank = std::move(d.blank);
     v.draft.rest = std::move(d.rest);
     db.link_parents(session.root);
@@ -806,7 +833,8 @@ struct editor_server {
   // Canon: the draft leaves, the presentation is printed projection. The course and
   // highlighting - until the draft in the same places, inside - aligning the typed text with
   // the canonical, then with a shift.
-  void finalize(peer & p, editor_view & v) {
+  enum class history { edit, undo, redo };
+  void finalize(peer & p, editor_view & v, history mode = history::edit) {
     if(!v.draft.open) return;
     auto & db = session.db;
     bool module = v.kind == "module";
@@ -831,6 +859,8 @@ struct editor_server {
       }
       db.link_parents(session.root);
     }
+    db.squash_log(v.draft.since, v.draft.sources, v.draft.source); // Draft keys - one edit in journal
+    editor_view::closed entry{v.draft.items, v.draft.next, std::move(v.draft.before), {}};
     v.draft = {};
     v.undo.clear();
     v.redo.clear();
@@ -839,6 +869,13 @@ struct editor_server {
     layout(v);
     uint32_t ne = module ? content_from(v, at + count) : uint32_t(v.text.size());
     if(module && ne < ob) ne = ob;
+    if(module) { // History of the accepted: the text of the unit after - canon
+      entry.after = v.text.substr(ob, ne - ob);
+      if(entry.before != entry.after) {
+        (mode == history::undo ? v.undone : v.done).push_back(std::move(entry));
+        if(mode == history::edit) v.undone.clear();
+      }
+    }
     auto map = [&](uint32_t x) -> uint32_t {
       if(x < ob) return place_of_byte(v, x);
       if(x >= oe && !(x == oe && oe == uint32_t(was.size()))) return place_of_byte(v, x - oe + ne);
@@ -942,8 +979,9 @@ struct editor_server {
     if(!keep_goal) v.goal = none;
     v.typing = false;
     close_completion(p, v);
-    if(auto r = draft_region(v); r && !(r->contains(v.cursor) && (v.anchor == none || r->contains(v.anchor)))) return finalize(p, v);
-    send_cursor(p, v);
+    if(auto r = draft_region(v); r && !(r->contains(v.cursor) && (v.anchor == none || r->contains(v.anchor)))) finalize(p, v);
+    else send_cursor(p, v);
+    send_hint(p, v);
   }
 
   // Motion key: new cursor location; vertical - column remembered
@@ -980,6 +1018,7 @@ struct editor_server {
     }
     replace(p, v, s, e, t);
     if(code_points(t) == 1) complete(p, v, false);
+    send_hint(p, v);
   }
 
   // Enter: line translation with line indentation; after `{` - deeper, between `{` and `}` -
@@ -1036,7 +1075,7 @@ struct editor_server {
     auto & from = again ? v.redo : v.undo;
     auto & to = again ? v.undo : v.redo;
     auto r = draft_region(v);
-    if(!r || from.empty()) return send(p, proto::s_error{again ? "повторять нечего" : "откат — внутри черновика: откатывать нечего"});
+    if(!r || from.empty()) return undo_closed(p, v, again);
     uint32_t base = v.byte_at[r->from];
     to.push_back({v.text.substr(base, v.byte_at[r->to] - base), v.byte_at[v.cursor] - base});
     auto snap = std::move(from.back());
@@ -1044,6 +1083,53 @@ struct editor_server {
     v.typing = false;
     v.anchor = v.goal = none;
     commit_draft(p, v, snap.text, snap.caret, r->from, r->to);
+  }
+
+  // Retracement (repeat) of the adopted editing: the unit - the same elements, its text - as
+  // it was before the editing (after it); editing back - with a draft, immediately to the
+  // canon. The text of the unit has changed since (another client) is a waiver.
+  void undo_closed(peer & p, editor_view & v, bool again) {
+    finalize(p, v);
+    auto & from = again ? v.undone : v.done;
+    if(from.empty()) return send(p, proto::s_error{again ? "повторять нечего" : "откатывать нечего"});
+    if(v.kind != "module") return send(p, proto::s_error{"откат принятого — в представлении модуля"});
+    editor_view::closed e = std::move(from.back());
+    from.pop_back();
+    auto const & items = session.db.as<n_module>(session.root).items;
+    uint32_t at = 0;
+    if(!e.items.empty()) {
+      auto it = std::ranges::find(items, e.items[0]);
+      bool here = it != items.end() && std::size_t(items.end() - it) >= e.items.size() && std::ranges::equal(e.items, std::span(it, e.items.size()));
+      if(!here) return send(p, proto::s_error{"откат: элементов правки больше нет"});
+      at = uint32_t(it - items.begin());
+    } else {
+      auto it = e.next ? std::ranges::find(items, e.next) : items.end();
+      at = uint32_t(it - items.begin());
+      while(!e.next && at > 0 && is_inner(items[at - 1])) --at;
+    }
+    uint32_t count = uint32_t(e.items.size());
+    uint32_t ob = at < v.chunk_at.size() && count ? v.chunk_at[at] : content_from(v, at), oe = content_from(v, at + count);
+    if(oe < ob || v.text.substr(ob, oe - ob) != e.after) return send(p, proto::s_error{"откат: элемент изменился после правки"});
+    for(auto & q: peers)
+      for(auto & w: q.views)
+        if(&w != &v && w.root && w.draft.open)
+          for(node_id x: w.draft.items)
+            if(std::ranges::contains(e.items, x)) return send(p, proto::s_error{"элемент правит другой клиент"});
+    uint32_t from_place = place_of_byte(v, ob), to_place = place_of_byte(v, oe);
+    v.draft = {};
+    v.draft.open = true;
+    v.draft.items = e.items;
+    v.draft.next = e.next;
+    v.draft.since = session.db.revision;
+    v.draft.before = e.after;
+    v.anchor = v.goal = none;
+    v.typing = false;
+    // cursor - in place of editing: the first difference of texts
+    uint32_t same = 0;
+    while(same < e.before.size() && same < e.after.size() && e.before[same] == e.after[same]) ++same;
+    while(same > 0 && (static_cast<unsigned char>(e.before[same]) & 0xC0) == 0x80) --same;
+    commit_draft(p, v, e.before, same, from_place, to_place);
+    finalize(p, v, again ? history::redo : history::undo);
   }
 
   std::optional<uint32_t> place_of(editor_view const & v, node_id node, uint32_t piece, uint32_t offset) const {
@@ -1086,6 +1172,198 @@ struct editor_server {
       return move_to(p, *v, std::min<uint32_t>(line_end(*v, *t) + 1, uint32_t(v->places.size() - 1)), true);
     }
     move_to(p, *v, *t, true);
+  }
+
+  // --- hints: guidance, design shape, signature ---
+  //
+  // 
+// The following lines are from AST and
+  // parsing (type over all instance, value in layer, error with a trace, ads with links), not
+  // text. *Mine: * line composition.
+
+  // The function declaration head is projection without a body: `when(c, expr yes) otherwise(expr
+  // no)`, `syntax if (c) {then_} else {else_}`.
+  std::string head_text(node_id f) const {
+    auto const & db = session.db;
+    std::vector<node_layout> ls;
+    printer pr(db);
+    pr.layouts = &ls;
+    pr.print(f);
+    std::map<uint32_t, uint32_t> at;
+    for(uint32_t k = 0; k < ls.size(); ++k) at[ls[k].node.value] = k;
+    node_id body = db.as<n_fn>(f).body;
+    std::string out;
+    bool stop = false;
+    auto rec = [&](auto && self, node_id n) -> void {
+      auto it = at.find(n.value);
+      if(it == at.end()) return;
+      for(auto const & pc: ls[it->second].pieces) {
+        if(stop) return;
+        if(auto const * t = std::get_if<std::string>(&pc)) out += *t;
+        else if(std::get<node_id>(pc) == body) stop = true;
+        else self(self, std::get<node_id>(pc));
+      }
+    };
+    rec(rec, f);
+    while(!out.empty() && (out.back() == ' ' || out.back() == '=' || out.back() == '>')) out.pop_back();
+    return out;
+  }
+
+  // Name announcements: module functions (with internal) and prelude, syntax records.
+  std::vector<node_id> declarations(std::string_view name) const {
+    std::vector<node_id> out;
+    for(node_id m: {session.root, session.db.prelude}) {
+      if(!m || !session.db.is<n_module>(m)) continue;
+      for(node_id f: session.db.as<n_module>(m).items)
+        if(session.db.is<n_fn>(f) && session.db.strings.text(session.db.as<n_fn>(f).name) == name) out.push_back(f);
+    }
+    return out;
+  }
+
+  // Construction: clauses, expression parameters or blocks, syntax recording - it has a form.
+  bool construction(node_id f) const {
+    auto const & fn = session.db.as<n_fn>(f);
+    if(!fn.form.empty()) return true;
+    return std::ranges::any_of(fn.params, [&](node_id p) {
+      auto const & x = session.db.as<n_param>(p);
+      return x.clause || x.mode == param_mode::expr;
+    });
+  }
+
+  void declaration_lines(std::vector<proto::s_line> & out, std::string_view name, std::vector<uint32_t> const & chosen) {
+    auto fns = declarations(name);
+    std::ranges::stable_sort(fns, {}, [&](node_id f) { return !std::ranges::contains(chosen, f.value); });
+    uint32_t n = 0;
+    for(node_id f: fns) {
+      if(++n > 8) break;
+      bool here = std::ranges::contains(chosen, f.value);
+      bool prelude = session.db[f].where.source == session.db[session.db.prelude].where.source;
+      std::string where = here ? "выбрана здесь" : prelude ? "прелюдия" : is_inner(f) ? "внутренняя" : "";
+      out.push_back({construction(f) ? "форма" : "объявление", cat(head_text(f), where.empty() ? "" : cat("  — ", where)), f});
+      if(auto const * nt = session.db.note_of(f))
+        for(auto const & l: nt->lead)
+          if(!l.empty()) out.push_back({"комментарий", l, {}});
+    }
+  }
+
+  std::vector<proto::s_line> hover_lines(editor_view const & v, node_id n) {
+    auto const & db = session.db;
+    std::vector<proto::s_line> out;
+    if(!n || n.value >= db.size()) return out;
+    if(db.is<n_hole>(n)) out.push_back({"дыра", db.as<n_hole>(n).reason, {}});
+    // type: the name-advertisement - according to all its mentions, otherwise - node
+    std::vector<std::string> ts;
+    node_id up = db[n].parent;
+    if(db.is<n_param>(n)) ts = types_of_name(scope_of(n), db.as<n_param>(n).name);
+    else if(db.is<n_var>(n)) ts = types_of_name(scope_of(n), db.as<n_var>(n).name);
+    else if(auto it = session.node_types.find(n.value); it != session.node_types.end()) ts = it->second;
+    else if(db.is<n_ident>(n)) ts = types_of_name(scope_of(n), db.as<n_ident>(n).name);
+    bool callee = up && db.is<n_call>(up) && db.as<n_call>(up).callee == n;
+    if(!ts.empty() && !callee) out.push_back({"тип", join_types(ts), {}});
+    if(auto const * l = layer_of(v))
+      if(auto it = l->literal.find(n.value); it != l->literal.end()) out.push_back({"значение", it->second, {}});
+    for(auto const & m: marks_errors(v))
+      if(m.node == n) out.push_back({"ошибка", m.text, {}});
+    // function or design name - ads with links (selected in instance - first)
+    symbol name;
+    if(db.is<n_fn>(n)) name = db.as<n_fn>(n).name; // announcement - his overload
+    else if(db.is<n_ident>(n)) name = db.as<n_ident>(n).name;
+    else if(db.is_member(n) && up && db.is<n_call>(up)) name = db.member_of(n).name;
+    else if(db.is<n_call>(n) && db.is<n_ident>(db.as<n_call>(n).callee)) name = db.as<n_ident>(db.as<n_call>(n).callee).name;
+    if(name) {
+      node_id call = db.is<n_call>(n) ? n : callee ? up : node_id{};
+      auto chosen = call && session.call_targets.contains(call.value) ? session.call_targets.at(call.value) : std::vector<uint32_t>{};
+      declaration_lines(out, db.strings.text(name), chosen);
+    }
+    return out;
+  }
+
+  void handle(peer & p, proto::c_hover const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    send(p, proto::s_hover{v->id, m.node, hover_lines(*v, m.node)});
+  }
+
+  void handle(peer & p, proto::c_open const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    auto const & db = session.db;
+    if(!m.node || m.node.value >= db.size()) return send(p, proto::s_error{"нет такого узла"});
+    finalize_peer(p);
+    if(db.is<n_fn>(m.node)) return open_fn(p, m.node);
+    uint32_t k = v->layout_of(m.node);
+    if(k == ~uint32_t{0}) return send(p, proto::s_error{"узла нет в этом представлении"});
+    move_to(p, *v, v->range[k].first, false);
+  }
+
+  // Hint set: cursor inside the brackets of the call - the signature with the current parameter;
+  // the word in front of the cursor - the name of the design - its shape. Otherwise, hide it.
+  void send_hint(peer & p, editor_view & v) {
+    auto const & db = session.db;
+    std::vector<proto::s_line> lines;
+    caret anchor{};
+    uint32_t c = v.cursor;
+    // cursor
+    uint32_t b = c;
+    while(b > 0 && ident_char(v.lead[b - 1])) --b;
+    std::string word;
+    for(uint32_t k = b; k < c; ++k) word += v.lead[k];
+    if(!word.empty() && !(c < v.lead.size() && ident_char(v.lead[c]))) {
+      for(node_id f: declarations(word))
+        if(construction(f) && lines.size() < 6) lines.push_back({"форма", head_text(f), f});
+      if(!lines.empty()) anchor = v.places[b];
+    }
+    // Call around the cursor: brackets of his arguments
+    if(lines.empty() && c > 0)
+      for(node_id n = v.places[c - 1].node; n; n = db[n].parent) {
+        if(!db.is<n_call>(n) || !db.is<n_ident>(db.as<n_call>(n).callee)) continue;
+        auto const & call = db.as<n_call>(n);
+        uint32_t k = v.layout_of(n), ck = v.layout_of(call.callee);
+        if(k == ~uint32_t{0} || ck == ~uint32_t{0}) break;
+        uint32_t open = v.range[ck].second; // `(` immediately after the name
+        if(open >= v.lead.size() || v.lead[open] != '(' || c <= open || c >= v.range[k].second) continue; // after `)` - no longer in brackets
+        uint32_t arg = 0; // current parameter - on arguments that ended before the cursor
+        for(node_id a: call.args) {
+          uint32_t ak = v.layout_of(a);
+          if(ak != ~uint32_t{0} && v.range[ak].second < c && v.lead[std::min<uint32_t>(v.range[ak].second, uint32_t(v.lead.size() - 1))] == ',') ++arg;
+          else if(ak != ~uint32_t{0} && v.range[ak].second < c) {
+            uint32_t q = v.range[ak].second;
+            while(q < c && v.lead[q] == ' ') ++q;
+            if(q < c && v.lead[q] == ',') ++arg;
+          }
+        }
+        std::string name(db.strings.text(db.as<n_ident>(call.callee).name));
+        auto chosen = session.call_targets.contains(n.value) ? session.call_targets.at(n.value) : std::vector<uint32_t>{};
+        auto fns = declarations(name);
+        std::ranges::stable_sort(fns, {}, [&](node_id f) { return !std::ranges::contains(chosen, f.value); });
+        for(node_id f: fns) {
+          if(lines.size() >= 6) break;
+          auto const & fn = db.as<n_fn>(f);
+          std::string s = cat(name, "(");
+          uint32_t from = 0, to = 0, head = 0;
+          for(uint32_t i = 0; i < fn.params.size(); ++i) {
+            auto const & pa = db.as<n_param>(fn.params[i]);
+            if(pa.clause) break; // Clauses - after the head
+            if(head) s += ", ";
+            std::string one;
+            if(pa.type && db.is<n_ident>(pa.type)) one = cat(db.strings.text(db.as<n_ident>(pa.type).name), " ");
+            if(pa.mode == param_mode::expr) one = cat("expr ", one);
+            one += db.strings.text(pa.name);
+            if(head == arg || (pa.pack && arg >= head)) {
+              from = code_points(s);
+              to = from + code_points(one);
+            }
+            s += one;
+            ++head;
+          }
+          lines.push_back({"сигнатура", s + ")", f, from, to});
+        }
+        if(!lines.empty()) anchor = v.places[v.range[ck].first];
+        break;
+      }
+    if(lines.empty() && !v.hint_shown) return;
+    v.hint_shown = !lines.empty();
+    send(p, proto::s_hint{v.id, anchor.node, anchor.piece, anchor.offset, std::move(lines)});
   }
 
   // --- complement ---

@@ -19,7 +19,7 @@
 
 namespace tz::proto {
 
-constexpr uint32_t version = 2;
+constexpr uint32_t version = 3;
 
 // --- client ---
 
@@ -104,7 +104,17 @@ struct c_select {
   uint32_t offset;
   uint32_t clicks;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select>;
+// Hover to the node: VM responds with a hint (s_hover).
+struct c_hover {
+  uint32_t view;
+  node_id node;
+};
+// Hint link: the function announcement is in the second panel, another is the cursor to it.
+struct c_open {
+  uint32_t view;
+  node_id node;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open>;
 
 // --- VM customer ---
 
@@ -237,7 +247,34 @@ struct s_select {
 struct s_clipboard {
   std::string text;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard>;
+// Hint line: view ("type", "value", "error", "announcement", "comment", "hole", "form",
+// "signature"), text, reference (ad node; empty - no); [from, to) - the selected part of the
+// text in code points (current parameter).
+// 
+//.
+struct s_line {
+  std::string kind;
+  std::string text;
+  node_id target;
+  uint32_t from = 0;
+  uint32_t to = 0;
+};
+// Guidance on the knot; empty - nothing to show.
+struct s_hover {
+  uint32_t view;
+  node_id node;
+  std::vector<s_line> lines;
+};
+// Node, piece, offset: design shape or call signature with the current parameter; hide
+// empty.
+struct s_hint {
+  uint32_t view;
+  node_id node;
+  uint32_t piece;
+  uint32_t offset;
+  std::vector<s_line> lines;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint>;
 
 // --- staff ---
 

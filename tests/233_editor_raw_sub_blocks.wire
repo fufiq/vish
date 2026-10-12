@@ -29,3 +29,7 @@ key 1 (
 key 1 4
 run
 // expect: output text="first\n42\nsecond\n5\n7\n" ok=true
+// Canon and journal: playback - the same projection and the same conclusion (draft - one edit)
+key 1 Escape
+roundtrip
+// expect: roundtrip: совпадает

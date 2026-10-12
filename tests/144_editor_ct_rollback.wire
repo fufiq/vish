@@ -26,3 +26,7 @@ key 1 x
 key 1 Backspace
 idle
 // expect: struct point { i64 x; i64 y; i64 z = 8; }
+// Canon and journal: playback - the same projection and the same conclusion (draft - one edit)
+key 1 Escape
+roundtrip
+// expect: roundtrip: совпадает

@@ -1,0 +1,47 @@
+// Подсказки в редакторе (§13.1): наведение — строки из AST и разбора, со ссылками на
+// объявления: 
+// Набор: слово —
+// имя конструкции — её форма; курсор в скобках вызова — сигнатуры с текущим
+// параметром. *Моё:* состав строк.
+// program: editor_hints.tz
+open_view module
+// имя переменной: тип по всем экземплярам
+hover 1 @total
+// expect: kind="тип" text="i64"
+// вызов: выбранная в экземплярах перегрузка — со ссылкой, комментарий перед ней
+hover 1 @sq:2
+// expect: kind="объявление" text="sq(x)  — выбрана здесь" target=#
+// expect: kind="комментарий" text="// квадрат числа"
+// конструкция — её форма
+hover 1 @when:2
+// expect: kind="форма" text="when(c, expr yes) otherwise(expr no)  — выбрана здесь"
+// объявление функции — оно само
+hover 1 @sq
+// expect: kind="объявление" text="sq(x)"
+// ссылка подсказки — объявление во второй панели
+open 1 @sq
+// expect: view view=2
+// expect: kind="fn"
+// набор: курсор в скобках вызова — сигнатура, текущий параметр выделен
+pointer 1 @3 0 0
+key 1 \s
+// expect: hint view=1
+// expect: kind="сигнатура" text="pair(a, b)" target=#
+// expect: from=8 to=9
+// до запятой — первый параметр
+key 1 ArrowLeft
+key 1 ArrowLeft
+key 1 ArrowLeft
+// expect: kind="сигнатура" text="pair(a, b)" target=#
+// expect: from=5 to=6
+// слово — имя конструкции: форма
+key 1 End
+key 1 Enter
+key 1 w
+key 1 h
+key 1 e
+key 1 n
+// expect: kind="форма" text="when(c, expr yes) otherwise(expr no)"
+// Escape — подсказка скрыта
+key 1 Escape
+// expect: hint view=1 node=· piece=0 offset=0 lines=
