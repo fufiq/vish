@@ -73,6 +73,7 @@ struct vm_session {
       errors.push_back(d);
     }
     node_types = vm.node_types(); // For the Editor: Types and Errors in Place
+    node_values = vm.node_values(); // and values known in compilation
     call_targets = vm.resolved_calls;
     layers = vm.layers;
     last_report = vm.report(name, db.source(db[root].where.source));
@@ -222,6 +223,7 @@ struct vm_session {
   std::string last_report;
   // Last check: node types in all contexts and errors (editor, §13.1).
   std::map<uint32_t, std::vector<std::string>> node_types;
+  std::map<uint32_t, std::vector<std::string>> node_values; // "Type\literal" by instance; literal empty - runtime
   std::map<uint32_t, std::vector<uint32_t>> call_targets; // call node → overload selected in instance
   std::vector<interpreter::trace_rec> trace; // launch-track
   std::map<uint32_t, std::map<std::string, interpreter::layer_info>> layers; // function → layers (contexts)

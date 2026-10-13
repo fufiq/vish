@@ -1252,14 +1252,14 @@ struct editor_server {
     if(!n || n.value >= db.size()) return out;
     if(db.is<n_hole>(n)) out.push_back({"дыра", db.as<n_hole>(n).reason, {}});
     // type: the name-advertisement - according to all its mentions, otherwise - node
-    std::vector<std::string> ts;
+    std::string ts;
     node_id up = db[n].parent;
-    if(db.is<n_param>(n)) ts = types_of_name(scope_of(n), db.as<n_param>(n).name);
-    else if(db.is<n_var>(n)) ts = types_of_name(scope_of(n), db.as<n_var>(n).name);
-    else if(auto it = session.node_types.find(n.value); it != session.node_types.end()) ts = it->second;
-    else if(db.is<n_ident>(n)) ts = types_of_name(scope_of(n), db.as<n_ident>(n).name);
+    if(db.is<n_param>(n)) ts = shown_name(scope_of(n), db.as<n_param>(n).name);
+    else if(db.is<n_var>(n)) ts = shown_name(scope_of(n), db.as<n_var>(n).name);
+    else if(session.node_types.contains(n.value)) ts = shown_node(n);
+    else if(db.is<n_ident>(n)) ts = shown_name(scope_of(n), db.as<n_ident>(n).name);
     bool callee = up && db.is<n_call>(up) && db.as<n_call>(up).callee == n;
-    if(!ts.empty() && !callee) out.push_back({"тип", join_types(ts), {}});
+    if(!ts.empty() && !callee) out.push_back({"тип", ts, {}});
     if(auto const * l = layer_of(v))
       if(auto it = l->literal.find(n.value); it != l->literal.end()) out.push_back({"значение", it->second, {}});
     for(auto const & m: marks_errors(v))
@@ -1487,7 +1487,7 @@ struct editor_server {
           x.rule = cat("вызов ", head_text(node_id(it->second[0])));
           x.rule_at = node_id(it->second[0]);
         }
-      if(auto it = session.node_types.find(n.value); it != session.node_types.end()) x.types = join_types(it->second);
+      x.types = shown_node(n);
       out.nodes.push_back(std::move(x));
       for(auto const & [c, name]: child_roles(n)) {
         bool param = r && r->params.contains(c.value);
@@ -2161,12 +2161,14 @@ struct editor_server {
       }
   }
 
-  // Name types in the area: all its mentions in the subtree (without nested
-  // functions) and initializers `name = e`.
-  std::vector<std::string> types_of_name(node_id scope, symbol name) const {
+  // Name types in the domain: all its mentions in the subtree (without nested functions)
+  // and initializers `name = e` . what are node types (node_types ) or their compile
+  // values (node_values )
+  std::vector<std::string> types_of_name(node_id scope, symbol name, std::map<uint32_t, std::vector<std::string>> const * what = nullptr) const {
+    if(!what) what = &session.node_types;
     std::vector<std::string> out;
     auto take = [&](node_id n) {
-      if(auto it = session.node_types.find(n.value); it != session.node_types.end())
+      if(auto it = what->find(n.value); it != what->end())
         for(auto const & t: it->second)
           if(!std::ranges::contains(out, t)) out.push_back(t);
     };
@@ -2182,6 +2184,38 @@ struct editor_server {
     };
     rec(rec, scope);
     return out;
+  }
+
+  // Type - two parts: runtime and compiltime: "i64 = 3", "f64 = 1.5 | i64 = 2", "i64 = 1 | 4".
+  // The value of runtime in at least one instance of this type (or values greater than four) is
+  // only type. vs is "type\literal" (node_values).
+  static std::string shown(std::vector<std::string> ts, std::vector<std::string> const & vs) {
+    if(vs.empty()) return join_types(std::move(ts));
+    std::map<std::string, std::vector<std::string>> by; // type → values (" - runtime )
+    for(auto const & x: vs) {
+      auto tab = x.find('\t');
+      by[x.substr(0, tab)].push_back(tab == std::string::npos ? std::string() : x.substr(tab + 1));
+    }
+    std::string out;
+    for(auto & [t, values]: by) {
+      std::string one = t;
+      if(!std::ranges::contains(values, std::string()) && values.size() <= 4) {
+        std::ranges::sort(values);
+        std::string v;
+        for(auto const & x: values) v += (v.empty() ? "" : " | ") + x;
+        one = cat(t, " = ", v);
+      }
+      out += (out.empty() ? "" : " | ") + one;
+    }
+    return out;
+  }
+  std::string shown_name(node_id scope, symbol name) const {
+    return shown(types_of_name(scope, name), types_of_name(scope, name, &session.node_values));
+  }
+  std::string shown_node(node_id n) const {
+    auto t = session.node_types.find(n.value);
+    auto v = session.node_values.find(n.value);
+    return shown(t == session.node_types.end() ? std::vector<std::string>{} : t->second, v == session.node_values.end() ? std::vector<std::string>{} : v->second);
   }
 
   static std::string join_types(std::vector<std::string> ts) {
@@ -2227,10 +2261,10 @@ struct editor_server {
     if(auto const * l = layer_of(v)) return layer_marks(v, *l);
     for(auto const & l: v.layouts) {
       node_id n = l.node;
-      std::vector<std::string> ts;
+      std::string ts;
       node_id at = n;
-      if(db.is<n_param>(n)) ts = types_of_name(scope_of(n), db.as<n_param>(n).name);
-      else if(db.is<n_var>(n)) ts = types_of_name(scope_of(n), db.as<n_var>(n).name);
+      if(db.is<n_param>(n)) ts = shown_name(scope_of(n), db.as<n_param>(n).name);
+      else if(db.is<n_var>(n)) ts = shown_name(scope_of(n), db.as<n_var>(n).name);
       else if(db.is<n_op>(n) && db.strings.text(db.as<n_op>(n).op) == "=" && db.as<n_op>(n).args.size() == 2 && db.is<n_ident>(db.as<n_op>(n).args[0])) {
         // `x = e` announces if the name is not yet available (author's decision: no auto)
         at = db.as<n_op>(n).args[0];
@@ -2239,9 +2273,9 @@ struct editor_server {
         for(auto const & c: context_identifiers(db, n))
           if(c.name == db.strings.text(name) && (c.kind == "переменная" || c.kind == "параметр")) known = true;
         if(known) continue;
-        ts = types_of_name(scope_of(n), name);
+        ts = shown_name(scope_of(n), name);
       } else continue;
-      if(!ts.empty()) out.push_back({at, "type", join_types(ts)});
+      if(!ts.empty()) out.push_back({at, "type", ts});
     }
     for(auto const & m: marks_errors(v)) out.push_back(m); // place in prelude - the first place of the program from Trace
     return out;

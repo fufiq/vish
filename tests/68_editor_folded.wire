@@ -1,7 +1,8 @@
 // Challenges wrapped up in compile-time (all arguments are known) are also
-// contexts of use. In runtime, there are no parameters (residual program does
-// not see them), but there are parameters types in the editor.
+// contexts of use. runtime doesn’t have them (residual program doesn’t see
+// them), but there are options in the editor. The type is two parts: runtime
+// and the value known in compilation, each instance has its own.
 //
 // program: editor_folded.tz
 open_view module
-// expect: kind="type" text="f64 | i64"
+// expect: kind="type" text="f64 = 1.5 | i64 = 2"

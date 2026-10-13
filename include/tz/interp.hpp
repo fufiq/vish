@@ -932,6 +932,25 @@ struct interpreter {
     return out;
   }
 
+  // node values for all instance : "type\literal", literal is empty - the value of runtime. Type is two parts: "the part that behaves
+  // differently in compiltime and the part that behaves differently in runtime".
+// - The editor shows both.
+  std::map<uint32_t, std::vector<std::string>> node_values() const {
+    std::map<uint32_t, std::vector<std::string>> out;
+    for(auto const & e: journal) {
+      if(!e.seen) continue;
+      auto & vs = out[e.node];
+      auto add = [&](value const & v) { // “type/t value” (runtime is empty)
+        std::string t = cat(types.describe(v), "\t", literal(v).value_or(""));
+        if(!std::ranges::contains(vs, t)) vs.push_back(t);
+      };
+      if(e.v.is<split_v>())
+        for(auto const & a: e.v.as<split_v>().alts) add(a);
+      else add(e.v);
+    }
+    return out;
+  }
+
   // Show the meaning as literal, if possible.
   std::optional<std::string> literal(value const & v) const {
     if(!v.known()) return std::nullopt;

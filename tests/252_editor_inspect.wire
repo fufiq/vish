@@ -17,6 +17,7 @@ inspect 1 @when:2
 // function call - selected overload
 // expect: rule="вызов pair(a, b)"
 // Syntax recording of the program: block - its parameter
+// expect: kind="n_int" text="2" rule="" rule_at=· types="i64 = 2"
 inspect 1 @twice:2
 // expect: kind="n_call" text="" rule="запись syntax twice {body}" rule_at=#
 // expect: role="args[0] → body" kind="n_block"
@@ -27,3 +28,6 @@ inspect 1 @if:2
 // expect: role="cond → c" kind="n_op" text=">"
 // expect: role="then_" kind="n_call"
 // expect: kind="итог" text="n_if{cond: k > 1, then_: print(k)}"
+// Types - with values known in compilation (compile-time): pair(1, 2) folded into 3
+// expect: role="args[1]" kind="n_call" text="" rule="вызов pair(a, b)"
+// expect: types="i64 = 3"
