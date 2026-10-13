@@ -1366,6 +1366,175 @@ struct editor_server {
     send(p, proto::s_hint{v.id, anchor.node, anchor.piece, anchor.offset, std::move(lines)});
   }
 
+  // --- AST inspector: what is and who is disassembled ---
+  //
+  //  
+// 
+//.
+  // *My:* Module element tree with seats in the parent (node field and recording or
+  // construction parameter), who disassembled the node and focus disclosure.
+
+  // node children with field names (reflection of node): `cond`, `args[1]`.
+  std::vector<std::pair<node_id, std::string>> child_roles(node_id n) const {
+    std::vector<std::pair<node_id, std::string>> out;
+    std::visit([&](auto const & x) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        std::string name(std::meta::identifier_of(m));
+        if constexpr(std::is_same_v<field_t, node_id>) {
+          if(x.[:m:]) out.push_back({x.[:m:], name});
+        } else if constexpr(std::is_same_v<field_t, node_list>) {
+          for(std::size_t i = 0; i < x.[:m:].size(); ++i)
+            if(x.[:m:][i]) out.push_back({x.[:m:][i], cat(name, "[", i, "]")});
+        }
+      }
+    }, session.db[n].kind);
+    return out;
+  }
+
+  // node: name, literal, operator, cause of the hole.
+  std::string own_text(node_id n) const {
+    auto const & db = session.db;
+    auto clip = [](std::string t) {
+      for(auto & c: t)
+        if(c == '\n') c = ' ';
+      if(code_points(t) > 40) {
+        std::size_t b = 0;
+        for(uint32_t k = 0; k < 40 && b < t.size(); ++k) b += cp_len(t, b);
+        t = t.substr(0, b) + "…";
+      }
+      return t;
+    };
+    if(db.is<n_ident>(n)) return std::string(db.strings.text(db.as<n_ident>(n).name));
+    if(db.is<n_fn>(n)) return std::string(db.strings.text(db.as<n_fn>(n).name));
+    if(db.is<n_param>(n)) return std::string(db.strings.text(db.as<n_param>(n).name));
+    if(db.is<n_var>(n)) return std::string(db.strings.text(db.as<n_var>(n).name));
+    if(db.is<n_op>(n)) return std::string(db.strings.text(db.as<n_op>(n).op));
+    if(db.is<n_int>(n) || db.is<n_float>(n) || db.is<n_str>(n)) return clip(printer(db).print(n));
+    if(db.is<n_hole>(n)) return clip(db.as<n_hole>(n).text);
+    if(db.is<n_raw>(n)) return clip(db.as<n_raw>(n).text);
+    return {};
+  }
+
+  // Rule node: Syntax recording (printing and parsing on it) or the construction it causes;
+  // children's places are its parameters.
+  struct rule_of {
+    node_id decl;
+    std::string what; // "record" or "construction"
+    std::map<uint32_t, std::string> params; // child → parameter of the rule
+  };
+  std::optional<rule_of> rule_for(node_id n, printer & pr) {
+    auto const & db = session.db;
+    if(auto const * r = pr.record_for(n)) {
+      auto const & [d, info] = *r;
+      rule_of out{d, "запись", {}};
+      auto const & fn = db.as<n_fn>(d);
+      for(uint32_t k = 0; k < fn.params.size() && k < info.slot.size(); ++k) {
+        node_id at = info.kind >= 0 ? node_place(db[n].kind, info.slot[k]) : db.as<n_call>(n).args[info.slot[k]];
+        if(at) out.params[at.value] = std::string(db.strings.text(db.as<n_param>(fn.params[k]).name));
+      }
+      return out;
+    }
+    if(!db.is<n_call>(n) || !db.is<n_ident>(db.as<n_call>(n).callee)) return std::nullopt;
+    auto const & c = db.as<n_call>(n);
+    auto chosen = session.call_targets.contains(n.value) ? session.call_targets.at(n.value) : std::vector<uint32_t>{};
+    auto fns = declarations(db.strings.text(db.as<n_ident>(c.callee).name));
+    std::ranges::stable_sort(fns, {}, [&](node_id f) { return !std::ranges::contains(chosen, f.value); });
+    for(node_id f: fns) {
+      if(!construction(f)) continue;
+      rule_of out{f, "конструкция", {}};
+      auto const & fn = db.as<n_fn>(f);
+      // arguments - parameters in order inside the head and each clause
+      std::map<uint32_t, uint32_t> used; // Clause → taken parameters
+      for(uint32_t i = 0; i < c.args.size(); ++i) {
+        symbol w = i < c.words.size() ? c.words[i] : symbol{};
+        uint32_t seen = 0;
+        for(node_id pa: fn.params) {
+          auto const & x = db.as<n_param>(pa);
+          if(x.clause != w) continue;
+          if(seen++ < used[w.value] && !x.pack) continue;
+          std::string name(db.strings.text(x.name));
+          out.params[c.args[i].value] = w ? cat(db.strings.text(w), ": ", name) : name;
+          if(!x.pack) ++used[w.value];
+          break;
+        }
+      }
+      return out;
+    }
+    return std::nullopt;
+  }
+
+  void handle(peer & p, proto::c_inspect const & m) {
+    editor_view * v = find(p, m.view);
+    if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
+    auto const & db = session.db;
+    if(!m.node || m.node.value >= db.size()) return send(p, proto::s_inspect{v->id, {}, {}, {}, {}});
+    // root - an element of the module (in the representation of the function - it)
+    node_id root = m.node;
+    while(db[root].parent && root != v->root && !db.is<n_module>(db[root].parent)) root = db[root].parent;
+    printer pr(db);
+    proto::s_inspect out{v->id, root, m.node, {}, {}};
+    std::map<uint32_t, std::string> role;
+    auto rec = [&](auto && self, node_id n, uint32_t depth) -> void {
+      if(out.nodes.size() >= 2000) return;
+      proto::s_inode x{n, depth, role.contains(n.value) ? role[n.value] : std::string{}, std::string(kind_name(db[n])), own_text(n), {}, {}, {}};
+      auto r = rule_for(n, pr);
+      if(r) {
+        x.rule = cat(r->what, " ", head_text(r->decl));
+        x.rule_at = r->decl;
+      } else if(db.is<n_call>(n)) // function call - selected in instance overload
+        if(auto it = session.call_targets.find(n.value); it != session.call_targets.end() && !it->second.empty()) {
+          x.rule = cat("вызов ", head_text(node_id(it->second[0])));
+          x.rule_at = node_id(it->second[0]);
+        }
+      if(auto it = session.node_types.find(n.value); it != session.node_types.end()) x.types = join_types(it->second);
+      out.nodes.push_back(std::move(x));
+      for(auto const & [c, name]: child_roles(n)) {
+        bool param = r && r->params.contains(c.value);
+        role[c.value] = !param ? name : r->params[c.value] == name ? name : cat(name, " → ", r->params[c.value]);
+        self(self, c, depth + 1);
+      }
+    };
+    rec(rec, root, 0);
+    // Disclosure: focus or the nearest node above with the rule
+    for(node_id n = m.node; n; n = db[n].parent) {
+      auto r = rule_for(n, pr);
+      if(!r) {
+        if(n == root) break;
+        continue;
+      }
+      auto const & fn = db.as<n_fn>(r->decl);
+      out.expand.push_back({r->what, head_text(r->decl), r->decl});
+      std::map<std::string, node_id> args;
+      for(auto const & [c, name]: child_roles(n))
+        if(r->params.contains(c.value)) {
+          out.expand.push_back({"параметр", cat(r->params[c.value], " = ", printer(db).print(c)), c});
+          auto bare = r->params[c.value];
+          if(auto colon = bare.find(": "); colon != std::string::npos) bare = bare.substr(colon + 2);
+          args[bare] = c;
+        }
+      if(r->what == "запись") { // summation
+        std::string fields;
+        for(auto const & [c, name]: child_roles(n)) fields += cat(fields.empty() ? "" : ", ", name, ": ", printer(db).print(c));
+        out.expand.push_back({"итог", cat(kind_name(db[n]), "{", fields, "}"), {}});
+      } else if(fn.body) { // frame-up
+        printer::substitution sub;
+        sub.text = [&](node_id x) -> std::optional<std::string> {
+          if(!db.is<n_ident>(x)) return std::nullopt;
+          auto it = args.find(std::string(db.strings.text(db.as<n_ident>(x).name)));
+          if(it == args.end()) return std::nullopt;
+          std::string t = printer(db).print(it->second);
+          node_id up = db[x].parent; // in parentheses (condition, argument) - without their
+          bool bracketed = up && (db.is<n_if>(up) || db.is<n_call>(up) || db.is<n_loop>(up));
+          return db.is<n_op>(it->second) && !bracketed ? cat("(", t, ")") : t;
+        };
+        out.expand.push_back({"раскрытие", printer(db, {}, sub).print(fn.body), {}});
+      }
+      break;
+    }
+    send(p, out);
+  }
+
   // --- complement ---
 
   static bool ident_char(char c) { return lexer::is_ident(c); }

@@ -305,3 +305,103 @@ body {
 .tz-tip b {
   color: var(--tz-caret);
 }
+/* инспектор AST: панель дерева (F2) */
+#ast {
+  width: 420px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  font-size: 12px;
+}
+#ast[hidden] {
+  display: none;
+}
+#ast .head {
+  padding: 6px 10px;
+  color: var(--tz-status);
+  border-bottom: 1px solid color-mix(in srgb, var(--tz-fg) 10%, transparent);
+}
+#ast .tree {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+}
+#ast .row {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+  padding-right: 8px;
+  cursor: pointer;
+  line-height: 1.6;
+}
+#ast .row:hover {
+  background: var(--tz-popup);
+}
+#ast .row[path] {
+  background: color-mix(in srgb, var(--tz-caret) 8%, transparent);
+}
+#ast .row[focus] {
+  background: color-mix(in srgb, var(--tz-caret) 20%, transparent);
+}
+#ast .role {
+  color: var(--tz-detail);
+}
+#ast .kind {
+  color: var(--tz-value);
+}
+#ast .types {
+  color: var(--tz-type);
+}
+#ast .rule {
+  color: var(--tz-caret);
+  text-decoration: underline dotted;
+}
+#ast .expand {
+  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  padding: 6px 10px;
+  max-height: 40%;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+#ast .expand[hidden] {
+  display: none;
+}
+#ast .expand .line {
+  display: flex;
+  gap: 8px;
+}
+#ast .expand .kind {
+  min-width: 10ch;
+  color: var(--tz-detail);
+}
+#ast .expand .line.link {
+  cursor: pointer;
+}
+/* режим структуры (Ctrl+Shift+A): рамки узлов, подсвеченный узел */
+#panes.structure .tz-node {
+  outline: 1px solid color-mix(in srgb, var(--tz-value) 28%, transparent);
+  outline-offset: -1px;
+}
+#panes.structure .tz-node:hover {
+  outline-color: var(--tz-caret);
+}
+.tz-node[inspected] {
+  background: color-mix(in srgb, var(--tz-caret) 22%, transparent);
+  outline: 1px solid var(--tz-caret);
+}
+.tz-structure-label {
+  position: fixed;
+  z-index: 5;
+  padding: 2px 6px;
+  font-size: 11px;
+  background: var(--tz-popup);
+  border: 1px solid color-mix(in srgb, var(--tz-fg) 18%, transparent);
+  border-radius: 3px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.tz-structure-label[hidden] {
+  display: none;
+}

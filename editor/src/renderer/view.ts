@@ -64,53 +64,11 @@ export class ViewElement {
     ];
   }
 
-  // Lines of hint: view - signature, link - by click (open).
-  static #lines(
-    box: HTMLElement,
-    lines: readonly HintLine[],
-    open: (node: NodeId) => void,
-  ): void {
-    box.replaceChildren(
-      ...lines.map((l) => {
-        const row = document.createElement('div');
-        row.className = 'line';
-        row.dataset.kind = l.kind;
-        const kind = document.createElement('span');
-        kind.className = 'kind';
-        kind.textContent = l.kind;
-        const text = document.createElement('span');
-        text.className = 'text';
-        if (l.to > l.from) {
-          // eslint-disable-next-line @typescript-eslint/no-misused-spread
-          const cps = [...l.text];
-          const mark = document.createElement('b');
-          mark.textContent = cps.slice(l.from, l.to).join('');
-          text.append(
-            cps.slice(0, l.from).join(''),
-            mark,
-            cps.slice(l.to).join(''),
-          );
-        } else text.textContent = l.text;
-        row.append(kind, text);
-        const target = l.target;
-        if (target !== null) {
-          row.classList.add('link');
-          row.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            open(target);
-          });
-        }
-        return row;
-      }),
-    );
-  }
-
   // Guidance - at the pointer (x, y - coordinates of the window).
   showHover(m: Hover, x: number, y: number, open: (n: NodeId) => void): void {
     this.tip.hidden = m.lines.length === 0;
     if (this.tip.hidden) return;
-    ViewElement.#lines(this.tip, m.lines, open);
+    renderLines(this.tip, m.lines, open);
     const origin = this.host.getBoundingClientRect();
     this.tip.style.left = `${String(x - origin.left + this.host.scrollLeft)}px`;
     this.tip.style.top = `${String(y - origin.top + this.host.scrollTop + 18)}px`;
@@ -124,7 +82,7 @@ export class ViewElement {
     const box = this.#box(m.node, m.piece, m.offset);
     this.hint.hidden = m.lines.length === 0 || !box;
     if (this.hint.hidden || !box) return;
-    ViewElement.#lines(this.hint, m.lines, open);
+    renderLines(this.hint, m.lines, open);
     this.hint.style.left = `${String(box.left)}px`;
     this.hint.style.top = `${String(box.top)}px`;
   }
@@ -142,6 +100,8 @@ export class ViewElement {
       throw new Error(`вид ${n.kind} не зарегистрирован`);
     }
     el.nodeId = id;
+    el.dataset.kind = n.kind;
+    el.dataset.id = String(id);
     el.note = n.note;
     this.byId.set(id, el);
     el.show(n.pieces, (c) => this.#build(c));
@@ -397,4 +357,46 @@ export function utf16Offset(s: string, cp: number): number {
     at += ch.length;
   }
   return at;
+}
+
+// Lines of hint: view - signature, link - by click (open).
+export function renderLines(
+  box: HTMLElement,
+  lines: readonly HintLine[],
+  open: (node: NodeId) => void,
+): void {
+  box.replaceChildren(
+    ...lines.map((l) => {
+      const row = document.createElement('div');
+      row.className = 'line';
+      row.dataset.kind = l.kind;
+      const kind = document.createElement('span');
+      kind.className = 'kind';
+      kind.textContent = l.kind;
+      const text = document.createElement('span');
+      text.className = 'text';
+      if (l.to > l.from) {
+        // eslint-disable-next-line @typescript-eslint/no-misused-spread
+        const cps = [...l.text];
+        const mark = document.createElement('b');
+        mark.textContent = cps.slice(l.from, l.to).join('');
+        text.append(
+          cps.slice(0, l.from).join(''),
+          mark,
+          cps.slice(l.to).join(''),
+        );
+      } else text.textContent = l.text;
+      row.append(kind, text);
+      const target = l.target;
+      if (target !== null) {
+        row.classList.add('link');
+        row.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          open(target);
+        });
+      }
+      return row;
+    }),
+  );
 }

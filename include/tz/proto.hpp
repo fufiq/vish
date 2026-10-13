@@ -19,7 +19,7 @@
 
 namespace tz::proto {
 
-constexpr uint32_t version = 3;
+constexpr uint32_t version = 4;
 
 // --- client ---
 
@@ -114,7 +114,12 @@ struct c_open {
   uint32_t view;
   node_id node;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open>;
+// AST Inspector: The tree of the module element in which the node node (focus) is located.
+struct c_inspect {
+  uint32_t view;
+  node_id node;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect>;
 
 // --- VM customer ---
 
@@ -274,7 +279,31 @@ struct s_hint {
   uint32_t offset;
   std::vector<s_line> lines;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint>;
+// Inspector tree node (in order of bypass, depth - depth): place in the parent (field node, and
+// the syntax recording parameter or structure, which it became), view, its short text, by whom
+// disassembled (record or construction - rule, ad - rule_at), types by instance.
+//
+struct s_inode {
+  node_id id;
+  uint32_t depth;
+  std::string role;
+  std::string kind;
+  std::string text;
+  std::string rule;
+  node_id rule_at;
+  std::string types;
+};
+// Inspector: the tree of the module element, the focus (node at the cursor) and the opening of
+// the focus: syntax recording - which piece became what parameter and what it turned into; the
+// construction - her body with substituted arguments.
+struct s_inspect {
+  uint32_t view;
+  node_id root;
+  node_id focus;
+  std::vector<s_inode> nodes;
+  std::vector<s_line> expand;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect>;
 
 // --- staff ---
 

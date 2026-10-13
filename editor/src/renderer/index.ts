@@ -10,10 +10,12 @@ import {
   encodeClient,
   schema,
   type ClientMsg,
+  type NodeId,
   type ServerMsg,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
 import { ViewElement } from './view';
+import { Inspector } from './inspector';
 import './nodes/index';
 import './styles.css';
 
@@ -50,6 +52,49 @@ function send(m: ClientMsg): void {
   window.vm.send(encodeClient(m));
 }
 
+// Inspector AST (F2 - wood panel, Ctrl+Shift+A - frame node in the text): the element tree
+// under the cursor, places node and by whom they are disassembled - from VM.
+const panes = byId('panes');
+const inspector = new Inspector(byId('ast'), {
+  open(v, node) {
+    send({ type: 'c_open', view: v.data.view, node });
+  },
+  place(v, node) {
+    // cursor - at the beginning of its first text node (or its first descendant)
+    const first = (id: NodeId): { node: NodeId; piece: number } | undefined => {
+      const n = v.nodes.get(id);
+      if (!n) return undefined;
+      for (const [i, p] of n.pieces.entries()) {
+        if (typeof p === 'string') {
+          if (p !== '') return { node: id, piece: i };
+        } else {
+          const got = first(p);
+          if (got) return got;
+        }
+      }
+      return undefined;
+    };
+    const at = first(node);
+    if (at) send({ type: 'c_pointer', view: v.data.view, ...at, offset: 0 });
+    activate(v);
+  },
+});
+const cursorNode = new Map<number, NodeId>();
+let inspectTimer: ReturnType<typeof setTimeout> | undefined;
+function structure(): boolean {
+  return panes.classList.contains('structure');
+}
+function requestInspect(): void {
+  if (!inspector.open && !structure()) return;
+  clearTimeout(inspectTimer);
+  inspectTimer = setTimeout(() => {
+    const v = active;
+    const node = v ? cursorNode.get(v.data.view) : undefined;
+    if (v && node !== undefined)
+      send({ type: 'c_inspect', view: v.data.view, node });
+  }, 120);
+}
+
 function activate(v: ViewElement | undefined): void {
   active = v;
   (v?.host ?? app).focus();
@@ -81,11 +126,19 @@ function receive(m: ServerMsg): void {
     }
     case 's_update':
       views.get(m.view)?.update(m);
+      requestInspect();
       statusLine.textContent = `ревизия ${String(m.revision)}`;
       return;
     case 's_cursor':
       views.get(m.view)?.showCursor(m);
+      if (m.node !== null) cursorNode.set(m.view, m.node);
+      requestInspect();
       return;
+    case 's_inspect': {
+      const v = views.get(m.view);
+      if (v) inspector.show(v, m);
+      return;
+    }
     case 's_decor': {
       const error = views.get(m.view)?.showMarks(m);
       if (views.get(m.view) !== active || debugging) return; // track-line
@@ -305,6 +358,22 @@ for (const pane of [app, side]) {
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
     v.hideHover();
     if (e.isComposing || e.key === 'Process') return; // IME: Text by compositionen d d
+    if (e.key === 'F2') {
+      e.preventDefault();
+      byId('ast').hidden = !byId('ast').hidden;
+      requestInspect();
+      return;
+    }
+    if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'Ф')) {
+      e.preventDefault();
+      panes.classList.toggle('structure');
+      if (!structure()) {
+        inspector.showLabel('', 0, 0);
+        statusLine.textContent = 'рамки узлов выключены';
+      }
+      requestInspect();
+      return;
+    }
     // Ctrl+V - Insert: paste event carries buffer text (buffer - by window)
     if (e.ctrlKey && !e.shiftKey && (e.key === 'v' || e.key === 'м')) return;
     e.preventDefault();
@@ -410,7 +479,33 @@ for (const pane of [app, side]) {
       send({ type: 'c_hover', view: v.data.view, node: n.nodeId });
     }, 400);
   });
+  // Structure mode: view and place of node under the pointer, path in the state bar
+  pane.addEventListener('mousemove', (e) => {
+    if (!structure()) return;
+    const path = e
+      .composedPath()
+      .filter(
+        (x): x is Element =>
+          x instanceof Element && x.classList.contains('tz-node'),
+      )
+      .reverse();
+    const inner = path.at(-1);
+    statusLine.textContent = inspector.describe(path);
+    const r = inner
+      ? inspector.roles.get(Number(inner.getAttribute('data-id')))
+      : undefined;
+    inspector.showLabel(
+      inner
+        ? [inspector.describe([inner]), r?.rule ?? '']
+            .filter((x) => x !== '')
+            .join('  ← ')
+        : '',
+      e.clientX,
+      e.clientY,
+    );
+  });
   pane.addEventListener('mouseleave', () => {
+    inspector.showLabel('', 0, 0);
     clearTimeout(hoverTimer);
     hoverNode = -1;
     for (const v of views.values()) if (v.host === pane) v.hideHover();

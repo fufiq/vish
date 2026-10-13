@@ -1,0 +1,19 @@
+// Программа для сценария 252_editor_inspect.wire (сама по себе — обычный тест).
+// out: 10
+// out: 2
+when(c, expr yes) otherwise(expr no) => if(c) yes else no;
+
+syntax twice {body} => {
+  body;
+  body;
+}
+
+pair(a, b) => a + b;
+
+main() {
+  n = pair(1, 2);
+  print(when(n > 2) { 10 } otherwise { 20 });
+  k = 0;
+  twice { k += 1; }
+  if(k > 1) print(k);
+}

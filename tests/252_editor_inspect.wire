@@ -1,0 +1,29 @@
+// AST Inspector (§13.1): what is and who is disassembled. The tree of the module element: the
+// place in the parent is the node field and the syntax recording parameter, or the structure
+// that it became; who disassembled the node; instance types. node disclosure at the cursor:
+// the record is which piece became what it turned into and what it turned into; the design is
+// its body with the arguments set up.
+// 
+//.
+// program: editor_inspect.tz
+open_view module
+// design challenge: arguments - its parameters, disclosure - body with substitution
+inspect 1 @when:2
+// expect: kind="n_call" text="" rule="конструкция when(c, expr yes) otherwise(expr no)" rule_at=#
+// expect: role="args[0] → c" kind="n_op" text=">"
+// expect: role="args[2] → otherwise: no" kind="n_block"
+// expect: kind="параметр" text="c = n > 2"
+// expect: kind="раскрытие" text="if(n > 2) {\n  10\n} else {\n  20\n}"
+// function call - selected overload
+// expect: rule="вызов pair(a, b)"
+// Syntax recording of the program: block - its parameter
+inspect 1 @twice:2
+// expect: kind="n_call" text="" rule="запись syntax twice {body}" rule_at=#
+// expect: role="args[0] → body" kind="n_block"
+// expect: kind="итог" text="n_call{callee: twice, args[0]: {\n  k += 1;\n}}"
+// prelude: if is a n_if node, its fields are write parameters
+inspect 1 @if:2
+// expect: kind="n_if" text="" rule="запись syntax if (c) {then_}" rule_at=#
+// expect: role="cond → c" kind="n_op" text=">"
+// expect: role="then_" kind="n_call"
+// expect: kind="итог" text="n_if{cond: k > 1, then_: print(k)}"

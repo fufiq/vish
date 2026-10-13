@@ -110,6 +110,12 @@ export interface Open {
   view: number;
   node: NodeId;
 }
+// AST Inspector: The tree of the module element in which the node node (focus) is located.
+export interface InspectAsk {
+  type: 'c_inspect';
+  view: number;
+  node: NodeId;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -127,7 +133,8 @@ export type ClientMsg =
   | Input
   | Select
   | HoverAsk
-  | Open;
+  | Open
+  | InspectAsk;
 
 export interface ServerHello {
   type: 's_hello';
@@ -292,6 +299,28 @@ export interface Hint {
   offset: number;
   lines: HintLine[];
 }
+// The node of the inspector’s tree in the order of bypassing: place in the parent (field and
+// parameter of recording or construction), view, your text, by whom disassembled, types.
+export interface InspectNode {
+  type: 's_inode';
+  id: NodeId;
+  depth: number;
+  role: string;
+  kind: string;
+  text: string;
+  rule: string;
+  rule_at: NodeId | null;
+  types: string;
+}
+// Inspector: tree, focus (node at the cursor) and focus opening.
+export interface Inspect {
+  type: 's_inspect';
+  view: number;
+  root: NodeId | null;
+  focus: NodeId | null;
+  nodes: InspectNode[];
+  expand: HintLine[];
+}
 export type ServerMsg =
   | ServerHello
   | View
@@ -308,7 +337,8 @@ export type ServerMsg =
   | Selection
   | Clipboard
   | Hover
-  | Hint;
+  | Hint
+  | Inspect;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 
