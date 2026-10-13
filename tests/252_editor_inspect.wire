@@ -7,6 +7,9 @@
 //.
 // program: editor_inspect.tz
 open_view module
+// the ad is the type and value at this moment, not future: k = 0, later k + = 1
+// expect: kind="type" text="i64 = 0"
+// expect-not: text="i64 = 0 | 2"
 // design challenge: arguments - its parameters, disclosure - body with substitution
 inspect 1 @when:2
 // expect: kind="n_call" text="" rule="конструкция when(c, expr yes) otherwise(expr no)" rule_at=#

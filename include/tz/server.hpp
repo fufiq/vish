@@ -1255,7 +1255,7 @@ struct editor_server {
     std::string ts;
     node_id up = db[n].parent;
     if(db.is<n_param>(n)) ts = shown_name(scope_of(n), db.as<n_param>(n).name);
-    else if(db.is<n_var>(n)) ts = shown_name(scope_of(n), db.as<n_var>(n).name);
+    else if(db.is<n_var>(n)) ts = db.as<n_var>(n).init ? shown_node(db.as<n_var>(n).init) : shown_name(scope_of(n), db.as<n_var>(n).name);
     else if(session.node_types.contains(n.value)) ts = shown_node(n);
     else if(db.is<n_ident>(n)) ts = shown_name(scope_of(n), db.as<n_ident>(n).name);
     bool callee = up && db.is<n_call>(up) && db.as<n_call>(up).callee == n;
@@ -2264,7 +2264,7 @@ struct editor_server {
       std::string ts;
       node_id at = n;
       if(db.is<n_param>(n)) ts = shown_name(scope_of(n), db.as<n_param>(n).name);
-      else if(db.is<n_var>(n)) ts = shown_name(scope_of(n), db.as<n_var>(n).name);
+      else if(db.is<n_var>(n)) ts = db.as<n_var>(n).init ? shown_node(db.as<n_var>(n).init) : shown_name(scope_of(n), db.as<n_var>(n).name);
       else if(db.is<n_op>(n) && db.strings.text(db.as<n_op>(n).op) == "=" && db.as<n_op>(n).args.size() == 2 && db.is<n_ident>(db.as<n_op>(n).args[0])) {
         // `x = e` announces if the name is not yet available (author's decision: no auto)
         at = db.as<n_op>(n).args[0];
@@ -2273,7 +2273,9 @@ struct editor_server {
         for(auto const & c: context_identifiers(db, n))
           if(c.name == db.strings.text(name) && (c.kind == "переменная" || c.kind == "параметр")) known = true;
         if(known) continue;
-        ts = shown_name(scope_of(n), name);
+        // the ad is the type and value at the time (initializer), not the future meanings of
+        // the name (author's decision 2026-10-13)
+        ts = shown_node(db.as<n_op>(n).args[1]);
       } else continue;
       if(!ts.empty()) out.push_back({at, "type", ts});
     }
