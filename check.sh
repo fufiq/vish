@@ -9,9 +9,13 @@ L=out/check
 mkdir -p $L
 rm -f $L/r_*
 
-suite() { # имя лог команда…
-  n=$1 l=$2; shift 2
-  "$@" > "$l" 2>&1; c=$?
+suite() { # имя лог бинарь аргументы…
+  # Each run is from its own directory: tests write files relative to it (58 files - out/ io_test
+  # .txt), simultaneous runs otherwise interfere with each other
+  n=$1 l=$2 b=$3; shift 3
+  d=$L/run_$n
+  rm -rf "$d"; mkdir -p "$d/out"; ln -s "$PWD/tests" "$d/tests"
+  (cd "$d" && "$OLDPWD/$b" "$@") > "$l" 2>&1; c=$?
   echo "$n: $(tail -1 "$l") (код $c)" > $L/r_$n
 }
 mode() { # режим: сборка → тесты; release — ещё --a64 и самокомпиляция
