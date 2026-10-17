@@ -1565,6 +1565,15 @@ struct parser {
         if(list) {
           eat_op(",");
           eat_op("...");
+        } else if(is_op(",")) { // (a, b) - several places in the same brackets: part per place
+          f.form.push_back(db.strings.intern(glued ? "()+" : "(+"));
+          while(is_op(",")) {
+            eat_op(",");
+            f.params.push_back(param());
+            f.form.push_back(db.strings.intern(is_op(",") ? ",+" : ",)"));
+          }
+          expect_close(')');
+          continue;
         }
         expect_close(')');
         f.form.push_back(db.strings.intern(cat(glued ? "()" : "(", list ? "..." : "")));
@@ -1617,7 +1626,7 @@ struct parser {
     if(it == rules.syntaxes.end()) return std::nullopt;
     std::vector<node_id> live(it->second.rbegin(), it->second.rend());
     auto piece = [&](node_id d, std::size_t k) { return form_piece(db, db.as<n_fn>(d), k); }; // The parsing layout is not visible.
-    auto is_param = [](std::string_view p) { return form_paren(p) || p == "{" || p == "{="; };
+    auto is_param = [](std::string_view p) { return form_place(p); };
     bool records = std::ranges::all_of(live, [&](node_id d) { auto r = record_of(db, d); return r && r->kind >= 0; });
     uint32_t saved = pos;
     bool committed = false;
@@ -1675,6 +1684,21 @@ struct parser {
             eat_op(",");
             items.push_back(expression());
           }
+          // (a, b): as many places as expressions are parts (+,+...)
+          auto multi = [&](node_id d) {
+            if(items.size() < 2 || !form_open(piece(d, k))) return false;
+            for(std::size_t i = 1; i < items.size(); ++i)
+              if(piece(d, k + i) != (i + 1 == items.size() ? ",)" : ",+")) return false;
+            return true;
+          };
+          if(std::ranges::any_of(live, multi)) {
+            std::erase_if(live, [&](node_id d) { return !multi(d); });
+            expect_close(')');
+            for(node_id x: items) args.push_back(x);
+            k += items.size();
+            continue;
+          }
+          std::erase_if(live, [&](node_id d) { return form_open(piece(d, k)); });
           bool one = items.size() == 1 && std::ranges::any_of(live, [&](node_id d) { return !form_list(piece(d, k)); });
           lists(!one);
           if(live.empty()) throw diagnostic(items.empty() ? "ожидалось выражение" : "ожидалось одно выражение в скобках", here().where);

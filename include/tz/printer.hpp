@@ -209,6 +209,10 @@ struct printer {
           out += '(';
           item(f.params[k]);
           out += ", ...)";
+        } else if(form_open(piece) || form_next(piece)) { // (a, b) - in place of part
+          out += form_open(piece) ? "(" : ", ";
+          item(f.params[k]);
+          if(piece == ",)") out += ')';
         } else params({f.params[k]});
       }, [](std::size_t) { return false; }, true);
       out += " => ";
@@ -285,15 +289,15 @@ struct printer {
         marks.push_back(p.substr(1, p.size() - 2));
         continue;
       }
-      bool place = form_paren(p) || p == "{" || p == "{=";
+      bool place = form_place(p);
       bool after_word = !prev.empty() && lexer::is_ident_start(prev[0]);
-      bool glued = p.starts_with("()") || (!decl && form_paren(p) && after_word);
+      bool glued = p.starts_with("()") || form_next(p) || (!decl && form_paren(p) && after_word);
       bool space = !prev.empty() && !glued && p != ";", newline = false, deeper = false;
       if(decl && !marks.empty()) {
         out += prev.empty() ? "[[" : " [[";
         for(std::size_t i = 0; i < marks.size(); ++i) out += cat(i ? ", " : "", marks[i]);
         out += "]]";
-        space = !p.starts_with("()");
+        space = !p.starts_with("()") && !form_next(p);
       } else
         for(auto m: marks) {
           if(m == "space" || m == "glued") space = m == "space";
@@ -319,6 +323,12 @@ struct printer {
   // The place of writing in its part: (x) - in brackets, (xs, ...) - elements array {…}
   // through the comma, {x} - block or expression as is.
   void part(std::string_view piece, node_id x) {
+    if(form_open(piece) || form_next(piece)) { // (a, b): place of part without parentheses
+      out += form_open(piece) ? "(" : ", ";
+      item(x);
+      if(piece == ",)") out += ')';
+      return;
+    }
     if(!form_paren(piece)) return item(x);
     out += '(';
     if(form_list(piece) && db.is<n_construct>(x) && kept(x)) {

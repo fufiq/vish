@@ -1351,8 +1351,12 @@ bool form_mark(std::string_view p) { return p.size() > 2 && p[0] == '['; }
 bool layout_mark_name(std::string_view w) { return w == "line" || w == "indent" || w == "space" || w == "glued"; }
 // Part-list `(xs, ...)`: elements by comma, space by array {…} (§4.4).
 bool form_list(std::string_view p) { return p.ends_with("..."); }
-// Part in brackets: (x), close to (x), list (xs, ...).
+// Part in brackets: (x), close (x), list (xs, ...); y (a, b) - in place for part: "(+) - open
+// and place, ", +" - comma and place, ",)" - comma, place, close.
 bool form_paren(std::string_view p) { return !p.empty() && p[0] == '('; }
+bool form_open(std::string_view p) { return p == "(+" || p == "()+"; }
+bool form_next(std::string_view p) { return p == ",+" || p == ",)"; }
+bool form_place(std::string_view p) { return form_paren(p) || form_next(p) || p == "{" || p == "{="; }
 // k-th part of the record without layout marks (empty - no such).
 std::string_view form_piece(ast_db const & db, n_fn const & f, std::size_t k) {
   for(symbol s: f.form) {

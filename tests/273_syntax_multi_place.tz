@@ -1,0 +1,20 @@
+// out: 12 10 0 10
+// machine
+// fmt-stable
+// store-roundtrip
+// fmt-has: syntax clamp3 (x, lo, hi) => clamp(x, lo, hi);
+// Несколько мест в одних скобках записи syntax: (a, b) — каждое своё место; формы с
+// разным числом мест — перегрузки. 
+// Было: только (x) и
+// список (xs, ...) — двухместная форма требовала слова между местами.
+struct ast.pair { code first; code second; }
+syntax pair (a, b) => ast.pair{a, b};
+ast.pair { eval(a, b) => (a * 10) + b; }
+
+syntax clamp3 (x, lo, hi) => clamp(x, lo, hi);
+syntax clamp3 (x) => clamp(x, 0, 10);
+clamp(i64 x, i64 lo, i64 hi) => if(x < lo) lo else if(x > hi) hi else x;
+
+main() {
+  print(pair (1, 2), clamp3 (15, 0, 10), clamp3 (-1, 0, 10), clamp3 (42));
+}
