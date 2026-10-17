@@ -755,6 +755,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
       throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[at].where);
     char const * what = fault == jit_fault_kind::bounds ? "индекс вне границ массива (машинный код)"
         : fault == jit_fault_kind::div_zero             ? "деление на ноль (машинный код)"
+        : db.is_assume(at)                              ? "нарушено предположение assume (машинный код)"
                                                         : "нарушено требование require (машинный код)";
     char const * type = fault == jit_fault_kind::bounds ? "out_of_bounds" : fault == jit_fault_kind::div_zero ? "div_by_zero"
                                                                                                               : "require_failed";

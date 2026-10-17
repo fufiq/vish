@@ -1060,7 +1060,7 @@ struct process_machine {
   bool has_leading_require(n_fn const & fn) const {
     if(!fn.body || !db.is<n_block>(fn.body)) return false;
     auto const & items = db.as<n_block>(fn.body).items;
-    return !items.empty() && db.require_cond(items[0]);
+    return !items.empty() && db.require_cond(items[0]) && !db.is_assume(items[0]);
   }
 
   void call_body_step() {
@@ -2218,7 +2218,9 @@ struct process_machine {
     }
     if(!truthy(pop_val(), db[cond].where)) { // require(c, "сообщение", …): Notes only at parsing
       auto const & args = db.as<n_call>(n).args;
-      throw diagnostic(args.size() > 1 && db.is<n_str>(args[1]) ? db.as<n_str>(args[1]).value : std::string("нарушено требование require"), db[n].where);
+      diagnostic d(args.size() > 1 && db.is<n_str>(args[1]) ? db.as<n_str>(args[1]).value : std::string(db.is_assume(n) ? "нарушено предположение assume" : "нарушено требование require"), db[n].where, diag_kind::runtime);
+      d.type = "require_failed"; // Excluding a program like an interpreter: catch it
+      throw d;
     }
     finish(mval{m_unit{}});
   }

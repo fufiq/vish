@@ -2174,7 +2174,7 @@ struct interpreter {
     auto b = in_path ? std::optional<bool>(false) : known_bool(c, db[cond].where);
     if(b && !*b) {
       auto const & args = db.as<n_call>(n).args;
-      std::string msg = "нарушено требование require";
+      std::string msg = db.is_assume(n) ? "нарушено предположение assume" : "нарушено требование require";
       if(args.size() > 1) {
         TZ_TRY(m, eval(args[1], env, frame));
         msg = m.is<str_v>() ? std::string(m.as<str_v>().str()) : show_v(m);
@@ -2201,6 +2201,11 @@ struct interpreter {
     // lead demand - overload selection condition: its failure runtime tells at the call
     // (unpack_failed), the body is not executed
     if(checking() && !b && !leading_require(n)) rt_check("require_failed", db[n].where);
+    // assume( is_index(k, xs) ) - then k - proved index xs (§10.2 ):
+//  
+// Check always, the fact - parsing and machine code
+    if(db.is_assume(n))
+      if(auto proof = index_check(cond, env); proof && proof->positive) proof->cell->proof = proof->fact;
     return ok(); // run-time - Condition: runtime (§5.4)
   }
 
@@ -2208,7 +2213,7 @@ struct interpreter {
     for(uint32_t i = 0; i < db.size(); ++i) {
       if(!db.is<n_fn>(node_id(i)) || !db.is<n_block>(db.as<n_fn>(node_id(i)).body)) continue;
       for(node_id s: db.as<n_block>(db.as<n_fn>(node_id(i)).body).items) {
-        if(!db.require_cond(s)) break;
+        if(!db.require_cond(s) || db.is_assume(s)) break; // assume is not a condition of overload
         if(s == n) return true;
       }
     }
@@ -2463,7 +2468,7 @@ struct interpreter {
     std::size_t from = ~std::size_t{0}; // length ≥ from
     for(auto const & c: cands) {
       auto const & fn = db.as<n_fn>(c.fn);
-      if(db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.require_cond(db.as<n_block>(fn.body).items[0])) return false;
+      if(db.is<n_block>(fn.body) && !db.as<n_block>(fn.body).items.empty() && db.require_cond(db.as<n_block>(fn.body).items[0]) && !db.is_assume(db.as<n_block>(fn.body).items[0])) return false;
       int mine = -1;
       for(std::size_t i = 0; i < fn.params.size(); ++i)
         if(node_id t = db.as<n_param>(fn.params[i]).type; t && db.is<n_pat>(t)) {
@@ -6494,7 +6499,7 @@ struct interpreter {
     int n = 0;
     bool unsure = false;
     for(node_id s: db.as<n_block>(fn.body).items) {
-      if(!db.require_cond(s)) break;
+      if(!db.require_cond(s) || db.is_assume(s)) break;
       ++n;
       flow c = eval(db.require_cond(s), probe, 0);
       if(c.v.is<bool>() && !c.v.as<bool>()) return {false, n, "require не выполнено", false};

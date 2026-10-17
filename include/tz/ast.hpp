@@ -438,7 +438,7 @@ struct ast_db {
     if(!k) {
       auto t = strings.text(s);
       k = sc_known | (t == "[]" ? sc_index : 0) | (t == ".[]" ? sc_field : 0) | (t.size() > 1 && t[0] == '.' && lexer::is_ident_start(t[1]) ? sc_member : 0) |
-          (t == "require" ? sc_require : 0) | (t == "hide" ? sc_hide : 0) | (t == "try_compile" ? sc_try : 0) |
+          (t == "require" || t == "assume" ? sc_require : 0) | (t == "hide" ? sc_hide : 0) | (t == "try_compile" ? sc_try : 0) |
           (t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" ? sc_assign : 0);
     }
     return k;
@@ -454,6 +454,12 @@ struct ast_db {
     auto const & c = as<n_call>(n);
     if(c.args.empty() || !call_named_kind(c, sc_require)) return {};
     return c.args[0];
+  }
+
+  // assume(c) is a test as required, but not a condition for choosing overload and after that
+  // condition is the fact of parsing (§10.2).
+  bool is_assume(node_id n) const {
+    return is<n_call>(n) && is<n_ident>(as<n_call>(n).callee) && strings.text(as<n_ident>(as<n_call>(n).callee).name) == "assume";
   }
 
   // a[i] is a paired operator [] over an object and an index:

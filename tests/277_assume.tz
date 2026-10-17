@@ -1,0 +1,27 @@
+// args: 2
+// out: 6
+// out: -1
+// out: -2
+// check: индексы, доказанные в границах (проверка снята):
+// jit-compiled: get
+// machine
+// assume(p) — явное предположение (§10.2): проверяется всегда (ложное — исключение
+// require_failed с трейсом, не UB: 
+//), после него условие —
+// факт разбора: assume(is_index(k, xs)) — k доказанный индекс xs, проверка границ снята.
+// В отличие от ведущего require — не условие выбора перегрузки. Машина: нарушение require и
+// assume — исключение программы (catch ловит), как у интерпретатора.
+get(xs, i64 k) {
+  assume(is_index(k, xs));
+  xs[k] + xs[k]
+}
+need(i64 n) {
+  require(n > 0);
+  n
+}
+main() {
+  xs = array{1, 2, 3};
+  print(get(xs, parse_int(args[1]).value));
+  print(try { get(xs, parse_int(args[1]).value + 5) } catch(e) { -1 });
+  print(try { need(parse_int(args[1]).value - 5) } catch(e) { -2 });
+}
