@@ -4229,6 +4229,8 @@ struct interpreter {
           t.env = probe_scope(p, t.env, seen);
           t.frame = 0;
           s->declare(it->first, value(t));
+        } else if(code_agg(v)) { // code - reference to the node, run-time -part: erased, it is not the node (code_kind(c)!= ast.int |...)
+          s->declare(it->first, v);
         } else {
           value e = erase(v);
           e.proof = 0; // Facts - their own parsing
