@@ -6835,7 +6835,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -7032,6 +7032,9 @@ struct interpreter {
         return value(std::move(r));
       }
     }
+    // indexation of node c is proved by parsing instance within bounds (in all contexts): index -
+    // range(xs.size) gives indexes of xs; no verification is required
+    if(n == "jit_proven" && a.size() == 1) return value(jit_analysis && jit_analysis->bounds_proven(code_node(a[0], where)));
     // node type in the context of parsing instance embedding - value-type; () - not executed
     if(n == "jit_type" && a.size() == 2 && a[1].is<int64_t>()) {
       if(!jit_analysis) return value();

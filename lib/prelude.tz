@@ -1675,10 +1675,16 @@ jit_compile(cg, f, types, type result) {
     else if(k == ast.string) vm_or_bad(e, fmt"узел {k}");
     else bad(fmt"узел {k}");
   };
-  // индекс в acc, проверка границ по размеру массива (запись s); данные — в second
+  // индекс в acc, проверка границ по размеру массива (запись s); данные — в second. Индекс,
+  // доказанный разбором экземпляра (range(xs.size) — индексы xs, пока xs не меняется), —
+  // без проверки: 
+// 
+//   — проверка уже была (is_index в for).
   checked(i64 s, e) => {
-    arr_size(second, env[s].slot);
-    jump_to(trap(1, e), 3, acc, second);
+    if(!jit_proven(e)) {
+      arr_size(second, env[s].slot);
+      jump_to(trap(1, e), 3, acc, second);
+    }
     arr_data(second, env[s].slot);
   };
   // append(xs, x) (push): место в словах есть — запись и n + 1 машинным кодом («бесконечный
