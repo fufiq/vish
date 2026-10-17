@@ -1,0 +1,13 @@
+// Editing function in the editor (Ctrl+Shift+R, §7.4): editing the program from the language to
+// the database, as a human edit; representing all customers - again.
+// program: program_edit.tz
+open_view module
+[2] open_view module
+apply refactor
+// expect: output text="применена refactor: правок 2\n" ok=true
+// expect: square(x) => x * x;
+// expect:   a = square(3);
+// expect-not:   print(debug);
+// expect: другому клиенту:
+apply nothing
+// expect: output text="нет функции правки nothing() без параметров\n" ok=false

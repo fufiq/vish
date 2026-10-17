@@ -1,0 +1,21 @@
+// Editing the program from the language (§7.4, author's decision 2026-10-17): the
+// editing function changes the program itself through the base - as a human edit, with
+// journal; Not on execution: only explicit application (tz apply, editor).
+//
+// program: program_edit.tz
+run
+// expect: 9 4
+apply refactor
+// expect: применена refactor: правок 2
+fmt
+// expect: square(x) => x * x;
+// expect: a = square(3);
+// expect: b = square(2);
+// expect-not: print(debug);
+run
+// expect: 9 4
+// expect-not: 7
+roundtrip
+// expect: roundtrip: совпадает
+apply nothing
+// expect: нет функции правки nothing() без параметров

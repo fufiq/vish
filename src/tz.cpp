@@ -27,7 +27,7 @@ using tz::cat;
 using tz::put;
 
 int usage() {
-  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz fmt --ct <программа>   проекция после элаборации: мутации ct-кода и порождённое emit\n  tz fmt --projection <ключ> <программа>   проекция — модуль записей syntax (по ключу, как use)\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] [--a64] <программа> [аргументы...]   исполнить main(); --a64 — код AArch64 параллельно, в qemu-aarch64\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
+  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz fmt --ct <программа>   проекция после элаборации: мутации ct-кода и порождённое emit\n  tz fmt --projection <ключ> <программа>   проекция — модуль записей syntax (по ключу, как use)\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] [--a64] <программа> [аргументы...]   исполнить main(); --a64 — код AArch64 параллельно, в qemu-aarch64\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz apply <программа> <функция> [база.tzdb]   применить функцию правки (code_rename…): новый текст, база\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог>          прогнать эталонные тесты\n"));
   return 2;
 }
 
@@ -236,6 +236,18 @@ int main(int argc, char ** argv) {
     }
     if(!parsed) return 1; // We don't do the whole thing - M0
 
+    // Program editing function in language (§7.4): tz apply program function [base.tzdb] - new
+    // projection in stdout, base - with journal editing.
+    if(cmd == "apply") {
+      if(at >= argc) return usage();
+      tz::vm_session session(p.db, p.root, p.path);
+      std::string r = session.exec(cat("apply ", argv[at]));
+      put(stderr, r);
+      if(!r.starts_with("применена")) return 1;
+      put(stdout, tz::printer(p.db).print(p.root));
+      if(at + 1 < argc) tz::save_db(p.db, p.root, argv[at + 1]);
+      return 0;
+    }
     if(cmd == "vm") {
       tz::vm_session session(p.db, p.root, p.path);
       auto & in = tz::os::host_stdin();

@@ -19,7 +19,7 @@
 
 namespace tz::proto {
 
-constexpr uint32_t version = 4;
+constexpr uint32_t version = 5;
 
 // --- client ---
 
@@ -119,7 +119,12 @@ struct c_inspect {
   uint32_t view;
   node_id node;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect>;
+// Apply the editing function of the program (without parameters): its code_rename, code_replace
+// ... change the program through the base as a human edit (§7.4). The answer is s_output.
+struct c_apply {
+  std::string fn;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply>;
 
 // --- VM customer ---
 

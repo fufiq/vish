@@ -3102,6 +3102,25 @@ struct interpreter {
 
   // --- code as a value (§7.4) ---
 
+  bool editing_program = false; // Application of the editing function: code_replace ... change the program
+  uint32_t program_edits = 0;
+  // Apply the editing function (without parameters): its code_replace, code_rename ... change
+  // the program through the base (journal, editor - as a human edit).
+  uint32_t apply_edit(node_id f) {
+    elaborate();
+    editing_program = true;
+    struct off {
+      bool & flag;
+      ~off() { flag = false; }
+    } guard{editing_program};
+    auto const & fn = db.as<n_fn>(f);
+    scope * inner = new_scope(globals);
+    scope_hold hold{*this, inner};
+    flow r = run_frame(fn.body, inner, fn.name, fn.outline);
+    if(r.kind == flow_kind::thr) uncaught(r);
+    return program_edits;
+  }
+
   // parsing is a code fact-finding program (code_types...): when parsing is itself, when
   // executed it is its parsing, once.
   std::list<interpreter> analysis_vm; // List: Type not yet complete (as choice_vms)
@@ -6779,7 +6798,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -7019,6 +7038,68 @@ struct interpreter {
     if(n == "jit_chain" && a.size() == 2 && a[1].is<int64_t>()) {
       node_id t = jit_analysis ? jit_analysis->chain_tree(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : node_id{};
       return t ? value(array_v::of({code_value(t)})) : value(array_v::of({}));
+    }
+    // --- editing the program from the language (author's decision 2026-10-17):
+// through the database and journal, as
+    // editing the editor, not mutations of the ct code (these are derivatives, roll back). Only with the
+    // explicit application of the editing function (tz apply, editor), not at every run: otherwise, the
+    // execution of the program would change the program itself. My names and boundaries.
+    if(n == "code_replace" || n == "code_rename" || n == "code_remove" || n == "code_insert") {
+      if(!editing_program) fail(cat(n, ": правка программы — только при её применении (tz apply функция, редактор Ctrl+Shift+R)"), where);
+      if(n == "code_replace" && a.size() == 2) { // The node becomes different (id the same)
+        node_id c = code_node(a[0], where), to = code_node(a[1], where);
+        if(c != to) {
+          db.replace(c, db[to].kind);
+          db.link_parents(c);
+        }
+        ++program_edits;
+        return value(unit_v{});
+      }
+      if(n == "code_rename" && a.size() == 2 && a[1].is<str_v>()) { // declaration and all its use
+        node_id d = code_node(a[0], where);
+        symbol to = sym(a[1].as<str_v>());
+        auto users = users_of(d);
+        auto renamed = [&](node_id x) {
+          node_kind k = db[x].kind;
+          if(auto * f = std::get_if<n_fn>(&k)) f->name = to;
+          else if(auto * v = std::get_if<n_var>(&k)) v->name = to;
+          else if(auto * pa = std::get_if<n_param>(&k)) pa->name = to;
+          else if(auto * i = std::get_if<n_ident>(&k)) i->name = to;
+          else fail("code_rename: объявление — функция, переменная, параметр или имя", where);
+          db.replace(x, std::move(k));
+        };
+        renamed(d);
+        for(node_id u: users) renamed(u);
+        ++program_edits;
+        return value(int64_t(users.size()));
+      }
+      if(n == "code_remove" && a.size() == 1) { // module
+        node_id c = code_node(a[0], where), up = db[c].parent;
+        if(!up || !db.is_context(up)) fail("code_remove: удалить можно элемент блока или модуля", where);
+        node_kind k = db[up].kind;
+        std::visit([&](auto & x) {
+          if constexpr(requires { x.items; }) std::erase(x.items, c);
+        }, k);
+        db.replace(up, std::move(k));
+        db.link_parents(up);
+        ++program_edits;
+        return value(unit_v{});
+      }
+      if(n == "code_insert" && a.size() == 3 && a[1].is<int64_t>()) { // c block or module in place k
+        node_id up = code_node(a[0], where), c = code_node(a[2], where);
+        if(!db.is_context(up)) fail("code_insert: вставлять можно в блок или модуль", where);
+        node_kind k = db[up].kind;
+        std::visit([&](auto & x) {
+          if constexpr(requires { x.items; }) {
+            std::size_t at = std::min<std::size_t>(std::size_t(std::max<int64_t>(a[1].as<int64_t>(), 0)), x.items.size());
+            x.items.insert(x.items.begin() + std::ptrdiff_t(at), c);
+          }
+        }, k);
+        db.replace(up, std::move(k));
+        db.link_parents(up);
+        ++program_edits;
+        return value(unit_v{});
+      }
     }
     // --- Code links (author's decision 2026-10-17):
 // Whoa

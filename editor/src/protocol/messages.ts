@@ -116,6 +116,11 @@ export interface InspectAsk {
   view: number;
   node: NodeId;
 }
+// Apply the program editing function (Ctrl+Shift+R): the answer is s_output.
+export interface Apply {
+  type: 'c_apply';
+  fn: string;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -134,7 +139,8 @@ export type ClientMsg =
   | Select
   | HoverAsk
   | Open
-  | InspectAsk;
+  | InspectAsk
+  | Apply;
 
 export interface ServerHello {
   type: 's_hello';

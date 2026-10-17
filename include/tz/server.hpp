@@ -2797,6 +2797,16 @@ struct editor_server {
     send(p, out);
   }
 
+  // The function of editing the program (author's decision 2026-10-17): edits - in the
+  // database, all presentations of all clients - again (as after the merger).
+  void handle(peer & p, proto::c_apply const & m) {
+    finalize_all();
+    std::string r = session.apply(m.fn);
+    bool ok = r.starts_with("применена");
+    if(ok) refresh_all();
+    send(p, proto::s_output{r, ok});
+  }
+
   void handle(peer & p, proto::c_merge const & m) {
     finalize_all();
     std::string path = m.path;

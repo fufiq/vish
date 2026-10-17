@@ -49,6 +49,7 @@ struct vm_session {
       if(cmd == "residual") return residual(args);
       if(cmd == "fmt") return printer(db).print(root);
       if(cmd == "edit" && args.size() == 1) return edit(args[0], body);
+      if(cmd == "apply" && args.size() == 1) return apply(args[0]);
       if(cmd == "stats") return stats();
       if(cmd == "roundtrip") return roundtrip();
       if(cmd == "save" && args.size() == 1) {
@@ -172,8 +173,21 @@ struct vm_session {
     return err + residual_view(db, vm).print(root);
   }
 
-  // Function correction: the text is disassembled into the base (new import), the node of the old
-  // function is replaced with new content - id and all references to the function are saved.
+  // Function correction: the text is disassembled into the base (new import), the node of
+  // the old function is replaced with new content - id and all references to the function
+  // are saved. Apply the editing function of the program (code_replace, code_rename,
+  // code_remove, code_insert): edits - to the database as human editing (§7.4).
+  std::string apply(std::string const & fn_name) {
+    node_id f;
+    for(node_id item: db.as<n_module>(root).items)
+      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name && db.as<n_fn>(item).params.empty()) f = item;
+    if(!f) return cat("нет функции правки ", fn_name, "() без параметров\n");
+    interpreter vm(db, root, {name}, mode::run);
+    uint32_t n = vm.apply_edit(f);
+    db.link_parents(root);
+    return cat("применена ", fn_name, ": правок ", n, "\n");
+  }
+
   std::string edit(std::string const & fn_name, std::string const & text) {
     parser p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
     node_id at; // parsing rules of the function location (§4.4): announced before it; new - the entire module

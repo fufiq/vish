@@ -38,7 +38,8 @@ const layersBar = byId('layers');
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
 const mergePanel = byId('merge');
-let gotoMode: 'goto' | 'merge' | 'projection' = 'goto';
+type GotoMode = 'goto' | 'merge' | 'projection' | 'apply';
+let gotoMode: GotoMode = 'goto';
 const statusLine = byId('status');
 const runPanel = byId('run');
 const runStdin = byId('run-stdin') as HTMLTextAreaElement;
@@ -309,14 +310,16 @@ function showMerge(
 }
 
 // Ctrl+P is the signature string; it is sent by Enter, Escape is closed.
-function openGoto(mode: 'goto' | 'merge' | 'projection' = 'goto'): void {
+function openGoto(mode: GotoMode = 'goto'): void {
   gotoMode = mode;
   gotoInput.placeholder =
     mode === 'goto'
       ? 'перейти или добавить: foo(i64)'
       : mode === 'merge'
         ? 'слить с базой: путь.tzdb'
-        : 'проекция: ключ модуля записей (пусто — по умолчанию)';
+        : mode === 'apply'
+          ? 'применить функцию правки программы: имя (code_rename, code_replace…)'
+          : 'проекция: ключ модуля записей (пусто — по умолчанию)';
   gotoForm.hidden = false;
   gotoInput.value = '';
   gotoInput.focus();
@@ -324,7 +327,11 @@ function openGoto(mode: 'goto' | 'merge' | 'projection' = 'goto'): void {
 gotoForm.addEventListener('submit', (e) => {
   e.preventDefault();
   gotoForm.hidden = true;
-  if (gotoMode === 'merge' && gotoInput.value.trim() !== '') {
+  if (gotoMode === 'apply' && gotoInput.value.trim() !== '') {
+    runPanel.hidden = false;
+    runOutput.textContent = '…';
+    send({ type: 'c_apply', fn: gotoInput.value.trim() });
+  } else if (gotoMode === 'merge' && gotoInput.value.trim() !== '') {
     send({ type: 'c_merge', path: gotoInput.value.trim() });
   } else if (gotoMode === 'projection' && active) {
     // projection Presentation (§4.4): Print Records and parsing Rules - Key Module
@@ -362,6 +369,11 @@ for (const pane of [app, side]) {
       e.preventDefault();
       byId('ast').hidden = !byId('ast').hidden;
       requestInspect();
+      return;
+    }
+    if (e.ctrlKey && e.shiftKey && (e.key === 'R' || e.key === 'К')) {
+      e.preventDefault();
+      openGoto('apply');
       return;
     }
     if (e.ctrlKey && e.shiftKey && (e.key === 'A' || e.key === 'Ф')) {
