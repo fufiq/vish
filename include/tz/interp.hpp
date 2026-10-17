@@ -50,6 +50,7 @@ struct write_log {
   std::set<value *> cells;
   std::map<value *, value> old;
   bool keep_old = false;
+  std::set<value *> whole; // Completely recorded (replacement, growth) - cell version grows
 };
 
 struct cell_book {
@@ -69,7 +70,10 @@ struct cell_book {
     auto & e = cells[c];
     if(whole) e.second = ++clock;
     for(auto * l: logs)
-      if(e.first <= l->start && l->cells.insert(c).second && l->keep_old) l->old.emplace(c, *c);
+      if(e.first <= l->start) {
+        if(whole) l->whole.insert(c);
+        if(l->cells.insert(c).second && l->keep_old) l->old.emplace(c, *c);
+      }
   }
 };
 
@@ -2766,6 +2770,7 @@ struct interpreter {
         log_hold wh{*this, &log};
         f = eval(l.body, env, frame);
       }
+      loop_whole[n.value].insert(log.whole.begin(), log.whole.end());
       if(!loops.back().may_break) {
         if(f.kind == flow_kind::brk) return ok();
         if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
@@ -2794,6 +2799,7 @@ struct interpreter {
       }
       if(f.kind == flow_kind::ret) record_return(f);
       if(f.kind == flow_kind::thr) record_throw(f.v);
+      loop_whole[n.value].insert(log.whole.begin(), log.whole.end());
       std::size_t had = cells.size();
       cells.insert(log.cells.begin(), log.cells.end());
       std::vector<std::string> after;
@@ -3930,6 +3936,11 @@ struct interpreter {
 
   flow index_rt(node_id n, index_view const & i, value const & obj, value const & idx, scope * env) {
     span where = db[n].where;
+    if(checking()) { // node array cell - for cycle invariant (jit_loop_keeps)
+      value * cell = db.is<n_ident>(i.object) ? find(env, db.as<n_ident>(i.object).name) : nullptr;
+      if(cell) index_cells[n.value].insert(cell);
+      else index_cells[n.value].insert(nullptr);
+    }
     // index type - property of instance, not values: place of use instantiation error
     // (§13.4), including when array and index is run-time
     auto index_type = [&](value const & x) {
@@ -6835,7 +6846,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -7035,6 +7046,10 @@ struct interpreter {
     // indexation of node c is proved by parsing instance within bounds (in all contexts): index -
     // range(xs.size) gives indexes of xs; no verification is required
     if(n == "jit_proven" && a.size() == 1) return value(jit_analysis && jit_analysis->bounds_proven(code_node(a[0], where)));
+    // The node array indexing c for the entire cycle l did not change completely (replacement, growth)
+    // - according to journal records parsing:
+// parsing fact, not the compiler's guess; its data and size - once before the cycle
+    if(n == "jit_loop_keeps" && a.size() == 2) return value(jit_analysis && jit_analysis->loop_keeps(code_node(a[0], where), code_node(a[1], where)));
     // node type in the context of parsing instance embedding - value-type; () - not executed
     if(n == "jit_type" && a.size() == 2 && a[1].is<int64_t>()) {
       if(!jit_analysis) return value();
@@ -7459,6 +7474,18 @@ struct interpreter {
   mutable std::set<uint64_t> writes_open;
   mutable bool writes_guess_used = false;
   std::set<uint32_t> proven; // node Indexations Proven within Boundaries
+  // Cycle invariant (parsing): cells written entirely per cycle (all iterations and contexts) and
+  // cells of node indexing arrays (nullptr - array not variable)
+  std::unordered_map<uint32_t, std::set<value *>> loop_whole;
+  std::unordered_map<uint32_t, std::set<value *>> index_cells;
+  bool loop_keeps(node_id loop, node_id index) const {
+    auto l = loop_whole.find(loop.value);
+    auto c = index_cells.find(index.value);
+    if(l == loop_whole.end() || c == index_cells.end() || c->second.contains(nullptr)) return false;
+    for(value * x: c->second)
+      if(l->second.contains(x)) return false;
+    return true;
+  }
   std::vector<std::tuple<span, std::string, uint32_t>> proven_list; // (place, text, node)
   std::set<uint32_t> unproven; // node indexation where the index has not been proven
   cell_book book;

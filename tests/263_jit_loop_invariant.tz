@@ -1,0 +1,92 @@
+// args: 6
+// out: 1
+// out: 2
+// out: 3
+// out: 4
+// out: 5
+// out: 5
+// out: [2, 3, 4, 5, 6, 1]
+// out: 10
+// out: 10
+// out: 15
+// out: 441
+// jit-compiled: swaps
+// jit-compiled: grows
+// jit-compiled: rebinds
+// jit-compiled: fresh
+// jit-compiled: nested
+// Данные и размер массива-переменной, объявленной до цикла, — один раз на входе в цикл, если
+// разбор подтвердил: за весь цикл массив не менялся целиком (jit_loop_keeps; запись элемента —
+// не замена). push, присваивание всего массива, массив внутри цикла — как раньше, каждый раз.
+//;
+//.
+swaps(xs) {
+  s = 0;
+  i = 1;
+  loop {
+    if(i >= xs.size) break;
+    t = xs[i];
+    xs[i] = xs[i - 1];
+    xs[i - 1] = t;
+    s += xs[i];
+    print(i);
+    i += 1;
+  }
+  s
+}
+
+grows(xs, i64 n) {
+  s = 0;
+  i = 0;
+  loop {
+    if(i >= n) break;
+    xs.push(i);
+    s += xs[i];
+    i += 1;
+  }
+  s
+}
+
+rebinds(xs, ys, i64 n) {
+  s = 0;
+  i = 0;
+  loop {
+    if(i >= n) break;
+    s += xs[i % 2];
+    xs = ys;
+    i += 1;
+  }
+  s
+}
+
+fresh(i64 n) {
+  s = 0;
+  i = 0;
+  loop {
+    if(i >= n) break;
+    zs = fill(i + 1, i);
+    s += zs[i];
+    i += 1;
+  }
+  s
+}
+
+nested(xs) {
+  s = 0;
+  for(a : range(xs.size)) {
+    for(b : range(xs.size)) s += xs[a] * xs[b];
+  }
+  s
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  xs = fill(n, 0);
+  for(k : range(n)) xs[k] = k + 1;
+  print(swaps(xs));
+  print(xs);
+  print(grows(fill(1, 0), n));
+  print(rebinds(fill(2, 5), fill(2, 1), n));
+  print(fresh(n));
+  print(nested(xs));
+}

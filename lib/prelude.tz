@@ -1293,6 +1293,9 @@ jit_compile(cg, f, types, type result) {
   labels = array{};
   faults = array{};
   loops = array{};
+  loop_nodes = array{}; // узлы охватывающих циклов (ast.loop) — для jit_loop_keeps
+  loop_slot0 = array{}; // nslots на входе в цикл: слот меньше — переменная объявлена до цикла
+  hoists = array{}; // вынесенное: array{глубина цикла, слот массива, 0 данные / 1 размер, слот значения}
   env = array{};
   top = 0; // занятые записи env
   base = 0; // первая запись текущей (встроенной) функции
@@ -1694,13 +1697,36 @@ jit_compile(cg, f, types, type result) {
       ast.loop{body} = e;
       t = label();
       done = label();
+      pre = label(); // предзаголовок: вынесенное из цикла (инвариант разбора) — один раз на входе
+      jump(pre);
       bind(t);
       loops.push(t);
       loops.push(done);
+      loop_nodes.push(e);
+      loop_slot0.push(nslots);
       in_region(() => gen(body));
       jump(t);
       bind(done);
       loops = drop_last(drop_last(loops));
+      depth_l = loop_nodes.size - 1;
+      loop_nodes = drop_last(loop_nodes);
+      loop_slot0 = drop_last(loop_slot0);
+      mine = array{};
+      rest = array{};
+      for(h : hoists) if(h[0] == depth_l) mine.push(h) else rest.push(h);
+      hoists = rest;
+      if(mine.size == 0) labels[pre] = labels[t];
+      else {
+        after = label();
+        jump(after);
+        bind(pre);
+        for(h : mine) {
+          if(h[2] == 0) arr_data(third, h[1]) else arr_size(third, h[1]);
+          put_bytes(slot_st(h[3], third));
+        }
+        jump(t);
+        bind(after);
+      }
     } else if(k == ast.break) {
       if(loops.size == 0) bad("break вне цикла");
       else jump(loops[loops.size - 1]);
@@ -1762,10 +1788,33 @@ jit_compile(cg, f, types, type result) {
 //   — проверка уже была (is_index в for).
   checked(i64 s, e) => {
     if(!jit_proven(e)) {
-      arr_size(second, env[s].slot);
+      hz = hoisted(s, 1, e);
+      if(hz >= 0) put_bytes(slot_ld(second, hz)) else arr_size(second, env[s].slot);
       jump_to(trap(1, e), 3, acc, second);
     }
-    arr_data(second, env[s].slot);
+    hd = hoisted(s, 0, e);
+    if(hd >= 0) put_bytes(slot_ld(second, hd)) else arr_data(second, env[s].slot);
+  };
+  // Данные (0) или размер (1) массива-переменной s — вынесенные из текущего цикла: 
+// 
+// 
+// Только по факту разбора (jit_loop_keeps: массив за весь цикл не
+  // менялся целиком) и для переменной, объявленной до цикла (её слот — до входа в цикл):
+  //.
+  // Значение — слот-переменная (в регистре, если есть свободный); -1 — не вынесено.
+  hoisted(i64 s, i64 kind, e) => {
+    r = -1;
+    if(!gen_sub && (loop_nodes.size > 0)) {
+      d = loop_nodes.size - 1;
+      sl = env[s].slot;
+      for(h : hoists) if((h[0] == d) && ((h[1] == sl) && (h[2] == kind))) r = h[3];
+      if((r < 0) && ((sl < loop_slot0[d]) && jit_loop_keeps(loop_nodes[d], e))) {
+        r = alloc(1);
+        give_reg(r, i64);
+        hoists.push(array{d, sl, kind, r});
+      }
+    }
+    r
   };
   // append(xs, x) (push): место в словах есть — запись и n + 1 машинным кодом («бесконечный
   // вектор»: растущий массив не переезжает, §12.2); нет — VM через службу (op 9: рост,
