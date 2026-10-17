@@ -914,6 +914,8 @@ struct process_machine {
           }
         }
       }
+      // Primitive operator - only "type equal", without i64 → f64 (§5.8, like an interpreter)
+      if(fits && !conv.empty() && helper.intrinsic_operator(fnode)) fits = false;
       if(!fits) {
         ++rejected;
         continue;
@@ -971,7 +973,12 @@ struct process_machine {
       d.type = "unpack_failed";
       throw d;
     }
-    if(!chosen) throw diagnostic(cat("нет подходящей перегрузки ", helper.str(db.as<n_fn>(fns.front()).name)), where);
+    if(!chosen) {
+      std::string_view name = helper.str(db.as<n_fn>(fns.front()).name);
+      if((name.starts_with("infix") || name.starts_with("prefix")) && nargs >= 1 && nargs <= 2) // interpreter-like
+        throw diagnostic(cat("оператор ", name.substr(name.starts_with("infix") ? 5 : 6), " не определён для ", describe(deref(args[0])), nargs == 2 ? cat(" и ", describe(deref(args[1]))) : std::string()), where);
+      throw diagnostic(cat("нет подходящей перегрузки ", name), where);
+    }
     if(tie) throw diagnostic("неоднозначный вызов", where);
     for(auto & [i, v]: chosen_conv) args[i] = std::move(v); // Values - in the types of parameters selected
     auto const & fn = db.as<n_fn>(chosen);
