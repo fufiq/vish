@@ -106,6 +106,7 @@ f64(i64 x) => int_to_float(x);
 f64(f64 x) => x;
 i64(f64 x) => float_to_int(x);
 i64(i64 x) => x;
+
 // биты i64 — для кодирования инструкций на языке (§10.4)
 [[associative]] operator (i64 a) & (i64 b) => band(a, b);
 [[associative]] operator (i64 a) | (i64 b) => bor(a, b);
@@ -4079,3 +4080,200 @@ analysis_limit(what) {
   else if(what == "recursion_depth") 2000 // предел глубины рекурсии при разборе
   else 0
 }
+
+// Числа других ширин — код, а не типы ядра: 
+// 
+// 
+//  (convert(0xdeadbeef, type_c<uint16_t>)). Свой
+// тип над __int64 / __float64 (§5.8): переполнение — по своей ширине (модульно, как i64), смешивать
+// с i64 — только явно: i32(x). *Моё:* представление в VM — 64 бита, сдвиг — по модулю ширины,
+// i32{x} — без проверки (x уже в диапазоне), i32(x) — с переносом.
+struct i8 { __int64 value; }
+struct i16 { __int64 value; }
+struct i32 { __int64 value; }
+struct u8 { __int64 value; }
+struct u16 { __int64 value; }
+struct u32 { __int64 value; }
+struct u64 { __int64 value; }
+struct f32 { __float64 value; }
+num_wrap_s(i64 x, i64 bits) => (x << (64 - bits)) >> (64 - bits);
+num_wrap_u(i64 x, i64 bits) => x & ((1 << bits) - 1);
+num_srl(i64 x, i64 n) => if(n == 0) x else ((x >> n) & ((1 << (64 - n)) - 1)); // логический сдвиг вправо
+num_ult(i64 a, i64 b) => (a ^ (1 << 63)) < (b ^ (1 << 63)); // беззнаковое сравнение битов
+// беззнаковое деление битов: «в столбик», 64 шага
+num_udivrem(i64 a, i64 b) {
+  require(b != 0, "деление на ноль");
+  q = 0;
+  r = 0;
+  for(i : range(64)) {
+    r = (r << 1) | (num_srl(a, 63 - i) & 1);
+    if(!num_ult(r, b)) {
+      r = r - b;
+      q = q | (1 << (63 - i));
+    }
+  }
+  array{q, r}
+}
+num_utext(i64 x) {
+  if(x >= 0) return text(x);
+  array{q, r} = num_udivrem(x, 10);
+  text(q) + text(r)
+}
+f32(f64 x) => f32{f32_round(x)};
+f32(i64 x) => f32{f32_round(f64(x))};
+f64(f32 x) => x.value;
+i64(f32 x) => i64(x.value);
+text(f32 x) => text(x.value);
+operator -(f32 a) => f32{0.0 - a.value};
+operator (f32 a) + (f32 b) => f32{f32_round(a.value + b.value)};
+operator (f32 a) - (f32 b) => f32{f32_round(a.value - b.value)};
+operator (f32 a) * (f32 b) => f32{f32_round(a.value * b.value)};
+operator (f32 a) / (f32 b) => f32{f32_round(a.value / b.value)};
+operator (f32 a) == (f32 b) => a.value == b.value;
+operator (f32 a) != (f32 b) => a.value != b.value;
+operator (f32 a) < (f32 b) => a.value < b.value;
+operator (f32 a) > (f32 b) => a.value > b.value;
+operator (f32 a) <= (f32 b) => a.value <= b.value;
+operator (f32 a) >= (f32 b) => a.value >= b.value;
+i8(i64 x) => i8{num_wrap_s(x, 8)};
+i64(i8 x) => x.value;
+f64(i8 x) => f64(x.value);
+text(i8 x) => text(x.value);
+operator (i8 a) + (i8 b) => i8(a.value + b.value);
+operator (i8 a) - (i8 b) => i8(a.value - b.value);
+operator (i8 a) * (i8 b) => i8(a.value * b.value);
+operator (i8 a) / (i8 b) => i8(a.value / b.value);
+operator (i8 a) % (i8 b) => i8(a.value % b.value);
+operator (i8 a) & (i8 b) => i8(a.value & b.value);
+operator (i8 a) | (i8 b) => i8(a.value | b.value);
+operator (i8 a) ^ (i8 b) => i8(a.value ^ b.value);
+operator (i8 a) << (i8 b) => i8(a.value << (b.value & 7));
+operator (i8 a) >> (i8 b) => i8(a.value >> (b.value & 7));
+operator (i8 a) == (i8 b) => a.value == b.value;
+operator (i8 a) != (i8 b) => a.value != b.value;
+operator (i8 a) < (i8 b) => a.value < b.value;
+operator (i8 a) > (i8 b) => a.value > b.value;
+operator (i8 a) <= (i8 b) => a.value <= b.value;
+operator (i8 a) >= (i8 b) => a.value >= b.value;
+operator -(i8 a) => i8(0 - a.value);
+i16(i64 x) => i16{num_wrap_s(x, 16)};
+i64(i16 x) => x.value;
+f64(i16 x) => f64(x.value);
+text(i16 x) => text(x.value);
+operator (i16 a) + (i16 b) => i16(a.value + b.value);
+operator (i16 a) - (i16 b) => i16(a.value - b.value);
+operator (i16 a) * (i16 b) => i16(a.value * b.value);
+operator (i16 a) / (i16 b) => i16(a.value / b.value);
+operator (i16 a) % (i16 b) => i16(a.value % b.value);
+operator (i16 a) & (i16 b) => i16(a.value & b.value);
+operator (i16 a) | (i16 b) => i16(a.value | b.value);
+operator (i16 a) ^ (i16 b) => i16(a.value ^ b.value);
+operator (i16 a) << (i16 b) => i16(a.value << (b.value & 15));
+operator (i16 a) >> (i16 b) => i16(a.value >> (b.value & 15));
+operator (i16 a) == (i16 b) => a.value == b.value;
+operator (i16 a) != (i16 b) => a.value != b.value;
+operator (i16 a) < (i16 b) => a.value < b.value;
+operator (i16 a) > (i16 b) => a.value > b.value;
+operator (i16 a) <= (i16 b) => a.value <= b.value;
+operator (i16 a) >= (i16 b) => a.value >= b.value;
+operator -(i16 a) => i16(0 - a.value);
+i32(i64 x) => i32{num_wrap_s(x, 32)};
+i64(i32 x) => x.value;
+f64(i32 x) => f64(x.value);
+text(i32 x) => text(x.value);
+operator (i32 a) + (i32 b) => i32(a.value + b.value);
+operator (i32 a) - (i32 b) => i32(a.value - b.value);
+operator (i32 a) * (i32 b) => i32(a.value * b.value);
+operator (i32 a) / (i32 b) => i32(a.value / b.value);
+operator (i32 a) % (i32 b) => i32(a.value % b.value);
+operator (i32 a) & (i32 b) => i32(a.value & b.value);
+operator (i32 a) | (i32 b) => i32(a.value | b.value);
+operator (i32 a) ^ (i32 b) => i32(a.value ^ b.value);
+operator (i32 a) << (i32 b) => i32(a.value << (b.value & 31));
+operator (i32 a) >> (i32 b) => i32(a.value >> (b.value & 31));
+operator (i32 a) == (i32 b) => a.value == b.value;
+operator (i32 a) != (i32 b) => a.value != b.value;
+operator (i32 a) < (i32 b) => a.value < b.value;
+operator (i32 a) > (i32 b) => a.value > b.value;
+operator (i32 a) <= (i32 b) => a.value <= b.value;
+operator (i32 a) >= (i32 b) => a.value >= b.value;
+operator -(i32 a) => i32(0 - a.value);
+u8(i64 x) => u8{num_wrap_u(x, 8)};
+i64(u8 x) => x.value;
+f64(u8 x) => f64(x.value);
+text(u8 x) => text(x.value);
+operator (u8 a) + (u8 b) => u8(a.value + b.value);
+operator (u8 a) - (u8 b) => u8(a.value - b.value);
+operator (u8 a) * (u8 b) => u8(a.value * b.value);
+operator (u8 a) / (u8 b) => u8(a.value / b.value);
+operator (u8 a) % (u8 b) => u8(a.value % b.value);
+operator (u8 a) & (u8 b) => u8(a.value & b.value);
+operator (u8 a) | (u8 b) => u8(a.value | b.value);
+operator (u8 a) ^ (u8 b) => u8(a.value ^ b.value);
+operator (u8 a) << (u8 b) => u8(a.value << (b.value & 7));
+operator (u8 a) >> (u8 b) => u8(a.value >> (b.value & 7));
+operator (u8 a) == (u8 b) => a.value == b.value;
+operator (u8 a) != (u8 b) => a.value != b.value;
+operator (u8 a) < (u8 b) => a.value < b.value;
+operator (u8 a) > (u8 b) => a.value > b.value;
+operator (u8 a) <= (u8 b) => a.value <= b.value;
+operator (u8 a) >= (u8 b) => a.value >= b.value;
+u16(i64 x) => u16{num_wrap_u(x, 16)};
+i64(u16 x) => x.value;
+f64(u16 x) => f64(x.value);
+text(u16 x) => text(x.value);
+operator (u16 a) + (u16 b) => u16(a.value + b.value);
+operator (u16 a) - (u16 b) => u16(a.value - b.value);
+operator (u16 a) * (u16 b) => u16(a.value * b.value);
+operator (u16 a) / (u16 b) => u16(a.value / b.value);
+operator (u16 a) % (u16 b) => u16(a.value % b.value);
+operator (u16 a) & (u16 b) => u16(a.value & b.value);
+operator (u16 a) | (u16 b) => u16(a.value | b.value);
+operator (u16 a) ^ (u16 b) => u16(a.value ^ b.value);
+operator (u16 a) << (u16 b) => u16(a.value << (b.value & 15));
+operator (u16 a) >> (u16 b) => u16(a.value >> (b.value & 15));
+operator (u16 a) == (u16 b) => a.value == b.value;
+operator (u16 a) != (u16 b) => a.value != b.value;
+operator (u16 a) < (u16 b) => a.value < b.value;
+operator (u16 a) > (u16 b) => a.value > b.value;
+operator (u16 a) <= (u16 b) => a.value <= b.value;
+operator (u16 a) >= (u16 b) => a.value >= b.value;
+u32(i64 x) => u32{num_wrap_u(x, 32)};
+i64(u32 x) => x.value;
+f64(u32 x) => f64(x.value);
+text(u32 x) => text(x.value);
+operator (u32 a) + (u32 b) => u32(a.value + b.value);
+operator (u32 a) - (u32 b) => u32(a.value - b.value);
+operator (u32 a) * (u32 b) => u32(a.value * b.value);
+operator (u32 a) / (u32 b) => u32(a.value / b.value);
+operator (u32 a) % (u32 b) => u32(a.value % b.value);
+operator (u32 a) & (u32 b) => u32(a.value & b.value);
+operator (u32 a) | (u32 b) => u32(a.value | b.value);
+operator (u32 a) ^ (u32 b) => u32(a.value ^ b.value);
+operator (u32 a) << (u32 b) => u32(a.value << (b.value & 31));
+operator (u32 a) >> (u32 b) => u32(a.value >> (b.value & 31));
+operator (u32 a) == (u32 b) => a.value == b.value;
+operator (u32 a) != (u32 b) => a.value != b.value;
+operator (u32 a) < (u32 b) => a.value < b.value;
+operator (u32 a) > (u32 b) => a.value > b.value;
+operator (u32 a) <= (u32 b) => a.value <= b.value;
+operator (u32 a) >= (u32 b) => a.value >= b.value;
+u64(i64 x) => u64{x};
+i64(u64 x) => x.value;
+text(u64 x) => num_utext(x.value);
+operator (u64 a) + (u64 b) => u64{a.value + b.value};
+operator (u64 a) - (u64 b) => u64{a.value - b.value};
+operator (u64 a) * (u64 b) => u64{a.value * b.value};
+operator (u64 a) & (u64 b) => u64{a.value & b.value};
+operator (u64 a) | (u64 b) => u64{a.value | b.value};
+operator (u64 a) ^ (u64 b) => u64{a.value ^ b.value};
+operator (u64 a) / (u64 b) => u64{num_udivrem(a.value, b.value)[0]};
+operator (u64 a) % (u64 b) => u64{num_udivrem(a.value, b.value)[1]};
+operator (u64 a) << (u64 b) => u64{a.value << (b.value & 63)};
+operator (u64 a) >> (u64 b) => u64{num_srl(a.value, b.value & 63)};
+operator (u64 a) == (u64 b) => a.value == b.value;
+operator (u64 a) != (u64 b) => a.value != b.value;
+operator (u64 a) < (u64 b) => num_ult(a.value, b.value);
+operator (u64 a) > (u64 b) => num_ult(b.value, a.value);
+operator (u64 a) <= (u64 b) => !num_ult(b.value, a.value);
+operator (u64 a) >= (u64 b) => !num_ult(a.value, b.value);

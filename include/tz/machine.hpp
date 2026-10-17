@@ -506,7 +506,7 @@ struct process_machine {
 
   void print(std::vector<mval> const & a) {
     std::string line;
-    for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + helper.show_v(to_value(a[i]));
+    for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + helper.print_text(to_value(a[i]));
     line += '\n';
     if(captured) *captured += line;
     else {

@@ -5573,21 +5573,28 @@ struct interpreter {
     // type; embedded is also a candidate)
     if(!user_ops.empty() || o.postfix)
       if(symbol f = operator_entity(o); user_ops.contains(f.value)) {
-        call_site site{where, std::string(str(f)), n.value, frame};
-        auto user = user_candidates(f);
-        bool lazy = std::ranges::any_of(user, [&](node_id fn) {
-          return std::ranges::any_of(db.as<n_fn>(fn).params, [&](node_id p) { return db.as<n_param>(p).mode == param_mode::expr; });
-        });
-        if(o.postfix || lazy) return call_overloaded(functions[f], o.args, env, frame, site);
+        auto const & ui = user_info(f);
+        auto const & user = ui.cands;
+        bool lazy = ui.lazy;
+        auto site = [&] { return call_site{where, std::string(str(f)), n.value, frame}; };
+        if(o.postfix || lazy) return call_overloaded(functions[f], o.args, env, frame, site());
+        auto scalar = [](value const & v) { return v.is<int64_t>() || v.is<double>() || v.is<bool>(); };
         std::vector<value> vals;
-        for(node_id a: o.args) {
-          TZ_TRY(v, eval(a, env, frame));
-          vals.push_back(std::move(v));
-        }
-        std::vector<std::string> ts;
-        for(auto const & v: vals) ts.push_back(types.describe(v));
-        if(std::ranges::any_of(vals, [](value const & v) { return v.is<split_v>(); }) || user_operator_applies(f, ts))
-          return dispatch_split(user, vals, 0, o.args, env, frame, site);
+        if(o.args.size() == 2 && !ui.scalar_params) { // Frequent: a + b over built-in scalars - no vector
+          TZ_TRY(x, eval(o.args[0], env, frame));
+          TZ_TRY(y, eval(o.args[1], env, frame));
+          if(scalar(x) && scalar(y) && overrides.empty() && op != "&&" && op != "||") return ok(binary(op, x, y, where));
+          vals.push_back(std::move(x));
+          vals.push_back(std::move(y));
+        } else
+          for(node_id a: o.args) {
+            TZ_TRY(v, eval(a, env, frame));
+            vals.push_back(std::move(v));
+          }
+        bool builtin_scalars = !ui.scalar_params && std::ranges::all_of(vals, [](value const & v) { return v.is<int64_t>() || v.is<double>() || v.is<bool>(); });
+        if(!builtin_scalars && (std::ranges::any_of(vals, [](value const & v) { return v.is<split_v>(); }) || user_applies(f, vals)))
+          return dispatch_split(user, vals, 0, o.args, env, frame, site());
+        if(auto r = apply_override(f, vals, o, n, env, frame, where)) return std::move(*r); // Checked { … } - and here
         // Built-in operation: user overload of these types is not accepted
         if(db.is_index(n)) return index_rt(n, db.index_of(n), vals[0], vals[1], env);
         if(o.args.size() == 1) return ok(lift(vals[0], [&](value const & a) { return unary(op, a, where); }));
@@ -6887,15 +6894,88 @@ struct interpreter {
     return has_addressed_return(db.as<n_fn>(f).body);
   }
 
-  std::vector<node_id> user_candidates(symbol f) const {
-    std::vector<node_id> out;
-    if(auto it = functions.find(f); it != functions.end())
-      for(node_id fn: it->second)
-        if(!intrinsic_operator(fn)) out.push_back(fn);
-    return out;
+  // overload operator, not built-in primitives; remembered by the symbol (reconciliation - by the
+  // number of overloads: editing adds or removes them)
+  mutable std::unordered_map<uint32_t, std::pair<std::vector<node_id>, std::vector<node_id>>> user_cands; // overload is not primitive
+  // User overload operator (not built-in primitives) and their features - one entry per symbol,
+  // reconciliation - by the number of overloads (they are only added by registration)
+  struct user_op_info {
+    std::size_t from = ~std::size_t{0};
+    std::vector<node_id> cands;
+    bool lazy = false; // There is an expr-parameter (lazy operands)
+    bool scalar_params = false; // have a built-in scalar type parameter or no type
+    std::vector<node_id> const * list = nullptr; // overloading
+  };
+  mutable std::deque<user_op_info> user_ops_memo; // by character number (addresses are stable)
+  user_op_info const & user_info(symbol f) const {
+    static user_op_info const none;
+    if(f.value >= user_ops_memo.size()) user_ops_memo.resize(f.value + 1);
+    auto & u = user_ops_memo[f.value];
+    if(!u.list) { // node map does not move, records are not deleted: the address of the congestion list - once
+      auto it = functions.find(f);
+      if(it == functions.end()) return none;
+      u.list = &it->second;
+    }
+    if(u.from != u.list->size()) {
+      std::vector<node_id> const * list = u.list;
+      u = {list->size(), {}, false, false, list};
+      for(node_id fn: *list) {
+        if(intrinsic_operator(fn)) continue;
+        u.cands.push_back(fn);
+        for(node_id p: db.as<n_fn>(fn).params) {
+          auto const & pp = db.as<n_param>(p);
+          u.lazy = u.lazy || pp.mode == param_mode::expr;
+          u.scalar_params = u.scalar_params || !pp.type || !db.is<n_ident>(pp.type) || types.builtin(str(db.as<n_ident>(pp.type).name));
+        }
+      }
+    }
+    return u;
   }
+  std::vector<node_id> const & user_candidates(symbol f) const { return user_info(f).cands; }
 
-  // Does the user overload operator accept such types of operands?
+  // Does the user overload operator accept such types of operands? Does the operator’s custom
+  // overload apply to values: In built-in scalars, the response to type numbers is remembered (f64 +
+  // f64 with overload i32 - no strings)
+  std::unordered_map<uint64_t, bool> user_applies_memo;
+  bool user_applies(symbol f, std::vector<value> const & vals) {
+    bool scalar_only = vals.size() <= 2;
+    uint64_t key = uint64_t(f.value) << 40;
+    for(std::size_t k = 0; k < vals.size() && scalar_only; ++k) {
+      value const & v = vals[k];
+      if(!(v.is<int64_t>() || v.is<double>() || v.is<bool>() || v.is<str_v>())) scalar_only = false;
+      else key |= uint64_t(types.of(v).value & 0xFFFFF) << (20 * k);
+    }
+    if(scalar_only)
+      if(auto it = user_applies_memo.find(key); it != user_applies_memo.end()) return it->second;
+    std::vector<std::string> ts;
+    for(auto const & v: vals) ts.push_back(types.describe(v));
+    bool r = user_operator_applies(f, ts);
+    if(scalar_only) user_applies_memo[key] = r;
+    return r;
+  }
+  // redefinition of context (checked { … }) for the operator f over the calculated values
+  std::optional<flow> apply_override(symbol f, std::vector<value> & vals, n_op const & o, node_id n, scope * env, uint32_t frame, span where) {
+    if(overrides.empty() || override_depth != 0 || o.args.size() != 2) return std::nullopt;
+    auto op = str(o.op);
+    if(op == "&&" || op == "||" || (db.sym_kind(o.op) & ast_db::sc_assign)) return std::nullopt;
+    for(auto it = overrides.rbegin(); it != overrides.rend(); ++it) {
+      if(it->entity != f) continue;
+      auto const & ps = db.as<n_fn>(it->fn).params;
+      bool fits = true;
+      for(std::size_t k = 0; k < ps.size() && fits; ++k) {
+        auto const & p = db.as<n_param>(ps[k]);
+        if(p.type && db.is<n_ident>(p.type) && str(db.as<n_ident>(p.type).name) != types.describe(vals[k])) fits = false;
+      }
+      if(!fits) continue;
+      ++override_depth;
+      struct depth_hold {
+        uint32_t & d;
+        ~depth_hold() { --d; }
+      } dh{override_depth};
+      return dispatch_split({it->fn}, vals, 0, o.args, env, frame, {where, std::string(str(f)), n.value, frame});
+    }
+    return std::nullopt;
+  }
   bool user_operator_applies(symbol f, std::vector<std::string> const & ts) const {
     for(node_id fn: user_candidates(f)) {
       auto const & ps = db.as<n_fn>(fn).params;
@@ -7028,7 +7108,7 @@ struct interpreter {
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
       {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
-      {"int_to_float", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
+      {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
   // instance at the language level (deduplication, §10.3):
@@ -7058,6 +7138,25 @@ struct interpreter {
     return true;
   }
 
+  // Print meanings: your type has text(T x) i32 is a number, not i32{value: 5} *Mine: * Only overload
+  // exactly this type.
+  std::string print_text(value const & v) {
+    if(v.is<agg_v>() && !types.anonymous(v.as<agg_v>().type))
+      if(auto it = functions.find(sym("text")); it != functions.end()) {
+        std::string_view tn = types.name(v.as<agg_v>().type);
+        for(node_id f: it->second) {
+          auto const & fn = db.as<n_fn>(f);
+          if(fn.params.size() != 1) continue;
+          node_id t = db.as<n_param>(fn.params[0]).type;
+          if(!t || !db.is<n_ident>(t) || str(db.as<n_ident>(t).name) != tn) continue;
+          std::vector<value> vals{v};
+          flow r = invoke(f, vals, {}, globals, {db[f].where, "text", 0, 0});
+          if(r.normal() && r.v.is<str_v>()) return std::string(r.v.as<str_v>().str());
+        }
+      }
+    return show_v(v);
+  }
+
   value builtin(symbol name, std::vector<value> & a, span where) {
     auto n = str(name);
     if(jit_trace && jit_question(n)) {
@@ -7073,7 +7172,7 @@ struct interpreter {
       rt_effect();
       if(checking()) return {};
       std::string line;
-      for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + show_v(a[i]);
+      for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + print_text(a[i]);
       if(captured) *captured += line + "\n";
       else put(stdout, cat(line, "\n"));
       return {};
@@ -7573,6 +7672,8 @@ struct interpreter {
       return erase(value(true));
     }
     // f64(i64 x) and i64(f64 x) are prelude ads above them
+    if(n == "f32_round" && a.size() == 1 && types.describe(a[0]) == types.float_name()) // f32 - Rounding to single accuracy
+      return a[0].known() ? value(double(float(a[0].as<double>()))) : erase(value(double(1)));
     if(n == "int_to_float" && a.size() == 1 && types.describe(a[0]) == types.int_name())
       return a[0].known() ? value(double(a[0].as<int64_t>())) : erase(value(double(1)));
     if(n == "float_to_int" && a.size() == 1 && types.describe(a[0]) == types.float_name())
