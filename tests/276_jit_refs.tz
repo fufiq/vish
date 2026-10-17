@@ -1,0 +1,56 @@
+// out: 48 [1, 24, 3]
+// out: 2.5 4
+// out: [2, 4, 6, 1] 4
+// out: 1
+// jit-compiled: bump
+// jit-compiled: fbump
+// jit-compiled: via
+// jit-compiled: twice_all
+// machine
+// Ссылка &e = xs[k] в машинном коде (§12.1): 
+// Только по факту разбора: за жизнь
+// ссылки (остаток блока) массив не заменялся и не рос — jit_ref_keeps; 
+// Иначе —
+// интерпретатор с поколениями (replaced).
+bump(xs, i64 k) {
+  &e = xs[k];
+  e += 10;
+  e = e * 2;
+  xs[k] + e
+}
+fbump(xs) {
+  &e = xs[1];
+  e += 0.5;
+  e
+}
+inc(x) => x += 1;
+via(xs) {
+  &e = xs[2];
+  inc(e);
+  e
+}
+// ссылка живёт в теле цикла; push — после цикла, вне её жизни
+twice_all(xs) {
+  for(i : range(xs.size)) {
+    &e = xs[i];
+    e *= 2;
+  }
+  xs.push(1);
+  xs.size
+}
+// массив заменяется за жизнь ссылки — факта нет, машинного кода нет
+replaced(xs) {
+  &e = xs[0];
+  e = 1;
+  xs = array{9};
+  xs.size
+}
+main() {
+  a = array{1, 2, 3};
+  print(bump(a, 1), a);
+  print(fbump(array{1.0, 2.0}), via(array{1, 2, 3}));
+  b = array{1, 2, 3};
+  n = twice_all(b);
+  print(b, n);
+  print(replaced(array{5}));
+}

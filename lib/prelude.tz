@@ -1205,6 +1205,7 @@ parse(code r, p) {
 // JIT зовёт jit_compile(цель, код функции, типы параметров, тип результата);
 // причина-строка — не умеет (исполнит интерпретатор).
 struct jc_range {} // тег: значение range(n) — в слоте граница n
+struct jc_ref {} // тег: ссылка &e = xs[k] — в слоте индекс k, th — узел xs[k], th_top — массив-переменная
 
 // имя в окружении: слот (kind — тип; массив — два слота: данные, размер; jc_range —
 // граница) или expr-параметр (код, контекст, окружение и функция вызывающего)
@@ -1364,7 +1365,7 @@ jit_compile(cg, f, types, type result) {
   };
   // значение VM (решение автора 2026-10-01: память — у VM): в слоте — адрес его
   // ячейки (массив — тоже: данные и размер код читает из ячейки)
-  is_handle(type t) => (t != unit) && (!((t == i64) || ((t == bool) || ((t == f64) || is_stream(t)))) && (t != jc_range));
+  is_handle(type t) => (t != unit) && (!((t == i64) || ((t == bool) || ((t == f64) || is_stream(t)))) && ((t != jc_range) && (t != jc_ref)));
   scalar(type t) => (t == i64) || ((t == bool) || ((t == f64) || is_stream(t))); // поток — его номер
   elem(type t) => if((t == array(f64)) || (t == stream(f64))) f64 else if(t == stream(bool)) bool else i64;
   if(!scalar(result) && ((result != unit) && !is_handle(result))) bad("тип результата"); // значение VM (и массив) — адрес ячейки в acc
@@ -1585,7 +1586,7 @@ jit_compile(cg, f, types, type result) {
     t = jit_type(e, ctx);
     if(v >= 0) {
       w = env[v];
-      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else w.kind
+      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else if(w.kind == jc_ref) ref_elem(v) else w.kind
     } else if(given(t)) t
     else if((k == ast.call) && (local_fns(callee_name(code_items(e)[0])).size > 0)) { // рекурсия локальной — тип её внешнего вызова
       r = unit;
@@ -1623,6 +1624,7 @@ jit_compile(cg, f, types, type result) {
     } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
     else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
     else if(is_handle(env[k].kind)) put_bytes(slot_ld(acc, env[k].slot)); // значение VM — адрес его ячейки
+    else if(env[k].kind == jc_ref) ref_load(k);
     else if(env[k].kind == unit) {
       kc = jit_const(e, ctx);
       if(kc.size == 1) gen_const(kc[0]) else bad(fmt"кт-параметр {name} в выражении");
@@ -1764,7 +1766,8 @@ jit_compile(cg, f, types, type result) {
       }
     } else if(k == ast.variable) {
       ast.variable{name, vt, init, _, is_ct, is_ref, _, _} = e;
-      if(is_ref || is_ct) bad("ссылка или ct-переменная");
+      if(is_ct) bad("ct-переменная");
+      else if(is_ref) gen_ref_decl(e, name, init);
       else if(given(vt) && (code_kind(vt) == ast.name)) { // T x = e: значение — в тип T (§5.8)
         want = type_of_code(vt);
         t = ty(init);
@@ -2018,6 +2021,53 @@ jit_compile(cg, f, types, type result) {
     if((g.size == 1) && typed_overload(g[0])) gen_inline(e, "infix[]", xs);
     else gen_index(e);
   };
+  // Ссылка &e = xs[k] (§12.1): 
+// Машинный код — только по факту разбора: за
+  // жизнь ссылки массив не заменялся и не рос (jit_ref_keeps) — элемент тот же, поколение
+  // не проверяется: 
+// Индекс — в слоте (регистре), чтение и запись — элемент массива.
+  gen_ref_decl(e, str name, init) => {
+    if(!jit_ref_keeps(e)) bad("ссылка: массив за её жизнь меняется целиком — интерпретатор (поколения)");
+    else if(index_parts(init).size != 2) bad("ссылка не на элемент массива");
+    else {
+      array{o, ix} = index_parts(init);
+      s = var_of(o);
+      if((s < 0) || (env[s].thunk || (!arr_like(env[s].kind) || !is_arr(arr_type(s, o))))) bad("ссылка: элемент массива-переменной");
+      else if(!scalar_t(elem(arr_type(s, o)))) bad("ссылка: элемент не скаляр");
+      else {
+        gen(ix);
+        checked(s, init);
+        k = alloc(1);
+        give_reg(k, i64);
+        put_bytes(slot_st(k, acc));
+        put(jc_var{name, jc_ref, k, false, init, 0, s, 0, 0});
+      }
+    }
+  };
+  ref_elem(i64 k) => {
+    v = env[k];
+    elem(arr_type(v.th_top, index_parts(v.th)[0]))
+  };
+  ref_load(i64 k) => {
+    v = env[k];
+    put_bytes(slot_ld(acc, v.slot));
+    checked(v.th_top, v.th);
+    put_bytes(if(ref_elem(k) == f64) cg.load_index_f64(acc_f, second, acc) else cg.load_index(acc, second, acc));
+  };
+  // значение — в acc (f64 — в acc_f)
+  ref_store(i64 k, type t) => {
+    v = env[k];
+    wrote(env[v.th_top].slot);
+    if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+    put_bytes(cg.push_tmp(acc));
+    depth += 1;
+    put_bytes(slot_ld(acc, v.slot));
+    checked(v.th_top, v.th);
+    put_bytes(cg.pop_tmp(third));
+    depth -= 1;
+    put_bytes(cg.store_index(second, acc, third));
+  };
+  store_var(i64 s, type t) => if(env[s].kind == jc_ref) ref_store(s, t) else store_slot(t, env[s].slot);
   gen_index_of(e, o, ix) => {
     s = var_of(o);
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
@@ -2042,6 +2092,9 @@ jit_compile(cg, f, types, type result) {
     gen(e);
     s = if(fresh) -1 else find(name);
     if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру");
+    else if((s >= 0) && (env[s].kind == jc_ref)) {
+      if(ref_elem(s) != t) bad("тип элемента ссылки") else ref_store(s, t);
+    }
     else {
       if(s < 0) {
         declare(name, t);
@@ -2315,18 +2368,18 @@ jit_compile(cg, f, types, type result) {
       s = var_of(xs[0]);
       if((s < 0) || env[s].thunk) bad("составное присваивание");
       else {
-        t = env[s].kind;
+        t = if(env[s].kind == jc_ref) ref_elem(s) else env[s].kind;
         g = op_codegen(cg, e, array{t, t}); // a op= b — кодогенератор op
         if(!given(g) || ((op == "/=") && (t != f64))) bad(fmt"{op} над {t}");
         else if((t == i64) && (known_g(cg, e, xs[1]).size == 1)) {
           gen(xs[0]);
           gk = known_g(cg, e, xs[1])[0];
           put_bytes(gk(acc, imm_of(xs[1], op)[0]));
-          store_slot(t, env[s].slot);
+          store_var(s, t);
         } else {
           operands(xs[0], xs[1], t);
           put_bytes(apply_op(e, t, g));
-          store_slot(t, env[s].slot);
+          store_var(s, t);
         }
       }
     } else if((op == "&&") || (op == "||")) { // короткая логика — переходы
@@ -2508,6 +2561,9 @@ jit_compile(cg, f, types, type result) {
       else if((s >= 0) && env[s].thunk) { // код вызывающего дальше — тот же код
         w = env[s];
         binds.push(jc_var{pname, w.kind, w.slot, true, w.th, w.th_ctx, w.th_top, w.th_base, w.th_ret});
+      } else if((s >= 0) && ((mode != 2) && (env[s].kind == jc_ref))) {
+        w = env[s];
+        binds.push(jc_var{pname, jc_ref, w.slot, false, w.th, 0, w.th_top, 0, 0}); // ссылка — тот же элемент
       } else if((s >= 0) && ((mode != 2) && !env[s].thunk)) {
         w = env[s];
         binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места

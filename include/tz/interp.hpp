@@ -1909,6 +1909,20 @@ struct interpreter {
       flow f = eval(s, inner, frame);
       if(!f.normal()) return f;
       last = std::move(f.v);
+      // reference &e = xs[k]: her life is the remainder of the block; what changed for her whole
+      // (replacement, growth) is a fact for machine code (jit_ref_keeps):
+//  
+      if(checking() && db.is<n_var>(s) && db.as<n_var>(s).ref && i + 1 < b.items.size()) {
+        write_log log{book.clock};
+        flow r;
+        {
+          book.logs.push_back(&log);
+          log_hold wh{*this, &log};
+          r = run_block(b, i + 1, inner, frame);
+        }
+        ref_whole[s.value].insert(log.whole.begin(), log.whole.end());
+        return r;
+      }
     }
     return ok(b.has_value ? std::move(last) : value());
   }
@@ -4538,6 +4552,7 @@ struct interpreter {
       return value(r);
     }
     if(!array_like(*cell)) return std::nullopt;
+    index_cells[place_node.value].insert(cell); // link array cell - for jit_ref_keeps
     if(cell->is<array_v>() && idx.known()) r.index = checked_index(*cell, idx, where);
     else {
       r.rt_index = true;
@@ -6945,7 +6960,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -7159,6 +7174,8 @@ struct interpreter {
     // - according to journal records parsing:
 // parsing fact, not the compiler's guess; its data and size - once before the cycle
     if(n == "jit_loop_keeps" && a.size() == 2) return value(jit_analysis && jit_analysis->loop_keeps(code_node(a[0], where), code_node(a[1], where)));
+    // link decl (&e = xs[k]): the array did not change completely during her life - the element is the same
+    if(n == "jit_ref_keeps" && a.size() == 1) return value(jit_analysis && jit_analysis->ref_keeps(code_node(a[0], where)));
     // node type in the context of parsing instance embedding - value-type; () - not executed
     if(n == "jit_type" && a.size() == 2 && a[1].is<int64_t>()) {
       if(!jit_analysis) return value();
@@ -7589,6 +7606,18 @@ struct interpreter {
   // cells of node indexing arrays (nullptr - array not variable)
   std::unordered_map<uint32_t, std::set<value *>> loop_whole;
   std::unordered_map<uint32_t, std::set<value *>> index_cells;
+  // The decl link array (&e = xs[k]) for her lifetime (block residue) did not change entirely.
+  std::unordered_map<uint32_t, std::set<value *>> ref_whole;
+  bool ref_keeps(node_id decl) const {
+    if(!db.is<n_var>(decl) || !db.as<n_var>(decl).ref) return false;
+    auto c = index_cells.find(db.as<n_var>(decl).init.value);
+    if(c == index_cells.end() || c->second.contains(nullptr)) return false;
+    auto l = ref_whole.find(decl.value);
+    if(l == ref_whole.end()) return true; // There's nothing in the block.
+    for(value * x: c->second)
+      if(l->second.contains(x)) return false;
+    return true;
+  }
   bool loop_keeps(node_id loop, node_id index) const {
     auto l = loop_whole.find(loop.value);
     auto c = index_cells.find(index.value);
