@@ -313,6 +313,13 @@ struct jit_machine {
     for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) code.byte(uint8_t(r.as<array_v>().get(k).as<int64_t>()));
     out.deps[lc.value] = db.node_revision(lc);
     out.bytes = code.size();
+    // TZ_JIT_DUMP = directory - machine code instance in the directory / name.bin (see objdump -b binary):
+    //  
+    if(char const * d = std::getenv("TZ_JIT_DUMP")) {
+      std::string bytes;
+      for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) bytes += char(r.as<array_v>().get(k).as<int64_t>());
+      os::write_file(cat(d, "/", db.strings.text(db.as<n_fn>(fn).name), ".bin"), bytes);
+    }
     out.by_lang = true;
     finish(out, code);
     out.ok = true;

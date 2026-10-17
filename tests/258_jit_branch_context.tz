@@ -1,0 +1,54 @@
+// out: 22 42 25 41 21 38
+// out: 0 1 1 0
+// out: 6
+// out: require_failed
+// jit-compiled: bits
+// jit-compiled: nbits
+// jit-compiled: idx
+// jit-compiled: guarded
+// Условие перехода — контекст цели (cg.unless / cg.when): сравнение i64 в if — cmp и
+// условный переход, без 0/1 в аккумуляторе; ! — переход с обратным условием; is_index —
+// беззнаковое сравнение (отрицательный индекс — не индекс). 
+//.
+bits(i64 a, i64 b) {
+  r = 0;
+  if(a == b) r += 1;
+  if(a != b) r += 2;
+  if(a < b) r += 4;
+  if(a >= b) r += 8;
+  if(a <= b) r += 16;
+  if(a > b) r += 32;
+  r
+}
+
+nbits(i64 a, i64 b) {
+  r = 0;
+  if(!(a == b)) r += 1;
+  if(!(a != b)) r += 2;
+  if(!(a < b)) r += 4;
+  if(!(a >= b)) r += 8;
+  if(!(a <= b)) r += 16;
+  if(!(a > b)) r += 32;
+  r
+}
+
+idx(i64 k, xs) => if(is_index(k, xs)) 1 else 0
+
+guarded(i64 a, i64 b) {
+  s = a + b; // не ведущий require — проверка в теле, не условие перегрузки
+  require(a < b);
+  require(!(a == b));
+  s
+}
+
+main() {
+  xs = fill(3, 0);
+  print(bits(1, 2), bits(2, 1), bits(-5, -5), nbits(1, 2), nbits(2, 1), nbits(-5, -5));
+  print(idx(-1, xs), idx(0, xs), idx(2, xs), idx(3, xs));
+  print(guarded(2, 4));
+  try {
+    guarded(4, 2);
+  } catch(require_failed e) {
+    print("require_failed");
+  }
+}

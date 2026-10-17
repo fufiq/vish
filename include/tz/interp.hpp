@@ -183,28 +183,31 @@ native_entry const * native_of(ast_db const & db, node_id n) {
   throw diagnostic(cat("native ", key, " не собран в VM — пересоберите: ./build.sh"), db[n].where);
 }
 
-// code generator entity in the context of the goal (§10.4): function-goal (amd64, arm64) and
-// in its body - `using operator` or context function with these types of parameters; the
-// last announcement - the first (program redefined prelude). The second is the function-goal
-// itself (`model()` is the register model).
-std::pair<node_id, node_id> find_codegen(ast_db const & db, std::string_view target, std::string_view entity, std::vector<std::string> const & types) {
-  for(uint32_t i = db.size(); i-- > 0;) {
-    if(!db.is<n_fn>(node_id(i)) || db.strings.text(db.as<n_fn>(node_id(i)).name) != target) continue;
-    node_id body = db.as<n_fn>(node_id(i)).body;
-    if(!db.is<n_block>(body)) continue;
-    auto const & items = db.as<n_block>(body).items;
-    for(auto it = items.rbegin(); it != items.rend(); ++it) {
-      node_id s = *it;
-      if(!db.is<n_fn>(s) || db.strings.text(db.as<n_fn>(s).name) != entity) continue;
-      auto const & ps = db.as<n_fn>(s).params;
-      bool fits = ps.size() == types.size();
-      for(std::size_t k = 0; fits && k < ps.size(); ++k) {
-        node_id ty = db.as<n_param>(ps[k]).type;
-        fits = ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == types[k];
-      }
-      if(fits) return {s, node_id(i)};
+// code generator entity in the context of the goal (§10.4): function-goal (amd64, arm64) and in its
+// body - `using operator` or context function with these types of parameters; the last announcement
+// - the first (program redefined prelude). The second is the function-goal itself (`model()` is the
+// register model). code generator entity in the body of the function-context fn (goal or nested
+// context of the goal).
+std::pair<node_id, node_id> codegen_in(ast_db const & db, node_id fn, std::string_view entity, std::vector<std::string> const & types) {
+  if(!fn || !db.is<n_fn>(fn) || !db.is<n_block>(db.as<n_fn>(fn).body)) return {};
+  auto const & items = db.as<n_block>(db.as<n_fn>(fn).body).items;
+  for(auto it = items.rbegin(); it != items.rend(); ++it) {
+    node_id s = *it;
+    if(!db.is<n_fn>(s) || db.strings.text(db.as<n_fn>(s).name) != entity) continue;
+    auto const & ps = db.as<n_fn>(s).params;
+    bool fits = ps.size() == types.size();
+    for(std::size_t k = 0; fits && k < ps.size(); ++k) {
+      node_id ty = db.as<n_param>(ps[k]).type;
+      fits = ty && db.is<n_ident>(ty) && db.strings.text(db.as<n_ident>(ty).name) == types[k];
     }
+    if(fits) return {s, fn};
   }
+  return {};
+}
+std::pair<node_id, node_id> find_codegen(ast_db const & db, std::string_view target, std::string_view entity, std::vector<std::string> const & types) {
+  for(uint32_t i = db.size(); i-- > 0;)
+    if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == target)
+      if(auto r = codegen_in(db, node_id(i), entity, types); r.first) return r;
   return {};
 }
 
@@ -2000,21 +2003,53 @@ struct interpreter {
   scope * entity_scope(symbol owner) {
     auto [it, fresh] = entity_scopes.try_emplace(owner.value, nullptr);
     if(fresh) {
-      scope * s = new_scope(globals);
-      if(auto fs = functions.find(owner); fs != functions.end())
-        for(node_id f: fs->second)
-          if(db.is<n_block>(db.as<n_fn>(f).body))
-            for(node_id item: db.as<n_block>(db.as<n_fn>(f).body).items)
-              if(db.is<n_fn>(item) && !db.as<n_fn>(item).scoped) {
-                symbol name = db.as<n_fn>(item).name;
-                if(value * cell = s->find(name); cell && cell->is<fn_v>() && cell->as<fn_v>().env == s) cell->as<fn_v>().set.push_back(item);
-                else s->declare(name, value(fn_v{{}, item, s, {item}}));
-              }
-      it->second = s;
+      std::vector<node_id> fs;
+      if(auto f = functions.find(owner); f != functions.end()) fs = f->second;
+      it->second = body_scope(fs, globals);
     }
     return it->second;
   }
   std::unordered_map<uint32_t, scope *> entity_scopes;
+  // The domain of bodies of functions fs: their local functions - as the block itself would declare them
+  scope * body_scope(std::vector<node_id> const & fs, scope * parent) {
+    scope * s = new_scope(parent);
+    for(node_id f: fs)
+      if(db.is<n_block>(db.as<n_fn>(f).body))
+        for(node_id item: db.as<n_block>(db.as<n_fn>(f).body).items)
+          if(db.is<n_fn>(item) && !db.as<n_fn>(item).scoped) {
+            symbol name = db.as<n_fn>(item).name;
+            if(value * cell = s->find(name); cell && cell->is<fn_v>() && cell->as<fn_v>().env == s) cell->as<fn_v>().set.push_back(item);
+            else s->declare(name, value(fn_v{{}, item, s, {item}}));
+          }
+    return s;
+  }
+  // Functions whose bodies contain entity-value members: entity by name (amd64) - all its
+  // ads; nested function-context (cg.unless) - it itself.
+  std::vector<node_id> entity_bodies(fn_v const & f) {
+    if(f.name && f.set.empty() && !f.lambda) {
+      if(auto it = functions.find(f.name); it != functions.end()) return it->second;
+      return {};
+    }
+    if(!f.name && f.set.empty() && f.lambda && db.is<n_fn>(f.lambda) && db.is<n_block>(db.as<n_fn>(f.lambda).body) && f.env) return {f.lambda};
+    return {};
+  }
+  // entity .context is a nested function-context value, with its area (its neighbors are
+  // visible to each other):
+//  
+  std::optional<value> entity_context(fn_v const & f, symbol name) {
+    std::vector<node_id> bodies = entity_bodies(f);
+    if(bodies.empty()) return std::nullopt;
+    scope * home = f.name ? entity_scope(f.name) : f.env;
+    for(node_id b: bodies)
+      for(node_id item: db.as<n_block>(db.as<n_fn>(b).body).items)
+        if(db.is<n_fn>(item) && !db.as<n_fn>(item).scoped && db.as<n_fn>(item).name == name && db.is<n_block>(db.as<n_fn>(item).body)) {
+          auto [it, fresh] = context_scopes.try_emplace(item.value, nullptr);
+          if(fresh) it->second = body_scope({item}, home);
+          return value(fn_v{{}, item, it->second, {}});
+        }
+    return std::nullopt;
+  }
+  std::unordered_map<uint32_t, scope *> context_scopes;
 
   flow eval_node(node_id n, n_fn const & f, scope * env, uint32_t) {
     if(f.scoped) { // using operator ... - to the end of the frame of the function-context, for all executable
@@ -3843,6 +3878,8 @@ struct interpreter {
       if(auto f = node_field(c, name)) return *f;
       fail(cat("у узла ", lang_kind_of(db[c]), " нет поля ", str(name)), where);
     }
+    if(obj.is<fn_v>())
+      if(auto c = entity_context(obj.as<fn_v>(), name)) return *c;
     if(str(name) == "size") {
       if(obj.is<array_v>()) return value(int64_t(obj.as<array_v>().size()));
       if(obj.is<str_v>()) return value(int64_t(obj.as<str_v>().size()));
@@ -5793,13 +5830,13 @@ struct interpreter {
       // entity .f(…) is a function declared in the body of the entity function:
 //  
       if(db.is<n_ident>(m.object)) {
-        symbol owner;
+        std::optional<fn_v> ent;
         if(value * cell = find(env, db.as<n_ident>(m.object).name)) {
-          if(cell->is<fn_v>() && cell->as<fn_v>().name && cell->as<fn_v>().set.empty() && !cell->as<fn_v>().lambda) owner = cell->as<fn_v>().name;
-        } else if(functions.contains(db.as<n_ident>(m.object).name)) owner = db.as<n_ident>(m.object).name;
-        if(owner) {
+          if(cell->is<fn_v>() && !entity_bodies(cell->as<fn_v>()).empty()) ent = cell->as<fn_v>();
+        } else if(functions.contains(db.as<n_ident>(m.object).name)) ent = fn_v{db.as<n_ident>(m.object).name, {}, nullptr};
+        if(ent) {
           std::vector<node_id> set;
-          for(node_id f: functions[owner])
+          for(node_id f: entity_bodies(*ent))
             if(db.is<n_block>(db.as<n_fn>(f).body))
               for(node_id s: db.as<n_block>(db.as<n_fn>(f).body).items)
                 if(db.is<n_fn>(s) && !db.as<n_fn>(s).scoped && db.as<n_fn>(s).name == m.name) set.push_back(s);
@@ -5808,7 +5845,7 @@ struct interpreter {
           std::vector<node_id> fit;
           for(node_id s: set)
             if(db.as<n_fn>(s).params.size() == c.args.size()) fit.push_back(s);
-          scope * home = entity_scope(owner); // entity neighbors are visible to each other.
+          scope * home = ent->name ? entity_scope(ent->name) : ent->env; // entity neighbors are visible to each other.
           if(fit.size() == 1) return call_value(value(fn_v{{}, fit[0], home, {}}), c.args, env, frame, where, n.value);
           if(!set.empty()) return call_value(value(fn_v{m.name, {}, home, set}), c.args, env, frame, where, n.value);
         }
@@ -6939,7 +6976,9 @@ struct interpreter {
         if(!t.is<type_v>()) fail("op_codegen: типы — значения-типы", where);
         names.push_back(std::string(types.name(t.as<type_v>().type)));
       }
-      auto [s, ctx_fn] = find_codegen(db, str(a[0].as<fn_v>().name), entity, names);
+      fn_v const & cg = a[0].as<fn_v>();
+      // Enclosed context of the target (cg.unless) - code generator from his body
+      auto [s, ctx_fn] = cg.name ? find_codegen(db, str(cg.name), entity, names) : codegen_in(db, cg.lambda, entity, names);
       if(!s) return value();
       return value(fn_v{{}, s, globals, {}}); // node call: parameters - target registers
     }
