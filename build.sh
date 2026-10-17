@@ -20,19 +20,32 @@ build() {
     case "$1" in
         release) $CXX $FLAGS -O2 -DNDEBUG -fcontract-evaluation-semantic=ignore src/tz.cpp -o "$OUT" -luring ;;
         debug)   $CXX $FLAGS -O0 -g src/tz.cpp -o "$OUT" -luring ;;
-        asan)    $CXX $FLAGS -O1 -g -fsanitize=address,undefined src/tz.cpp -o "$OUT" -luring ;;
+        # -fno-var-tracking: local places at -O1 for gdb are not built - 330 → 190 from build (GCC
+        # is quadratic on huge functions); lines in ASan reports remain, debug mode
+        #
+# 
+        asan)    $CXX $FLAGS -O1 -g -fno-var-tracking -fsanitize=address,undefined src/tz.cpp -o "$OUT" -luring ;;
         *) echo "неизвестный режим: $1" >&2; exit 2 ;;
     esac
 }
 
+# Assemblies of modes go in parallel (check.sh): the header could update the neighboring mode
+# while this assembly was going, reassembly, if it is not the one with which it was collected.
 mode=${1:-release}
+before=$(cksum < out/native.hpp)
 build "$mode"
 rc=0
-"$OUT" native out/native.hpp || rc=$?
+tmp=out/native.hpp.$$ # замена переименованием — соседняя сборка не прочтёт половину
+cp out/native.hpp "$tmp"
+"$OUT" native "$tmp" || rc=$?
 if [ $rc = 3 ]; then
+    mv "$tmp" out/native.hpp
+else
+    rm -f "$tmp"
+    [ $rc = 0 ] || exit $rc
+fi
+if [ "$(cksum < out/native.hpp)" != "$before" ]; then
     echo "out/native.hpp обновлён — пересборка"
     build "$mode"
-elif [ $rc != 0 ]; then
-    exit $rc
 fi
 echo "$OUT ($mode)"
