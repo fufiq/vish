@@ -392,6 +392,9 @@ amd64(expr body) {
   // регистровая модель: аккумулятор, второй операнд, их f64, база аргументов, кадр, стек
   // + аргументы C ABI (службы VM) и второй регистр результата
   model() => array{0, 1, 0, 1, 7, 5, 4, 2, 7, 6, 2, 1, 2, 3}; // rax, rcx, xmm0, xmm1, rdi, rbp, rsp, rdx; rdi, rsi, rdx, rcx; rdx; rbx — кадр объемлющей у подпрограммы
+  // Свободные регистры для переменных (скаляры, классы i64 и f64): компилятор их больше ни
+  // для чего не берёт; у вызовов они в памяти (см. jit_compile: spill/reload).
+  var_regs() => array{array{8, 9, 10, 11}, array{2, 3, 4, 5}}; // r8–r11, xmm2–xmm5
   using operator (i64 a) + (i64 b) => x64_rr(0x1, a, b); // add
   using operator (i64 a) - (i64 b) => x64_rr(0x29, a, b); // sub
   using operator (i64 a) & (i64 b) => x64_rr(0x21, a, b); // and
@@ -485,6 +488,9 @@ amd64(expr body) {
 
 arm64(expr body) {
   model() => array{9, 3, 0, 1, 0, 29, 31, 2, 0, 1, 2, 3, 1, 19}; // x9, x3, d0, d1, x0, x29, sp, x2; x0–x3; x1; x19 — кадр объемлющей у подпрограммы
+  // Свободные регистры для переменных (скаляры, классы i64 и f64): компилятор их больше ни
+  // для чего не берёт; у вызовов они в памяти (см. jit_compile: spill/reload).
+  var_regs() => array{array{10, 11, 12, 13}, array{4, 5, 6, 7}}; // x10–x13, d4–d7
   using operator (i64 a) + (i64 b) => a64_rrr(0x8B000000, a, a, b); // add
   using operator (i64 a) - (i64 b) => a64_rrr(0xCB000000, a, a, b); // sub
   using operator (i64 a) & (i64 b) => a64_rrr(0x8A000000, a, a, b); // and
@@ -1315,8 +1321,78 @@ jit_compile(cg, f, types, type result) {
   // Слот — в своём кадре; у подпрограммы (рекурсивной локальной функции) слоты
   // объемлющей — через регистр её кадра: захват по ссылке 
 // 
-  sb(i64 sl) => if(gen_sub && (sl < SUB)) outer_r else frame;
-  so(i64 sl) => off(if(sl >= SUB) sl - SUB else sl);
+  sb(i64 slot_no) => if(gen_sub && (slot_no < SUB)) outer_r else frame;
+  // Переменные-скаляры тела функции — в регистрах цели (var_regs, первые объявленные):
+  // как у JIT M1 (решение
+  // пользователя). У слота регистра есть и место в кадре: перед вызовом (служба VM,
+  // подпрограмма, рекурсия) значения — в кадр, после — обратно: переключение ≈ вызов,
+  // 
+// У подпрограммы
+  // (рекурсивной локальной функции) всё в памяти: её кадр и кадр объемлющей.
+  array{gp_regs, f_regs} = cg.var_regs();
+  rv_slot = array{};
+  rv_reg = array{};
+  rv_f = array{};
+  rv_gp = 0;
+  rv_fn = 0;
+  reg_of(i64 at) => {
+    k = -1;
+    if(!gen_sub) for(i : range(rv_slot.size)) if(rv_slot[i] == at) k = i;
+    k
+  };
+  give_reg(i64 at, type kind) => if(!gen_sub) {
+    if(kind == f64) {
+      if(rv_fn < f_regs.size) {
+        rv_slot.push(at);
+        rv_reg.push(f_regs[rv_fn]);
+        rv_f.push(true);
+        rv_fn += 1;
+      }
+    } else if((kind == i64) || (kind == bool)) {
+      if(rv_gp < gp_regs.size) {
+        rv_slot.push(at);
+        rv_reg.push(gp_regs[rv_gp]);
+        rv_f.push(false);
+        rv_gp += 1;
+      }
+    }
+  };
+  // слот в регистр r / из регистра r (биты; f64 в регистре f64 — переносом)
+  slot_ld(i64 r, i64 at) => {
+    k = reg_of(at);
+    b = sb(at);
+    o = so(at);
+    if(k < 0) cg.load(r, b, o) else if(rv_f[k]) cg.move_from_f64(r, rv_reg[k]) else cg.move(r, rv_reg[k])
+  };
+  slot_st(i64 at, i64 r) => {
+    k = reg_of(at);
+    b = sb(at);
+    o = so(at);
+    if(k < 0) cg.store(b, o, r) else if(rv_f[k]) cg.move_to_f64(rv_reg[k], r) else cg.move(rv_reg[k], r)
+  };
+  slot_ldf(i64 r, i64 at) => {
+    k = reg_of(at);
+    b = sb(at);
+    o = so(at);
+    if(k < 0) cg.load_f64(r, b, o) else if(rv_f[k]) cg.move_f64(r, rv_reg[k]) else cg.move_to_f64(r, rv_reg[k])
+  };
+  slot_stf(i64 at, i64 r) => {
+    k = reg_of(at);
+    b = sb(at);
+    o = so(at);
+    if(k < 0) cg.store_f64(b, o, r) else if(rv_f[k]) cg.move_f64(rv_reg[k], r) else cg.move_from_f64(rv_reg[k], r)
+  };
+  spill() => if(!gen_sub) for(i : range(rv_slot.size)) {
+    o = so(rv_slot[i]);
+    rg = rv_reg[i];
+    put_bytes(if(rv_f[i]) cg.store_f64(frame, o, rg) else cg.store(frame, o, rg));
+  };
+  reload() => if(!gen_sub) for(i : range(rv_slot.size)) {
+    o = so(rv_slot[i]);
+    rg = rv_reg[i];
+    put_bytes(if(rv_f[i]) cg.load_f64(rg, frame, o) else cg.load(rg, frame, o));
+  };
+  so(i64 slot_no) => off(if(slot_no >= SUB) slot_no - SUB else slot_no);
   put(v) => {
     if(top < env.size) env[top] = v;
     else env.push(v);
@@ -1324,6 +1400,7 @@ jit_compile(cg, f, types, type result) {
   };
   declare(str name, type kind) => {
     s = alloc(1); // массив и значение VM — адрес ячейки
+    give_reg(s, kind);
     put(jc_var{name, kind, s, false, f, 0, 0, 0, 0});
     s
   };
@@ -1332,7 +1409,7 @@ jit_compile(cg, f, types, type result) {
     for(i : range(top)) if((i >= base) && (env[i].name == name)) k = i;
     k
   };
-  load_slot(type kind, i64 s) => put_bytes(if(kind == f64) cg.load_f64(acc_f, sb(s), so(s)) else cg.load(acc, sb(s), so(s)));
+  load_slot(type kind, i64 s) => put_bytes(if(kind == f64) slot_ldf(acc_f, s) else slot_ld(acc, s));
   // запись, которая сделала бы порядок W и B наблюдаемым
   wrote(i64 sl) => {
     if(!fusing) {
@@ -1344,7 +1421,7 @@ jit_compile(cg, f, types, type result) {
     wrote(s);
     store_bytes(kind, s);
   };
-  store_bytes(type kind, i64 s) => put_bytes(if(kind == f64) cg.store_f64(sb(s), so(s), acc_f) else cg.store(sb(s), so(s), acc));
+  store_bytes(type kind, i64 s) => put_bytes(if(kind == f64) slot_stf(s, acc_f) else slot_st(s, acc));
   take_first(xs, i64 n) => {
     r = array{};
     for(i : range(n)) r.push(xs[i]);
@@ -1460,7 +1537,7 @@ jit_compile(cg, f, types, type result) {
       else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
     } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
     else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
-    else if(is_handle(env[k].kind)) put_bytes(cg.load(acc, sb(env[k].slot), so(env[k].slot))); // значение VM — адрес его ячейки
+    else if(is_handle(env[k].kind)) put_bytes(slot_ld(acc, env[k].slot)); // значение VM — адрес его ячейки
     else if(env[k].kind == unit) {
       kc = jit_const(e, ctx);
       if(kc.size == 1) gen_const(kc[0]) else bad(fmt"кт-параметр {name} в выражении");
@@ -1621,20 +1698,20 @@ jit_compile(cg, f, types, type result) {
   push_into(i64 sl, type t, e) => {
     slow = label();
     done = label();
-    put_bytes(cg.load(second, sb(sl), so(sl)));
+    put_bytes(slot_ld(second, sl));
     put_bytes(cg.load(third, second, a_size));
     put_bytes(cg.load(second, second, a_cap));
     put_bytes(cg.is_index(third, second));
     jump_unless(third, slow);
-    put_bytes(cg.load(second, sb(sl), so(sl)));
+    put_bytes(slot_ld(second, sl));
     put_bytes(cg.load(third, second, a_size));
     put_bytes(cg.load(second, second, a_data));
     put_bytes(cg.store_index(second, third, acc));
     put_bytes(cg.address(third, third, 1));
-    put_bytes(cg.load(second, sb(sl), so(sl)));
+    put_bytes(slot_ld(second, sl));
     put_bytes(cg.store(second, a_size, third));
     // push инвалидирует опору всегда (§12.1, как у интерпретатора): новое поколение буфера
-    put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
+    put_bytes(slot_ld(acc, args_slot));
     put_bytes(cg.load(acc, acc, 8 * (ap + 6)));
     put_bytes(cg.load(third, acc, 0));
     put_bytes(cg.address(third, third, 1));
@@ -1643,7 +1720,7 @@ jit_compile(cg, f, types, type result) {
     jump(done);
     bind(slow);
     put_bytes(cg.move(ca2, acc));
-    put_bytes(cg.load(ca1, sb(sl), so(sl)));
+    put_bytes(slot_ld(ca1, sl));
     vm_service(9, t, e);
     bind(done);
   };
@@ -1669,31 +1746,31 @@ jit_compile(cg, f, types, type result) {
       k0 = alloc(w);
       bsl(i64 j) => (k0 + w) - (1 + j);
       gen(val);
-      put_bytes(cg.store(sb(bsl(1)), so(bsl(1)), acc));
+      put_bytes(slot_st(bsl(1), acc));
       mem_to(acc);
-      put_bytes(cg.store(sb(bsl(0)), so(bsl(0)), acc));
+      put_bytes(slot_st(bsl(0), acc));
       kinds = array{};
       for(i : range(n)) {
         t = ty(names[i]);
         if(!given(t) || (t == unit) || ((t == jc_range) || is_stream(t))) bad(fmt"распаковка: тип имени {t}");
         kinds.push(t);
         put_bytes(cg.load_const(acc, vm_kind(t)));
-        put_bytes(cg.store(sb(bsl(2 + (2 * i))), so(bsl(2 + (2 * i))), acc));
+        put_bytes(slot_st(bsl(2 + (2 * i)), acc));
       }
       put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
       vm_service(if(test) 12 else 11, unit, e); // предикат — истина/ложь в acc, имена — при успехе
       res = alloc(1);
-      put_bytes(cg.store(sb(res), so(res), acc));
+      put_bytes(slot_st(res, acc));
       for(i : range(n)) if(ok) {
         ast.parameter{pname, _, _, _, _, _, _} = names[i];
         t = kinds[i];
         sl = declare(pname, t);
         wrote(sl);
-        put_bytes(cg.load(acc, sb(bsl(3 + (2 * i))), so(bsl(3 + (2 * i)))));
+        put_bytes(slot_ld(acc, bsl(3 + (2 * i))));
         if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
         store_bytes(t, sl);
       }
-      put_bytes(cg.load(acc, sb(res), so(res)));
+      put_bytes(slot_ld(acc, res));
     }
   };
   // array{x, ...ys} над i64/f64: пустой массив нужной раскладки с местом под скаляры —
@@ -1719,32 +1796,32 @@ jit_compile(cg, f, types, type result) {
       mem_to(ca1);
       put_bytes(cg.load_const(ca2, n));
       vm_service(10, et, e);
-      put_bytes(cg.store(sb(c), so(c), acc));
+      put_bytes(slot_st(c, acc));
       for(x : items) {
         if(code_kind(x) == ast.spread) {
           ast.spread{v} = x;
           src = alloc(1);
           j = alloc(1);
           gen(v);
-          put_bytes(cg.store(sb(src), so(src), acc));
+          put_bytes(slot_st(src, acc));
           put_bytes(cg.load_const(acc, 0));
-          put_bytes(cg.store(sb(j), so(j), acc));
+          put_bytes(slot_st(j, acc));
           top_l = label();
           end_l = label();
           bind(top_l);
-          put_bytes(cg.load(acc, sb(j), so(j)));
-          put_bytes(cg.load(second, sb(src), so(src)));
+          put_bytes(slot_ld(acc, j));
+          put_bytes(slot_ld(second, src));
           put_bytes(cg.load(second, second, a_size));
           put_bytes(cg.is_index(acc, second));
           jump_unless(acc, end_l);
-          put_bytes(cg.load(second, sb(src), so(src)));
+          put_bytes(slot_ld(second, src));
           put_bytes(cg.load(second, second, a_data));
-          put_bytes(cg.load(third, sb(j), so(j)));
+          put_bytes(slot_ld(third, j));
           put_bytes(cg.load_index(acc, second, third));
           push_into(c, et, e);
-          put_bytes(cg.load(acc, sb(j), so(j)));
+          put_bytes(slot_ld(acc, j));
           put_bytes(cg.address(acc, acc, 1));
-          put_bytes(cg.store(sb(j), so(j), acc));
+          put_bytes(slot_st(j, acc));
           jump(top_l);
           bind(end_l);
         } else {
@@ -1753,12 +1830,12 @@ jit_compile(cg, f, types, type result) {
           push_into(c, et, e);
         }
       }
-      put_bytes(cg.load(acc, sb(c), so(c)));
+      put_bytes(slot_ld(acc, c));
     }
   };
   // размер и данные массива — из его ячейки (слот sl — её адрес)
   arr_size(i64 r, i64 sl) => {
-    put_bytes(cg.load(r, sb(sl), so(sl)));
+    put_bytes(slot_ld(r, sl));
     put_bytes(cg.load(r, r, a_size));
   };
   // размер массива переменной s в месте o: числовой — плотные слова, иначе (код, строки,
@@ -1767,12 +1844,12 @@ jit_compile(cg, f, types, type result) {
     t = arr_type(s, o);
     if(is_arr(t) || (t == late_arr)) arr_size(r, env[s].slot)
     else {
-      put_bytes(cg.load(r, sb(env[s].slot), so(env[s].slot)));
+      put_bytes(slot_ld(r, env[s].slot));
       put_bytes(cg.load(r, r, a_items_n));
     }
   };
   arr_data(i64 r, i64 sl) => {
-    put_bytes(cg.load(r, sb(sl), so(sl)));
+    put_bytes(slot_ld(r, sl));
     put_bytes(cg.load(r, r, a_data));
   };
   // a[i] — парный оператор [] (узел ast.operation "[]")
@@ -1835,7 +1912,38 @@ jit_compile(cg, f, types, type result) {
   // второй операнд: вычислить, на стек, первый, второй — в second
   // слева направо, как интерпретатор (у операндов бывают эффекты): первый — на стек,
   // второй — в second, первый — обратно в acc
-  operands(e0, e1, type t) => {
+  // Первый операнд — переменная-скаляр, второй её не меняет (без присваиваний и вызовов):
+  // чтение переменной ненаблюдаемо, порядок тот же по смыслу — второй вычисляется первым,
+  // переменная берётся из своего места (регистра) без стека временных.
+  assign_ops = array{"=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="};
+  calm(e) => {
+    k = code_kind(e);
+    if((k == ast.name) || ((k == ast.int) || (k == ast.float))) true
+    else if(k == ast.chain) {
+      t = jit_chain(e, ctx);
+      (t.size == 1) && calm(t[0])
+    } else if(k == ast.operation) {
+      ast.operation{op, xs, _} = e;
+      r = !has_str(assign_ops, op);
+      for(x : xs) if(r && !calm(x)) r = false;
+      r
+    } else false
+  };
+  has_str(xs, str x) => {
+    r = false;
+    for(y : xs) if(y == x) r = true;
+    r
+  };
+  plain_var(e) => (code_kind(e) == ast.name) && {
+    ast.name{nm} = e;
+    v = find(nm);
+    (v >= 0) && (!env[v].thunk && ((env[v].kind == i64) || ((env[v].kind == bool) || (env[v].kind == f64))))
+  };
+  operands(e0, e1, type t) => if(plain_var(e0) && calm(e1)) {
+    gen(e1);
+    if(t == f64) put_bytes(cg.move_f64(second_f, acc_f)) else put_bytes(cg.move(second, acc));
+    gen(e0);
+  } else {
     gen(e0);
     if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
     put_bytes(cg.push_tmp(acc));
@@ -1888,7 +1996,7 @@ jit_compile(cg, f, types, type result) {
       if((s < 0) || env[s].thunk) bad("is_index не над переменной");
       else {
         gen(xs[0]);
-        if(env[s].kind == jc_range) put_bytes(cg.load(second, sb(env[s].slot), so(env[s].slot)));
+        if(env[s].kind == jc_range) put_bytes(slot_ld(second, env[s].slot));
         else arr_size_of(second, s, xs[1]);
         fix_ops.push(c);
         jump_to(l, 6, if(when) 1 else 0, fix_ops.size - 1);
@@ -1909,7 +2017,7 @@ jit_compile(cg, f, types, type result) {
     s = var_of(xs[0]);
     if((s < 0) || env[s].thunk) bad("обращение .size не к переменной");
     else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]);
-    else if(env[s].kind == jc_range) put_bytes(cg.load(acc, sb(env[s].slot), so(env[s].slot)));
+    else if(env[s].kind == jc_range) put_bytes(slot_ld(acc, env[s].slot));
     else bad(".size не массива");
   };
   // p.x — поле агрегата-переменной p: номер поля типа k (статичен); пусто — не поле
@@ -1924,7 +2032,7 @@ jit_compile(cg, f, types, type result) {
   } else array{};
   // адрес данных полей агрегата fs[0] — в регистр r; поле k — по смещению k * шаг + скаляр
   fields_to(i64 r, i64 s) => {
-    put_bytes(cg.load(r, sb(env[s].slot), so(env[s].slot)));
+    put_bytes(slot_ld(r, env[s].slot));
     put_bytes(cg.load(r, r, ag_data));
   };
   field_off(i64 k) => (k * ag_stride) + ag_scalar;
@@ -2066,7 +2174,7 @@ jit_compile(cg, f, types, type result) {
       if((s < 0) || env[s].thunk) bad("is_index не над переменной");
       else {
         gen(xs[0]);
-        if(env[s].kind == jc_range) put_bytes(cg.load(second, sb(env[s].slot), so(env[s].slot)));
+        if(env[s].kind == jc_range) put_bytes(slot_ld(second, env[s].slot));
         else arr_size_of(second, s, xs[1]);
         put_bytes(cg.is_index(acc, second));
       }
@@ -2142,20 +2250,22 @@ jit_compile(cg, f, types, type result) {
   };
   // адрес памяти контекста вызова — в регистр r (из области аргументов)
   mem_to(i64 r) => {
-    put_bytes(cg.load(r, sb(args_slot), so(args_slot)));
+    put_bytes(slot_ld(r, args_slot));
     put_bytes(cg.load(r, r, 8 * (ap + 5)));
   };
   vm_service(i64 op, type carried, e) => vm_service_code(op, jt_code(carried), e);
   // code: тип (биты 0–7) и флаги (8 — последний аргумент print)
   vm_service_code(i64 op, i64 code, e) => {
     put_bytes(cg.load_const(ca3, (code << 32) | code_id(e)));
-    put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
+    put_bytes(slot_ld(acc, args_slot));
     put_bytes(cg.load(acc, acc, 8 * (ap + 4)));
     put_bytes(cg.load_const(ca0, op));
     pad = (depth % 2) == 1; // стек хоста — по 16 байт
+    spill();
     if(pad) put_bytes(cg.stack_alloc(8));
     put_bytes(cg.call_reg(acc));
     if(pad) put_bytes(cg.stack_free(8));
+    reload();
     jump_if(cret2, trap(6, e));
     if(((code & 255) == 2) && (op == 2)) put_bytes(cg.move_to_f64(acc_f, acc)); // read потока f64
   };
@@ -2278,9 +2388,11 @@ jit_compile(cg, f, types, type result) {
       }
       if(!gen_sub) put_bytes(cg.move(outer_r, frame)); // кадр объемлющей — подпрограмме
       pad = (depth % 2) == 1;
+      spill();
       if(pad) put_bytes(cg.stack_alloc(8));
       jump_to(subs[si].entry, 5, 0, 0);
       if(pad) put_bytes(cg.stack_free(8));
+      reload();
     }
   };
   same_types(xs, ys) => (xs.size == ys.size) && {
@@ -2316,7 +2428,7 @@ jit_compile(cg, f, types, type result) {
     for(i : range(ps.size)) {
       ast.parameter{pname, _, _, _, _, _, _} = ps[i];
       sl = alloc(1);
-      put_bytes(cg.store(sb(sl), so(sl), regs4[i])); // биты (f64 — тоже)
+      put_bytes(slot_st(sl, regs4[i])); // биты (f64 — тоже)
       put(jc_var{pname, sub.kinds[i], sl, false, f, 0, 0, 0, 0});
     }
     ctx = sub.ctx;
@@ -2443,7 +2555,7 @@ jit_compile(cg, f, types, type result) {
         s = var_of(xs[i]);
         if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в рекурсивный вызов");
         else {
-          put_bytes(cg.load(acc, sb(env[s].slot), so(env[s].slot)));
+          put_bytes(slot_ld(acc, env[s].slot));
           put_bytes(cg.store(frame, area(j), acc));
         }
         j += 1;
@@ -2459,12 +2571,14 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.load_const(acc, 0));
     put_bytes(cg.store(frame, area(ws), acc));
     for(q : range(3)) { // служба VM, память вызова, счётчик поколений — из своей области
-      put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
+      put_bytes(slot_ld(acc, args_slot));
       put_bytes(cg.load(acc, acc, 8 * ((ap + 4) + q)));
       put_bytes(cg.store(frame, area((ws + 4) + q), acc));
     }
     put_bytes(cg.address(argbase, frame, area(0)));
+    spill();
     jump_to(entry, 5, 0, 0);
+    reload();
     put_bytes(cg.move(third, acc)); // результат — пока в стороне
     put_bytes(cg.load(acc, frame, area(ws)));
     l = label();
@@ -2490,7 +2604,7 @@ jit_compile(cg, f, types, type result) {
         jumps += 1;
       } else {
         if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
-        put_bytes(cg.load(second, sb(args_slot), so(args_slot)));
+        put_bytes(slot_ld(second, args_slot));
         put_bytes(cg.store(second, 8 * (ap + 2), acc));
         put_bytes(cg.load_const(acc, jt_code(t)));
         put_bytes(cg.store(second, 8 * (ap + 3), acc));
@@ -2575,6 +2689,7 @@ jit_compile(cg, f, types, type result) {
         if(!scalar(t)) bad(fmt"аргумент блока типа {t}");
         gen(xs[i]);
         sl = alloc(1);
+        give_reg(sl, t); // имя блока — переменная, как объявленная
         store_slot(t, sl);
         ast.parameter{pname, _, _, _, _, _, _} = ps[i];
         binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
@@ -2788,7 +2903,7 @@ jit_compile(cg, f, types, type result) {
         fusing = false;
         if(f_closes != 1) bad("генератор: close(s) не один раз");
         // поток после цикла — закрытый и пустой, как после настоящего обмена
-        put_bytes(cg.load(acc, sb(sl), so(sl)));
+        put_bytes(slot_ld(acc, sl));
         put_bytes(cg.move(ca1, acc));
         vm_service(4, unit, e);
       }
@@ -2805,6 +2920,7 @@ jit_compile(cg, f, types, type result) {
       else {
         gen(xs[1]);
         p = alloc(1);
+        give_reg(p, t); // x потребителя — переменная
         store_bytes(t, p);
         ast.lambda{bps, bb, _} = f_body;
         ast.parameter{pname, _, _, _, _, _, _} = bps[0];
@@ -2903,37 +3019,37 @@ jit_compile(cg, f, types, type result) {
     w = 2 + (3 * n);
     k0 = alloc(w);
     bsl(i64 j) => (k0 + w) - (1 + j);
-    put_bytes(cg.load(acc, sb(args_slot), so(args_slot)));
+    put_bytes(slot_ld(acc, args_slot));
     put_bytes(cg.load(acc, acc, 8 * (ap + 5)));
-    put_bytes(cg.store(sb(bsl(0)), so(bsl(0)), acc));
+    put_bytes(slot_st(bsl(0), acc));
     put_bytes(cg.load_const(acc, n));
-    put_bytes(cg.store(sb(bsl(1)), so(bsl(1)), acc));
+    put_bytes(slot_st(bsl(1), acc));
     for(i : range(n)) {
       v = env[vs[i][1]];
       put_bytes(cg.load_const(acc, code_id(vs[i][0])));
-      put_bytes(cg.store(sb(bsl(2 + (3 * i))), so(bsl(2 + (3 * i))), acc));
+      put_bytes(slot_st(bsl(2 + (3 * i)), acc));
       put_bytes(cg.load_const(acc, vm_kind(v.kind)));
-      put_bytes(cg.store(sb(bsl(3 + (3 * i))), so(bsl(3 + (3 * i))), acc));
+      put_bytes(slot_st(bsl(3 + (3 * i)), acc));
       if(v.kind == f64) {
         load_slot(f64, v.slot);
         put_bytes(cg.move_from_f64(acc, acc_f));
-      } else put_bytes(cg.load(acc, sb(v.slot), so(v.slot)));
-      put_bytes(cg.store(sb(bsl(4 + (3 * i))), so(bsl(4 + (3 * i))), acc));
+      } else put_bytes(slot_ld(acc, v.slot));
+      put_bytes(slot_st(bsl(4 + (3 * i)), acc));
     }
     put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
     put_bytes(cg.load_const(ca2, vm_kind(t)));
     vm_service(8, unit, e);
     keep = alloc(1); // результат — в стороне, пока скаляры и массивы перечитываются
-    put_bytes(cg.store(sb(keep), so(keep), acc));
+    put_bytes(slot_st(keep, acc));
     for(i : range(n)) {
       v = env[vs[i][1]];
       if(!is_handle(v.kind)) { // скаляр мог измениться (mut-параметр вызова)
-        put_bytes(cg.load(acc, sb(bsl(4 + (3 * i))), so(bsl(4 + (3 * i)))));
+        put_bytes(slot_ld(acc, bsl(4 + (3 * i))));
         if(v.kind == f64) put_bytes(cg.move_to_f64(acc_f, acc));
         store_bytes(v.kind, v.slot);
       }
     }
-    put_bytes(cg.load(acc, sb(keep), so(keep)));
+    put_bytes(slot_ld(acc, keep));
     if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
   };
   // x = e, где e — значение VM: адрес его ячейки в слот
@@ -2950,7 +3066,7 @@ jit_compile(cg, f, types, type result) {
       else {
         sl = env[s].slot;
         wrote(sl);
-        put_bytes(cg.store(sb(sl), so(sl), acc));
+        put_bytes(slot_st(sl, acc));
       }
     }
   };
@@ -2972,19 +3088,19 @@ jit_compile(cg, f, types, type result) {
     s = declare(pname, types[i]);
     if(types[i] != unit) {
       put_bytes(cg.load(acc, argbase, 8 * ap));
-      put_bytes(cg.store(sb(s), so(s), acc));
+      put_bytes(slot_st(s, acc));
       ap += 1;
     }
   }
   args_slot = alloc(1); // база области аргументов — для ловушек
-  put_bytes(cg.store(sb(args_slot), so(args_slot), argbase));
+  put_bytes(slot_st(args_slot, argbase));
   outer_save = alloc(1); // регистр кадра объемлющей — сохраняемый (C ABI): вернуть вызвавшему
-  put_bytes(cg.store(sb(outer_save), so(outer_save), outer_r));
+  put_bytes(slot_st(outer_save, outer_r));
   if(ok) gen(fbody);
   if(gens.size > 0) bad("spawn (файбер) — интерпретатор");
   bind(ret);
   if(result == f64) put_bytes(cg.move_from_f64(acc, acc_f)); // f64 — битами в аккумуляторе
-  put_bytes(cg.load(outer_r, sb(outer_save), so(outer_save)));
+  put_bytes(slot_ld(outer_r, outer_save));
   put_bytes(cg.move(stack, frame));
   put_bytes(cg.frame_leave());
   put_bytes(cg.ret());
@@ -3002,11 +3118,11 @@ jit_compile(cg, f, types, type result) {
       continue;
     }
     if(x[1] == 1) { // границы: индекс (acc) и размер (second) — в слова значения, сообщение как у интерпретатора
-      put_bytes(cg.load(third, sb(args_slot), so(args_slot)));
+      put_bytes(slot_ld(third, args_slot));
       put_bytes(cg.store(third, 8 * (ap + 2), acc));
       put_bytes(cg.store(third, 8 * (ap + 3), second));
     }
-    put_bytes(cg.load(second, sb(args_slot), so(args_slot)));
+    put_bytes(slot_ld(second, args_slot));
     if(x[1] < 0) { // ошибка вызванного: вид, узел, значение, тип — из его области (смещение слова — x[2])
       for(q : range(4)) {
         put_bytes(cg.load(acc, frame, x[2] + (8 * q)));

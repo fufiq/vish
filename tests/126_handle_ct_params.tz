@@ -2,8 +2,8 @@
 // jit-compiled: norm1
 // jit-compiled: len
 // jit-compiled: shift
-// jit-stats: jit  pick(кт, i64) → 76
-// jit-stats: jit  pick(кт, i64) → 58
+// jit-stats: jit  pick(кт, i64) → 68
+// jit-stats: jit  pick(кт, i64) → 50
 // Параметры машинного кода сверх скаляров и массивов. Значение VM (агрегат, строка) —
 // адрес его ячейки, как массив (§12.2). Тип, функция, контекст — параметр экземпляра:
 // экземпляр на

@@ -1,0 +1,71 @@
+// out: 1
+// out: 1.5
+// out: 2
+// out: 3.0
+// out: 3
+// out: 4.5
+// out: 7.5 6
+// out: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+// out: 55 120 49
+// out: 13.5 0
+// out: 6765
+// jit-compiled: live_across
+// jit-compiled: fib
+// jit-compiled: outer
+// jit-compiled: guard
+// Переменные-скаляры в регистрах цели (var_regs): живы через вызовы — служба VM (print,
+// push с ростом массива), рекурсия, подпрограмма рекурсивной локальной функции, ошибка VM
+// в try — перед вызовом в кадр, после — обратно.
+live_across(i64 n, xs) {
+  a = 0;
+  x = 0.0;
+  b = 7;
+  y = 1.5;
+  for(i : range(n)) {
+    a += 1;
+    x += y;
+    print(a);
+    print(x);
+  }
+  j = 1;
+  loop {
+    if(j > 19) break;
+    xs.push(j);
+    j += 1;
+  }
+  print(x + 3.0, (a + b) - 4);
+  a
+}
+
+fib(i64 n) => if(n < 2) n else (fib(n - 1)) + (fib(n - 2))
+
+outer(i64 n) {
+  k = 3;
+  fact(i64 m) => if(m < 2) 1 else m * fact(m - 1);
+  r = fact(n);
+  q = (k * 16) + 1;
+  print(fib(10), r, q);
+  r
+}
+
+guard(xs) {
+  s = 1.5;
+  t = 0;
+  try {
+    s += 12.0;
+    t = xs[5];
+  } catch(out_of_bounds e) {
+    t = 0;
+  }
+  print(s, t);
+  t
+}
+
+main() {
+  xs = array{0};
+  live_across(3, xs);
+  print(xs);
+  outer(5);
+  guard(array{1, 2});
+  print(fib(20));
+}
