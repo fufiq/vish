@@ -221,7 +221,7 @@ in_blocks_of(c, str g) {
 }
 // c — блок-аргумент вызова g: блок, блок-лямбда, пак клауз или хвост
 block_of_call(cl, c, str g) => (code_kind(cl) == ast.call) && {
-  ast.call{callee, xs, _, tail, _, _} = cl;
+  ast.call{callee, xs, _, tail, _, _, _} = cl;
   arg = false;
   for(x : xs) if(code_id(x) == code_id(c)) arg = true;
   last = (xs.size > 0) && (code_id(xs[xs.size - 1]) == code_id(c));
@@ -1566,14 +1566,14 @@ jit_compile(cg, f, types, type result) {
     name
   } else "";
   is_call_of(e, str name) => (code_kind(e) == ast.call) && {
-    ast.call{c, _, _, _, _, _} = e;
+    ast.call{c, _, _, _, _, _, _} = e;
     callee_name(c) == name
   };
   // ct-состояние значения (§5.6) машинный код не несёт: код с ним исполняет интерпретатор
   ct_state_op(str name) => (name == "ct_state") || ((name == "set_ct_state") || (name == "call_site"));
   uses_ct_state(e) => {
     found = (code_kind(e) == ast.call) && {
-      ast.call{c, _, _, _, _, _} = e;
+      ast.call{c, _, _, _, _, _, _} = e;
       ct_state_op(callee_name(c))
     };
     for(x : code_items(e)) if(!found) found = uses_ct_state(x);
@@ -1593,7 +1593,7 @@ jit_compile(cg, f, types, type result) {
       for(x : local_fns(callee_name(code_items(e)[0]))) for(lr : lres) if(lr[0] == code_id(x)) r = lr[1];
       r
     } else if(is_call_of(e, "index")) { // примитив ядра a[i] — тип элемента
-      ast.call{_, ys, _, _, _, _} = e;
+      ast.call{_, ys, _, _, _, _, _} = e;
       a = ty(ys[0]);
       if(a == jc_range) i64 else elem(a)
     } else if(k == ast.int) i64
@@ -2219,7 +2219,7 @@ jit_compile(cg, f, types, type result) {
   // условием. Остальное — значение в acc и переход по нему.
   cmp_op(str op) => (op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || (op == ">=")))));
   is_index_call(c) => (code_kind(c) == ast.call) && {
-    ast.call{callee, xs, _, _, _, _} = c;
+    ast.call{callee, xs, _, _, _, _, _} = c;
     (callee_name(callee) == "is_index") && ((xs.size == 2) && ((find("is_index") < 0) && ((local_fns("is_index").size == 0) && (jit_const(c, ctx).size == 0))))
   };
   // условие перехода: array{узел, известный второй операнд (array{} — в регистре)} — решено при
@@ -2253,7 +2253,7 @@ jit_compile(cg, f, types, type result) {
         jump_to(l, 6, if(when) 1 else 0, fix_conds.size - 1);
       } else jump_value(c, when, l);
     } else if(is_index_call(c)) {
-      ast.call{_, xs, _, _, _, _} = c;
+      ast.call{_, xs, _, _, _, _, _} = c;
       s = var_of(xs[1]);
       if((s < 0) || env[s].thunk) bad("is_index не над переменной");
       else {
@@ -2415,7 +2415,7 @@ jit_compile(cg, f, types, type result) {
     post && ((ys.size == 1) && (code_name(callee) != ""))
   };
   gen_call(e) => {
-    ast.call{callee, xs0, _, _, _, _} = e;
+    ast.call{callee, xs0, _, _, _, _, _} = e;
     if(dotted(callee)) {
       ast.operation{_, ys, _} = callee;
       if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
@@ -3089,7 +3089,7 @@ jit_compile(cg, f, types, type result) {
     r = false;
     if((k == ast.return) || (k == ast.throw)) r = true;
     else if(k == ast.call) {
-      ast.call{cal, cxs, _, _, _, _} = c;
+      ast.call{cal, cxs, _, _, _, _, _} = c;
       nm = callee_name(cal);
       if(nm == "close") r = true;
       else if(nm != "") {
@@ -3135,7 +3135,7 @@ jit_compile(cg, f, types, type result) {
       r && gen_tail(items[items.size - 1], seen, cc)
     } else if(k != ast.call) false
     else {
-      ast.call{cal, cxs, _, _, _, _} = c;
+      ast.call{cal, cxs, _, _, _, _, _} = c;
       nm = callee_name(cal);
       if(nm == "") false
       else if(nm == "close") true
@@ -3468,7 +3468,7 @@ sl() {
 
   // хвост конструкции-инструкции: while(c) x = 1; — x = 1 это инструкция
   tail_of(call, n) => {
-    ast.call{_, args, _, tail, _, _} = call;
+    ast.call{_, args, _, tail, _, _, _} = call;
     tail && ((args.size > 0) && same(args[args.size - 1], n))
   };
 
@@ -3540,7 +3540,7 @@ sl() {
       // вызов может изменить аргументы-алиасы (§6.2); у конструкции (for, while)
       // действие — в её блоке, он режется отдельно
       if(k == ast.call) {
-        ast.call{_, args, words, tail, _, _} = n;
+        ast.call{_, args, words, tail, _, _, _} = n;
         if(!tail && (words.size == 0)) {
           for(a : args) if(code_kind(a) == ast.name) add(defs, code_name(a));
         }
@@ -3698,7 +3698,7 @@ rs() {
   };
 
   is_require(n) => (code_kind(n) == ast.call) && {
-    ast.call{c, args, words, _, _, _} = n;
+    ast.call{c, args, words, _, _, _, _} = n;
     (words.size == 0) && ((args.size > 0) && ((code_kind(c) == ast.name) && (code_name(c) == "require")))
   };
 
@@ -3708,7 +3708,7 @@ rs() {
     if(kind_in(n, array{ast.variable, ast.function, ast.parameter, ast.lambda, ast.block, ast.return, ast.loop, ast.break, ast.continue}) || (is_require(n) || is_clause_pack(n))) false
     else if(!given(p)) false
     else if((code_kind(p) == ast.call) && {
-      ast.call{c, _, _, _, _, _} = p;
+      ast.call{c, _, _, _, _, _, _} = p;
       sl.same(c, n)
     }) false
     else if((code_kind(p) == ast.variable) && {
@@ -3768,7 +3768,7 @@ rs() {
       if(!o.found || (!o.seen || (o.effect || (o.diverted || !o.known)))) r = false;
     }
     if(r && (code_kind(n) == ast.call)) {
-      ast.call{c, _, _, _, _, _} = n;
+      ast.call{c, _, _, _, _, _, _} = n;
       if(code_kind(c) == ast.name) {
         name = code_name(c);
         for(item : code_items(code_module(n))) {

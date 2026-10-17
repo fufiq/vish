@@ -124,6 +124,10 @@ struct n_call {
 //;
   // arguments - text (n_str), expression, ..., text; writing - template
   bool tagged = false;
+  // 10s - s(10) call : number and close name (castomic literature,
+// without `_` : ); writing in
+// literature
+  bool literal_suffix = false;
 };
 struct n_op {
   symbol op;

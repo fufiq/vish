@@ -1,0 +1,18 @@
+// out: 15 2.5 16
+// machine
+// fmt-stable
+// fmt-has:   t = 10s + 5s;
+// Кастомный литерал — сущность языка, а не строка: 
+//  
+// как шаблон с тегом — вызов: 
+// но без `_`. Число и вплотную
+// имя: 10s ≡ s(10), 2.5ms ≡ ms(2.5); печать — литералом.
+struct seconds { i64 v; }
+struct millis { f64 v; }
+s(i64 n) => seconds{n};
+ms(f64 x) => millis{x};
+operator (seconds a) + (seconds b) => seconds{a.v + b.v};
+main() {
+  t = 10s + 5s;
+  print(t.v, (2.5ms).v, 0x10);
+}

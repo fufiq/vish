@@ -2217,11 +2217,11 @@ struct parser {
     switch(t.kind) {
       case tok::int_lit: {
         advance();
-        return db.add(n_int{parse_int(t.text), false, t.text.starts_with("0x") || t.text.starts_with("0X")}, t.where);
+        return literal_suffix(db.add(n_int{parse_int(t.text), false, t.text.starts_with("0x") || t.text.starts_with("0X")}, t.where));
       }
       case tok::float_lit: {
         advance();
-        return db.add(n_float{parse_float(t.text)}, t.where);
+        return literal_suffix(db.add(n_float{parse_float(t.text)}, t.where));
       }
       case tok::char_lit: { // 'c' - byte: strings - bytes (§4.0)
         advance();
@@ -2290,6 +2290,18 @@ struct parser {
   }
 
   // --- literary ---
+
+  // Number and close name - custom literature: 10s от s(10), 2.5ms от ms(2.5) (§4.5)
+  node_id literal_suffix(node_id lit) {
+    if(here().kind != tok::ident || !here().glued || is_keyword(here().text)) return lit;
+    uint32_t start = db[lit].where.begin;
+    n_call c;
+    c.callee = db.add(n_ident{db.strings.intern(here().text)}, here().where);
+    advance();
+    c.args.push_back(lit);
+    c.literal_suffix = true;
+    return db.add(std::move(c), {start, toks[pos - 1].where.end});
+  }
 
   static int64_t parse_int(std::string_view s) {
     int64_t v = 0;

@@ -1033,6 +1033,10 @@ struct printer {
   // parentheses of its group: `auto x : xs` at the place of its source, `E e` at the end.
   void print_node(node_id call, n_call const & c) {
     if(c.tagged) return tagged(c); // hide x, try_compile { … } - prelude records (record_for)
+    if(c.literal_suffix && c.args.size() == 1) { // 10s - literary with suffix
+      item(c.args[0]);
+      return item(c.callee);
+    }
     item(c.callee);
     auto word = [&](uint32_t i) { return c.words.empty() ? symbol{} : c.words[i]; };
     uint32_t n = uint32_t(c.args.size());
