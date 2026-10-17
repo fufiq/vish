@@ -1439,27 +1439,19 @@ jit_compile(cg, f, types, type result) {
   // слот в регистр r / из регистра r (биты; f64 в регистре f64 — переносом)
   slot_ld(i64 r, i64 at) => {
     k = reg_of(at);
-    b = sb(at);
-    o = so(at);
-    if(k < 0) cg.load(r, b, o) else if(rv_f[k]) cg.move_from_f64(r, rv_reg[k]) else cg.move(r, rv_reg[k])
+    if(k < 0) cg.load(r, sb(at), so(at)) else if(rv_f[k]) cg.move_from_f64(r, rv_reg[k]) else cg.move(r, rv_reg[k])
   };
   slot_st(i64 at, i64 r) => {
     k = reg_of(at);
-    b = sb(at);
-    o = so(at);
-    if(k < 0) cg.store(b, o, r) else if(rv_f[k]) cg.move_to_f64(rv_reg[k], r) else cg.move(rv_reg[k], r)
+    if(k < 0) cg.store(sb(at), so(at), r) else if(rv_f[k]) cg.move_to_f64(rv_reg[k], r) else cg.move(rv_reg[k], r)
   };
   slot_ldf(i64 r, i64 at) => {
     k = reg_of(at);
-    b = sb(at);
-    o = so(at);
-    if(k < 0) cg.load_f64(r, b, o) else if(rv_f[k]) cg.move_f64(r, rv_reg[k]) else cg.move_to_f64(r, rv_reg[k])
+    if(k < 0) cg.load_f64(r, sb(at), so(at)) else if(rv_f[k]) cg.move_f64(r, rv_reg[k]) else cg.move_to_f64(r, rv_reg[k])
   };
   slot_stf(i64 at, i64 r) => {
     k = reg_of(at);
-    b = sb(at);
-    o = so(at);
-    if(k < 0) cg.store_f64(b, o, r) else if(rv_f[k]) cg.move_f64(rv_reg[k], r) else cg.move_from_f64(rv_reg[k], r)
+    if(k < 0) cg.store_f64(sb(at), so(at), r) else if(rv_f[k]) cg.move_f64(rv_reg[k], r) else cg.move_from_f64(rv_reg[k], r)
   };
   spill() => if(!gen_sub) for(i : range(rv_slot.size)) {
     o = so(rv_slot[i]);

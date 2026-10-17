@@ -240,7 +240,7 @@ struct printer {
         if(f.expr_body) {
           out += " => ";
           item(f.body);
-          out += ';';
+          if(!ends_in_statement(f.body)) out += ';';
         } else {
           out += ' ';
           item(f.body);
@@ -261,7 +261,7 @@ struct printer {
     if(f.expr_body) {
       out += " => ";
       item(f.body);
-      out += ';';
+      if(!ends_in_statement(f.body)) out += ';';
     } else {
       out += ' ';
       item(f.body);
@@ -739,8 +739,26 @@ struct printer {
     out += ';';
   }
 
-  // Write node ends with `;` (return x;) or body block (loop { }, if(c) { } else { }) -
-  // `;` is not needed after it.
+  // Node recording ends `;` (return x;) or body-block (loop { }), if(c) { } else { }) - `;` You
+  // don't have to. Body. `=> e` ends with the tail design instruction (g() => if(c) for(x : xs)
+  // s;): её `;` - and the end of the announcement.
+  //
+  bool ends_in_statement(node_id x) {
+    if(db.is<n_call>(x)) {
+      auto const & c = db.as<n_call>(x);
+      if(!c.tail || c.args.empty() || (!c.words.empty() && c.words.back())) return false;
+      node_id b = c.args.back();
+      if(db.is<n_lambda>(b)) b = db.as<n_lambda>(b).body;
+      return !db.is<n_block>(b) && !db.is<n_raw>(b);
+    }
+    auto rec = record_for(x);
+    if(!rec) return false;
+    auto const & [f, r] = *rec;
+    auto last = str(db.as<n_fn>(f).form.back());
+    if((last != "{" && last != "{=") || r.slot.empty()) return false;
+    return ends_in_statement(r.kind >= 0 ? node_place(db[x].kind, r.slot.back()) : db.as<n_call>(x).args[r.slot.back()]);
+  }
+
   bool closed(node_id n) {
     auto rec = record_for(n);
     if(!rec) return false;

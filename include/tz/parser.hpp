@@ -1084,7 +1084,7 @@ struct parser {
       eat_op("=>");
       f.body = expression();
       f.expr_body = true;
-      if(is_op(";")) eat_op(";");
+      end_expr_body();
     } else {
       f.body = block();
     }
@@ -1365,6 +1365,14 @@ struct parser {
     return db.is<n_if>(e) || db.is<n_loop>(e) || (db.is<n_ct>(e) && db.is<n_block>(db.as<n_ct>(e).body)) || db.is<n_block>(e) || (db.is<n_call>(e) && (db.as<n_call>(e).tail || !db.as<n_call>(e).words.empty()));
   }
 
+  // Body end `=> e`: The tail instruction at the end of the body (g() => if(c) for(x : xs) s;) has
+  // already eaten the `;` - it is also the end of the announcement; the flag should not live to see
+  // the next instruction (there it broke the call: k(…) - the name k and a separate instruction).
+  void end_expr_body() {
+    if(tail_statement) tail_statement = false;
+    else if(is_op(";")) eat_op(";");
+  }
+
   void end_statement() {
     if(is_op(";")) eat_op(";");
     else if(!is_close('}')) throw diagnostic("ожидалось ';'", here().where);
@@ -1498,7 +1506,7 @@ struct parser {
       eat_op("=>");
       f.body = expression();
       f.expr_body = true;
-      if(is_op(";")) eat_op(";");
+      end_expr_body();
     } else {
       f.body = block();
     }
@@ -1578,7 +1586,7 @@ struct parser {
     expect_op("=>");
     f.body = is_open('{') && !record_ahead() ? block() : expression();
     f.expr_body = true;
-    if(is_op(";")) eat_op(";");
+    end_expr_body();
     node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
     learn(db.as<n_fn>(id), id);
     return id;
@@ -2092,7 +2100,7 @@ struct parser {
     expect_op("=>");
     f.body = is_open('{') && !record_ahead() ? block() : expression();
     f.expr_body = true;
-    if(is_op(";")) eat_op(";");
+    end_expr_body();
     return db.add(std::move(f), {start, toks[pos - 1].where.end});
   }
 
