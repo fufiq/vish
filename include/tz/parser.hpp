@@ -1082,7 +1082,7 @@ struct parser {
     }
     if(is_op("=>")) {
       eat_op("=>");
-      f.body = expression();
+      f.body = expr_body();
       f.expr_body = true;
       end_expr_body();
     } else {
@@ -1369,9 +1369,18 @@ struct parser {
     return db.is<n_if>(e) || db.is<n_loop>(e) || (db.is<n_ct>(e) && db.is<n_block>(db.as<n_ct>(e).body)) || db.is<n_block>(e) || (db.is<n_call>(e) && (db.as<n_call>(e).tail || !db.as<n_call>(e).words.empty()));
   }
 
-  // Body end `=> e`: The tail instruction at the end of the body (g() => if(c) for(x : xs) s;) has
-  // already eaten the `;` - it is also the end of the announcement; the flag should not live to see
-  // the next instruction (there it broke the call: k(…) - the name k and a separate instruction).
+  // Body end `=> e`: The tail instruction at the end of the body (g() => if(c) for(x : xs) s;) has already
+  // eaten the `;` - it is also the end of the announcement; the flag should not live to see the next
+  // instruction (there it broke the call: k(…) - the name k and a separate instruction). The `=> e` body is
+  // an instruction: the tail of the structure at its beginning (g() => for(x : xs) s;), as in the if branch
+  // without brackets (author's decision 2026-10-11). My body is the beginning of the instruction.
+  node_id expr_body() {
+    uint32_t head_saved = std::exchange(statement_head, here().where.begin);
+    node_id e = expression();
+    statement_head = head_saved;
+    return e;
+  }
+
   void end_expr_body() {
     if(tail_statement) tail_statement = false;
     else if(is_op(";")) eat_op(";");
@@ -1508,7 +1517,7 @@ struct parser {
     f.name = db.strings.intern(role + sym);
     if(is_op("=>")) {
       eat_op("=>");
-      f.body = expression();
+      f.body = expr_body();
       f.expr_body = true;
       end_expr_body();
     } else {
@@ -1588,7 +1597,7 @@ struct parser {
       } else throw diagnostic("в записи syntax — слова, символы, ;, (параметр) и {тело}", here().where);
     }
     expect_op("=>");
-    f.body = is_open('{') && !record_ahead() ? block() : expression();
+    f.body = is_open('{') && !record_ahead() ? block() : expr_body();
     f.expr_body = true;
     end_expr_body();
     node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
@@ -1844,7 +1853,11 @@ struct parser {
     for(;;) {
       uint32_t a0 = here().where.begin;
       node_id a = unary_core();
-      bool closed = tail_statement || (db.is<n_if>(a) && if_closed(a));
+      // The instruction ending in a block (for(…) { … }, loop { … }, until (c) { … }) ends in `}`: the next
+      // line of `-1` is a new instruction, not a minus.
+// *Mine: * - Just at the beginning of the instruction
+      bool closed = tail_statement || (db.is<n_if>(a) && if_closed(a)) ||
+          (!db.is<n_if>(a) && db[a].where.begin == statement_head && ends_with_block(a));
       uint32_t n = closed ? 0 : run_length();
       run_split sp;
       bool more = false;
@@ -2102,7 +2115,7 @@ struct parser {
     f.form.push_back(db.strings.intern("{"));
     f.params.push_back(db.add(std::move(p), {p0, toks[pos - 1].where.end}));
     expect_op("=>");
-    f.body = is_open('{') && !record_ahead() ? block() : expression();
+    f.body = is_open('{') && !record_ahead() ? block() : expr_body();
     f.expr_body = true;
     end_expr_body();
     return db.add(std::move(f), {start, toks[pos - 1].where.end});
