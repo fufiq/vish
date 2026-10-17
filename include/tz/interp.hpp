@@ -561,8 +561,9 @@ struct interpreter {
         return;
       }
       for(node_id a: e.attrs) ext_attrs[e.name].push_back(a);
+      bool kind = program_kind(db, str(e.name)).has_value(); // ast.twice { eval(expr x) => ...; } - members of the species, not overload
       for(node_id i: e.items) {
-        if(db.is<n_fn>(i)) functions[db.as<n_fn>(i).name].push_back(i);
+        if(db.is<n_fn>(i)) (kind ? kind_members[e.name] : functions[db.as<n_fn>(i).name]).push_back(i);
         else ext_fields[e.name].push_back(i);
       }
     }
@@ -4081,9 +4082,21 @@ struct interpreter {
     fail(cat("исполнение неразобранного фрагмента: ", h.reason), db[n].where);
   }
 
-  // The node of the program type has reached execution: its meaning is disclosure in the known node.
-  flow eval_node(node_id n, n_node const & u, scope *, uint32_t) {
-    fail(cat("узел ", u.kind, " не раскрыт: смысл вида программы — раскрытие ([[transform]] f(", u.kind, " x) возвращает код из известных узлов)"), db[n].where);
+  // Program type node: execution - eval type (author's decision 2026-10-17:
+// form - member of the species.
+  // node fields are eval arguments in order, as in a call in place node: the expr field is calculated
+  // in place (semantic inlining: return and break from it - out). parsing is the same execution (value
+  // approach). No eval - the meaning of the view is only disclosure.
+  flow eval_node(node_id n, n_node const & u, scope * env, uint32_t frame) {
+    std::vector<node_id> evals;
+    if(auto it = kind_members.find(sym(u.kind)); it != kind_members.end())
+      for(node_id f: it->second)
+        if(str(db.as<n_fn>(f).name) == "eval") evals.push_back(f);
+    if(evals.empty())
+      fail(cat("узел ", u.kind, " не раскрыт: смысл вида программы — раскрытие ([[transform]] f(", u.kind, " x) возвращает код из известных узлов) или ", u.kind, " { eval(…) => …; }"), db[n].where);
+    for(node_id x: u.items)
+      if(!x) fail(cat("узел ", u.kind, ": поле пусто — eval получает все поля"), db[n].where);
+    return call_overloaded(evals, u.items, env, frame, {db[n].where, cat(u.kind, ".eval"), n.value, frame});
   }
 
   flow eval_node(node_id n, auto const &, scope *, uint32_t) {
@@ -7459,6 +7472,7 @@ struct interpreter {
   std::map<symbol, node_id> structs; // named units of the module
   bool elaborated = false;
   std::map<symbol, std::vector<node_id>> ext_fields, ext_attrs; // Extensions Name { … }
+  std::map<symbol, std::vector<node_id>> kind_members; // functions of the program node type: ast.twice { eval(…) }
   std::vector<std::vector<value> *> throw_sinks; // run-time branch shooters: try and instance
   std::map<std::string, std::set<std::string>> throws_of; // instance → Types of Exceptions (Report)
   std::vector<call_site> throw_stack; // last-throw

@@ -1779,6 +1779,26 @@ struct process_machine {
     resume_call(n);
   }
 
+  // Program type node: call eval with fields (like interpreter::eval_node(n_node)).
+  std::vector<node_id> kind_evals(n_node const & u) {
+    std::vector<node_id> evals;
+    if(auto it = helper.kind_members.find(helper.sym(u.kind)); it != helper.kind_members.end())
+      for(node_id f: it->second)
+        if(helper.str(db.as<n_fn>(f).name) == "eval") evals.push_back(f);
+    return evals;
+  }
+  void eval_node(node_id n, n_node const & u) {
+    if(top().phase == 0) {
+      std::vector<node_id> evals = kind_evals(u);
+      if(evals.empty())
+        throw diagnostic(cat("узел ", u.kind, " не раскрыт: смысл вида программы — раскрытие ([[transform]] f(", u.kind, " x) возвращает код из известных узлов) или ", u.kind, " { eval(…) => …; }"), db[n].where);
+      for(node_id x: u.items)
+        if(!x) throw diagnostic(cat("узел ", u.kind, ": поле пусто — eval получает все поля"), db[n].where);
+      return eval_call_args(n, evals, u.items, false);
+    }
+    resume_call(n);
+  }
+
   // Arguments for congestion fns: t.extra - overload by the name of the first, t.a - number of arguments.
   void eval_call_args(node_id n, std::vector<node_id> const & fns, node_list const & args, bool op) {
     m_task & t = top();
@@ -1828,6 +1848,7 @@ struct process_machine {
 
   node_list call_args(node_id n) {
     if(db.is<n_op>(n)) return db.as<n_op>(n).args;
+    if(db.is<n_node>(n)) return db.as<n_node>(n).items; // Type of program: fields - arguments eval
     auto const & c = db.as<n_call>(n);
     if(db.is_member(c.callee) && !entity_members(n, top().scope).empty()) return c.args; // entity .f(…) without an object
     if(db.is_member(c.callee)) {
@@ -1841,6 +1862,7 @@ struct process_machine {
   // overload of the call n: local set (from the caller area) or module function; env is the
   // local set environment (m_none is the global area).
   std::vector<node_id> overloads_of(node_id n, node_id any, uint32_t scope, uint32_t * env = nullptr) {
+    if(db.is<n_node>(n)) return kind_evals(db.as<n_node>(n));
     if(auto set = entity_members(n, scope); !set.empty()) {
       if(env) *env = entity_scope(db.as<n_ident>(db.member_of(db.as<n_call>(n).callee).object).name);
       return set;

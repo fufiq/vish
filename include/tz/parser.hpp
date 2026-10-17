@@ -1362,6 +1362,10 @@ struct parser {
   }
 
   bool ends_with_block(node_id e) const {
+    if(db.is<n_node>(e)) { // Type of body-ending recording program: until (c) {body}
+      auto const & items = db.as<n_node>(e).items;
+      return !items.empty() && db.is<n_block>(items.back());
+    }
     return db.is<n_if>(e) || db.is<n_loop>(e) || (db.is<n_ct>(e) && db.is<n_block>(db.as<n_ct>(e).body)) || db.is<n_block>(e) || (db.is<n_call>(e) && (db.as<n_call>(e).tail || !db.as<n_call>(e).words.empty()));
   }
 
