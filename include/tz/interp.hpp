@@ -546,9 +546,14 @@ struct interpreter {
       // 
       if(st.items.size() == 1 && db.is<n_var>(st.items[0]) && db.is<n_ident>(db.as<n_var>(st.items[0]).type) && str(db.as<n_var>(st.items[0]).name) == "value" && !is_node_kind(str(st.name)))
         if(uint32_t m = type_registry::machine(str(db.as<n_ident>(db.as<n_var>(st.items[0]).type).name))) {
-          if(!types.bind_tag(m, str(st.name)))
-            fail(cat("тег ", str(st.name), ": у представления ", type_registry::machine_names[m], " уже есть тег ", types.name(type_id(m)), " (или имя занято другим типом)"), db[item].where);
-          return;
+          if(types.bind_tag(m, str(st.name))) return;
+          // The second type over the same view (struct meters { __int64 value; }) is its own type,
+          // not the same i64:
+//;
+          // . *My:* value is an aggregate with a value field (the first tag has the machine number
+          // itself)
+          if(types.builtin(str(st.name)))
+            fail(cat("тип ", str(st.name), ": имя занято типом VM"), db[item].where);
         }
       structs[st.name] = item;
       if(st.base) types.set_parent(types.named(str(st.name)), types.named(str(st.base)));
@@ -1964,6 +1969,20 @@ struct interpreter {
   std::vector<uint8_t> fixed_names; // 0 don't know, 1 no, 2 yes
   size_t fixed_types = 0;
 
+  // The value in the place of type tn (T x = e, tag T {e}): imaginable - is converted, otherwise error.
+  value placed(value init, symbol tn, bool strict, span where) {
+    value got;
+    fit r = init.is<split_v>() ? fit::no : type_fit(init, str(tn), strict, got);
+    if(r == fit::no && !strict && !init.is<split_v>() && numeric_pair(init, str(tn)))
+      fail_rt("unpack_failed", cat("значение ", show_v(init), " не представимо в ", str(tn)), where); // type fits, meaning not
+    if(r == fit::no) check_type(init, tn, where);
+    else {
+      if(r == fit::maybe) rt_check("unpack_failed", where);
+      init = std::move(got);
+    }
+    return init;
+  }
+
   bool implicit_declaration(node_id s, scope * env) const {
     if(!db.is<n_op>(s) || db.strings.text(db.as<n_op>(s).op) != "=" || !db.is<n_ident>(db.as<n_op>(s).args[0])) return false;
     return !env->find(db.as<n_ident>(db.as<n_op>(s).args[0]).name);
@@ -1975,17 +1994,7 @@ struct interpreter {
     if(v.type && db.is<n_ident>(v.type)) {
       // T x = e - the value is represented in T (reduced), explicit T x = e - type exactly T
       // (§5.8, the author's decision on parameters - the same in the announcement)
-      symbol tn = db.as<n_ident>(v.type).name;
-      span where = db[v.init].where;
-      value got;
-      fit r = init.is<split_v>() ? fit::no : type_fit(init, str(tn), v.strict, got);
-      if(r == fit::no && !v.strict && !init.is<split_v>() && numeric_pair(init, str(tn)))
-        fail_rt("unpack_failed", cat("значение ", show_v(init), " не представимо в ", str(tn)), where); // type fits, meaning not
-      if(r == fit::no) check_type(init, tn, where);
-      else {
-        if(r == fit::maybe) rt_check("unpack_failed", where);
-        init = std::move(got);
-      }
+      init = placed(std::move(init), db.as<n_ident>(v.type).name, v.strict, db[v.init].where);
     }
     if(checking())
       emit({report_event::stage, path, std::string(str(v.name)),
@@ -2225,14 +2234,16 @@ struct interpreter {
     bool is_code = want_node && x && code_agg(*x);
     bool subtype = types.is_a(got, want);
     bool record = is_record(v), empty = record && empty_record(v), want_struct = record && structs.contains(sym(want));
+    node_id conv = implicit_fn(got, want);
     std::string key;
     key += char('0' + strict + 2 * subtype + 4 * record + 8 * want_struct + 16 * empty + 32 * is_code + 64 * want_node);
+    key += conv ? '+' : '-';
     key += got;
     key += '|';
     key += want;
     auto it = fit_rules.find(key);
     if(it == fit_rules.end()) {
-      value r = lang_rule(fit_fn, "fit_rule", {value(std::string(got)), value(std::string(want)), value(strict), value(subtype), value(record), value(want_struct), value(empty), value(is_code), value(want_node)}, {});
+      value r = lang_rule(fit_fn, "fit_rule", {value(std::string(got)), value(std::string(want)), value(strict), value(subtype), value(record), value(want_struct), value(empty), value(is_code), value(want_node), value(bool(conv))}, {});
       it = fit_rules.emplace(std::move(key), r.as<int64_t>()).first;
     }
     switch(it->second) {
@@ -2266,8 +2277,32 @@ struct interpreter {
         std::string k(lang_kind_of(db[c]));
         return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
       }
+      case 8: { // Transformation function: f64 implicit(meters m) =>
+        if(!conv) return fit::no;
+        std::vector<value> vals{v};
+        flow r = invoke(conv, vals, {}, globals, {db[conv].where, "implicit", 0, 0});
+        if(r.kind == flow_kind::thr) uncaught(r);
+        if(!r.normal()) return fit::no;
+        out = r.v;
+        return v.known() ? fit::representable : fit::maybe;
+      }
       default: return fit::no;
     }
+  }
+  // Implicit transformation declared by the program: `want implicit(got x) => …` -
+  // parameter exactly type got, type of result - want.
+//.
+  // Whether his relation permits is decided by fit_rule (the fact of implicit).
+  node_id implicit_fn(std::string_view got, std::string_view want) {
+    auto it = functions.find(sym("implicit"));
+    if(it == functions.end()) return {};
+    for(node_id f: it->second) {
+      auto const & fn = db.as<n_fn>(f);
+      if(fn.params.size() != 1 || !fn.result_type || !db.is<n_ident>(fn.result_type) || str(db.as<n_ident>(fn.result_type).name) != want) continue;
+      node_id t = db.as<n_param>(fn.params[0]).type;
+      if(t && db.is<n_ident>(t) && str(db.as<n_ident>(t).name) == got) return f;
+    }
+    return {};
   }
   std::unordered_map<std::string, int64_t> fit_rules; // facts → relation (fit_rule)
   // The threshold of static parsing is analysis_limit prelude (M6 step 7), once to the name.
@@ -3883,6 +3918,9 @@ struct interpreter {
       }
       return ok(value(std::move(g)));
     }
+    // Tag above representation: i64 {x} is the value represented in i64 (as i64 y = x): the tag is a
+    // type as a value, its constructor is the same as the location of this type
+    if(tname != "array" && types.builtin(tname) && items.size() == 1 && !open) return ok(placed(std::move(items[0]), db.as<n_ident>(c.type).name, false, db[c.items[0]].where));
     if(tname != "array") fail(cat("конструктор ", tname, "{} пока не поддержан"), db[n].where);
     for(auto const & x: items)
       if(!x.known() || open) { // at least one run-time element is an array of run-time; tuple is the length and types of elements in its type
@@ -3933,6 +3971,8 @@ struct interpreter {
     if(obj.is<agg_v>())
       for(auto & [k, v]: obj.as<agg_v>().fields)
         if(k == name) return v;
+    // Tag over representation (struct i64 { __int64 value; }): the value field itself
+    if(str(name) == "value" && (obj.is<int64_t>() || obj.is<double>() || obj.is<bool>())) return obj;
     fail(cat("у значения типа ", types.describe(obj), " нет поля ", str(name)), where);
   }
 

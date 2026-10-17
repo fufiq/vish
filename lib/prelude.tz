@@ -3901,12 +3901,15 @@ overload_pick(feats, maybes, bool checking) {
 
 // fit_rule: подходит ли значение типа got месту типа want, если типы не равны.
 // 0 — нет, 2 — наследник вместо базы (как есть), 3 — запись {x: …} → struct, 4 — {} →
-// ноль числа, 5 — i64 → f64 (без потерь), 6 — f64 → i64 (целое), 7 — по виду узла кода.
+// ноль числа, 5 — i64 → f64 (без потерь), 6 — f64 → i64 (целое), 7 — по виду узла кода,
+// 8 — функцией программы `want implicit(got x) => …` (implicit — она объявлена): 
+// объявленное программой — первым.
 // 
 // explicit — только равный тип.
-fit_rule(got, want, strict, subtype, record, want_struct, empty, is_code, want_node) {
+fit_rule(got, want, strict, subtype, record, want_struct, empty, is_code, want_node, implicit) {
   if(is_code && want_node) 7
   else if(strict) 0
+  else if(implicit) 8
   else if(subtype) 2
   else if(record && want_struct) 3
   else if(empty && ((want == "i64") || (want == "f64"))) 4

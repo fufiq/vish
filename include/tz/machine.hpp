@@ -1493,6 +1493,8 @@ struct process_machine {
     if(o.is<m_agg>())
       for(auto const & f: o.as<m_agg>().fields)
         if(f.name == m.name) return finish(f.v);
+    // Tag above representation: value is the machine value itself (like an interpreter)
+    if(helper.str(m.name) == "value" && (o.is<int64_t>() || o.is<double>() || o.is<bool>())) return finish(std::move(o));
     throw diagnostic(cat("у значения типа ", describe(o), " нет поля ", helper.str(m.name)), db[n].where);
   }
 
@@ -2303,6 +2305,9 @@ struct process_machine {
         throw d;
       }
       x = std::move(got);
+    } else if(v.type && db.is<n_ident>(v.type) && !v.strict) { // Transformation by rule (f64 d = m - implicit programs)
+      mval got;
+      if(type_fit(x, helper.str(db.as<n_ident>(v.type).name), false, got) == 1) x = std::move(got);
     }
     if(v.type && db.is<n_ident>(v.type) && !v.strict) x = to_type(std::move(x), helper.str(db.as<n_ident>(v.type).name), db[v.init].where); // point p = {x: …}
     declare(t.scope, v.name, std::move(x));
@@ -2353,6 +2358,18 @@ struct process_machine {
         g.fields.push_back({f.name, std::move(v)});
       }
       return finish(mval{std::move(g)});
+    }
+    if(helper.str(tname) != "array" && helper.types.builtin(helper.str(tname)) && c.items.size() == 1) { // Tag: i64 {x} - as i64 y = x
+      std::string_view want = helper.str(tname);
+      mval x = deref(fib().vals[t.base]), got;
+      int r = type_fit(x, want, false, got);
+      if(r == 0 && numeric_pair(x, want)) {
+        diagnostic d(cat("значение ", describe(x), " не представимо в ", want), db[c.items[0]].where, diag_kind::runtime);
+        d.type = "unpack_failed";
+        throw d;
+      }
+      if(r == 0) throw diagnostic(cat("ожидался тип ", want, ", получен ", describe(x)), db[c.items[0]].where);
+      return finish(r == 1 ? std::move(got) : std::move(x));
     }
     if(helper.str(tname) != "array") throw diagnostic(cat("конструктор ", helper.str(tname), "{} пока не поддержан"), db[n].where);
     m_arr a;
