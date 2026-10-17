@@ -5710,7 +5710,8 @@ struct interpreter {
     if(ct_cells.contains(target) && ct_depth == 0 && !level_probe)
       fail("ct-переменная меняется только кодом при компиляции (ct { … })", where);
     bool pinned = target->pinned;
-    if(!pinned && target->hidden) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
+    bool out_init = op == "=" && db.is<n_ident>(lhs) && out_marker(target->hidden); // Out-Parameter: Recording - Building on Place
+    if(!pinned && target->hidden && !out_init) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
     value result = op == "=" ? std::move(rhs) : binary(std::string_view(op).substr(0, 1), *target, rhs, where);
     if(op == "=" && is_record(result)) result = to_type(std::move(result), place_type(*target), where); // Struct holds it, {x: …} becomes it.
     if(root->state_level && root->state_level->holds(target)) { // place - state of the program: value in its level
@@ -5755,12 +5756,52 @@ struct interpreter {
 
   // Hidden name (hide / own) can not be mentioned:
 // A split path is a mistake on that path.
+  // out-parameter (§6.2): the place of the result at the caller
+// 
+// The name of the argument is the place:
+  // No caller is declared; the former value goes away; before writing the function is hidden (reading
+  // is an error), before leaving the function is written on all paths. My:* recording form.
+  value out_place(node_id arg, node_id param, scope * env) {
+    symbol name = db.as<n_ident>(arg).name;
+    value * cell = find(env, name);
+    if(!cell) cell = env->declare(name, value());
+    if(!checking() || !cell->is<split_v>()) *cell = value();
+    else *cell = value();
+    cell->hidden = param.value + 1;
+    return *cell;
+  }
+  bool out_marker(uint32_t h) const {
+    return h && db.is<n_param>(node_id(h - 1)) && db.as<n_param>(node_id(h - 1)).mode == param_mode::out;
+  }
+  void out_written(node_list const & params, scope * inner, call_site const & site) {
+    for(node_id pn: params) {
+      auto const & p = db.as<n_param>(pn);
+      if(p.mode != param_mode::out) continue;
+      value const * c = inner->find(p.name);
+      if(!c) continue;
+      bool unset = out_marker(c->hidden), some = false;
+      if(c->is<split_v>())
+        for(auto const & a: c->as<split_v>().alts) some = some || out_marker(a.hidden);
+      if(unset || some) {
+        diagnostic d(cat("out-параметр ", str(p.name), unset ? " не записан" : " не записан в одном из путей", " к выходу из функции"), db[pn].where);
+        for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+        d.note("вызов", site.where);
+        throw d;
+      }
+    }
+  }
+
   void not_hidden(value const & v, symbol name, span where) {
     uint32_t h = v.hidden;
     if(!h && v.is<split_v>())
       for(auto const & a: v.as<split_v>().alts)
         if(a.hidden) h = a.hidden;
     if(!h) return;
+    if(out_marker(h)) {
+      diagnostic d(cat(name ? cat("имя ", str(name)) : std::string("значение"), " ещё не записано (out-параметр ", str(db.as<n_param>(node_id(h - 1)).name), ")"), where);
+      for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
+      throw d;
+    }
     diagnostic d(cat(name ? cat("имя ", str(name)) : std::string("значение"), v.hidden ? " скрыто" : " скрыто в одном из путей", " (hide/own)"), where);
     d.note("скрыто здесь", db[node_id(h - 1)].where);
     if(!path.empty()) d.note(cat("в продолжении ", path), where);
@@ -6163,7 +6204,13 @@ struct interpreter {
         auto const & ps = db.as<n_fn>(f).params;
         if(i >= ps.size() || db.as<n_param>(ps[i]).mode != param_mode::expr) expr_everywhere = false;
       }
+      bool out_everywhere = !fns.empty() && db.is<n_ident>(args[i]);
+      for(node_id f: fns) {
+        auto const & ps = db.as<n_fn>(f).params;
+        if(i >= ps.size() || db.as<n_param>(ps[i]).mode != param_mode::out) out_everywhere = false;
+      }
       if(expr_everywhere) vals[i] = value(thunk_v{args[i], frame, env, ctx});
+      else if(out_everywhere) vals[i] = out_place(args[i], db.as<n_fn>(fns[0]).params[i], env);
       else if(value * cell = checking() ? nullptr : place_or_null(args[i], env); cell && cell->is<array_v>())
         vals[i] = value(array_v::borrow(cell->as<array_v>())); // place-link, not copy
       else {
@@ -6362,6 +6409,8 @@ struct interpreter {
           }
           else feat.push_back(100 + int64_t(pattern_checks(p.type)));
           maybe = maybe || r == unpacked::maybe;
+        } else if(p.mode == param_mode::out) {
+          feat.push_back(2); // out - the place of the result: the value is given by the function
         } else if(p.type && db.is<n_ident>(p.type)) {
           auto want = str(db.as<n_ident>(p.type).name);
           value got;
@@ -6649,6 +6698,7 @@ struct interpreter {
         try {
           r = run_frame(fn.body, inner, fn.name, fn.outline, site.frame);
           if(r.kind != flow_kind::thr) write_back_fields(f, fn.params, args, env, inner, site);
+          if(r.kind != flow_kind::thr) out_written(fn.params, inner, site);
         } catch(...) {
           throw_sinks.pop_back();
           throw;
@@ -6780,6 +6830,11 @@ struct interpreter {
       if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && db.is_index(args[i]) && writes_param(f, i))
         if(auto r = element_ref(args[i], env, 0, args[i])) {
           inner->declare(p.name, std::move(*r));
+          continue;
+        }
+      if(p.mode == param_mode::out && i < args.size() && db.is<n_ident>(args[i])) // The place of the result is the name of the caller.
+        if(value * cell = find(env, db.as<n_ident>(args[i]).name)) {
+          inner->alias(p.name, cell);
           continue;
         }
       if(p.mode != param_mode::expr && p.mode != param_mode::own && !vals[i].is<split_v>()) {

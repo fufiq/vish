@@ -901,6 +901,10 @@ struct process_machine {
           } else feat.push_back(100 + int64_t(helper.pattern_checks(p.type)));
           continue;
         }
+        if(p.mode == param_mode::out) { // location of the result: the value is given by the function
+          feat.push_back(2);
+          continue;
+        }
         if(p.type && db.is<n_ident>(p.type)) {
           if(args[i].is<m_thunk>()) continue;
           mval got;
@@ -1908,6 +1912,14 @@ struct process_machine {
         fib().vals.push_back(mval{m_thunk{args[i], t.scope, t.frame, t.ctx}});
         continue;
       }
+      // out-параметр: имя — место результата; нет у вызывающего — объявляется (строгость —
+      // Read before writing, all paths - parsing as an interpreter
+      bool out_everywhere = !fns.empty() && db.is<n_ident>(args[i]);
+      for(node_id f: fns) {
+        auto const & ps = db.as<n_fn>(f).params;
+        if(i >= ps.size() || db.as<n_param>(ps[i]).mode != param_mode::out) out_everywhere = false;
+      }
+      if(out_everywhere && find(t.scope, db.as<n_ident>(args[i]).name).scope == m_none) declare(t.scope, db.as<n_ident>(args[i]).name, mval{m_unit{}});
       // array element to variable parameter - reference to element, not copy
       bool writes = false;
       for(node_id f: fns) {
