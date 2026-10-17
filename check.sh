@@ -1,6 +1,6 @@
 #!/bin/sh
-# Complete check before the commit: three assemblies - at the same time (each - one stream of GCC,
-# the cores are enough), tests of the mode - immediately upon the readiness of its assembly.
+# Complete check before the committ: three assemblies - simultaneously (code generation each -
+# on the cores, -flto=auto), tests of the mode - immediately upon the readiness of its assembly.
 # ./check.sh - release, debug, asan + --a64, TZ_JIT_SELF, editor
 # ./check.sh quick is release only and its output code 0 is all green. Logs -
 # out/check/. Working out/tz - release.

@@ -12,7 +12,9 @@ cd "$(dirname "$0")"
 
 CXX=${CXX:-g++-16}
 OUT=${OUT:-out/tz} # свой выход — сборки режимов параллельно (full.sh)
-FLAGS="-std=c++26 -freflection -fcontracts -Iinclude -Iout -Wall -Wextra -Wno-unused-parameter ${EXTRA:-}"
+# -flto=auto: the same TU and one command, but code generation (80 - 90% of the time) GCC
+# cuts to pieces and runs through all cores: release 89 → 39 s, asan 190 → 63 s.
+FLAGS="-std=c++26 -freflection -fcontracts -flto=auto -Iinclude -Iout -Wall -Wextra -Wno-unused-parameter ${EXTRA:-}"
 mkdir -p out
 [ -f out/native.hpp ] || printf '#pragma once\nnamespace tz {\nstd::span<native_entry const> native_table() { return {}; }\n}\n' > out/native.hpp
 
@@ -20,7 +22,7 @@ build() {
     case "$1" in
         release) $CXX $FLAGS -O2 -DNDEBUG -fcontract-evaluation-semantic=ignore src/tz.cpp -o "$OUT" -luring ;;
         debug)   $CXX $FLAGS -O0 -g src/tz.cpp -o "$OUT" -luring ;;
-        # -fno-var-tracking: local places at -O1 for gdb are not built - 330 → 190 from build (GCC
+        # -fno-var-tracking: local places at -O1 for gdb are not built - 113 → 63 with build (GCC
         # is quadratic on huge functions); lines in ASan reports remain, debug mode
         #
 # 
