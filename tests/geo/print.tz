@@ -3,4 +3,4 @@
 // по области видимости).
 module geo.print;
 
-syntax forever {body} => n_loop{body};
+syntax forever {body} => ast.loop{body};

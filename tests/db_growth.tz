@@ -12,24 +12,24 @@ shift(i64 x) => x;
 other() => 7;
 
 tune(f, op, k) => ct {
-  f.body = n_op{op, array{n_ident{"x"}, n_int{k}}};
+  f.body = ast.operation{op, array{ast.name{"x"}, ast.int{k}}};
 };
 
 ct {
-  f = n_fn{"twice", array{n_param{"x"}}};
-  f.body = n_op{"*", array{n_ident{"x"}, n_int{2}}};
+  f = ast.function{"twice", array{ast.parameter{"x"}}};
+  f.body = ast.operation{"*", array{ast.name{"x"}, ast.int{2}}};
   f.expr_body = true;
   emit(f);
-  g = n_fn{"twice", array{n_param{"s", n_ident{"str"}}}};
-  g.body = n_op{"+", array{n_ident{"s"}, n_ident{"s"}}};
+  g = ast.function{"twice", array{ast.parameter{"s", ast.name{"str"}}}};
+  g.body = ast.operation{"+", array{ast.name{"s"}, ast.name{"s"}}};
   g.expr_body = true;
   emit(g);
 }
 
 sum_parse(r) {
-  n_raw{_, items, _, _, _} = r;
-  e = n_int{0};
-  for(a : items) e = n_op{"+", array{e, a}};
+  ast.raw{_, items, _, _, _} = r;
+  e = ast.int{0};
+  for(a : items) e = ast.operation{"+", array{e, a}};
   e
 }
 

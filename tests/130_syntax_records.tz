@@ -7,16 +7,16 @@
 // fmt-stable
 // store-roundtrip
 // Записи (§4.4): if, loop, return, break, continue, throw, hide, try_compile —
-// объявления syntax прелюдии, тело которых — узел ядра (n_if{c, then_, else_}) или
+// объявления syntax прелюдии, тело которых — узел ядра (ast.if{c, then_, else_}) или
 // вызов ядра (hide(x)): 
 // 
 // 
 // Программа объявляет свои
 // записи тех же узлов: разбор строит тот же узел, печать — по ближайшей видимой
 // записи (своей, ниже её объявления; §4.4, записи печати по области видимости).
-syntax forever {body} => n_loop{body};
-syntax when (c) {yes} otherwise {no} => n_if{c, yes, no};
-syntax leave {v}; => n_return{v};
+syntax forever {body} => ast.loop{body};
+syntax when (c) {yes} otherwise {no} => ast.if{c, yes, no};
+syntax leave {v}; => ast.return{v};
 
 count(n) {
   i = 0;

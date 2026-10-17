@@ -1183,23 +1183,51 @@ std::string render(diagnostic const & d, std::string_view file, ast_db const & d
   return out;
 }
 
-// The name of the type node is the name of its structure (n_op, n_if...): a tag of the
-// form node for code as a value (§7.4). Is there any alternative to node_kind?
+// Names node in language (author's decision 2026-10-17): module `ast` -
+//  
+// The form node is `ast.<слово>` in the full word: the structure of C++ n_fn - `ast.function`,
+// n_ident - `ast.name`; the field - without tail `_` (then → then: in C++ then / else - not
+// field names). My words.
+std::string_view lang_word(std::string_view cpp) {
+  static constexpr std::pair<std::string_view, std::string_view> renamed[] = {
+      {"n_fn", "function"}, {"n_param", "parameter"}, {"n_var", "variable"}, {"n_ident", "name"}, {"n_str", "string"},
+      {"n_op", "operation"}, {"n_extend", "extension"}, {"n_pat", "pattern"}, {"n_pat_field", "pattern_field"},
+      {"n_ref", "reference"}, {"n_sym", "symbol"}};
+  for(auto const & [a, b]: renamed)
+    if(a == cpp) return b;
+  return cpp.starts_with("n_") ? cpp.substr(2) : cpp;
+}
+std::string lang_kind_name(std::string_view cpp) { return cat("ast.", lang_word(cpp)); }
+std::string_view lang_field(std::string_view cpp) { return cpp.ends_with('_') ? cpp.substr(0, cpp.size() - 1) : cpp; }
+
+// The name of the type node in the language by number in node_kind (table - once, by reflection).
+std::string_view lang_kind(std::size_t index) {
+  static std::vector<std::string> const names = [] {
+    std::vector<std::string> v;
+    template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) v.push_back(lang_kind_name(std::meta::identifier_of(t)));
+    return v;
+  }();
+  return index < names.size() ? std::string_view(names[index]) : std::string_view("ast.?");
+}
+std::string_view lang_context() {
+  static std::string const n = lang_kind_name(std::meta::identifier_of(^^n_context));
+  return n;
+}
+
+// node by name in language (ast.operation, ast.if...): a node tag for code as a value
+// (§7.4). Is there any alternative to node_kind?
 bool is_node_kind(std::string_view name) {
-  bool found = false;
-  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind))))
-    found = found || std::meta::identifier_of(t) == name;
-  return found;
+  if(!name.starts_with("ast.")) return false;
+  for(std::size_t i = 0; i < std::variant_size_v<node_kind>; ++i)
+    if(lang_kind(i) == name) return true;
+  return false;
 }
 
 // The node type number in node_kind is named for the structure (-1 is not).
 int node_kind_index(std::string_view name) {
-  int out = -1, i = 0;
-  template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-    if(std::meta::identifier_of(t) == name) out = i;
-    ++i;
-  }
-  return out;
+  for(std::size_t i = 0; i < std::variant_size_v<node_kind>; ++i)
+    if(lang_kind(i) == name) return int(i);
+  return -1;
 }
 
 // Fields in the form node; -1 - not all fields node (such a node does not build a record).
@@ -1342,20 +1370,23 @@ consteval char const * node_field_type() {
 // sample base.
 std::string ast_structs_text() {
   std::string out = "// узлы АСТ (порождено из структур узлов VM)\n";
-  out += cat("struct ", std::meta::identifier_of(^^n_context), " { }\n");
+  out += cat("struct ", lang_context(), " { }\n");
   template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-    out += cat("struct ", std::meta::identifier_of(t));
+    out += cat("struct ", lang_kind_name(std::meta::identifier_of(t)));
     template for(constexpr auto b: std::define_static_array(std::meta::bases_of(t, std::meta::access_context::unchecked())))
-      out += cat(" : ", std::meta::identifier_of(std::meta::type_of(b)));
+      out += cat(" : ", lang_kind_name(std::meta::identifier_of(std::meta::type_of(b))));
     out += " {";
     template for(constexpr auto m: fields_of<typename[:t:]>())
-      out += cat(" ", node_field_type<typename[:std::meta::type_of(m):]>(), " ", std::meta::identifier_of(m), ";");
+      out += cat(" ", node_field_type<typename[:std::meta::type_of(m):]>(), " ", lang_field(std::meta::identifier_of(m)), ";");
     out += " }\n";
   }
   return out;
 }
 
-// The name node is for debugging (through reflection, without manual tables).
+// The name of node is ast.if, ast.call.
+std::string_view lang_kind_of(node const & n) { return lang_kind(n.kind.index()); }
+
+// The name of the type node is the C++ structure (editor protocol, debugging output).
 std::string_view kind_name(node const & n) {
   return std::visit([](auto const & k) -> std::string_view {
     return std::meta::identifier_of(std::meta::remove_cvref(^^decltype(k)));

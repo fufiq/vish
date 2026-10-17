@@ -17,13 +17,13 @@
 // примечанием печати.  
 // *Моё:* имя prefer, функция скобок по имени,
 // описатели-аргументы.
-[[prefer(plain_then)]] syntax when (c) {yes}; otherwise {no} => n_if{c, yes, no};
-syntax when (c) {yes} otherwise {no} => n_if{c, yes, no};
+[[prefer(plain_then)]] syntax when (c) {yes}; otherwise {no} => ast.if{c, yes, no};
+syntax when (c) {yes} otherwise {no} => ast.if{c, yes, no};
 
 // ветка «то» — не блок: форма с `;` (как в C)
 plain_then(n) => {
-  n_if{_, t, _} = n;
-  code_kind(t) != n_block
+  ast.if{_, t, _} = n;
+  code_kind(t) != ast.block
 };
 
 // своя функция скобок модуля: скобки у любого вложенного инфикса, и у того же

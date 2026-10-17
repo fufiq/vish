@@ -15,8 +15,8 @@
 //.
 use geo.forms; // twice { … }, a +* b, thrice { … } — из модуля
 
-// блок и модуль — наследники контекста (struct n_block : n_context)
-kind(n_context c) => "контекст";
+// блок и модуль — наследники контекста (struct ast.block : ast.context)
+kind(ast.context c) => "контекст";
 kind(c) => "нет";
 
 forms() {
@@ -56,8 +56,8 @@ local() {
 main() {
   forms();
   local();
-  b = n_block{array{}, false, array{}};
-  m = n_module{"m", array{}, array{}, array{}, array{}};
-  print(kind(b), kind(m), kind(n_hole{"x", "y"}), if(n_context{} = m) "да" else "нет");
-  print(fields(n_context));
+  b = ast.block{array{}, false, array{}};
+  m = ast.module{"m", array{}, array{}, array{}, array{}};
+  print(kind(b), kind(m), kind(ast.hole{"x", "y"}), if(ast.context{} = m) "да" else "нет");
+  print(fields(ast.context));
 }

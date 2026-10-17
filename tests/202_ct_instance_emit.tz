@@ -25,8 +25,8 @@ note(x) {
     for(s : seen) if(s == t) fresh = false;
     if(fresh) {
       seen = array{...seen, t};
-      f = n_fn{"describe", array{n_param{"v", n_ident{t}}}};
-      f.body = n_op{"+", array{n_str{t + ": "}, n_call{n_ident{"text"}, array{n_ident{"v"}}}}};
+      f = ast.function{"describe", array{ast.parameter{"v", ast.name{t}}}};
+      f.body = ast.operation{"+", array{ast.string{t + ": "}, ast.call{ast.name{"text"}, array{ast.name{"v"}}}}};
       f.expr_body = true;
       emit(f);
     }

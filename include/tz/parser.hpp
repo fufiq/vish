@@ -31,6 +31,7 @@ struct parser {
     src = db.source(source);
     lexer lx(src);
     toks = lx.run();
+    fold_ast_names();
     diags = std::move(lx.errors); // token::err - Diag numbers
     if(!diags.empty()) lex_error = diags.front().what();
     take_comments(lx.comments, 0);
@@ -49,10 +50,30 @@ struct parser {
       t.where.begin += range.begin;
       t.where.end += range.begin;
     }
+    fold_ast_names();
     for(auto const & d: lx.errors) diags.push_back(diagnostic(d.what(), {d.where.begin + range.begin, d.where.end + range.begin}));
     if(!diags.empty()) lex_error = diags.front().what();
     take_comments(lx.comments, range.begin);
     match_brackets();
+  }
+
+  // The name node AST is one name: `ast.if`, `ast.call` (module ast, author's decision 2026-10-17).
+  // The `ast` `.` word is one lexeme-name: the words of the node species (if, return, use...) after
+  // `ast.` are not words of the language. `ast` is the name of the module, not the variable.
+  void fold_ast_names() {
+    std::vector<token> out;
+    for(std::size_t i = 0; i < toks.size(); ++i) {
+      token t = toks[i];
+      bool after_dot = !out.empty() && out.back().kind == tok::op && out.back().ch() == '.' && t.glued;
+      if(t.kind == tok::ident && t.text == "ast" && !after_dot && i + 2 < toks.size() && toks[i + 1].kind == tok::op && toks[i + 1].ch() == '.' && toks[i + 1].glued &&
+         toks[i + 2].kind == tok::ident && toks[i + 2].glued) {
+        t.text = std::string_view(t.text.data(), std::size_t(toks[i + 2].text.data() + toks[i + 2].text.size() - t.text.data()));
+        t.where.end = toks[i + 2].where.end;
+        i += 2;
+      }
+      out.push_back(t);
+    }
+    toks = std::move(out);
   }
 
   // --- Comments: Context Elements (§4.0) ---

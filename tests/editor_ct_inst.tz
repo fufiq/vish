@@ -9,7 +9,7 @@ greet() {
 instrument(f, s) {
   ct {
     b = f.body;
-    b.items = array{n_call{n_ident{"print"}, array{n_str{s}}}, ...b.items};
+    b.items = array{ast.call{ast.name{"print"}, array{ast.string{s}}}, ...b.items};
   }
 }
 

@@ -453,6 +453,22 @@ Compile-time исполняет **тот же интерпретатор VM**, �
 
 ### 7.4. Сущности компилятора как значения
 «в этом суть мета-языка»: `struct foo{}` — экземпляр типа `struct`,.
+
+**Имена узлов в языке — модуль `ast` (решение автора 2026-10-17).** «ноды того же аст должны быть описаны в рамках твоей программы». Вид узла — `ast.<слово>` полным словом; поле — без хвостового `_`. `ast.X` — одно имя (лексема): слова видов (`if`, `return`, `use`) после `ast.` — не слова языка; `ast` — имя модуля, не переменной. Структуры C++ (`n_*`) — внутренние: протокол редактора и журнал их не меняют. Старые упоминания `n_*` в этой спеке — имена структур C++.
+
+| C++ | язык | | C++ | язык |
+|---|---|---|---|---|
+| `n_module` | `ast.module` | | `n_lambda` | `ast.lambda` |
+| `n_fn` | `ast.function` | | `n_construct` | `ast.construct` |
+| `n_param` | `ast.parameter` | | `n_hole` | `ast.hole` |
+| `n_var` | `ast.variable` | | `n_chain` | `ast.chain` |
+| `n_block` | `ast.block` | | `n_extend` | `ast.extension` |
+| `n_ident` | `ast.name` | | `n_quote`, `n_splice` | `ast.quote`, `ast.splice` |
+| `n_int`, `n_float`, `n_str` | `ast.int`, `ast.float`, `ast.string` | | `n_pat`, `n_pat_field` | `ast.pattern`, `ast.pattern_field` |
+| `n_call` | `ast.call` | | `n_unpack`, `n_subject`, `n_spread` | `ast.unpack`, `ast.subject`, `ast.spread` |
+| `n_op` | `ast.operation` | | `n_use`, `n_native` | `ast.use`, `ast.native` |
+| `n_if` (`cond`, `then`, `else`) | `ast.if` | | `n_ref` | `ast.reference` |
+| `n_loop`, `n_break`, `n_continue`, `n_return`, `n_throw`, `n_ct` | `ast.loop` … `ast.ct` | | `n_raw`, `n_sym`, `n_context` | `ast.raw`, `ast.symbol`, `ast.context` |
 | Значение | Возможности |
 |---|---|
 | `type` | `fields(T)`, `size(T)`, `typeid(T)`, построение типов (`make_struct([...])`), `extend` |

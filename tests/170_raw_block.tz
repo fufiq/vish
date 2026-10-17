@@ -12,9 +12,9 @@
 // 
 // Итог — обычный код в месте блока: имена — у вызывающего.
 sum_parse(r) {
-  n_raw{_, items, _, _, _} = r;
-  e = n_int{0};
-  for(a : items) e = n_op{"+", array{e, a}};
+  ast.raw{_, items, _, _, _} = r;
+  e = ast.int{0};
+  for(a : items) e = ast.operation{"+", array{e, a}};
   e
 }
 

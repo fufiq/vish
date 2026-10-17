@@ -25,7 +25,7 @@ struct str { __bytes value; }
 // 
 // 
 // Тело записи — сам узел над её
-// частями: n_if{c, t, e} — узел ядра (struct программы, §7.4), hide(x) — вызов
+// частями: ast.if{c, t, e} — узел ядра (struct программы, §7.4), hide(x) — вызов
 // ядра; разбор строит этот узел, печать узла идёт по первой подходящей записи.
 // Части: (x) — в скобках (вплотную к слову — только вплотную), {x} — тело: блок
 // или выражение, {[[value]] x} — слот-значение: то же, но {} в нём — пустой
@@ -34,19 +34,19 @@ struct str { __bytes value; }
 // перед }). Из форм с общим началом
 // выбирает текст впереди. Узлы те же — интерпретатор, машина, JIT, редактор их
 // не различают; *моё:* запись узла и вызова ядра — не функция.
-syntax if (c) {then_} => n_if{c, then_};
-syntax if (c) {then_} else {else_} => n_if{c, then_, else_};
-syntax if (c) {then_}; else {else_} => n_if{c, then_, else_}; // if(c) x = 1; else x = 2;
-syntax loop {body} => n_loop{body};
-syntax break; => n_break{};
-syntax continue; => n_continue{};
-syntax return; => n_return{};
-syntax return {[[value]] value}; => n_return{value};
+syntax if (c) {then_} => ast.if{c, then_};
+syntax if (c) {then_} else {else_} => ast.if{c, then_, else_};
+syntax if (c) {then_}; else {else_} => ast.if{c, then_, else_}; // if(c) x = 1; else x = 2;
+syntax loop {body} => ast.loop{body};
+syntax break; => ast.break{};
+syntax continue; => ast.continue{};
+syntax return; => ast.return{};
+syntax return {[[value]] value}; => ast.return{value};
 // return(f) x — выход из внешней f; return (x) через пробел — значение
-syntax return(target); => n_return{_, target};
-syntax return(target) {[[value]] value}; => n_return{value, target};
+syntax return(target); => ast.return{_, target};
+syntax return(target) {[[value]] value}; => ast.return{value, target};
 // throw — выражение 
-syntax throw {[[value]] value} => n_throw{value};
+syntax throw {[[value]] value} => ast.throw{value};
 // hide x — имя исчезает из области:  
 syntax hide {x} => hide(x);
 // try_compile { … } — 
@@ -201,7 +201,7 @@ in_blocks_of(c, str g) {
   found = false;
   done = false;
   while(!done && given(up)) {
-    if(code_kind(up) == n_fn) done = true;
+    if(code_kind(up) == ast.function) done = true;
     else if(block_of_call(up, at, g)) {
       found = true;
       done = true;
@@ -212,20 +212,20 @@ in_blocks_of(c, str g) {
   found
 }
 // c — блок-аргумент вызова g: блок, блок-лямбда, пак клауз или хвост
-block_of_call(cl, c, str g) => (code_kind(cl) == n_call) && {
-  n_call{callee, xs, _, tail, _, _} = cl;
+block_of_call(cl, c, str g) => (code_kind(cl) == ast.call) && {
+  ast.call{callee, xs, _, tail, _, _} = cl;
   arg = false;
   for(x : xs) if(code_id(x) == code_id(c)) arg = true;
   last = (xs.size > 0) && (code_id(xs[xs.size - 1]) == code_id(c));
-  (code_kind(callee) == n_ident) && ((code_name(callee) == g) && (arg && ((tail && last) || (is_code_block(c) || is_clause_pack(c)))))
+  (code_kind(callee) == ast.name) && ((code_name(callee) == g) && (arg && ((tail && last) || (is_code_block(c) || is_clause_pack(c)))))
 };
-is_code_block(c) => (code_kind(c) == n_block) || ((code_kind(c) == n_lambda) && {
-  n_lambda{_, _, block} = c;
+is_code_block(c) => (code_kind(c) == ast.block) || ((code_kind(c) == ast.lambda) && {
+  ast.lambda{_, _, block} = c;
   block
 });
-is_clause_pack(c) => (code_kind(c) == n_construct) && {
-  n_construct{t, items, _} = c;
-  all = (items.size > 0) && (given(t) && ((code_kind(t) == n_ident) && (code_name(t) == "array")));
+is_clause_pack(c) => (code_kind(c) == ast.construct) && {
+  ast.construct{t, items, _} = c;
+  all = (items.size > 0) && (given(t) && ((code_kind(t) == ast.name) && (code_name(t) == "array")));
   for(x : items) if(!is_code_block(x)) all = false;
   all
 };
@@ -255,25 +255,25 @@ same_module_types(ext, entity) => require(same_module(ext, entity) || uses_modul
 module_declares(m, str t) {
   found = false;
   for(x : code_items(m))
-    if(code_kind(x) == n_extend) {
-      n_extend{name, _, _, _, of, _} = x;
+    if(code_kind(x) == ast.extension) {
+      ast.extension{name, _, _, _, of, _} = x;
       if((of == "struct") && (name == t)) found = true;
     }
   found
 }
-declared_in(t, m) => given(t) && ((code_kind(t) == n_ident) && module_declares(m, code_name(t)));
+declared_in(t, m) => given(t) && ((code_kind(t) == ast.name) && module_declares(m, code_name(t)));
 uses_module_type(c, m) {
   found = false;
-  if(code_kind(c) == n_fn) {
-    n_fn{_, params, _, _, _, _, _, _, _} = c;
+  if(code_kind(c) == ast.function) {
+    ast.function{_, params, _, _, _, _, _, _, _} = c;
     for(p : params) {
-      n_param{_, t, _, _, _, _, _} = p;
+      ast.parameter{_, t, _, _, _, _, _} = p;
       if(declared_in(t, m)) found = true;
     }
-  } else if(code_kind(c) == n_var) {
-    n_var{_, t, _, _, _, _, _, _} = c;
+  } else if(code_kind(c) == ast.variable) {
+    ast.variable{_, t, _, _, _, _, _, _} = c;
     found = declared_in(t, m);
-  } else if(code_kind(c) == n_extend) {
+  } else if(code_kind(c) == ast.extension) {
     for(x : code_items(c)) if(uses_module_type(x, m)) found = true;
   }
   found
@@ -682,7 +682,7 @@ fill(i64 n, x) {
 is_err(result r) => !r.ok;
 
 // Разбор кодом (§4.4): блок конструкции, тело которой объявляет `syntax {r} => f(r);`,
-// хранится сырым (n_raw: атомы и подблоки с позициями), f разбирает его при анализе и
+// хранится сырым (ast.raw: атомы и подблоки с позициями), f разбирает его при анализе и
 // возвращает код (или значение — VM строит код, который его создаёт) либо parse_error —
 // дыру с причиной на месте атома. 
 // Библиотека — по его критике mecha:
@@ -797,7 +797,7 @@ p_further(a, b) => (a[1] > b[1]) || ((a[1] == b[1]) && (a[4] > b[4]));
 // символы: байт на (k, c) или -1 — конец слова; cont — продолжение того же слова: в
 // следующий атом — только вплотную; подблок — не символы
 p_at(xs, i64 k, i64 c, bool cont) {
-  if((k >= xs.size) || (code_kind(xs[k]) == n_raw)) return -1;
+  if((k >= xs.size) || (code_kind(xs[k]) == ast.raw)) return -1;
   if(cont && (c == 0) && !code_glued(xs[k])) return -1;
   code_text(xs[k])[c]
 }
@@ -806,7 +806,7 @@ p_next(xs, i64 k, i64 c) => if((c + 1) < code_text(xs[k]).size) array{k, c + 1} 
 // неудача символа на (k, c): конец слова или блока — место сразу за последним символом атома
 p_fail_at(xs, i64 k, i64 c, bool cont, str why) {
   end = (c == 0) && (k > 0) && ((k == xs.size) || (cont && (p_at(xs, k, c, true) < 0)));
-  if(end && (code_kind(xs[k - 1]) != n_raw)) return p_fail(xs, k - 1, code_text(xs[k - 1]).size, why);
+  if(end && (code_kind(xs[k - 1]) != ast.raw)) return p_fail(xs, k - 1, code_text(xs[k - 1]).size, why);
   p_fail(xs, k, c, why)
 }
 p_digit(i64 ch, i64 base) {
@@ -873,15 +873,15 @@ p_run(p_int p, xs, i64 k, i64 c) {
   if((c > 0) || (p.base != 10) || (p.max > 0)) return p_int_chars(p, xs, k, c);
   j = k;
   neg = false;
-  if(p.sign && p_has(xs, j, n_sym)) {
-    n_sym{t, _} = xs[j];
+  if(p.sign && p_has(xs, j, ast.symbol)) {
+    ast.symbol{t, _} = xs[j];
     if(t == "-") {
       neg = true;
       j = j + 1;
     }
   }
-  if(!p_has(xs, j, n_int)) return p_fail(xs, j, 0, "ожидалось целое");
-  n_int{v, _, _} = xs[j];
+  if(!p_has(xs, j, ast.int)) return p_fail(xs, j, 0, "ожидалось целое");
+  ast.int{v, _, _} = xs[j];
   p_ok(j + 1, 0, if(neg) -v else v)
 }
 p_run(p_num p, xs, i64 k, i64 c) {
@@ -890,29 +890,29 @@ p_run(p_num p, xs, i64 k, i64 c) {
   if(r[0]) return p_ok(r[1], 0, f64(r[2]));
   j = k;
   neg = false;
-  if(p.sign && p_has(xs, j, n_sym)) {
-    n_sym{t, _} = xs[j];
+  if(p.sign && p_has(xs, j, ast.symbol)) {
+    ast.symbol{t, _} = xs[j];
     if(t == "-") {
       neg = true;
       j = j + 1;
     }
   }
-  if(!p_has(xs, j, n_float)) return p_fail(xs, j, 0, "ожидалось число");
-  n_float{v} = xs[j];
+  if(!p_has(xs, j, ast.float)) return p_fail(xs, j, 0, "ожидалось число");
+  ast.float{v} = xs[j];
   p_ok(j + 1, 0, if(neg) -v else v)
 }
 p_run(p_word p, xs, i64 k, i64 c) {
   if((c > 0) && (p.w != "")) return p_lit_chars(xs, k, c, p.w);
   if(c > 0) return p_mid(xs, k, c);
-  if(!p_has(xs, k, n_ident)) return if(p.w == "") p_fail(xs, k, 0, "ожидалось имя") else p_glued_lit(xs, k, p.w);
-  n_ident{nm} = xs[k];
+  if(!p_has(xs, k, ast.name)) return if(p.w == "") p_fail(xs, k, 0, "ожидалось имя") else p_glued_lit(xs, k, p.w);
+  ast.name{nm} = xs[k];
   if((p.w != "") && (nm != p.w)) return p_glued_lit(xs, k, p.w);
   p_ok(k + 1, 0, nm)
 }
 p_run(p_text p, xs, i64 k, i64 c) {
   if(c > 0) return p_mid(xs, k, c);
-  if(!p_has(xs, k, n_str)) return p_fail(xs, k, 0, "ожидалась строка");
-  n_str{v} = xs[k];
+  if(!p_has(xs, k, ast.string)) return p_fail(xs, k, 0, "ожидалась строка");
+  ast.string{v} = xs[k];
   p_ok(k + 1, 0, v)
 }
 p_run(p_bool p, xs, i64 k, i64 c) {
@@ -926,9 +926,9 @@ p_run(p_sym p, xs, i64 k, i64 c) {
   if(c > 0) return p_lit_chars(xs, k, c, p.s);
   ok = true;
   for(i : range(p.s.size)) {
-    if(!p_has(xs, k + i, n_sym)) ok = false;
+    if(!p_has(xs, k + i, ast.symbol)) ok = false;
     else {
-      n_sym{t, g} = xs[k + i];
+      ast.symbol{t, g} = xs[k + i];
       if((t[0] != p.s[i]) || ((i > 0) && !g)) ok = false;
     }
   }
@@ -942,15 +942,15 @@ p_run(p_chr p, xs, i64 k, i64 c) {
 }
 p_run(p_code p, xs, i64 k, i64 c) {
   if(c > 0) return p_mid(xs, k, c);
-  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, 0, "ожидался блок {…}");
-  n_raw{open, _, _, _, _} = xs[k];
+  if(!p_has(xs, k, ast.raw)) return p_fail(xs, k, 0, "ожидался блок {…}");
+  ast.raw{open, _, _, _, _} = xs[k];
   if(open != "{") return p_fail(xs, k, 0, "ожидался блок {…}");
   p_ok(k + 1, 0, code_parse(xs[k]))
 }
 p_run(p_sub p, xs, i64 k, i64 c) {
   if(c > 0) return p_mid(xs, k, c);
-  if(!p_has(xs, k, n_raw)) return p_fail(xs, k, 0, "ожидался подблок " + p.open);
-  n_raw{open, items, _, _, _} = xs[k];
+  if(!p_has(xs, k, ast.raw)) return p_fail(xs, k, 0, "ожидался подблок " + p.open);
+  ast.raw{open, items, _, _, _} = xs[k];
   if(open != p.open) return p_fail(xs, k, 0, "ожидался подблок " + p.open);
   r = p_whole(p.ps[0], items);
   if(!r[0]) return array{false, k, r[2], r[3], r[4]}; // место ошибки — атом внутри подблока
@@ -1004,10 +1004,10 @@ p_run(p_as p, xs, i64 k, i64 c) {
   p_ok(r[1], r[4], p.v[0])
 }
 // значение — код, который его строит (агрегат по map — Имя{…} в порядке полей)
-p_lit(i64 v) => n_int{v};
-p_lit(f64 v) => n_float{v};
-p_lit(str v) => n_str{v};
-p_lit(bool v) => n_ident{if(v) "true" else "false"};
+p_lit(i64 v) => ast.int{v};
+p_lit(f64 v) => ast.float{v};
+p_lit(str v) => ast.string{v};
+p_lit(bool v) => ast.name{if(v) "true" else "false"};
 p_lit(v) => v;
 p_index(names, str n) {
   i = -1;
@@ -1023,7 +1023,7 @@ p_run(p_map p, xs, i64 k, i64 c) {
     if(i < 0) return p_fail(xs, k, c, "map: нет парсера поля " + f.name);
     items = array{...items, p_lit(r[2][i])};
   }
-  p_ok(r[1], r[4], n_construct{n_ident{text(p.t)}, items})
+  p_ok(r[1], r[4], ast.construct{ast.name{text(p.t)}, items})
 }
 // весь вход: после разбора — конец (и не посреди атома)
 p_whole(p, xs) {
@@ -1033,7 +1033,7 @@ p_whole(p, xs) {
 }
 // parse(r, p) — правило блока: syntax {r} => parse(r, p);
 parse(code r, p) {
-  n_raw{_, items, _, _, _} = r;
+  ast.raw{_, items, _, _, _} = r;
   x = p_whole(p, items);
   if(!x[0]) return parse_error_in{if(given(x[3])) x[3] else r, x[2], x[4]};
   p_lit(x[2])
@@ -1049,7 +1049,7 @@ parse(code r, p) {
 // сущность (amd64, arm64): её члены (cg.load, cg.jump…) и переопределённые в ней
 // операции (op_codegen: оператор узла программы с типами операндов) — байты.
 // Без строк:
-// — вид узла — тег (n_op, n_if…), узел — распаковкой образцом,
+// — вид узла — тег (ast.operation, ast.if…), узел — распаковкой образцом,
 // типы — значения (i64, array(i64), stream(f64)). Типы узлов и деревья цепочек — у
 // разбора экземпляра: 
 //. Регистры модели (acc, second…) и смещения меток (target, fault)
@@ -1085,10 +1085,10 @@ struct jc_catch { type ty; i64 label; bool binds; str name; i64 slot; i64 depth;
 // пользователя 2026-10-01). 
 //.
 jit_precheck(f) {
-  n_fn{_, params, _, body, _, _, _, _, _} = f;
+  ast.function{_, params, _, body, _, _, _, _, _} = f;
   for(p : params) {
-    n_param{_, t, mode, pack, _, _, _} = p;
-    if(given(t) && (code_kind(t) == n_pat)) return array{p, "параметр-образец (распаковка) — интерпретатор"};
+    ast.parameter{_, t, mode, pack, _, _, _} = p;
+    if(given(t) && (code_kind(t) == ast.pattern)) return array{p, "параметр-образец (распаковка) — интерпретатор"};
     if(pack && (mode == 0)) return array{p, "хвост аргументов ...xs — интерпретатор"};
   }
   jit_rejects(body, code_module(f))
@@ -1098,25 +1098,25 @@ jit_precheck(f) {
 jit_module_ct(m) {
   names = array{};
   for(x : code_items(m))
-    if(code_kind(x) == n_var) {
-      n_var{name, _, _, _, is_ct, _, _, _} = x;
+    if(code_kind(x) == ast.variable) {
+      ast.variable{name, _, _, _, is_ct, _, _, _} = x;
       if(is_ct) names.push(name);
     }
   names
 }
 
-jit_rejects(c, m) => jit_rejects_in(c, if(given(m) && (code_kind(m) == n_module)) jit_module_ct(m) else array{});
+jit_rejects(c, m) => jit_rejects_in(c, if(given(m) && (code_kind(m) == ast.module)) jit_module_ct(m) else array{});
 
 jit_rejects_in(c, cts) {
   if(!given(c)) return array{};
   kind = code_kind(c);
   up = code_parent(c);
-  if((kind == n_call) && (code_name(c) == "try_compile")) return array{c, "узел n_call"}; // try_compile { … } — проба разбора
-  if(kind == n_hole) return array{c, "узел n_hole"};
-  if((kind == n_pat) && (code_kind(up) != n_unpack)) return array{c, "узел n_pat"};
-  if((kind == n_spread) && (code_kind(up) != n_construct)) return array{c, "узел n_spread"}; // ... в array{…} — значение VM
-  if(kind == n_ct) return array{c, "ct — по месту вызова (канонический порядок)"};
-  if(kind == n_ident) {
+  if((kind == ast.call) && (code_name(c) == "try_compile")) return array{c, "узел ast.call"}; // try_compile { … } — проба разбора
+  if(kind == ast.hole) return array{c, "узел ast.hole"};
+  if((kind == ast.pattern) && (code_kind(up) != ast.unpack)) return array{c, "узел ast.pattern"};
+  if((kind == ast.spread) && (code_kind(up) != ast.construct)) return array{c, "узел ast.spread"}; // ... в array{…} — значение VM
+  if(kind == ast.ct) return array{c, "ct — по месту вызова (канонический порядок)"};
+  if(kind == ast.name) {
     nm = code_name(c);
     for(x : cts) if(x == nm) return array{c, "ct-переменная модуля — по месту (канонический порядок)"};
   }
@@ -1130,7 +1130,7 @@ jit_rejects_in(c, cts) {
 // Создаёт ли тело потоки (вызов stream(…)): типы элементов — после второго прохода разбора.
 jit_makes_streams(c) {
   if(!given(c)) return false;
-  if((code_kind(c) == n_call) && (code_name(c) == "stream")) return true;
+  if((code_kind(c) == ast.call) && (code_name(c) == "stream")) return true;
   for(x : code_items(c)) if(jit_makes_streams(x)) return true;
   false
 }
@@ -1340,23 +1340,23 @@ jit_compile(cg, f, types, type result) {
     cur = old_cur;
     r
   };
-  var_of(e) => if(code_kind(e) == n_ident) {
-    n_ident{name} = e;
+  var_of(e) => if(code_kind(e) == ast.name) {
+    ast.name{name} = e;
     find(name)
   } else -1;
-  callee_name(e) => if(code_kind(e) == n_ident) {
-    n_ident{name} = e;
+  callee_name(e) => if(code_kind(e) == ast.name) {
+    ast.name{name} = e;
     name
   } else "";
-  is_call_of(e, str name) => (code_kind(e) == n_call) && {
-    n_call{c, _, _, _, _, _} = e;
+  is_call_of(e, str name) => (code_kind(e) == ast.call) && {
+    ast.call{c, _, _, _, _, _} = e;
     callee_name(c) == name
   };
   // ct-состояние значения (§5.6) машинный код не несёт: код с ним исполняет интерпретатор
   ct_state_op(str name) => (name == "ct_state") || ((name == "set_ct_state") || (name == "call_site"));
   uses_ct_state(e) => {
-    found = (code_kind(e) == n_call) && {
-      n_call{c, _, _, _, _, _} = e;
+    found = (code_kind(e) == ast.call) && {
+      ast.call{c, _, _, _, _, _} = e;
       ct_state_op(callee_name(c))
     };
     for(x : code_items(e)) if(!found) found = uses_ct_state(x);
@@ -1371,38 +1371,38 @@ jit_compile(cg, f, types, type result) {
       w = env[v];
       if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else w.kind
     } else if(given(t)) t
-    else if((k == n_call) && (local_fns(callee_name(code_items(e)[0])).size > 0)) { // рекурсия локальной — тип её внешнего вызова
+    else if((k == ast.call) && (local_fns(callee_name(code_items(e)[0])).size > 0)) { // рекурсия локальной — тип её внешнего вызова
       r = unit;
       for(x : local_fns(callee_name(code_items(e)[0]))) for(lr : lres) if(lr[0] == code_id(x)) r = lr[1];
       r
     } else if(is_call_of(e, "index")) { // примитив ядра a[i] — тип элемента
-      n_call{_, ys, _, _, _, _} = e;
+      ast.call{_, ys, _, _, _, _} = e;
       a = ty(ys[0]);
       if(a == jc_range) i64 else elem(a)
-    } else if(k == n_int) i64
-    else if(k == n_float) f64
-    else if(k == n_op) {
-      n_op{op, xs, _} = e;
+    } else if(k == ast.int) i64
+    else if(k == ast.float) f64
+    else if(k == ast.operation) {
+      ast.operation{op, xs, _} = e;
       if(op == ".size") i64
       else if(op == "[]") {
         a = ty(xs[0]);
         if(a == jc_range) i64 else elem(a)
       } else if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool
       else ty(xs[0])
-    } else if(k == n_chain) {
+    } else if(k == ast.chain) {
       c = jit_chain(e, ctx);
       if(c.size == 0) unit else ty(c[0])
     } else unit
   };
   gen_name(e) => {
-    n_ident{name} = e;
+    ast.name{name} = e;
     k = find(name);
     if(name == "true") put_bytes(cg.load_const(acc, 1));
     else if(name == "false") put_bytes(cg.load_const(acc, 0));
     else if(k < 0) bad(fmt"имя {name}");
     else if(env[k].thunk) {
       v = env[k];
-      if(code_kind(v.th) == n_lambda) bad("блок — только body(v)");
+      if(code_kind(v.th) == ast.lambda) bad("блок — только body(v)");
       else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
     } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
     else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
@@ -1421,7 +1421,7 @@ jit_compile(cg, f, types, type result) {
     name_nodes(e, names);
     pure = true;
     for(c : names) {
-      n_ident{nm} = c;
+      ast.name{nm} = c;
       k = find(nm);
       if((k >= 0) && (env[k].thunk || (env[k].kind != unit))) pure = false;
     }
@@ -1438,31 +1438,31 @@ jit_compile(cg, f, types, type result) {
   gen(e) => {
     k = code_kind(e);
     if(!ok) {
-    } else if(k == n_int) {
-      n_int{v, _, _} = e;
+    } else if(k == ast.int) {
+      ast.int{v, _, _} = e;
       put_bytes(cg.load_const(acc, v));
-    } else if(k == n_float) {
-      n_float{v} = e;
+    } else if(k == ast.float) {
+      ast.float{v} = e;
       gen_const(v);
-    } else if(k == n_ident) gen_name(e);
-    else if(k == n_op) {
+    } else if(k == ast.name) gen_name(e);
+    else if(k == ast.operation) {
       kc = ct_const(e); // значение известно разбору экземпляра
       if(kc.size == 1) gen_const(kc[0]) else gen_op(e);
     }
-    else if(k == n_chain) {
+    else if(k == ast.chain) {
       t = jit_chain(e, ctx);
       if(t.size == 0) bad("цепочка: дерево зависит от пути");
       else gen(t[0]);
-    } else if(k == n_call) gen_call(e);
-    else if(k == n_block) {
-      n_block{items, _, _} = e;
+    } else if(k == ast.call) gen_call(e);
+    else if(k == ast.block) {
+      ast.block{items, _, _} = e;
       saved_top = top;
       saved_lf = lfns.size;
       for(x : items) if(ok) gen(x);
       top = saved_top;
       lfns = take_first(lfns, saved_lf);
-    } else if(k == n_if) {
-      n_if{c, t, el} = e;
+    } else if(k == ast.if) {
+      ast.if{c, t, el} = e;
       // условие известно разбору экземпляра (кт-параметр) — только живая ветка; подпрограмма
       // исполняется на всех глубинах рекурсии, а разбор видел её в контексте первого встраивания
       kc = ct_const(c);
@@ -1480,8 +1480,8 @@ jit_compile(cg, f, types, type result) {
         if(given(el)) in_region(() => gen(el));
         bind(l_done);
       }
-    } else if(k == n_loop) {
-      n_loop{body} = e;
+    } else if(k == ast.loop) {
+      ast.loop{body} = e;
       t = label();
       done = label();
       bind(t);
@@ -1491,14 +1491,14 @@ jit_compile(cg, f, types, type result) {
       jump(t);
       bind(done);
       loops = drop_last(drop_last(loops));
-    } else if(k == n_break) {
+    } else if(k == ast.break) {
       if(loops.size == 0) bad("break вне цикла");
       else jump(loops[loops.size - 1]);
-    } else if(k == n_continue) {
+    } else if(k == ast.continue) {
       if(loops.size == 0) bad("continue вне цикла");
       else jump(loops[loops.size - 2]);
-    } else if(k == n_return) {
-      n_return{v, tg} = e;
+    } else if(k == ast.return) {
+      ast.return{v, tg} = e;
       to = cur;
       if(given(tg)) { // return(f) — из внешней функции f, return(caller) — из вызывающей (§6.1)
         tn = callee_name(tg);
@@ -1520,10 +1520,10 @@ jit_compile(cg, f, types, type result) {
         if(depth > 0) put_bytes(cg.stack_free(8 * depth)); // временные незавершённых выражений
         jump(fr_exit[to]);
       }
-    } else if(k == n_var) {
-      n_var{name, vt, init, _, is_ct, is_ref, _, _} = e;
+    } else if(k == ast.variable) {
+      ast.variable{name, vt, init, _, is_ct, is_ref, _, _} = e;
       if(is_ref || is_ct) bad("ссылка или ct-переменная");
-      else if(given(vt) && (code_kind(vt) == n_ident)) { // T x = e: значение — в тип T (§5.8)
+      else if(given(vt) && (code_kind(vt) == ast.name)) { // T x = e: значение — в тип T (§5.8)
         want = type_of_code(vt);
         t = ty(init);
         if(want == t) assign(name, init, true);
@@ -1534,15 +1534,15 @@ jit_compile(cg, f, types, type result) {
           store_slot(f64, env[top - 1].slot);
         } else bad(fmt"объявление {want} из {t}");
       } else assign(name, init, true);
-    } else if(k == n_throw) gen_throw(e);
-    else if(k == n_fn) { // локальная функция: кода на месте нет — встраивается в вызовы
-      n_fn{nm, _, _, _, _, _, _, sc, _} = e;
+    } else if(k == ast.throw) gen_throw(e);
+    else if(k == ast.function) { // локальная функция: кода на месте нет — встраивается в вызовы
+      ast.function{nm, _, _, _, _, _, _, sc, _} = e;
       if(!sc && op_name(nm)) bad(fmt"оператор в блоке ({nm}) — интерпретатор");
       lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
     }
-    else if(k == n_construct) gen_construct(e);
-    else if(k == n_unpack) gen_unpack(e);
-    else if(k == n_str) vm_or_bad(e, fmt"узел {k}");
+    else if(k == ast.construct) gen_construct(e);
+    else if(k == ast.unpack) gen_unpack(e);
+    else if(k == ast.string) vm_or_bad(e, fmt"узел {k}");
     else bad(fmt"узел {k}");
   };
   // индекс в acc, проверка границ по размеру массива (запись s); данные — в second
@@ -1598,13 +1598,13 @@ jit_compile(cg, f, types, type result) {
   // целиком (длина, остаток, типы, unpack_failed), служба op 11; имена — в слоты: скаляр
   // битами, значение VM — копией в памяти вызова. Тип имени — из разбора (его наблюдение)
   gen_unpack(e) => {
-    n_unpack{pat, val, test} = e;
-    n_pat{_, items} = pat;
+    ast.unpack{pat, val, test} = e;
+    ast.pattern{_, items} = pat;
     names = array{};
     for(it : items) {
-      if(code_kind(it) != n_param) bad("образец: вложенный или значение");
+      if(code_kind(it) != ast.parameter) bad("образец: вложенный или значение");
       else {
-        n_param{pname, _, _, _, _, _, _} = it;
+        ast.parameter{pname, _, _, _, _, _, _} = it;
         if(pname != "_") names.push(it);
       }
     }
@@ -1632,7 +1632,7 @@ jit_compile(cg, f, types, type result) {
       res = alloc(1);
       put_bytes(cg.store(sb(res), so(res), acc));
       for(i : range(n)) if(ok) {
-        n_param{pname, _, _, _, _, _, _} = names[i];
+        ast.parameter{pname, _, _, _, _, _, _} = names[i];
         t = kinds[i];
         sl = declare(pname, t);
         wrote(sl);
@@ -1647,19 +1647,19 @@ jit_compile(cg, f, types, type result) {
   // VM в памяти вызова (op 10), элементы — push машинным кодом, ...ys — цикл по данным ys
   gen_construct(e) => {
     t = ty(e);
-    n_construct{tn, items, _} = e;
+    ast.construct{tn, items, _} = e;
     fits = is_arr(t) && (given(tn) && (code_name(tn) == "array"));
     // {x: …} без типа: тип — от места (параметр, поле, результат), это семантика VM
     if(!given(tn)) bad("анонимный литерал {…} — интерпретатор");
     n = 0;
     for(x : items) if(fits) {
-      if(code_kind(x) == n_spread) {
-        n_spread{v} = x;
+      if(code_kind(x) == ast.spread) {
+        ast.spread{v} = x;
         if(ty(v) != t) fits = false;
       } else if(ty(x) != elem(t)) fits = false;
       else n += 1;
     }
-    if(!fits) vm_or_bad(e, "узел n_construct");
+    if(!fits) vm_or_bad(e, "узел ast.construct");
     else {
       et = elem(t);
       c = alloc(1);
@@ -1668,8 +1668,8 @@ jit_compile(cg, f, types, type result) {
       vm_service(10, et, e);
       put_bytes(cg.store(sb(c), so(c), acc));
       for(x : items) {
-        if(code_kind(x) == n_spread) {
-          n_spread{v} = x;
+        if(code_kind(x) == ast.spread) {
+          ast.spread{v} = x;
           src = alloc(1);
           j = alloc(1);
           gen(v);
@@ -1722,9 +1722,9 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.load(r, sb(sl), so(sl)));
     put_bytes(cg.load(r, r, a_data));
   };
-  // a[i] — парный оператор [] (узел n_op "[]")
-  index_parts(e) => if(code_kind(e) == n_op) {
-    n_op{op, xs, _} = e;
+  // a[i] — парный оператор [] (узел ast.operation "[]")
+  index_parts(e) => if(code_kind(e) == ast.operation) {
+    ast.operation{op, xs, _} = e;
     if((op == "[]") && (xs.size == 2)) xs else array{}
   } else array{};
   gen_index(e) => {
@@ -1733,10 +1733,10 @@ jit_compile(cg, f, types, type result) {
   };
   // перегрузка [] кодом с типами (operator (T a)[U i]), подошедшая к операндам — встраивается
   typed_overload(g) => {
-    n_fn{_, ps, _, _, _, _, _, _, _} = g;
+    ast.function{_, ps, _, _, _, _, _, _, _} = g;
     n = 0;
     for(p : ps) {
-      n_param{_, pt, _, _, _, _, _} = p;
+      ast.parameter{_, pt, _, _, _, _, _} = p;
       if(given(pt)) n += 1;
     }
     n > 0
@@ -1760,7 +1760,7 @@ jit_compile(cg, f, types, type result) {
     }
   };
   assign(str name, e, bool fresh) => {
-    if((code_kind(e) == n_lambda) && (fresh || (find(name) < 0))) return put(jc_var{name, unit, 0, true, e, ctx, top, base, cur}); // f = (x) => … — как локальная функция
+    if((code_kind(e) == ast.lambda) && (fresh || (find(name) < 0))) return put(jc_var{name, unit, 0, true, e, ctx, top, base, cur}); // f = (x) => … — как локальная функция
     t = if(is_call_of(e, "range")) jc_range else ty(e);
     if(is_handle(t)) assign_handle(name, e, t, fresh);
     else if(!scalar(t) && (t != jc_range)) bad(fmt"присваивание значения {t}");
@@ -1812,8 +1812,8 @@ jit_compile(cg, f, types, type result) {
     else bad(".size не массива");
   };
   // p.x — поле агрегата-переменной p: номер поля типа k (статичен); пусто — не поле
-  field_slot(e) => if((code_kind(e) == n_op) && dotted(e)) {
-    n_op{_, ys, _} = e;
+  field_slot(e) => if((code_kind(e) == ast.operation) && dotted(e)) {
+    ast.operation{_, ys, _} = e;
     s = var_of(ys[0]);
     if((s < 0) || (env[s].thunk || (!is_handle(env[s].kind) || arr_like(env[s].kind)))) array{}
     else {
@@ -1846,7 +1846,7 @@ jit_compile(cg, f, types, type result) {
     } else vm_or_bad(e, fmt"запись поля {t}");
   };
   gen_op(e) => {
-    n_op{op, xs, _} = e;
+    ast.operation{op, xs, _} = e;
     if(op == "[]") gen_index_op(e, xs);
     else if(op == ".size") gen_size(xs);
     else if(field_slot(e).size == 2) gen_field(e, field_slot(e));
@@ -1861,8 +1861,8 @@ jit_compile(cg, f, types, type result) {
         gen(xs[0]);
         put_bytes(g(if(t == f64) acc_f else acc));
       }
-    } else if((op == "=") && (code_kind(xs[0]) == n_ident)) {
-      n_ident{name} = xs[0];
+    } else if((op == "=") && (code_kind(xs[0]) == ast.name)) {
+      ast.name{name} = xs[0];
       assign(name, xs[1], false);
     } else if((op == "=") && (field_slot(xs[0]).size == 2)) gen_field_store(e, xs, field_slot(xs[0]));
     else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: значение — на стек, индекс, границы, запись
@@ -1883,7 +1883,7 @@ jit_compile(cg, f, types, type result) {
         depth -= 1;
         put_bytes(cg.store_index(second, acc, third));
       }
-    } else if(((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/=")))) && (code_kind(xs[0]) == n_ident)) {
+    } else if(((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/=")))) && (code_kind(xs[0]) == ast.name)) {
       s = var_of(xs[0]);
       if((s < 0) || env[s].thunk) bad("составное присваивание");
       else {
@@ -1920,14 +1920,14 @@ jit_compile(cg, f, types, type result) {
   };
   // a.f(b) ≡ f(a, b), если у a нет поля f 
 // вызов с первым аргументом a; агрегат — у VM (поле-функция)
-  dotted(callee) => (code_kind(callee) == n_op) && {
-    n_op{op, ys, post} = callee;
+  dotted(callee) => (code_kind(callee) == ast.operation) && {
+    ast.operation{op, ys, post} = callee;
     post && ((ys.size == 1) && (code_name(callee) != ""))
   };
   gen_call(e) => {
-    n_call{callee, xs0, _, _, _, _} = e;
+    ast.call{callee, xs0, _, _, _, _} = e;
     if(dotted(callee)) {
-      n_op{_, ys, _} = callee;
+      ast.operation{_, ys, _} = callee;
       if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
       else {
         args = array{ys[0]};
@@ -2019,7 +2019,7 @@ jit_compile(cg, f, types, type result) {
       vm_service_code(6, 1 << 8, e);
     } else {
       simple = true;
-      for(x : xs) if((code_kind(x) != n_str) && !scalar(ty(x))) simple = false;
+      for(x : xs) if((code_kind(x) != ast.string) && !scalar(ty(x))) simple = false;
       if(!simple) vm_or_bad(e, "print значения VM");
       else {
         for(i : range(xs.size)) if(ok) gen_print_arg(e, xs[i], if((i + 1) == xs.size) 1 else 0);
@@ -2027,7 +2027,7 @@ jit_compile(cg, f, types, type result) {
     }
   };
   gen_print_arg(e, x, i64 last) => {
-    if(code_kind(x) == n_str) {
+    if(code_kind(x) == ast.string) {
       mem_to(ca1);
       vm_service_code(7, last << 8, x);
     } else {
@@ -2065,10 +2065,10 @@ jit_compile(cg, f, types, type result) {
   bind_args(ps, xs) => {
     binds = array{};
     for(i : range(ps.size)) {
-      n_param{pname, _, mode, _, _, _, _} = ps[i];
+      ast.parameter{pname, _, mode, _, _, _, _} = ps[i];
       a = xs[i];
       s = var_of(a);
-      if((mode == 4) || (code_kind(a) == n_lambda)) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur}); // лямбда — код определения
+      if((mode == 4) || (code_kind(a) == ast.lambda)) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur}); // лямбда — код определения
       else if((s >= 0) && env[s].thunk) { // код вызывающего дальше — тот же код
         w = env[s];
         binds.push(jc_var{pname, w.kind, w.slot, true, w.th, w.th_ctx, w.th_top, w.th_base, w.th_ret});
@@ -2111,7 +2111,7 @@ jit_compile(cg, f, types, type result) {
       lf = lfns[0];
       for(l : lfns) if(code_id(l.f) == code_id(g[0])) lf = l;
       lres.push(array{code_id(g[0]), ty(e)});
-      n_fn{_, ps, _, body, _, _, _, _, _} = g[0];
+      ast.function{_, ps, _, body, _, _, _, _, _} = g[0];
       binds = bind_args(ps, xs); // аргументы — в виде вызывающего
       if(ok) {
         exit = label();
@@ -2145,7 +2145,7 @@ jit_compile(cg, f, types, type result) {
   // Рекурсия локальной функции — настоящий вызов подпрограммы (свой кадр; захват — кадр
   // объемлющей через регистр): аргументы — в регистрах C ABI, результат — в аккумуляторе
   call_sub(e, str name, fc, xs) => {
-    n_fn{_, ps, _, _, _, _, _, _, _} = fc;
+    ast.function{_, ps, _, _, _, _, _, _, _} = fc;
     kinds = array{};
     for(x : xs) kinds.push(ty(x));
     lf = lfns[0];
@@ -2158,7 +2158,7 @@ jit_compile(cg, f, types, type result) {
     else {
       for(k : kinds) if(!scalar(k) && !is_handle(k)) bad(fmt"рекурсия {name}: параметр {k}");
       for(p : ps) {
-        n_param{_, _, mode, _, _, _, _} = p;
+        ast.parameter{_, _, mode, _, _, _, _} = p;
         if(mode != 0) bad(fmt"рекурсия {name}: параметр не по значению");
       }
       if(si < 0) {
@@ -2191,7 +2191,7 @@ jit_compile(cg, f, types, type result) {
     r
   };
   gen_subroutine(sub) => {
-    n_fn{_, ps, _, body, _, _, _, _, _} = sub.f;
+    ast.function{_, ps, _, body, _, _, _, _, _} = sub.f;
     regs4 = array{ca0, ca1, ca2, ca3};
     w_env = env;
     w_top = top;
@@ -2216,7 +2216,7 @@ jit_compile(cg, f, types, type result) {
     for(v : sub.envsnap) put(v);
     base = sub.base;
     for(i : range(ps.size)) {
-      n_param{pname, _, _, _, _, _, _} = ps[i];
+      ast.parameter{pname, _, _, _, _, _, _} = ps[i];
       sl = alloc(1);
       put_bytes(cg.store(sb(sl), so(sl), regs4[i])); // биты (f64 — тоже)
       put(jc_var{pname, sub.kinds[i], sl, false, f, 0, 0, 0, 0});
@@ -2251,11 +2251,11 @@ jit_compile(cg, f, types, type result) {
     pick = array{};
     tie = false;
     for(g : gs) {
-      n_fn{_, ps, _, _, _, _, _, _, _} = g;
+      ast.function{_, ps, _, _, _, _, _, _, _} = g;
       fits = ps.size == xs.size;
       score = 0;
       for(i : range(if(fits) ps.size else 0)) {
-        n_param{_, pt, mode, pack, _, _, _} = ps[i];
+        ast.parameter{_, pt, mode, pack, _, _, _} = ps[i];
         if(given(pt)) {
           want = type_of_code(pt);
           at = ty(xs[i]);
@@ -2292,7 +2292,7 @@ jit_compile(cg, f, types, type result) {
     body = e;
     is_outline = true;
     if(g.size == 1) {
-      n_fn{_, gps, _, gbody, g_outline, _, _, _, _} = g[0];
+      ast.function{_, gps, _, gbody, g_outline, _, _, _, _} = g[0];
       ps = gps;
       body = gbody;
       is_outline = g_outline;
@@ -2378,7 +2378,7 @@ jit_compile(cg, f, types, type result) {
   // throw: catch выбран при компиляции по типу — значение в его переменную и переход;
   // не пойман здесь — в слоты области (вид 5, узел, значение, тип) и выход
   gen_throw(e) => {
-    n_throw{v} = e;
+    ast.throw{v} = e;
     t = ty(v);
     if(!scalar(t)) bad(fmt"throw значения {t}");
     else {
@@ -2416,8 +2416,8 @@ jit_compile(cg, f, types, type result) {
     if((b < 0) || ((h < 0) || (!env[b].thunk || !env[h].thunk))) bad("intercept не над expr-параметрами");
     else {
       hv = env[h];
-      hs = if(code_kind(hv.th) == n_construct) { // пак клауз — кортеж блоков
-        n_construct{_, items, _} = hv.th;
+      hs = if(code_kind(hv.th) == ast.construct) { // пак клауз — кортеж блоков
+        ast.construct{_, items, _} = hv.th;
         items
       } else array{hv.th};
       frame_c = array{};
@@ -2425,13 +2425,13 @@ jit_compile(cg, f, types, type result) {
       for(l : hs) {
         ps = array{};
         body = l;
-        if(n_lambda{lps, lbody, _} = l) {
+        if(ast.lambda{lps, lbody, _} = l) {
           ps = lps;
           body = lbody;
         }
         if(ps.size != 1) bad("catch не блок с параметром");
         else {
-          n_param{pname, pt, _, _, _, _, _} = ps[0];
+          ast.parameter{pname, pt, _, _, _, _, _} = ps[0];
           cty = if(given(pt)) type_of_code(pt) else unit;
           binds = (pname != "_") && (uses(body, pname) > 0);
           if(binds && !scalar(cty)) bad("catch использует значение, неизвестное машинному коду");
@@ -2463,12 +2463,12 @@ jit_compile(cg, f, types, type result) {
     ps = array{};
     body = l;
     block = false;
-    if(n_lambda{lps, lbody, lblock} = l) {
+    if(ast.lambda{lps, lbody, lblock} = l) {
       ps = lps;
       body = lbody;
       block = lblock;
     }
-    if(code_kind(l) != n_lambda) bad("вызов expr-параметра, который не блок и не лямбда");
+    if(code_kind(l) != ast.lambda) bad("вызов expr-параметра, который не блок и не лямбда");
     else if(ps.size != xs.size) bad("арность блока");
     else {
       binds = array{};
@@ -2478,7 +2478,7 @@ jit_compile(cg, f, types, type result) {
         gen(xs[i]);
         sl = alloc(1);
         store_slot(t, sl);
-        n_param{pname, _, _, _, _, _, _} = ps[i];
+        ast.parameter{pname, _, _, _, _, _, _} = ps[i];
         binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
       }
       if(ok && block) in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => {
@@ -2513,8 +2513,8 @@ jit_compile(cg, f, types, type result) {
   };
   // имена в коде (для того, что W читает снаружи)
   idents(c, found) => {
-    if(code_kind(c) == n_ident) {
-      n_ident{nm} = c;
+    if(code_kind(c) == ast.name) {
+      ast.name{nm} = c;
       found.push(nm);
     }
     for(x : code_items(c)) idents(x, found);
@@ -2554,17 +2554,17 @@ jit_compile(cg, f, types, type result) {
     }
     k
   };
-  is_block(c) => (code_kind(c) == n_lambda) && {
-    n_lambda{_, _, block} = c;
+  is_block(c) => (code_kind(c) == ast.lambda) && {
+    ast.lambda{_, _, block} = c;
     block
   };
   // B не выходит из цикла for: нет return, break/continue — только своих циклов
   consumer_stays(c, i64 inl) => {
     k = code_kind(c);
-    if(k == n_return) false
-    else if(((k == n_break) || (k == n_continue)) && (inl == 0)) false
+    if(k == ast.return) false
+    else if(((k == ast.break) || (k == ast.continue)) && (inl == 0)) false
     else {
-      inner = inl + if((k == n_loop) || is_block(c)) 1 else 0;
+      inner = inl + if((k == ast.loop) || is_block(c)) 1 else 0;
       r = true;
       for(x : code_items(c)) if(r && !consumer_stays(x, inner)) r = false;
       r
@@ -2573,7 +2573,7 @@ jit_compile(cg, f, types, type result) {
   arity_fns(str nm, i64 n) => {
     fs = array{};
     for(g : functions_named(nm)) {
-      n_fn{_, ps, _, _, _, _, _, _, _} = g;
+      ast.function{_, ps, _, _, _, _, _, _, _} = g;
       if(ps.size == n) fs.push(g);
     }
     fs
@@ -2582,15 +2582,15 @@ jit_compile(cg, f, types, type result) {
   gen_escapes(c, seen) => {
     k = code_kind(c);
     r = false;
-    if((k == n_return) || (k == n_throw)) r = true;
-    else if(k == n_call) {
-      n_call{cal, cxs, _, _, _, _} = c;
+    if((k == ast.return) || (k == ast.throw)) r = true;
+    else if(k == ast.call) {
+      ast.call{cal, cxs, _, _, _, _} = c;
       nm = callee_name(cal);
       if(nm == "close") r = true;
       else if(nm != "") {
         for(g : arity_fns(nm, cxs.size)) if(!r && !has(seen, code_id(g))) {
           seen.push(code_id(g));
-          n_fn{_, _, _, gb, _, _, _, _, _} = g;
+          ast.function{_, _, _, gb, _, _, _, _, _} = g;
           if(gen_escapes(gb, seen)) r = true;
         }
       }
@@ -2602,10 +2602,10 @@ jit_compile(cg, f, types, type result) {
   pick_fn(str nm, cxs, i64 cc) => {
     fs = array{};
     for(g : arity_fns(nm, cxs.size)) {
-      n_fn{_, ps, _, _, _, _, _, _, _} = g;
+      ast.function{_, ps, _, _, _, _, _, _, _} = g;
       fits = true;
       for(i : range(ps.size)) {
-        n_param{_, pt, _, _, _, _, _} = ps[i];
+        ast.parameter{_, pt, _, _, _, _, _} = ps[i];
         if(given(pt)) {
           want = type_of_code(pt);
           at = jit_type(cxs[i], cc);
@@ -2620,17 +2620,17 @@ jit_compile(cg, f, types, type result) {
   // W кончается close(s): последнее действие — close или вызов, который им кончается
   gen_tail(c, seen, i64 cc) => {
     k = code_kind(c);
-    if(k == n_lambda) {
-      n_lambda{_, lb, _} = c;
+    if(k == ast.lambda) {
+      ast.lambda{_, lb, _} = c;
       gen_tail(lb, seen, cc)
-    } else if(k == n_block) {
-      n_block{items, _, _} = c;
+    } else if(k == ast.block) {
+      ast.block{items, _, _} = c;
       r = items.size > 0;
       for(i : range(items.size)) if(r && (((i + 1) < items.size) && gen_escapes(items[i], seen))) r = false;
       r && gen_tail(items[items.size - 1], seen, cc)
-    } else if(k != n_call) false
+    } else if(k != ast.call) false
     else {
-      n_call{cal, cxs, _, _, _, _} = c;
+      ast.call{cal, cxs, _, _, _, _} = c;
       nm = callee_name(cal);
       if(nm == "") false
       else if(nm == "close") true
@@ -2641,7 +2641,7 @@ jit_compile(cg, f, types, type result) {
         if(!r || ((fs.size != 1) || has(seen, code_id(fs[0])))) false
         else {
           seen.push(code_id(fs[0]));
-          n_fn{_, _, _, fb, _, _, _, _, _} = fs[0];
+          ast.function{_, _, _, fb, _, _, _, _, _} = fs[0];
           gen_tail(fb, seen, inline_context(cc, c))
         }
       }
@@ -2658,7 +2658,7 @@ jit_compile(cg, f, types, type result) {
     else if(others) bad("поток видят несколько spawn");
     else if(!is_block(body)) bad("тело for");
     else {
-      n_lambda{bps, bb, _} = body;
+      ast.lambda{bps, bb, _} = body;
       if(bps.size != 1) bad("тело for");
       else if(!consumer_stays(bb, 0)) bad("тело for выходит из цикла");
       else if(!gen_tail(g.w, array{}, g.w_ctx)) bad("генератор: close(s) — не последнее действие, или return/throw");
@@ -2681,8 +2681,8 @@ jit_compile(cg, f, types, type result) {
         fusing = true;
         in_view(g.w_top, g.w_base, g.w_ctx, g.w_ret, () => {
           wb = g.w;
-          if(code_kind(wb) == n_lambda) {
-            n_lambda{_, lb, _} = wb;
+          if(code_kind(wb) == ast.lambda) {
+            ast.lambda{_, lb, _} = wb;
             wb = lb;
           }
           gen(wb);
@@ -2708,8 +2708,8 @@ jit_compile(cg, f, types, type result) {
         gen(xs[1]);
         p = alloc(1);
         store_bytes(t, p);
-        n_lambda{bps, bb, _} = f_body;
-        n_param{pname, _, _, _, _, _, _} = bps[0];
+        ast.lambda{bps, bb, _} = f_body;
+        ast.parameter{pname, _, _, _, _, _, _} = bps[0];
         w_env = env;
         w_top = top;
         w_base = base;
@@ -2736,7 +2736,7 @@ jit_compile(cg, f, types, type result) {
 //  — то, что не ускорено, исполняет интерпретатор
   // по месту (*моё*: по узлу, с переменными, которые узел читает).
   name_nodes(c, found) => {
-    if(code_kind(c) == n_ident) found.push(c);
+    if(code_kind(c) == ast.name) found.push(c);
     for(x : code_items(c)) name_nodes(x, found);
   };
   // передаваемые VM переменные: узел имени, запись окружения; пусто и bad — нельзя
@@ -2746,7 +2746,7 @@ jit_compile(cg, f, types, type result) {
     vs = array{};
     seen = array{};
     for(c : nodes) {
-      n_ident{nm} = c;
+      ast.name{nm} = c;
       k = find(nm);
       if((k >= 0) && !has(seen, k)) {
         seen.push(k);
@@ -2775,27 +2775,27 @@ jit_compile(cg, f, types, type result) {
     same
   };
   op_name(str nm) => starts(nm, "infix") || (starts(nm, "prefix") || starts(nm, "postfix"));
-  rule_decl(x) => (code_kind(x) == n_fn) && {
-    n_fn{nm, ps, _, _, _, _, _, sc, form} = x;
+  rule_decl(x) => (code_kind(x) == ast.function) && {
+    ast.function{nm, ps, _, _, _, _, _, sc, form} = x;
     r = (form.size > 0) || op_name(nm);
     for(p : ps) {
-      n_param{_, _, mode, _, clause, _, _} = p;
+      ast.parameter{_, _, mode, _, clause, _, _} = p;
       if((mode == 4) || (clause != "")) r = true;
     }
     r && !sc
   };
   rules_in(fn) => {
-    n_fn{_, _, _, b, _, _, _, _, _} = fn;
+    ast.function{_, _, _, b, _, _, _, _, _} = fn;
     r = false;
-    if(code_kind(b) == n_block) {
-      n_block{items, _, _} = b;
+    if(code_kind(b) == ast.block) {
+      ast.block{items, _, _} = b;
       for(x : items) if(rule_decl(x)) r = true;
     }
     r
   };
   // тело начинается с require — условие выбора перегрузки (неудача — unpack_failed у вызова)
-  leading_require(body) => (code_kind(body) == n_block) && {
-    n_block{items, _, _} = body;
+  leading_require(body) => (code_kind(body) == ast.block) && {
+    ast.block{items, _, _} = body;
     (items.size > 0) && is_call_of(items[0], "require")
   };
   // результат — в acc (f64 — в acc_f), значение VM — адрес ячейки в acc
@@ -2867,10 +2867,10 @@ jit_compile(cg, f, types, type result) {
   frame_at = out.size;
   frame_size = (i64 n) => cg.frame_alloc(n);
   put_bytes(frame_size(0));
-  n_fn{_, fps, _, fbody, _, _, _, _, _} = f;
+  ast.function{_, fps, _, fbody, _, _, _, _, _} = f;
   ap = 0; // слово в области аргументов
   for(i : range(fps.size)) {
-    n_param{pname, _, _, _, _, _, _} = fps[i];
+    ast.parameter{pname, _, _, _, _, _, _} = fps[i];
     s = declare(pname, types[i]);
     if(types[i] != unit) {
       put_bytes(cg.load(acc, argbase, 8 * ap));
@@ -2962,7 +2962,7 @@ sl() {
 
   // хвост конструкции-инструкции: while(c) x = 1; — x = 1 это инструкция
   tail_of(call, n) => {
-    n_call{_, args, _, tail, _, _} = call;
+    ast.call{_, args, _, tail, _, _} = call;
     tail && ((args.size > 0) && same(args[args.size - 1], n))
   };
 
@@ -2971,13 +2971,13 @@ sl() {
     p = code_parent(n);
     k = if(given(p)) code_kind(p) else unit;
     if(!given(p)) false
-    else if((k == n_block) || (k == n_module)) true
-    else if(k == n_call) tail_of(p, n) && (code_kind(n) != n_lambda)
-    else if(k == n_lambda) {
-      n_lambda{_, body, block} = p;
+    else if((k == ast.block) || (k == ast.module)) true
+    else if(k == ast.call) tail_of(p, n) && (code_kind(n) != ast.lambda)
+    else if(k == ast.lambda) {
+      ast.lambda{_, body, block} = p;
       block && same(body, n)
-    } else if(k == n_if) {
-      n_if{_, yes, no} = p;
+    } else if(k == ast.if) {
+      ast.if{_, yes, no} = p;
       (same(yes, n) || same(no, n)) && statement(p)
     } else false
   };
@@ -2989,10 +2989,10 @@ sl() {
   reads(n, names) => {
     if(given(n)) {
       k = code_kind(n);
-      if(k == n_ident) add(names, code_name(n));
-      else if((k != n_block) && (k != n_lambda)) {
+      if(k == ast.name) add(names, code_name(n));
+      else if((k != ast.block) && (k != ast.lambda)) {
         for(c : code_items(n)) {
-          if(!((k == n_call) && tail_of(n, c))) reads(c, names);
+          if(!((k == ast.call) && tail_of(n, c))) reads(c, names);
         }
       }
     }
@@ -3002,29 +3002,29 @@ sl() {
     defs = array{};
     uses = array{};
     k = code_kind(n);
-    if(k == n_var) {
-      n_var{name, _, init, _, _, _, _, _} = n;
+    if(k == ast.variable) {
+      ast.variable{name, _, init, _, _, _, _, _} = n;
       add(defs, name);
       reads(init, uses);
-    } else if(k == n_if) {
-      n_if{c, _, _} = n;
+    } else if(k == ast.if) {
+      ast.if{c, _, _} = n;
       reads(c, uses);
-    } else if((k == n_loop) || ((k == n_break) || (k == n_continue))) {
+    } else if((k == ast.loop) || ((k == ast.break) || (k == ast.continue))) {
       // цикл попадает в срез как охватывающая конструкция сохранённых инструкций
-    } else if((k == n_op) && {
-      n_op{op, _, _} = n;
+    } else if((k == ast.operation) && {
+      ast.operation{op, _, _} = n;
       assign(op)
     }) {
-      n_op{op, args, _} = n;
+      ast.operation{op, args, _} = n;
       t = args[0];
       loop {
-        if(code_kind(t) != n_op) break;
-        n_op{o, xs, pf} = t;
+        if(code_kind(t) != ast.operation) break;
+        ast.operation{o, xs, pf} = t;
         if((o != "[]") || ((xs.size != 2) || pf)) break;
         reads(xs[1], uses);
         t = xs[0];
       }
-      if(code_kind(t) == n_ident) {
+      if(code_kind(t) == ast.name) {
         add(defs, code_name(t));
         if((op != "=") || !same(t, args[0])) add(uses, code_name(t));
       }
@@ -3033,10 +3033,10 @@ sl() {
       reads(n, uses);
       // вызов может изменить аргументы-алиасы (§6.2); у конструкции (for, while)
       // действие — в её блоке, он режется отдельно
-      if(k == n_call) {
-        n_call{_, args, words, tail, _, _} = n;
+      if(k == ast.call) {
+        ast.call{_, args, words, tail, _, _} = n;
         if(!tail && (words.size == 0)) {
-          for(a : args) if(code_kind(a) == n_ident) add(defs, code_name(a));
+          for(a : args) if(code_kind(a) == ast.name) add(defs, code_name(a));
         }
       }
     }
@@ -3054,11 +3054,11 @@ sl() {
   // обойти тело: для каждой инструкции — что она определяет и что использует
   collect(n, stmts) => {
     if(given(n)) {
-      if(statement(n) && (code_kind(n) != n_block)) stmts.push(analyze(n));
+      if(statement(n) && (code_kind(n) != ast.block)) stmts.push(analyze(n));
       for(c : code_items(n)) {
-        skip = code_kind(c) == n_fn;
-        if(code_kind(c) == n_lambda) {
-          n_lambda{_, _, block} = c;
+        skip = code_kind(c) == ast.function;
+        if(code_kind(c) == ast.lambda) {
+          ast.lambda{_, _, block} = c;
           skip = !block;
         }
         if(!skip) collect(c, stmts);
@@ -3080,12 +3080,12 @@ sl() {
 slice_hidden(m, str fn_name, str var) {
   fs = array{};
   for(item : code_items(m))
-    if((code_kind(item) == n_fn) && (code_name(item) == fn_name)) fs.push(item);
+    if((code_kind(item) == ast.function) && (code_name(item) == fn_name)) fs.push(item);
   if(fs.size == 0) return array{};
   f = fs[fs.size - 1];
   stmts = array{};
   all = array{};
-  n_fn{_, _, _, body, _, _, _, _, _} = f;
+  ast.function{_, _, _, body, _, _, _, _, _} = f;
   sl.collect(body, stmts);
   sl.statements(body, all);
   named = false;
@@ -3184,33 +3184,33 @@ rs() {
   lvalue(n) => {
     p = code_parent(n);
     r = false;
-    if(given(p) && (code_kind(p) == n_op)) {
-      n_op{op, args, _} = p;
+    if(given(p) && (code_kind(p) == ast.operation)) {
+      ast.operation{op, args, _} = p;
       r = sl.assign(op) && sl.same(args[0], n);
     }
     r
   };
 
-  is_require(n) => (code_kind(n) == n_call) && {
-    n_call{c, args, words, _, _, _} = n;
-    (words.size == 0) && ((args.size > 0) && ((code_kind(c) == n_ident) && (code_name(c) == "require")))
+  is_require(n) => (code_kind(n) == ast.call) && {
+    ast.call{c, args, words, _, _, _} = n;
+    (words.size == 0) && ((args.size > 0) && ((code_kind(c) == ast.name) && (code_name(c) == "require")))
   };
 
   // не заменять: цель присваивания, вызываемое, объявления и параметры
   foldable_position(n) => {
     p = code_parent(n);
-    if(kind_in(n, array{n_var, n_fn, n_param, n_lambda, n_block, n_return, n_loop, n_break, n_continue}) || (is_require(n) || is_clause_pack(n))) false
+    if(kind_in(n, array{ast.variable, ast.function, ast.parameter, ast.lambda, ast.block, ast.return, ast.loop, ast.break, ast.continue}) || (is_require(n) || is_clause_pack(n))) false
     else if(!given(p)) false
-    else if((code_kind(p) == n_call) && {
-      n_call{c, _, _, _, _, _} = p;
+    else if((code_kind(p) == ast.call) && {
+      ast.call{c, _, _, _, _, _} = p;
       sl.same(c, n)
     }) false
-    else if((code_kind(p) == n_var) && {
-      n_var{_, t, _, _, _, _, _, _} = p;
+    else if((code_kind(p) == ast.variable) && {
+      ast.variable{_, t, _, _, _, _, _, _} = p;
       sl.same(t, n)
     }) false
-    else if((code_kind(p) == n_construct) && {
-      n_construct{t, _, _} = p;
+    else if((code_kind(p) == ast.construct) && {
+      ast.construct{t, _, _} = p;
       sl.same(t, n)
     }) false
     else !lvalue(n)
@@ -3221,14 +3221,14 @@ rs() {
     r = "";
     if(!sl.statement(n) && foldable_position(n)) {
       o = view_obs(n);
-      if(o.found && (o.seen && (!o.diverted && (!o.effect && (o.has_literal && !kind_in(n, array{n_int, n_float, n_str})))))) r = o.literal;
+      if(o.found && (o.seen && (!o.diverted && (!o.effect && (o.has_literal && !kind_in(n, array{ast.int, ast.float, ast.string})))))) r = o.literal;
     }
     r
   };
 
   // условие if: 0 — неизвестно, 1 — ложь, 2 — истина
   cond_of(n) => {
-    n_if{c, _, _} = n;
+    ast.if{c, _, _} = n;
     o = view_obs(c);
     if(!o.found || (!o.seen || (o.effect || !o.is_bool))) 0 else if(o.truth) 2 else 1
   };
@@ -3236,40 +3236,40 @@ rs() {
   // развилка с известным условием — её ветка (array{} — свёртки нет)
   fold_if(n) => {
     r = array{};
-    if(code_kind(n) == n_if) {
+    if(code_kind(n) == ast.if) {
       c = cond_of(n);
-      n_if{_, yes, no} = n;
+      ast.if{_, yes, no} = n;
       if(c == 2) r.push(yes);
       if((c == 1) && given(no)) r.push(no);
     }
     r
   };
-  drops(n) => (code_kind(n) == n_if) && ((cond_of(n) == 1) && {
-    n_if{_, _, no} = n;
+  drops(n) => (code_kind(n) == ast.if) && ((cond_of(n) == 1) && {
+    ast.if{_, _, no} = n;
     !given(no)
   });
 
   // инструкция-выражение, которая ничего не делает при этих входах: результат известен
   // и отброшен, рантайм-эффектов нет, изменяемых параметров нет
   pure_noop(n) => {
-    r = kind_in(n, array{n_call, n_op, n_ident});
-    if(r && (code_kind(n) == n_op)) {
-      n_op{op, _, _} = n;
+    r = kind_in(n, array{ast.call, ast.operation, ast.name});
+    if(r && (code_kind(n) == ast.operation)) {
+      ast.operation{op, _, _} = n;
       if(sl.assign(op)) r = false;
     }
     if(r) {
       o = view_obs(n);
       if(!o.found || (!o.seen || (o.effect || (o.diverted || !o.known)))) r = false;
     }
-    if(r && (code_kind(n) == n_call)) {
-      n_call{c, _, _, _, _, _} = n;
-      if(code_kind(c) == n_ident) {
+    if(r && (code_kind(n) == ast.call)) {
+      ast.call{c, _, _, _, _, _} = n;
+      if(code_kind(c) == ast.name) {
         name = code_name(c);
         for(item : code_items(code_module(n))) {
-          if((code_kind(item) == n_fn) && (code_name(item) == name)) {
-            n_fn{_, params, _, _, _, _, _, _, _} = item;
+          if((code_kind(item) == ast.function) && (code_name(item) == name)) {
+            ast.function{_, params, _, _, _, _, _, _, _} = item;
             for(p : params) {
-              n_param{_, _, mode, _, _, _, _} = p;
+              ast.parameter{_, _, mode, _, _, _, _} = p;
               if((mode == 1) || ((mode == 2) || (mode == 3))) r = false; // mut, own, out
             }
           }
@@ -3287,18 +3287,18 @@ rs() {
   keep(n, used) => {
     p = code_parent(n);
     k = code_kind(n);
-    if((k == n_fn) && (given(p) && (code_kind(p) == n_module))) (code_name(n) == "main") || view_live(n)
+    if((k == ast.function) && (given(p) && (code_kind(p) == ast.module))) (code_name(n) == "main") || view_live(n)
     else if(!sl.statement(n)) true
     else if({
       o = view_obs(n);
       !o.found || !o.present
     }) false // не исполнялась при этих входах
-    else if((k == n_var) && {
-      n_var{name, _, init, _, _, _, _, _} = n;
+    else if((k == ast.variable) && {
+      ast.variable{name, _, init, _, _, _, _, _} = n;
       !sl.has(used, name) && dead_init(init)
     }) false // мёртвая переменная: её нигде не читают, инициализация без эффекта
     else if(view_declares(n) && {
-      n_op{_, args, _} = n;
+      ast.operation{_, args, _} = n;
       !sl.has(used, code_name(args[0])) && dead_init(args[1])
     }) false // x = e, объявившее x, которое не читают
     else if(pure_noop(n)) false
@@ -3313,13 +3313,13 @@ rs() {
       o = view_obs(n);
       ignoring_dead = o.found && o.present;
       folds = fold_if(n);
-      if((k == n_fn) && ((given(p) && (code_kind(p) == n_module)) && !keep(n, used))) {
-      } else if(sl.statement(n) && ((k != n_var) && (!view_declares(n) && ((k != n_fn) && (!ignoring_dead || pure_noop(n)))))) {
+      if((k == ast.function) && ((given(p) && (code_kind(p) == ast.module)) && !keep(n, used))) {
+      } else if(sl.statement(n) && ((k != ast.variable) && (!view_declares(n) && ((k != ast.function) && (!ignoring_dead || pure_noop(n)))))) {
       } else if(fold_value(n).size > 0) {
       } else if(folds.size > 0) gather(folds[0], used)
       else if(drops(n)) {
       } else {
-        if((k == n_ident) && !lvalue(n)) sl.add(used, code_name(n));
+        if((k == ast.name) && !lvalue(n)) sl.add(used, code_name(n));
         for(c : code_items(n)) gather(c, used);
       }
     }

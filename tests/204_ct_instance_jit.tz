@@ -12,7 +12,7 @@ scale(i64 x) => x;
 shift(i64 x) => x;
 
 tune(f, op, k) => ct {
-  f.body = n_op{op, array{n_ident{"x"}, n_int{k}}};
+  f.body = ast.operation{op, array{ast.name{"x"}, ast.int{k}}};
 };
 
 main() {

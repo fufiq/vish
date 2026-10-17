@@ -23,7 +23,7 @@ sum(a, b) {
 // функция, вызванная из ct модуля, — тоже ct-код
 trace_entry(f) {
   b = f.body;
-  b.items = array{n_call{n_ident{"print"}, array{n_str{"вход в " + code_name(f)}}}, ...b.items};
+  b.items = array{ast.call{ast.name{"print"}, array{ast.string{"вход в " + code_name(f)}}}, ...b.items};
 }
 
 ct {

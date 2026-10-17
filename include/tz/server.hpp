@@ -1380,7 +1380,7 @@ struct editor_server {
     std::visit([&](auto const & x) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
         using field_t = [:std::meta::type_of(m):];
-        std::string name(std::meta::identifier_of(m));
+        std::string name(lang_field(std::meta::identifier_of(m))); // field-name
         if constexpr(std::is_same_v<field_t, node_id>) {
           if(x.[:m:]) out.push_back({x.[:m:], name});
         } else if constexpr(std::is_same_v<field_t, node_list>) {
@@ -1477,7 +1477,7 @@ struct editor_server {
     std::map<uint32_t, std::string> role;
     auto rec = [&](auto && self, node_id n, uint32_t depth) -> void {
       if(out.nodes.size() >= 2000) return;
-      proto::s_inode x{n, depth, role.contains(n.value) ? role[n.value] : std::string{}, std::string(kind_name(db[n])), own_text(n), {}, {}, {}};
+      proto::s_inode x{n, depth, role.contains(n.value) ? role[n.value] : std::string{}, std::string(lang_kind_of(db[n])), own_text(n), {}, {}, {}};
       auto r = rule_for(n, pr);
       if(r) {
         x.rule = cat(r->what, " ", head_text(r->decl));
@@ -1516,7 +1516,7 @@ struct editor_server {
       if(r->what == "запись") { // summation
         std::string fields;
         for(auto const & [c, name]: child_roles(n)) fields += cat(fields.empty() ? "" : ", ", name, ": ", printer(db).print(c));
-        out.expand.push_back({"итог", cat(kind_name(db[n]), "{", fields, "}"), {}});
+        out.expand.push_back({"итог", cat(lang_kind_of(db[n]), "{", fields, "}"), {}});
       } else if(fn.body) { // frame-up
         printer::substitution sub;
         sub.text = [&](node_id x) -> std::optional<std::string> {

@@ -5,7 +5,7 @@ struct point { i64 x; i64 y; }
 
 ct {
   p = code(point);
-  p.items = array{...p.items, n_var{"z", n_ident{"i64"}, n_int{7}}};
+  p.items = array{...p.items, ast.variable{"z", ast.name{"i64"}, ast.int{7}}};
 }
 
 main() {

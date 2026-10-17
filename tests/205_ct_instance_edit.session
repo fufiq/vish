@@ -20,7 +20,7 @@ jit
 // expect: jit  scale(i64)
 edit tune
 tune(f, op, k) => ct {
-  f.body = n_op{op, array{n_ident{"x"}, n_int{k + 1}}};
+  f.body = ast.operation{op, array{ast.name{"x"}, ast.int{k + 1}}};
 };
 .
 // expect: функция tune заменена

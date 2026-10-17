@@ -14,7 +14,7 @@ key 1 Delete
 idle
 // expect: i64 z = 0;
 key 1 8
-// expect: курсор:   p.items = array{...p.items, n_var{"z", n_ident{"i64"}, n_int{8‸}}};
+// expect: курсор:   p.items = array{...p.items, ast.variable{"z", ast.name{"i64"}, ast.int{8‸}}};
 idle
 // expect: struct point { i64 x; i64 y; i64 z = 8; }
 // The source is no longer a ct code (ct → xct): the mutation rolls back, the z field is no

@@ -11,9 +11,9 @@ step() {
 }
 
 main() {
-  x = n_int{1};
+  x = ast.int{1};
   print(x.value);
   step();
   f = code(step);
-  f.body = n_block{};
+  f.body = ast.block{};
 }

@@ -1778,7 +1778,7 @@ struct interpreter {
     if(auto t = types.builtin(str(x.name))) return ok(value(type_v{t}));
     if(structs.contains(x.name)) return ok(value(type_v{types.named(str(x.name))})); // entity struct - value
     // Type node code - tag (n_op, n_if...):
-    if(str(x.name).starts_with("n_") && is_node_kind(str(x.name))) return ok(value(type_v{types.named(str(x.name))}));
+    if(is_node_kind(str(x.name))) return ok(value(type_v{types.named(str(x.name))}));
     if(auto it = functions.find(x.name); it != functions.end()) {
       for(node_id f: it->second)
         if(inline_required(f))
@@ -2109,7 +2109,7 @@ struct interpreter {
     if(want == "auto" || got_desc == want || got == want) return fit::exact; // sameness
     // Type ratio in language (fit_rule prelude, M6 step 6), facts in VM
     value const * x = shape_of(v);
-    bool want_node = want.starts_with("n_") && (is_node_kind(want) || want == std::meta::identifier_of(^^n_context));
+    bool want_node = is_node_kind(want) || want == lang_context();
     bool is_code = want_node && x && code_agg(*x);
     bool subtype = types.is_a(got, want);
     bool record = is_record(v), empty = record && empty_record(v), want_struct = record && structs.contains(sym(want));
@@ -2151,7 +2151,7 @@ struct interpreter {
       case 7: { // N if c receives the node code n if, n context c and the heirs
         if(!v.known()) return strict ? fit::no : fit::maybe;
         node_id c = code_node(v, {});
-        std::string k(kind_name(db[c]));
+        std::string k(lang_kind_of(db[c]));
         return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
       }
       default: return fit::no;
@@ -2454,13 +2454,13 @@ struct interpreter {
     // and its field; in parsing, the node run-time - fields on the samples of the structure node base
     // node (n_context - block, module, quote) - a sample of the base: the type node - its successor,
     // the field - the base (first; the author's decision 2026-10-02)
-    bool node_base = kind == std::meta::identifier_of(^^n_context);
+    bool node_base = kind == lang_context();
     if((is_node_kind(kind) || node_base) && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code") {
       std::vector<value> fs;
       unpacked r = unpacked::yes;
       if(v.known()) {
         node_id c = code_node(v, where);
-        if(!c || (kind_name(db[c]) != kind && !types.is_a(std::string(kind_name(db[c])), kind))) return unpacked::no;
+        if(!c || (lang_kind_of(db[c]) != kind && !types.is_a(std::string(lang_kind_of(db[c])), kind))) return unpacked::no;
         fs = node_fields(c);
         fs.resize(std::min(fs.size(), node_samples(kind).size())); // sample fields - base fields
       } else {
@@ -3097,7 +3097,7 @@ struct interpreter {
   std::vector<value> node_samples(std::string_view kind) {
     std::vector<value> xs;
     template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-      if(std::meta::identifier_of(t) == kind) {
+      if(lang_kind_name(std::meta::identifier_of(t)) == kind) {
         [[maybe_unused]] typename[:t:] x{};
         template for(constexpr auto m: fields_of<typename[:t:]>()) xs.push_back(field_sample(x.[:m:]));
       }
@@ -3126,7 +3126,7 @@ struct interpreter {
     std::optional<value> out;
     std::visit([&](auto const & k) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>())
-        if(std::meta::identifier_of(m) == str(name)) out = field_value(k.[:m:]);
+        if(lang_field(std::meta::identifier_of(m)) == str(name)) out = field_value(k.[:m:]);
     },
         db[c].kind);
     return out;
@@ -3137,7 +3137,7 @@ struct interpreter {
     template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
       [[maybe_unused]] typename[:t:] x{};
       template for(constexpr auto m: fields_of<typename[:t:]>())
-        if(std::meta::identifier_of(m) == str(name)) {
+        if(lang_field(std::meta::identifier_of(m)) == str(name)) {
           value v = field_sample(x.[:m:]);
           if(out && types.describe(*out) != types.describe(v)) mixed = true;
           if(!out) out = std::move(v);
@@ -3231,11 +3231,11 @@ struct interpreter {
     std::optional<node_kind> out;
     std::set<uint32_t> taken;
     template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-      if(std::meta::identifier_of(t) == kind) {
+      if(lang_kind_name(std::meta::identifier_of(t)) == kind) {
         typename[:t:] x{};
         uint32_t k = 0;
         template for(constexpr auto m: fields_of<typename[:t:]>()) {
-          if(k < items.size()) set_field(x.[:m:], items[k], cat(kind, ".", std::meta::identifier_of(m)), node_id{}, taken, where);
+          if(k < items.size()) set_field(x.[:m:], items[k], cat(kind, ".", lang_field(std::meta::identifier_of(m))), node_id{}, taken, where);
           ++k;
         }
         if(items.size() > k) fail(cat(kind, ": полей ", k, ", значений ", items.size()), where);
@@ -3265,20 +3265,20 @@ struct interpreter {
       std::set<uint32_t> taken; // Children of other node fields are busy
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
         using field_t = [:std::meta::type_of(m):];
-        if(std::meta::identifier_of(m) != str(name)) {
+        if(lang_field(std::meta::identifier_of(m)) != str(name)) {
           if constexpr(std::is_same_v<field_t, node_id>) taken.insert(x.[:m:].value);
           else if constexpr(std::is_same_v<field_t, node_list>)
             for(node_id y: x.[:m:]) taken.insert(y.value);
         }
       }
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>())
-        if(std::meta::identifier_of(m) == str(name)) {
+        if(lang_field(std::meta::identifier_of(m)) == str(name)) {
           found = true;
-          set_field(x.[:m:], v, cat(kind_name(db[c]), ".", str(name)), c, taken, where);
+          set_field(x.[:m:], v, cat(lang_kind_of(db[c]), ".", str(name)), c, taken, where);
         }
     },
         k);
-    if(!found) fail(cat("у узла ", kind_name(db[c]), " нет поля ", str(name)), where);
+    if(!found) fail(cat("у узла ", lang_kind_of(db[c]), " нет поля ", str(name)), where);
     if(own) {
       db.mutate(c, std::move(k), 0);
       db.link_parents(c);
@@ -3288,12 +3288,12 @@ struct interpreter {
       if(db.birth_of(c) <= pass_base) // It is impossible to change the already disassembled run-time code: the execution and parsing would diverge
         if(node_id u = used_within(c)) {
           code_failed = true;
-          diagnostic d(cat("изменение кода после его использования: ", kind_name(db[c]), " уже разобран в каноническом порядке инстанцирования — менять код можно до первого использования"), where);
+          diagnostic d(cat("изменение кода после его использования: ", lang_kind_of(db[c]), " уже разобран в каноническом порядке инстанцирования — менять код можно до первого использования"), where);
           d.note("использован здесь", db[u].where);
           for(auto it = stack.rbegin(); it != stack.rend(); ++it) d.note(cat("в ", it->what), it->where);
           throw d;
         }
-      if(db.birth_of(c) <= pass_base) code_changes.push_back({db[ct_source].where, stack.empty() ? std::string("модуль") : stack.back().what, cat(kind_name(db[c]), ".", str(name))});
+      if(db.birth_of(c) <= pass_base) code_changes.push_back({db[ct_source].where, stack.empty() ? std::string("модуль") : stack.back().what, cat(lang_kind_of(db[c]), ".", str(name))});
       db.mutate(c, std::move(k), db.birth_of(c) > pass_base ? 0 : ct_source.value + 1);
       db.link_parents(c);
       return;
@@ -3594,7 +3594,7 @@ struct interpreter {
       items.push_back(std::move(x));
     }
     auto tname = str(db.as<n_ident>(c.type).name);
-    if(tname.starts_with("n_") && is_node_kind(tname)) return ok(node_literal(tname, items, db[n].where)); // n_X {…} is a living base node
+    if(is_node_kind(tname)) return ok(node_literal(tname, items, db[n].where)); // n_X {…} is a living base node
     if(auto it = structs.find(db.as<n_ident>(c.type).name); it != structs.end()) { // Name {a, b} - by position n
       auto all = fields_of_struct(it->first);
       if(items.size() > all.size()) fail(cat(tname, ": полей ", all.size(), ", значений ", items.size()), db[n].where);
@@ -3650,7 +3650,7 @@ struct interpreter {
     if(code_agg(obj) && str(name) != "node") { // e.cond is the field node (§7.4)
       node_id c = code_node(obj, where);
       if(auto f = node_field(c, name)) return *f;
-      fail(cat("у узла ", kind_name(db[c]), " нет поля ", str(name)), where);
+      fail(cat("у узла ", lang_kind_of(db[c]), " нет поля ", str(name)), where);
     }
     if(str(name) == "size") {
       if(obj.is<array_v>()) return value(int64_t(obj.as<array_v>().size()));
@@ -3804,7 +3804,7 @@ struct interpreter {
   }
 
   flow eval_node(node_id n, auto const &, scope *, uint32_t) {
-    fail(cat("узел ", kind_name(db[n]), " нельзя исполнить"), db[n].where);
+    fail(cat("узел ", lang_kind_of(db[n]), " нельзя исполнить"), db[n].where);
   }
 
   // --- Operator chain: parsing by brute force (§4.4) ---
@@ -6851,7 +6851,7 @@ struct interpreter {
     // Code bypass: type node, daughter node, name, text (projection)
     if(n.starts_with("code_") && a.size() == 1) {
       node_id c = code_node(a[0], where);
-      if(n == "code_kind") return value(type_v{types.named(kind_name(db[c]))}); // tag
+      if(n == "code_kind") return value(type_v{types.named(lang_kind_of(db[c]))}); // tag
       if(n == "code_fields") return value(array_v::of(node_fields(c))); // node fields in order for sample unpacking
       if(n == "code_items") {
         std::vector<value> xs;

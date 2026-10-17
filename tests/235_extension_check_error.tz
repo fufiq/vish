@@ -17,10 +17,10 @@ operator (w a) <+> (w b) => w{a.v + b.v};
 
 has_x(ext, entity) {
   ok = true;
-  if(code_kind(ext) == n_fn) {
-    n_fn{_, params, _, _, _, _, _, _, _} = ext;
+  if(code_kind(ext) == ast.function) {
+    ast.function{_, params, _, _, _, _, _, _, _} = ext;
     for(p : params) {
-      n_param{_, t, _, _, _, _, _} = p;
+      ast.parameter{_, t, _, _, _, _, _} = p;
       if(given(t)) {
         if(!has_field(type_of_code(t), "x")) ok = false;
       }

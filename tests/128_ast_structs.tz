@@ -1,4 +1,4 @@
-// out: [field{name: cond, type: code}, field{name: then_, type: code}, field{name: else_, type: code}]
+// out: [field{name: cond, type: code}, field{name: then, type: code}, field{name: else, type: code}]
 // out: + 2 false
 // out: a
 // out: 12
@@ -9,13 +9,13 @@
 // Узлы АСТ — struct программы: 
 // 
 // Объявления порождены из структур
-// узлов VM; образец n_op{op, xs, post} = c — проверка вида узла и его поля (пустой узел —
+// узлов VM; образец ast.operation{op, xs, post} = c — проверка вида узла и его поля (пустой узел —
 // code без узла, given — ложь); предикат if(образец = v) — и в машинном коде; размер
 // массива значений VM (код, строки) машинный код читает из списка значений.
 show(c) {
-  n_op{op, xs, post} = c;
+  ast.operation{op, xs, post} = c;
   print(op, xs.size, post);
-  n_ident{nm} = xs[0];
+  ast.name{nm} = xs[0];
   print(nm);
 }
 pairsum(i64 k) {
@@ -26,16 +26,16 @@ pairsum(i64 k) {
 }
 kind_of(c) {
   r = 0;
-  if(n_op{op, xs, _} = c) r = xs.size;
-  if(n_if{_, _, el} = c) r = if(given(el)) 100 else 50;
+  if(ast.operation{op, xs, _} = c) r = xs.size;
+  if(ast.if{_, _, el} = c) r = if(given(el)) 100 else 50;
   r
 }
 main() {
-  print(fields(n_if));
-  n_quote{items} = quote { a + 2 };
+  print(fields(ast.if));
+  ast.quote{items} = quote { a + 2 };
   show(items[0]);
   print(pairsum(4));
-  n_quote{ifs} = quote { if(a) 1 else 2 };
-  n_quote{lits} = quote { 7 };
+  ast.quote{ifs} = quote { if(a) 1 else 2 };
+  ast.quote{lits} = quote { 7 };
   print(kind_of(items[0]), kind_of(ifs[0]), kind_of(lits[0]));
 }

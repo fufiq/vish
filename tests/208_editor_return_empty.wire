@@ -1,6 +1,6 @@
-// return {} in the editor (§4.3, §4.4): typed is disassembled by writing prelude `return
-// {[[value]] value};` - `{}` in slot value - empty literal (n_construct), not empty block
-// (n_block).
+// return {} in the editor (§4.3, §4.4): the typed is disassembled by writing prelude `return
+// {[[value]] value};` - `{}` in the slot value - empty literal (ast.construct), not an empty
+// block (ast.block).
 //.
 // program: editor_return.tz
 open_view module

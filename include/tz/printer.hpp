@@ -110,7 +110,7 @@ struct printer {
 
   // A node without a record (if, loop... without prelude) is a kernel record: type {поля}.
   void print_node(node_id n, auto const &) {
-    out += cat(kind_name(db[n]), "{");
+    out += cat(lang_kind_of(db[n]), "{");
     bool first = true;
     db.for_each_child(n, [&](node_id c) {
       out += first ? "" : ", ";

@@ -21,8 +21,8 @@ steps(expr body) {
 steps_code(parse_error e) => e;
 steps_code(xs) {
   items = array{};
-  for(s : xs) items = array{...items, n_call{n_ident{"print"}, array{n_str{s[0]}}}, s[1]};
-  n_block{items}
+  for(s : xs) items = array{...items, ast.call{ast.name{"print"}, array{ast.string{s[0]}}}, s[1]};
+  ast.block{items}
 }
 
 main() {

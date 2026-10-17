@@ -8,7 +8,7 @@
 // fmt-has:   otherwise
 // fmt-has:     return 2;
 // fmt-has: sum_of(1, 2, 3), sum_of(5)
-// fmt-has: syntax when [[space]] (c) [[indent]] {yes} [[line]] otherwise [[indent]] {no} => n_if{c, yes, no};
+// fmt-has: syntax when [[space]] (c) [[indent]] {yes} [[line]] otherwise [[indent]] {no} => ast.if{c, yes, no};
 // fmt-has: syntax sum_of(xs, ...) => sum_all(xs);
 // fmt-has:     again {
 // fmt-has:   forever {
@@ -24,7 +24,7 @@
 // запись — от следующей строки; в контексте — первая подходящая по порядку.
 use geo.print;
 
-syntax when [[space]] (c) [[indent]] {yes} [[line]] otherwise [[indent]] {no} => n_if{c, yes, no};
+syntax when [[space]] (c) [[indent]] {yes} [[line]] otherwise [[indent]] {no} => ast.if{c, yes, no};
 syntax sum_of(xs, ...) => sum_all(xs);
 
 sum_all(xs) {
@@ -38,7 +38,7 @@ pick(x) {
 }
 
 quiet(expr body) {
-  syntax hush {[[value]] v}; => n_return{v};
+  syntax hush {[[value]] v}; => ast.return{v};
   body;
 }
 
@@ -57,7 +57,7 @@ main() {
     if(n > 2) break;
   }
   {
-    syntax again {body} => n_loop{body};
+    syntax again {body} => ast.loop{body};
     i = 0;
     loop {
       i += 1;

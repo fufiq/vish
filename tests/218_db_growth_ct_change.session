@@ -7,7 +7,7 @@ run
 // expect: 300 15 7⏎16
 edit tune
 tune(f, op, k) => ct {
-  f.body = n_op{op, array{n_ident{"x"}, n_int{k + 1}}};
+  f.body = ast.operation{op, array{ast.name{"x"}, ast.int{k + 1}}};
 };
 .
 run
@@ -18,7 +18,7 @@ roundtrip
 // expect: roundtrip: совпадает
 edit tune
 tune(f, op, k) => ct {
-  f.body = n_op{op, array{n_ident{"x"}, n_int{k}}};
+  f.body = ast.operation{op, array{ast.name{"x"}, ast.int{k}}};
 };
 .
 run
@@ -29,9 +29,9 @@ roundtrip
 // expect: roundtrip: совпадает
 edit sum_parse
 sum_parse(r) {
-  n_raw{_, items, _, _, _} = r;
-  e = n_int{100};
-  for(a : items) e = n_op{"+", array{e, a}};
+  ast.raw{_, items, _, _, _} = r;
+  e = ast.int{100};
+  for(a : items) e = ast.operation{"+", array{e, a}};
   e
 }
 .

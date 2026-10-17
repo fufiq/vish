@@ -9,9 +9,9 @@
 // переписывает — пробелы, переводы строк, комментарии, склейки символов (`x=1`) остаются;
 // fmt∘fmt = fmt, база (.tzdb) хранит то же.
 sum_parse(r) {
-  n_raw{_, items, _, _, _} = r;
-  e = n_int{0};
-  for(a : items) e = n_op{"+", array{e, a}};
+  ast.raw{_, items, _, _, _} = r;
+  e = ast.int{0};
+  for(a : items) e = ast.operation{"+", array{e, a}};
   e
 }
 
@@ -20,7 +20,7 @@ sum_of(expr body) {
   body
 }
 
-// пары имя=число: склейка видна у символа (n_sym.glued), здесь не важна
+// пары имя=число: склейка видна у символа (ast.symbol.glued), здесь не важна
 pairs(expr body) {
   syntax {r} => parse(r, repeated(seq(word(), "=", i64, repeated(","))));
   body

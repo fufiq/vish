@@ -3,7 +3,7 @@
 // out: both(helper) => helper(1) + helper;
 // fmt-stable
 // store-roundtrip
-// Имена в созданном коде (решение автора 2026-10-02): n_ident{"x"} — имя, его
+// Имена в созданном коде (решение автора 2026-10-02): ast.name{"x"} — имя, его
 // связывает анализ в месте, куда узел попал: 
 //;
 // конкретная сущность — ссылка на объявление ref(f), не ловится именем места вставки:
@@ -14,13 +14,13 @@ ct base = 1000;
 
 ct {
   // параметр helper заслоняет функцию: имя связывается с параметром, ссылка — с функцией
-  f = n_fn{"both", array{n_param{"helper"}}};
-  f.body = n_op{"+", array{n_call{ref(helper), array{n_int{1}}}, n_ident{"helper"}}};
+  f = ast.function{"both", array{ast.parameter{"helper"}}};
+  f.body = ast.operation{"+", array{ast.call{ref(helper), array{ast.int{1}}}, ast.name{"helper"}}};
   f.expr_body = true;
   emit(f);
   // ссылка на ct-переменную модуля — её значение, хотя в месте вставки есть свой base
-  g = n_fn{"get_base", array{n_param{"base"}}};
-  g.body = n_ref{ref(base).target}; // n_ref{номер узла объявления} — то же, что ref(base)
+  g = ast.function{"get_base", array{ast.parameter{"base"}}};
+  g.body = ast.reference{ref(base).target}; // ast.reference{номер узла объявления} — то же, что ref(base)
   g.expr_body = true;
   emit(g);
 }

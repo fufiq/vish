@@ -4,7 +4,7 @@
 // out: point{x: 1, y: 2, z: 3}
 // out: [field{name: x, type: i64}, field{name: y, type: i64}, field{name: z, type: i64}]
 // out: twice(x) => x * 2;
-// out: if(a) 1 else 2 a n_int
+// out: if(a) 1 else 2 a ast.int
 // out: да
 // fmt-stable
 // store-roundtrip
@@ -20,21 +20,21 @@ struct point { i64 x; i64 y; }
 
 ct {
   // новая функция: узел создаётся, достраивается и порождается emit
-  f = n_fn{"twice", array{n_param{"x"}}};
-  f.body = n_op{"*", array{n_ident{"x"}, n_int{2}}};
+  f = ast.function{"twice", array{ast.parameter{"x"}}};
+  f.body = ast.operation{"*", array{ast.name{"x"}, ast.int{2}}};
   f.expr_body = true;
   emit(f);
   // перегрузка той же функции: twice(str s)
-  g = n_fn{"twice", array{n_param{"s", n_ident{"str"}}}};
-  g.body = n_op{"+", array{n_ident{"s"}, n_ident{"s"}}};
+  g = ast.function{"twice", array{ast.parameter{"s", ast.name{"str"}}}};
+  g.body = ast.operation{"+", array{ast.name{"s"}, ast.name{"s"}}};
   g.expr_body = true;
   emit(g);
   // поле в struct: struct point — инстанс struct, его узел — код
   p = code(point);
-  p.items = array{...p.items, n_var{"z", n_ident{"i64"}, n_int{7}}};
+  p.items = array{...p.items, ast.variable{"z", ast.name{"i64"}, ast.int{7}}};
 }
 
-is_if(n_if c) => "да";
+is_if(ast.if c) => "да";
 is_if(c) => "нет";
 
 main() {
@@ -44,7 +44,7 @@ main() {
   print(point{1, 2, 3});
   print(fields(point));
   print(code_text(code(twice))); // печать созданного — по записям syntax
-  c = n_if{n_ident{"a"}, n_int{1}, n_int{2}};
-  print(code_text(c), code_text(c.cond), code_kind(c.then_));
-  print(is_if(c)); // код узла n_if — инстанс struct n_if
+  c = ast.if{ast.name{"a"}, ast.int{1}, ast.int{2}};
+  print(code_text(c), code_text(c.cond), code_kind(c.then));
+  print(is_if(c)); // код узла ast.if — инстанс struct ast.if
 }

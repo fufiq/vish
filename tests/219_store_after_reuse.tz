@@ -22,8 +22,8 @@ ct {
   emit(make_adder(5));
   big = 100;
   emit(quote { add_big(x) => add_n(x) + #big; });
-  f = n_fn{"via_ref", array{n_param{"helper"}}};
-  f.body = n_op{"+", array{n_call{ref(helper), array{n_int{1000}}}, n_ident{"helper"}}};
+  f = ast.function{"via_ref", array{ast.parameter{"helper"}}};
+  f.body = ast.operation{"+", array{ast.call{ref(helper), array{ast.int{1000}}}, ast.name{"helper"}}};
   f.expr_body = true;
   emit(f);
 }
@@ -31,8 +31,8 @@ ct {
 note(x) {
   ct {
     t = text(typeof(x));
-    f = n_fn{"describe", array{n_param{"v", n_ident{t}}}};
-    f.body = n_op{"+", array{n_str{t + ": "}, n_call{n_ident{"text"}, array{n_ident{"v"}}}}};
+    f = ast.function{"describe", array{ast.parameter{"v", ast.name{t}}}};
+    f.body = ast.operation{"+", array{ast.string{t + ": "}, ast.call{ast.name{"text"}, array{ast.name{"v"}}}}};
     f.expr_body = true;
     emit(f);
   }
@@ -44,7 +44,7 @@ main() {
   print(answer(), add_n(10), add_big(0));
   print(via_ref(0), 1 + 2 + 3);
   print(describe(1), describe(2.5));
-  c = n_if{n_ident{"a"}, n_int{1}, n_int{2}}; // узел при запуске — производный
+  c = ast.if{ast.name{"a"}, ast.int{1}, ast.int{2}}; // узел при запуске — производный
   print(code_text(c));
   a = 20;
   print(a + 2, a + 2 + 1);
