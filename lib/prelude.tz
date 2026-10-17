@@ -98,6 +98,14 @@ operator (f64 a) >= (f64 b) => ge(a, b);
 [[associative]] operator (bool a) || (expr bool b) => or(a, b);
 operator -(i64 a) => neg(a);
 operator -(f64 a) => neg(a);
+
+// Преобразования чисел — объявления по типам, как операторы (M6, 
+// решение автора 2026-10-10): у VM — машинные int_to_float/float_to_int.
+// i64 → f64 и f64 → i64 (целая часть) — явным вызовом; f64(2.5) — f64 уже, i64(2) — i64 уже.
+f64(i64 x) => int_to_float(x);
+f64(f64 x) => x;
+i64(f64 x) => float_to_int(x);
+i64(i64 x) => x;
 // биты i64 — для кодирования инструкций на языке (§10.4)
 [[associative]] operator (i64 a) & (i64 b) => band(a, b);
 [[associative]] operator (i64 a) | (i64 b) => bor(a, b);

@@ -1,7 +1,7 @@
 // Reactivity (§10.1): editing functions only recalculates dependent instance.
 // program: stats.tz
 check
-// expect: пересчитано 4 экземпл.
+// expect: пересчитано 5 экземпл. (sq, sum_sq, f64, mean, main)
 check
 // expect: пересчитано 0 экземпл.
 // expect: из кэша 1
@@ -19,7 +19,7 @@ mean(xs) {
 // expect: функция mean заменена
 check
 // expect: пересчитано 2 экземпл. (mean, main)
-// expect: из кэша 1
+// expect: из кэша 2
 run
 // expect: 30.0
 // expect: 5.0

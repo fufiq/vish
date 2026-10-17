@@ -6946,7 +6946,7 @@ struct interpreter {
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
       {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
-      {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
+      {"int_to_float", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
     auto n = str(name);
@@ -7441,9 +7441,10 @@ struct interpreter {
         fail(cat("is_index: ожидался массив, получено ", types.describe(a[1])), where);
       return erase(value(true));
     }
-    if(n == types.float_name() && a.size() == 1 && types.describe(a[0]) == types.int_name())
+    // f64(i64 x) and i64(f64 x) are prelude ads above them
+    if(n == "int_to_float" && a.size() == 1 && types.describe(a[0]) == types.int_name())
       return a[0].known() ? value(double(a[0].as<int64_t>())) : erase(value(double(1)));
-    if(n == types.int_name() && a.size() == 1 && types.describe(a[0]) == types.float_name())
+    if(n == "float_to_int" && a.size() == 1 && types.describe(a[0]) == types.float_name())
       return a[0].known() ? value(int64_t(a[0].as<double>())) : erase(value(int64_t(1)));
     if(n == "read_floats") {
       rt_effect();
