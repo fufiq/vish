@@ -1,0 +1,55 @@
+// args: 5
+// out: 12 -2 5 7 2 35 160 0 -3
+// out: 2147483652 -2147483643 4294967301 -1
+// out: 5 -9223372036854775808 1
+// out: 37 42 22
+// jit-compiled: arith
+// jit-compiled: wide
+// jit-compiled: shifts
+// jit-compiled: cmps
+// Второй операнд, известный при компиляции, — значением в кодогенератор контекста known цели
+// (add r, imm32 / cmp r, imm32; jcc), вне imm32 — через регистр, как раньше. 
+//.
+arith(i64 x) {
+  a = x + 7;
+  b = x - 7;
+  c = x & 7;
+  d = x | 2;
+  e = x ^ 7;
+  f = x * 7;
+  g = x << 5;
+  h = x >> 3;
+  k = x;
+  k -= 8;
+  print(a, b, c, d, e, f, g, h, k);
+  a
+}
+
+wide(i64 x) {
+  print(x + 2147483647, x - 2147483648, x + 4294967296, (x * -1) + 4);
+  x
+}
+
+shifts(i64 x) {
+  print(x << 0, ((x - 5) + 1) << 63, (x >> 63) + 1);
+  x
+}
+
+cmps(i64 a) {
+  r = 0;
+  if(a == 5) r += 1;
+  if(a != 5) r += 2;
+  if(a < 6) r += 4;
+  if(a >= 6) r += 8;
+  if(a <= -1) r += 16;
+  if(a > 4) r += 32;
+  r
+}
+
+main() {
+  x = parse_int(args[1]).value;
+  arith(x);
+  wide(x);
+  shifts(x);
+  print(cmps(x) + 0, cmps(x + 1) + 0, cmps(-7) + 0);
+}
