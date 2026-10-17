@@ -3030,6 +3030,106 @@ struct interpreter {
 
   // --- code as a value (§7.4) ---
 
+  // parsing is a code fact-finding program (code_types...): when parsing is itself, when
+  // executed it is its parsing, once.
+  std::list<interpreter> analysis_vm; // List: Type not yet complete (as choice_vms)
+  interpreter & analysis() {
+    if(checking()) return *this; // parsing (and elaboration in performance) - observations
+    if(root != this) return root->analysis();
+    if(analysis_vm.empty()) {
+      analysis_vm.emplace_back(db, mod, std::vector<std::string>{prog_path}, mode::check);
+      try {
+        analysis_vm.back().run_main();
+      } catch(diagnostic const &) {
+      }
+    }
+    return analysis_vm.back();
+  }
+
+  // --- Code communication: name announcement, overload call, use ---
+  static bool relation_builtin(std::string_view n) {
+    for(std::string_view x: {"code_declaration", "code_targets", "code_users", "code_callers", "code_calls", "code_deps", "code_instances", "code_types", "code_values"})
+      if(x == n) return true;
+    return false;
+  }
+  // Bypassing the subtree (without attached function announcements - they have their own).
+  void walk_code(node_id c, auto && f) {
+    if(!c) return;
+    f(c);
+    db.for_each_child(c, [&](node_id x) {
+      if(!db.is<n_fn>(x) || x == c) walk_code(x, f);
+    });
+  }
+  bool within_code(node_id x, node_id top) const {
+    for(; x; x = db[x].parent)
+      if(x == top) return true;
+    return false;
+  }
+  // Announce name by area: blocks up (announcement to place), function or lambda
+  // parameters, then module (function, module variable) and prelude.
+  node_id declaration_of(node_id c) {
+    if(db.is<n_fn>(c) || db.is<n_var>(c) || db.is<n_param>(c)) return c;
+    if(!db.is<n_ident>(c)) return {};
+    symbol s = db.as<n_ident>(c).name;
+    for(node_id at = c, p = db[c].parent; p; at = p, p = db[p].parent) {
+      if(db.is<n_block>(p))
+        for(node_id x: db.as<n_block>(p).items) {
+          if(x == at || within_code(at, x)) { // `a = …` without the previous announcement - it's itself
+            if(db.is<n_op>(x) && str(db.as<n_op>(x).op) == "=" && db.as<n_op>(x).args.size() == 2 && db.as<n_op>(x).args[0] == c) return c;
+            break;
+          }
+          if(db.is<n_var>(x) && db.as<n_var>(x).name == s) return x;
+          if(db.is<n_op>(x) && str(db.as<n_op>(x).op) == "=" && db.as<n_op>(x).args.size() == 2 && db.is<n_ident>(db.as<n_op>(x).args[0]) && db.as<n_ident>(db.as<n_op>(x).args[0]).name == s) return db.as<n_op>(x).args[0];
+        }
+      if(db.is<n_fn>(p))
+        for(node_id x: db.as<n_fn>(p).params)
+          if(db.as<n_param>(x).name == s) return x;
+      if(db.is<n_lambda>(p))
+        for(node_id x: db.as<n_lambda>(p).params)
+          if(db.is<n_param>(x) && db.as<n_param>(x).name == s) return x;
+    }
+    for(node_id m: {mod, db.prelude}) {
+      if(!m || !db.is<n_module>(m)) continue;
+      for(node_id x: db.as<n_module>(m).items) {
+        if(db.is<n_fn>(x) && db.as<n_fn>(x).name == s) return x;
+        if(db.is<n_var>(x) && db.as<n_var>(x).name == s) return x;
+      }
+    }
+    return {};
+  }
+  // overload call: selected by parsing (by instance), otherwise all with that name.
+  std::vector<node_id> targets_of(node_id call) {
+    std::vector<node_id> out;
+    if(!db.is<n_call>(call)) return out;
+    if(auto it = root->resolved_calls.find(call.value); it != root->resolved_calls.end())
+      for(uint32_t f: it->second) out.push_back(node_id(f));
+    if(!out.empty()) return out;
+    node_id callee = db.as<n_call>(call).callee;
+    symbol s = db.is<n_ident>(callee) ? db.as<n_ident>(callee).name : db.is_member(callee) ? db.member_of(callee).name : symbol{};
+    if(auto it = functions.find(s); s && it != functions.end()) out = it->second;
+    return out;
+  }
+  // Ad uses: program names (with modules used) that lead to it; functions and calls that select
+  // it.
+  std::vector<node_id> users_of(node_id d) {
+    std::vector<node_id> out;
+    if(!d) return out;
+    bool fn = db.is<n_fn>(d);
+    symbol s = fn ? db.as<n_fn>(d).name : db.is<n_var>(d) ? db.as<n_var>(d).name : db.is<n_param>(d) ? db.as<n_param>(d).name : db.is<n_ident>(d) ? db.as<n_ident>(d).name : symbol{};
+    if(!s) return out;
+    auto look = [&](auto && self, node_id x) -> void {
+      if(db.is<n_ident>(x) && db.as<n_ident>(x).name == s && x != d) {
+        node_id up = db[x].parent;
+        bool call = up && db.is<n_call>(up) && db.as<n_call>(up).callee == x;
+        bool hit = fn ? (call ? std::ranges::contains(targets_of(up), d) : declaration_of(x) == d) : declaration_of(x) == d;
+        if(hit) out.push_back(x);
+      }
+      db.for_each_child(x, [&](node_id y) { self(self, y); });
+    };
+    look(look, mod);
+    return out;
+  }
+
   value code_value(node_id n) {
     agg_v c{types.named("code"), {}};
     c.fields.push_back({sym("node"), value(int64_t(n.value))});
@@ -6607,7 +6707,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"},
       {"f64", "(x)"}, {"i64", "(x)"}, {"not", "(x)"}};
 
   value builtin(symbol name, std::vector<value> & a, span where) {
@@ -6847,6 +6947,69 @@ struct interpreter {
     if(n == "jit_chain" && a.size() == 2 && a[1].is<int64_t>()) {
       node_id t = jit_analysis ? jit_analysis->chain_tree(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : node_id{};
       return t ? value(array_v::of({code_value(t)})) : value(array_v::of({}));
+    }
+    // --- Code links (author's decision 2026-10-17):
+// Whoa
+    // Uses an ad that calls a function, what it calls, what the node depends on, its instance,
+    // types and values of node. Name to the ad by area (blocks up, parameters, module); call to
+    // overload selected by parsing, otherwise by name. My:* composition and names (modeled
+    // code_kind, code_items).
+    if(n.starts_with("code_") && a.size() == 1 && relation_builtin(n)) {
+      node_id c = code_node(a[0], where);
+      auto codes = [&](std::vector<node_id> const & xs) {
+        std::vector<value> out;
+        for(node_id x: xs) out.push_back(code_value(x));
+        return value(array_v::of(std::move(out)));
+      };
+      if(n == "code_declaration") return code_value(declaration_of(c));
+      if(n == "code_targets") return codes(targets_of(c));
+      if(n == "code_users") return codes(users_of(c));
+      if(n == "code_callers") {
+        std::vector<node_id> xs;
+        for(node_id u: users_of(c))
+          if(node_id up = db[u].parent; up && db.is<n_call>(up) && db.as<n_call>(up).callee == u) xs.push_back(up);
+        return codes(xs);
+      }
+      if(n == "code_calls") {
+        std::vector<node_id> xs;
+        walk_code(c, [&](node_id x) {
+          if(db.is<n_call>(x)) xs.push_back(x);
+        });
+        return codes(xs);
+      }
+      if(n == "code_deps") {
+        std::vector<node_id> xs;
+        walk_code(c, [&](node_id x) {
+          if(!db.is<n_ident>(x)) return;
+          node_id up = db[x].parent;
+          std::vector<node_id> ds = up && db.is<n_call>(up) && db.as<n_call>(up).callee == x ? targets_of(up) : std::vector<node_id>{declaration_of(x)};
+          for(node_id d: ds)
+            if(d && !std::ranges::contains(xs, d) && !within_code(d, c)) xs.push_back(d);
+        });
+        return codes(xs);
+      }
+      // parsing (check): instance, types and values of node by instance. In parsing -
+      // disassembled so far; in execution - parsing program (once).
+      if(n == "code_instances") {
+        interpreter & an = analysis();
+        std::vector<value> xs;
+        if(auto it = an.layers.find(c.value); it != an.layers.end())
+          for(auto const & [key, l]: it->second) xs.push_back(value(key));
+        return value(array_v::of(std::move(xs)));
+      }
+      if(n == "code_types" || n == "code_values") {
+        interpreter & an = analysis();
+        std::vector<value> xs;
+        std::set<std::string> seen;
+        for(auto const & e: an.journal) {
+          if(e.node != c.value || !e.seen) continue;
+          if(n == "code_types") { // Type - the meaning of this performance (by name)
+            std::string t = an.types.describe(e.v);
+            if(seen.insert(t).second) xs.push_back(value(type_v{&an == this ? types.of(e.v) : types.named(an.types.name(an.types.of(e.v)))}));
+          } else if(auto lit = an.literal(e.v); lit && seen.insert(*lit).second) xs.push_back(e.v);
+        }
+        return value(array_v::of(std::move(xs)));
+      }
     }
     // Code bypass: type node, daughter node, name, text (projection)
     if(n.starts_with("code_") && a.size() == 1) {
