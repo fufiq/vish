@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
 #include <liburing.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -386,6 +387,30 @@ struct uring {
     return out;
   }
 };
+// The work of VM is on its stack: the depth of parsing and executions by AST (compiler in the
+// language compiles itself, TZ_JIT_SELF) does not depend on the limit of the host stack (ulimit
+// -s, under asan frames three times more). Reserve - virtual, pages - as you touch.
+int with_stack(size_t bytes, auto && f) {
+  struct job {
+    decltype(f) & run;
+    int rc = 1;
+  } j{f};
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  pthread_attr_setstacksize(&a, bytes);
+  pthread_t t;
+  auto body = [](void * p) -> void * {
+    auto & x = *static_cast<job *>(p);
+    x.rc = x.run();
+    return nullptr;
+  };
+  int e = pthread_create(&t, &a, body, &j);
+  pthread_attr_destroy(&a);
+  if(e) return f(); // Not given flow - on the host stack
+  pthread_join(t, nullptr);
+  return j.rc;
+}
+
 } // namespace tz::os
 
 namespace tz {

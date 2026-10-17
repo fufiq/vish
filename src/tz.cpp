@@ -58,7 +58,14 @@ int report_error(program const & p, tz::diagnostic const & d) {
 
 } // namespace
 
+int run(int argc, char ** argv);
+
+// All work is on the VM 256MB stack (os::with_stack): depth is not the limit of the host stack.
 int main(int argc, char ** argv) {
+  return tz::os::with_stack(size_t(256) << 20, [&] { return run(argc, argv); });
+}
+
+int run(int argc, char ** argv) {
   if(argc == 2 && std::string_view(argv[1]) == "schema") { // Editor's Protocol Scheme (JSON)
     put(stdout, tz::proto::schema());
     return 0;

@@ -2,8 +2,9 @@
 # Complete check before the committ: three assemblies - simultaneously (code generation each -
 # on the cores, -flto=auto), tests of the mode - immediately upon the readiness of its assembly.
 # ./check.sh - release, debug, asan + --a64, TZ_JIT_SELF, editor
-# ./check.sh quick is release only and its output code 0 is all green. Logs -
-# out/check/. Working out/tz - release.
+# ./check.sh Quick - Release only and its tests
+# ./check.sh full - as without a key, plus TZ_JIT_SELF under asan (≈7.5 min) Exit code
+# 0 - all green. Logs - out/check/. Working out/tz - release.
 cd "$(dirname "$0")"
 L=out/check
 mkdir -p $L
@@ -18,13 +19,17 @@ suite() { # имя лог бинарь аргументы…
   (cd "$d" && "$OLDPWD/$b" "$@") > "$l" 2>&1; c=$?
   echo "$n: $(tail -1 "$l") (код $c)" > $L/r_$n
 }
-mode() { # режим: сборка → тесты; release — ещё --a64 и самокомпиляция
+mode() { # режим: сборка → тесты; release — ещё --a64 и самокомпиляция (full: и asan)
   m=$1 b=out/tz-$1
   if ! OUT=$b ./build.sh "$m" > $L/b_$m.log 2>&1; then
     echo "$m: сборка упала (код $?, $L/b_$m.log)" > $L/r_$m
     return
   fi
+  if [ "$m" = asan ] && [ "$FULL" = 1 ]; then # full: самокомпиляция и под asan (≈5 мин) — стек VM, не хоста
+    TZ_JIT_SELF=1 suite self_asan $L/t_self_asan.log $b test tests &
+  fi
   suite "$m" $L/t_$m.log $b test tests
+  wait
   if [ "$m" = release ]; then
     cp $b out/tz
     suite a64 $L/t_a64.log $b test tests --a64 &
@@ -39,6 +44,8 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
 }
 
 start=$(date +%s)
+FULL=0
+[ "$1" = full ] && FULL=1
 if [ "$1" = quick ]; then
   mode release
 else
