@@ -1700,7 +1700,7 @@ struct parser {
         if(auto r = record_of(db, d)) {
           std::vector<node_id> places(r->places);
           for(std::size_t i = 0; i < args.size(); ++i) places[r->slot[i]] = args[i];
-          if(r->kind >= 0) return db.add(make_node(r->kind, places), w);
+          if(r->kind >= 0) return db.add(make_node(r->kind, places, r->program), w);
           n_call c; // kernel call recording: try_compile { … }, hide x
           c.args = std::move(places);
           c.callee = db.add(n_ident{form[0]}, {h0, h1});

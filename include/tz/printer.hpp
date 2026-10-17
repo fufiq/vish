@@ -449,6 +449,7 @@ struct printer {
     auto const & [f, r] = x;
     if(r.kind >= 0) {
       if(int(db[n].kind.index()) != r.kind) return false;
+      if(!r.program.empty() && db.as<n_node>(n).kind != r.program) return false; // type of program - by name
       for(uint32_t p = 0; p < r.places; ++p)
         if(bool(node_place(db[n].kind, p)) != std::ranges::contains(r.slot, p)) return false;
       return true;
@@ -464,7 +465,7 @@ struct printer {
       for(int k = 0; k < int(std::variant_size_v<node_kind>); ++k) v.push_back(node_code_fields(k) >= 0);
       return v;
     }();
-    return db.is<n_call>(n) || able[db[n].kind.index()];
+    return db.is<n_call>(n) || db.is<n_node>(n) || able[db[n].kind.index()];
   }
 
   // Syntax form call (c.form - link to the ad, it was chosen by parsing): the record - the ad

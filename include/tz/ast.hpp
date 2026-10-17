@@ -289,9 +289,21 @@ struct n_sym {
   bool glued = false;
 };
 
+// Node of the type declared by the program: struct ast.twice { code x; }
+// 
+// The meaning of the form is the disclosure in the known node ([[transform]]
+// f(ast.twice t), author's decision 2026-10-17: ). *My:* field is node (code) in the
+// order of the announcement; in node_kind - the last (type numbers in journal .tzdb do
+// not shift).
+struct n_node {
+  std::string kind; // ast.twice
+  node_list items;
+};
+
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
     n_call, n_op, n_if, n_loop, n_break, n_continue, n_return,
-    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native, n_ref, n_raw, n_sym>;
+    n_ct, n_lambda, n_construct, n_hole, n_throw, n_chain, n_extend, n_quote, n_splice, n_pat, n_unpack, n_pat_field, n_subject, n_spread, n_use, n_native, n_ref, n_raw, n_sym, n_node>;
+constexpr std::size_t program_kind_index = std::variant_size_v<node_kind> - 1; // n_node
 
 struct node {
   node_kind kind;
@@ -1057,6 +1069,7 @@ struct ast_db {
   uint32_t size() const { return nodes.size(); }
 
   interner strings;
+  mutable std::unordered_map<std::string, uint32_t> program_kinds; // ast.X → node announcement (program_kind)
   void log(journal_op op) { oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}}); }
 
   void link_rec(node_id root) {
@@ -1218,14 +1231,44 @@ std::string_view lang_context() {
 // (§7.4). Is there any alternative to node_kind?
 bool is_node_kind(std::string_view name) {
   if(!name.starts_with("ast.")) return false;
-  for(std::size_t i = 0; i < std::variant_size_v<node_kind>; ++i)
+  for(std::size_t i = 0; i < program_kind_index; ++i)
     if(lang_kind(i) == name) return true;
   return false;
 }
 
+// Type node declared by the program (n_node): struct ast.X { code a; code b; } is field names in
+// order; nullopt is no such announcement or field is no node. An ad is searched on the database
+// only for a name that VM does not have; what is found is remembered and verified with each
+// request (ad editing - other fields, renaming - search again).
+std::optional<std::vector<symbol>> program_kind(ast_db const & db, std::string_view name) {
+  if(!name.starts_with("ast.") || is_node_kind(name)) return std::nullopt;
+  auto decl = [&](uint32_t i) {
+    node_id d(i);
+    if(!db.is<n_extend>(d)) return false;
+    auto const & e = db.as<n_extend>(d);
+    return e.of && db.strings.text(e.of) == "struct" && e.name && db.strings.text(e.name) == name;
+  };
+  uint32_t at = 0;
+  if(auto it = db.program_kinds.find(std::string(name)); it != db.program_kinds.end() && decl(it->second)) at = it->second;
+  else {
+    for(uint32_t i = 1; i < db.size(); ++i)
+      if(decl(i)) at = i; // last
+    if(!at) return std::nullopt;
+    db.program_kinds[std::string(name)] = at;
+  }
+  std::vector<symbol> fields;
+  for(node_id x: db.as<n_extend>(node_id(at)).items) {
+    if(!db.is<n_var>(x)) continue;
+    auto const & v = db.as<n_var>(x);
+    if(!v.type || !db.is<n_ident>(v.type) || db.strings.text(db.as<n_ident>(v.type).name) != "code") return std::nullopt;
+    fields.push_back(v.name);
+  }
+  return fields;
+}
+
 // The node type number in node_kind is named for the structure (-1 is not).
 int node_kind_index(std::string_view name) {
-  for(std::size_t i = 0; i < std::variant_size_v<node_kind>; ++i)
+  for(std::size_t i = 0; i < program_kind_index; ++i)
     if(lang_kind(i) == name) return int(i);
   return -1;
 }
@@ -1248,8 +1291,10 @@ int node_code_fields(int kind) {
   return out;
 }
 
-// Kind node with fields in order (empty node_id - the field is empty).
-node_kind make_node(int kind, std::vector<node_id> const & places) {
+// Kind node with fields in order (empty node_id is empty); program is the name of the program
+// type (n_node).
+node_kind make_node(int kind, std::vector<node_id> const & places, std::string_view program = {}) {
+  if(!program.empty()) return n_node{std::string(program), places};
   node_kind out;
   int i = 0;
   template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
@@ -1270,6 +1315,7 @@ node_kind make_node(int kind, std::vector<node_id> const & places) {
 
 // Place node (if the field is a node)
 node_id node_place(node_kind const & k, uint32_t place) {
+  if(auto const * u = std::get_if<n_node>(&k)) return place < u->items.size() ? u->items[place] : node_id{}; // programme
   node_id out;
   std::visit([&](auto const & x) {
     uint32_t i = 0;
@@ -1294,6 +1340,7 @@ struct record_info {
   int kind = -1; // node (number in node_kind); -1 - kernel call with head name
   std::vector<uint32_t> slot; // parameter k → place in the body (field node / call argument)
   uint32_t places = 0; // body-place
+  std::string program; // View declared by the program (kind - n_node): ast.twice
 };
 
 // Marking layout in the syntax record (§4.4, projection): `[[line]] else` - part from the
@@ -1324,9 +1371,16 @@ std::optional<record_info> record_of(ast_db const & db, node_id fn) {
   record_info r;
   node_list items;
   if(db.is<n_construct>(f.body) && db.is<n_ident>(db.as<n_construct>(f.body).type)) {
-    r.kind = node_kind_index(db.strings.text(db.as<n_ident>(db.as<n_construct>(f.body).type).name));
-    if(r.kind < 0) return std::nullopt;
-    int n = node_code_fields(r.kind);
+    std::string_view kind = db.strings.text(db.as<n_ident>(db.as<n_construct>(f.body).type).name);
+    r.kind = node_kind_index(kind);
+    int n = r.kind >= 0 ? node_code_fields(r.kind) : -1;
+    if(r.kind < 0) { // Syntax twice (x) => ast.twice {x}
+      auto pk = program_kind(db, kind);
+      if(!pk) return std::nullopt;
+      r.kind = int(program_kind_index);
+      r.program = kind;
+      n = int(pk->size());
+    }
     items = db.as<n_construct>(f.body).items;
     if(n < 0 || items.size() > uint32_t(n)) return std::nullopt;
     r.places = uint32_t(n);
@@ -1372,19 +1426,24 @@ std::string ast_structs_text() {
   std::string out = "// узлы АСТ (порождено из структур узлов VM)\n";
   out += cat("struct ", lang_context(), " { }\n");
   template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
-    out += cat("struct ", lang_kind_name(std::meta::identifier_of(t)));
-    template for(constexpr auto b: std::define_static_array(std::meta::bases_of(t, std::meta::access_context::unchecked())))
-      out += cat(" : ", lang_kind_name(std::meta::identifier_of(std::meta::type_of(b))));
-    out += " {";
-    template for(constexpr auto m: fields_of<typename[:t:]>())
-      out += cat(" ", node_field_type<typename[:std::meta::type_of(m):]>(), " ", lang_field(std::meta::identifier_of(m)), ";");
-    out += " }\n";
+    if constexpr(!std::is_same_v<typename[:t:], n_node>) { // Programming program announces program
+      out += cat("struct ", lang_kind_name(std::meta::identifier_of(t)));
+      template for(constexpr auto b: std::define_static_array(std::meta::bases_of(t, std::meta::access_context::unchecked())))
+        out += cat(" : ", lang_kind_name(std::meta::identifier_of(std::meta::type_of(b))));
+      out += " {";
+      template for(constexpr auto m: fields_of<typename[:t:]>())
+        out += cat(" ", node_field_type<typename[:std::meta::type_of(m):]>(), " ", lang_field(std::meta::identifier_of(m)), ";");
+      out += " }\n";
+    }
   }
   return out;
 }
 
 // The name of node is ast.if, ast.call.
-std::string_view lang_kind_of(node const & n) { return lang_kind(n.kind.index()); }
+std::string_view lang_kind_of(node const & n) {
+  if(auto const * u = std::get_if<n_node>(&n.kind)) return u->kind; // programme
+  return lang_kind(n.kind.index());
+}
 
 // The name of the type node is the C++ structure (editor protocol, debugging output).
 std::string_view kind_name(node const & n) {

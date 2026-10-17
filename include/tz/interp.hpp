@@ -2220,7 +2220,7 @@ struct interpreter {
     if(want == "auto" || got_desc == want || got == want) return fit::exact; // sameness
     // Type ratio in language (fit_rule prelude, M6 step 6), facts in VM
     value const * x = shape_of(v);
-    bool want_node = is_node_kind(want) || want == lang_context();
+    bool want_node = node_kind_named(want) || want == lang_context();
     bool is_code = want_node && x && code_agg(*x);
     bool subtype = types.is_a(got, want);
     bool record = is_record(v), empty = record && empty_record(v), want_struct = record && structs.contains(sym(want));
@@ -2566,7 +2566,7 @@ struct interpreter {
     // node (n_context - block, module, quote) - a sample of the base: the type node - its successor,
     // the field - the base (first; the author's decision 2026-10-02)
     bool node_base = kind == lang_context();
-    if((is_node_kind(kind) || node_base) && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code") {
+    if((node_kind_named(kind) || node_base) && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "code") {
       std::vector<value> fs;
       unpacked r = unpacked::yes;
       if(v.known()) {
@@ -3307,6 +3307,10 @@ struct interpreter {
   }
   std::vector<value> node_fields(node_id c) {
     std::vector<value> xs;
+    if(db.is<n_node>(c)) { // Type of program: fields - node in order of announcement
+      for(node_id x: db.as<n_node>(c).items) xs.push_back(field_value(x));
+      return xs;
+    }
     std::visit([&](auto const & k) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) xs.push_back(field_value(k.[:m:]));
     },
@@ -3328,6 +3332,10 @@ struct interpreter {
   }
   std::vector<value> node_samples(std::string_view kind) {
     std::vector<value> xs;
+    if(auto pk = program_kind(db, kind)) {
+      for(std::size_t k = 0; k < pk->size(); ++k) xs.push_back(field_sample(node_id{}));
+      return xs;
+    }
     template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
       if(lang_kind_name(std::meta::identifier_of(t)) == kind) {
         [[maybe_unused]] typename[:t:] x{};
@@ -3356,6 +3364,13 @@ struct interpreter {
   // species with such field; different types in different species - unknown)
   std::optional<value> node_field(node_id c, symbol name) {
     std::optional<value> out;
+    if(db.is<n_node>(c)) { // Type of program: field - by declaring struct ast. X
+      auto const & u = db.as<n_node>(c);
+      if(auto pk = program_kind(db, u.kind))
+        for(std::size_t k = 0; k < pk->size() && k < u.items.size(); ++k)
+          if((*pk)[k] == name) out = field_value(u.items[k]);
+      return out;
+    }
     std::visit([&](auto const & k) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>())
         if(lang_field(std::meta::identifier_of(m)) == str(name)) out = field_value(k.[:m:]);
@@ -3376,6 +3391,7 @@ struct interpreter {
         }
     }
     if(mixed) return value(rt_v{});
+    if(!out) return field_sample(node_id{}); // Program type field - node (struct ast.X { code x; })
     return out;
   }
 
@@ -3455,11 +3471,23 @@ struct interpreter {
     }
   }
 
-  // n_X {a, b, …} - new node of the form n_X, field by position (missing - empty); run-time field
-  // (in parsing) - code unknown
+  // n_X {a, b, …} is a new node of the form n_X, field by position (missing - empty); run-time
+  // field (in parsing) - code unknown Type node - VM (ast.if) or declared program (struct
+  // ast.twice { code x; }).
+  bool node_kind_named(std::string_view k) const { return is_node_kind(k) || (k.starts_with("ast.") && program_kind(db, k)); }
+
   value node_literal(std::string_view kind, std::vector<value> const & items, span where) {
     for(auto const & x: items)
       if(!x.known()) return erase(code_value(node_id(1)));
+    if(auto pk = program_kind(db, kind)) { // Type of program: fields - node in order of announcement
+      if(items.size() > pk->size()) fail(cat(kind, ": полей ", pk->size(), ", значений ", items.size()), where);
+      n_node u{std::string(kind), {}};
+      for(std::size_t k = 0; k < pk->size(); ++k)
+        u.items.push_back(k < items.size() ? code_node(items[k], where) : node_id{});
+      node_id n = db.derive(std::move(u), where, derived_nodes);
+      db.link_parents(n);
+      return code_value(n);
+    }
     std::optional<node_kind> out;
     std::set<uint32_t> taken;
     template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
@@ -3493,6 +3521,17 @@ struct interpreter {
     if(inst && !instantiating && done_by_pass(where)) return;
     node_kind k = db[c].kind; // copy: its appearance in node - on the field
     bool found = false;
+    if(auto * u = std::get_if<n_node>(&k)) { // Type of program: field - node on the announcement
+      if(auto pk = program_kind(db, u->kind))
+        for(std::size_t i = 0; i < pk->size() && i < u->items.size(); ++i)
+          if((*pk)[i] == name) {
+            std::set<uint32_t> taken;
+            for(std::size_t j = 0; j < u->items.size(); ++j)
+              if(j != i) taken.insert(u->items[j].value);
+            set_field(u->items[i], v, cat(u->kind, ".", str(name)), c, taken, where);
+            found = true;
+          }
+    } else
     std::visit([&](auto & x) {
       std::set<uint32_t> taken; // Children of other node fields are busy
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
@@ -3826,7 +3865,7 @@ struct interpreter {
       items.push_back(std::move(x));
     }
     auto tname = str(db.as<n_ident>(c.type).name);
-    if(is_node_kind(tname)) return ok(node_literal(tname, items, db[n].where)); // n_X {…} is a living base node
+    if(node_kind_named(tname)) return ok(node_literal(tname, items, db[n].where)); // Ast.X {…} - Live Base Node
     if(auto it = structs.find(db.as<n_ident>(c.type).name); it != structs.end()) { // Name {a, b} - by position n
       auto all = fields_of_struct(it->first);
       if(items.size() > all.size()) fail(cat(tname, ": полей ", all.size(), ", значений ", items.size()), db[n].where);
@@ -4040,6 +4079,11 @@ struct interpreter {
 
   flow eval_node(node_id n, n_hole const & h, scope *, uint32_t) {
     fail(cat("исполнение неразобранного фрагмента: ", h.reason), db[n].where);
+  }
+
+  // The node of the program type has reached execution: its meaning is disclosure in the known node.
+  flow eval_node(node_id n, n_node const & u, scope *, uint32_t) {
+    fail(cat("узел ", u.kind, " не раскрыт: смысл вида программы — раскрытие ([[transform]] f(", u.kind, " x) возвращает код из известных узлов)"), db[n].where);
   }
 
   flow eval_node(node_id n, auto const &, scope *, uint32_t) {
@@ -5819,7 +5863,7 @@ struct interpreter {
     if(want == "auto") return;
     auto check1 = [&](value const & x) {
       value got;
-      if(code_agg(x) && is_node_kind(want) && type_fit(x, want, false, got) != fit::no) return; // code node n_X - instance n_X
+      if(code_agg(x) && node_kind_named(want) && type_fit(x, want, false, got) != fit::no) return; // The code node ast.X is the instance ast. X
       if(std::string why; is_record(x) && structs.contains(sym(want)) && record_fit(x, want, got, &why) == fit::no) // Reason: Excessive or inappropriate field
         fail(cat(types.describe(x), " не становится ", want, ": ", why), where);
       if(empty_record(x)) fail(cat("{} — значение типа места: есть у struct, i64, f64, не у ", want), where);
