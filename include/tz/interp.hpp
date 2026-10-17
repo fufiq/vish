@@ -77,6 +77,13 @@ struct cell_book {
   }
 };
 
+// parsing instance compiler question and answer (instance deduplication).
+struct jit_query {
+  std::string name;
+  std::vector<std::pair<char, int64_t>> args; // 'c' is a node, 'i' is a number
+  std::string answer;
+};
+
 struct scope {
   scope * parent = nullptr;
   // The root of the body function: the environment of the call
@@ -7023,8 +7030,45 @@ struct interpreter {
       {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
+  // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
+  // instance at the language level (deduplication, §10.3):
+// 
+//.
+  std::vector<jit_query> * jit_trace = nullptr;
+  static bool jit_question(std::string_view n) {
+    return n == "jit_type" || n == "jit_const" || n == "jit_proven" || n == "jit_loop_keeps" || n == "jit_chain" || n == "jit_ref_keeps";
+  }
+  std::string jit_answer(value const & v) {
+    if(code_agg(v)) return v.as<agg_v>().fields[0].second.is<int64_t>() ? cat("c", v.as<agg_v>().fields[0].second.as<int64_t>()) : std::string("c");
+    if(v.is<array_v>()) {
+      std::string s = "[";
+      for(uint32_t i = 0; i < v.as<array_v>().size(); ++i) s += jit_answer(v.as<array_v>().get(i)) + ",";
+      return s + "]";
+    }
+    if(v.is<type_v>()) return cat("t:", types.name(v.as<type_v>().type));
+    return cat(types.describe(v), "=", v.known() ? show_v(v) : std::string("?"));
+  }
+  // Same questions to this parsing: answers match - runtime - part same
+  bool jit_replay(std::vector<jit_query> const & qs) {
+    for(auto const & q: qs) {
+      std::vector<value> a;
+      for(auto const & [k, x]: q.args) a.push_back(k == 'c' ? code_value(node_id(uint32_t(x))) : value(x));
+      if(jit_answer(builtin(sym(q.name), a, {})) != q.answer) return false;
+    }
+    return true;
+  }
+
   value builtin(symbol name, std::vector<value> & a, span where) {
     auto n = str(name);
+    if(jit_trace && jit_question(n)) {
+      auto * t = std::exchange(jit_trace, nullptr);
+      value r = builtin(name, a, where);
+      jit_trace = t;
+      jit_query q{std::string(n), {}, jit_answer(r)};
+      for(auto const & x: a) q.args.push_back(code_agg(x) ? std::pair{'c', int64_t(code_node(x, where).value)} : std::pair{'i', x.is<int64_t>() ? x.as<int64_t>() : int64_t(0)});
+      t->push_back(std::move(q));
+      return r;
+    }
     if(n == "print") {
       rt_effect();
       if(checking()) return {};

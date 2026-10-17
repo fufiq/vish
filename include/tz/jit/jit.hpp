@@ -190,6 +190,8 @@ struct jit_fn {
   std::vector<value> extra;
   type_registry * extra_from = nullptr;
   value result_shape; // result - the value of VM: its sample (types parsing instance)
+  std::vector<jit_query> queries; // Compiler questions to parsing - runtime
+  std::string same_as; // instance (the same runtime part)
 };
 
 // The value of VM, which the machine code holds at the cell address: string, aggregate,
@@ -242,7 +244,8 @@ struct jit_machine {
       jit_fn const * f = &fns[index];
       node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
       auto name = db.strings.text(db.as<n_fn>(fn).name);
-      if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка", f->lang_note.empty() ? "" : cat(", ", f->lang_note), "\n");
+      if(f->ok && !f->same_as.empty()) out += cat("  jit  ", name, "(", types_str(f->params), ") → код ", f->same_as, " (та же рантайм-часть)\n");
+      else if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка", f->lang_note.empty() ? "" : cat(", ", f->lang_note), "\n");
       else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
     }
     return out;
@@ -279,6 +282,7 @@ struct jit_machine {
     try {
       interpreter comp(db, mod, {"jit"}, mode::run);
       comp.jit_analysis = an_for_lang;
+      comp.jit_trace = &out.queries;
       // bootstrapping: static compiler functions (encoders, functions over node-struct) compiles
       // itself; bypassing AST is dynamics in the form of node, it has VM: , without dispatch in
       // runtime and boxing
@@ -329,6 +333,7 @@ struct jit_machine {
   node_id mod;
   std::deque<jit_fn> fns; // instance arena (addresses stable)
   std::map<std::string, uint32_t> cache; // key instance → number in fns
+  std::map<std::string, std::vector<uint32_t>> rt_index; // runtime - part → instance with code
 };
 
 // JIT host (x86-64): its code is executed by an interpreter.
@@ -429,9 +434,45 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
       return;
     }
     an_for_lang = &an;
+    // Deduplication (§10.3, R2): instance of one function with the same compiler input
+    // (run-time-parameter types, samples, result) and the same parsing answers to its questions - one
+    // runtime-part: the code is already there, is not compiled.
+// 
+// Comparison by language facts, not code.
+    std::string rt_key = cat(fn.value, "(");
+    for(std::size_t i = 0; i < out.params.size(); ++i)
+      rt_key += out.params[i] == jt::handle ? cat("h:", an.types.describe(shapes[i]), ",") : jt_name(out.params[i]) + ",";
+    rt_key += cat(")", jt_name(out.result), out.result == jt::handle ? an.types.describe(out.result_shape) : std::string());
+    for(uint32_t k: rt_index[rt_key]) {
+      jit_fn & other = fns[k];
+      if(&other == &out || !other.ok || !other.by_lang || !still_valid(other)) continue;
+      interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.jit_analysis = &an;
+      bool same = false;
+      try {
+        same = comp.jit_replay(other.queries);
+      } catch(diagnostic const &) {
+      }
+      if(!same) continue;
+      out.entry = other.entry;
+      out.image = other.image;
+      out.relocs = other.relocs;
+      out.bytes = other.bytes;
+      out.by_lang = true;
+      out.lang_note = other.lang_note;
+      out.queries = other.queries;
+      for(auto const & [n, rev]: other.deps) out.deps[n] = rev;
+      out.same_as = cat(db.strings.text(db.as<n_fn>(fn).name), "(", types_str(other.params), ")");
+      out.ok = true;
+      return;
+    }
     // code generation - complete compiler in language (jit_compile prelude); failed -
     // interpreter with cause
-    if(lang_compile(fn, out)) return;
+    if(lang_compile(fn, out)) {
+      for(uint32_t k = 0; k < fns.size(); ++k)
+        if(&fns[k] == &out) rt_index[rt_key].push_back(k);
+      return;
+    }
     out.reason = out.lang_error.empty() ? "компилятор языка: нет jit_compile" : cat("компилятор языка: ", out.lang_error);
   } catch(jit_unsupported const & u) {
     auto lc = locate(db.source(db[u.node].where.source), db[u.node].where.begin);
