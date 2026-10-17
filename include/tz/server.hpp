@@ -1479,7 +1479,16 @@ struct editor_server {
       if(out.nodes.size() >= 2000) return;
       proto::s_inode x{n, depth, role.contains(n.value) ? role[n.value] : std::string{}, std::string(lang_kind_of(db[n])), own_text(n), {}, {}, {}};
       auto r = rule_for(n, pr);
-      if(r) {
+      node_id rewrote; // Rewritten by a transformer or modified by a ct code (§7.4)
+      for(auto const & mu: db.mutations)
+        if(mu.target == n.value && mu.source) rewrote = node_id(mu.source - 1);
+      if(rewrote && db.is<n_fn>(rewrote)) {
+        x.rule = cat("переписан ", head_text(rewrote));
+        x.rule_at = rewrote;
+      } else if(rewrote) {
+        x.rule = "изменён ct-кодом";
+        x.rule_at = rewrote;
+      } else if(r) {
         x.rule = cat(r->what, " ", head_text(r->decl));
         x.rule_at = r->decl;
       } else if(db.is<n_call>(n)) // function call - selected in instance overload
@@ -2154,9 +2163,16 @@ struct editor_server {
         for(uint32_t k = 0; k < v.places.size(); ++k)
           if(v.places[k].node == at.node && v.places[k].piece == at.piece && v.places[k].offset == at.offset) v.cursor = k;
         if(v.text == was) continue;
-        for(node_id x: shown)
-          if(v.layout_of(x) != ~uint32_t{0} && !std::ranges::any_of(shown, [&](node_id y) { return y != x && within(x, y); }))
-            send(p, proto::s_update{v.id, db.revision, x, subtree(v, x)});
+        // one update is a common ancestor of the changed (the client does not see an intermediate mixture)
+        node_id top;
+        for(node_id x: shown) {
+          if(v.layout_of(x) == ~uint32_t{0}) continue;
+          if(!top) top = x;
+          while(top && !within(x, top)) top = db[top].parent;
+        }
+        while(top && v.layout_of(top) == ~uint32_t{0}) top = db[top].parent;
+        if(!top) top = v.root;
+        send(p, proto::s_update{v.id, db.revision, top, subtree(v, top)});
         send_cursor(p, v);
       }
   }

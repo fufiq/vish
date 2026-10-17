@@ -1,0 +1,22 @@
+// Transformer in Editor (§7.4): The rewritten node shown by the rewritten inspector
+// calls the rule; editing the transformer rolls back its changes ( ), pause -
+// rewrites the new rule.
+//
+// program: editor_transform.tz
+open_view module
+// expect:   a = 21 * 2;
+// expect:   b = 5 * 2;
+inspect 1 @21
+// expect: kind="ast.operation" text="*" rule="переписан [[transform]] double_call(ast.call c)" rule_at=#
+// The rule is no longer the same as the name - changes roll back immediately.
+pointer 1 @"twice2" 0 1
+key 1 x
+// expect:   a = twice2(21);
+// expect:   b = twice2(5);
+// It's the same thing again.
+key 1 Backspace
+idle
+// expect:   a = 21 * 2;
+key 1 Escape
+roundtrip
+// expect: roundtrip: совпадает

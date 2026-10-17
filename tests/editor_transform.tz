@@ -1,0 +1,18 @@
+// Программа для сценария 255_editor_transform.wire (сама по себе — обычный тест).
+// out: 42 10
+// out: 7000
+twice2(x) => x + x;
+
+// вызов twice2(x) — умножение x * 2
+[[transform]] double_call(ast.call c) {
+  if(code_name(c) != "twice2") return;
+  x = code_items(c)[1];
+  ast.operation{"*", array{x, ast.int{2}}}
+}
+
+main() {
+  a = twice2(21);
+  b = twice2(5);
+  print(a, b);
+  print(7000);
+}

@@ -613,6 +613,7 @@ struct interpreter {
         if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) declare_state(item); // [[state]] x = e
       }
     }
+    transform_pass(); // Transformers - after ct modules: generated is also rewritten
     elaborating = false;
     ct_source = {};
     if(!eh.mark.nested && instance_ct()) instantiation_pass();
@@ -621,6 +622,77 @@ struct interpreter {
     for(node_id m: module_order)
       for(node_id item: db.as<n_module>(m).items)
         if(db.inst_emits.contains(item.value) && inst_registered.insert(item.value).second) register_item(item);
+  }
+
+  // --- Transformers: Rule (§7.4) ---
+  //
+  // Author's decision (2026-10-17).
+// 
+// 
+  // . The function with the attribute [[transform]] and the parameter of the form node (ast.call
+  // c; without the type - any node) is called when elaborating for each such node modules of the
+  // program; returned the code - the node becomes it (change with the source - function: editing
+  // or removing the transformer rolls back its changes, as in ct-code), another - the node as it
+  // was. The rewritten node is again viewed by all transformers except those already applied to
+  // it; then by its children. My:* attribute, order (in the order of modules, top-down), limit -
+  // 100,000 applications.
+  std::vector<node_id> transforms() {
+    std::vector<node_id> out;
+    for(node_id m: module_order)
+      for(node_id f: db.as<n_module>(m).items)
+        if(db.is<n_fn>(f))
+          for(node_id a: db.as<n_fn>(f).attrs)
+            if(db.is<n_ident>(a) && str(db.as<n_ident>(a).name) == "transform") out.push_back(f);
+    return out;
+  }
+  bool transform_fits(node_id t, node_id c) {
+    auto const & fn = db.as<n_fn>(t);
+    if(fn.params.size() != 1) fail("[[transform]]: один параметр — узел (ast.call c)", db[t].where);
+    node_id ty = db.as<n_param>(fn.params[0]).type;
+    if(!ty) return true;
+    if(!db.is<n_ident>(ty)) return false;
+    std::string_view want = str(db.as<n_ident>(ty).name);
+    std::string_view k = lang_kind_of(db[c]);
+    return k == want || types.is_a(std::string(k), want);
+  }
+  void transform_pass() {
+    auto ts = transforms();
+    if(ts.empty()) return;
+    uint32_t budget = 100000;
+    std::set<std::pair<uint32_t, uint32_t>> applied;
+    auto visit = [&](auto && self, node_id c) -> void {
+      if(!c) return;
+      if(db.is<n_fn>(c) && std::ranges::contains(ts, c)) return; // The transformer does not rewrite its code.
+      for(bool again = true; again;) {
+        again = false;
+        for(node_id t: ts) {
+          if(applied.contains({c.value, t.value}) || !transform_fits(t, c)) continue;
+          applied.insert({c.value, t.value});
+          if(budget-- == 0) fail("трансформаторы: больше 100000 применений — правило не сходится", db[t].where);
+          auto const & fn = db.as<n_fn>(t);
+          scope * inner = new_scope(globals);
+          scope_hold hold{*this, inner};
+          inner->declare(db.as<n_param>(fn.params[0]).name, code_value(c));
+          ct_source = t;
+          ++ct_depth;
+          flow r = run_frame(fn.body, inner, fn.name, fn.outline);
+          --ct_depth;
+          if(r.kind == flow_kind::thr) uncaught(r);
+          if(!r.v.is<agg_v>() || types.name(r.v.as<agg_v>().type) != "code") continue;
+          node_id to = code_node(r.v, db[t].where);
+          if(!to || to == c) continue;
+          db.mutate(c, db[to].kind, t.value + 1);
+          db.link_parents(c);
+          again = true; // rewritten, again to all except those used
+          break;
+        }
+      }
+      std::vector<node_id> kids;
+      db.for_each_child(c, [&](node_id x) { kids.push_back(x); });
+      for(node_id x: kids) self(self, x);
+    };
+    for(node_id m: module_order)
+      if(m != db.prelude) visit(visit, m);
   }
 
   // --- ct code instance changes the code (§7.4) ---
