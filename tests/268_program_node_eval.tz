@@ -2,6 +2,7 @@
 // out: 20 -1
 // out: 3
 // check:   eval(expr, expr)  ×1
+// jit-compiled: first_big
 // machine
 // fmt-stable
 // store-roundtrip

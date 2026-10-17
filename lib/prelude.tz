@@ -1779,6 +1779,7 @@ jit_compile(cg, f, types, type result) {
     else if(k == ast.construct) gen_construct(e);
     else if(k == ast.unpack) gen_unpack(e);
     else if(k == ast.string) vm_or_bad(e, fmt"узел {k}");
+    else if(kind_functions(e, "eval").size > 0) gen_program_node(e);
     else bad(fmt"узел {k}");
   };
   // индекс в acc, проверка границ по размеру массива (запись s); данные — в second. Индекс,
@@ -2666,7 +2667,15 @@ jit_compile(cg, f, types, type result) {
   gen_inline(e, str name, xs) => {
     gk = if((name == "for") && (xs.size == 2)) generator_of(xs[0]) else -1;
     if(gk >= 0) return gen_fused(e, xs, gk);
-    g = choose(name, xs);
+    gen_inline_of(e, name, xs, choose(name, xs));
+  };
+  // узел вида программы с eval (ast.dbl { eval(expr x) => …; }): вызов eval на месте узла,
+  // поля — аргументы (как у интерпретатора, решение автора 2026-10-17)
+  gen_program_node(e) => {
+    xs = code_items(e);
+    gen_inline_of(e, fmt"{code_kind(e)}.eval", xs, choose_from(kind_functions(e, "eval"), xs));
+  };
+  gen_inline_of(e, str name, xs, g) => {
     if((g.size == 1) && (code_id(g[0]) == code_id(f))) return call_self_with(xs); // рекурсия — настоящий вызов себя
     rec = false;
     if(g.size == 1) {
