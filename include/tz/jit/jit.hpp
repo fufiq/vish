@@ -433,6 +433,10 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
     }
+    if(an.resources_made || an.drops_called) { // Resources (drop) - their lifetime is guided by the interpreter
+      out.reason = "ресурсы с destroy — интерпретатор";
+      return;
+    }
     an_for_lang = &an;
     // Deduplication (§10.3, R2): instance of one function with the same compiler input
     // (run-time-parameter types, samples, result) and the same parsing answers to its questions - one

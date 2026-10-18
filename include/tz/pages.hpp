@@ -87,7 +87,15 @@ struct address_space {
     while((uint32_t(1) << k) < words) ++k;
     return k;
   }
+  // Live level allocation: a region is liberated only when nothing lives in it.
+  //  
+  uint64_t live = 0;
+  uint32_t holders = 0; // region() values that keep the level
+  bool dead = false;
+  std::vector<uint64_t *> big_reserved; // Ranges of growing vectors (level release)
   uint64_t * take_small(uint32_t k) {
+    if(dead) throw std::bad_alloc();
+    ++live;
     if(!small_free[k].empty()) {
       uint64_t * p = small_free[k].back();
       small_free[k].pop_back();
@@ -105,9 +113,14 @@ struct address_space {
     small_used += bytes;
     return p;
   }
-  void give_small(uint64_t * p, uint32_t k) { small_free[k].push_back(p); }
+  void give_small(uint64_t * p, uint32_t k) {
+    --live;
+    small_free[k].push_back(p);
+  }
 
   uint64_t * take_big() {
+    if(dead) throw std::bad_alloc();
+    ++live;
     if(!big_free.empty()) {
       uint64_t * p = big_free.back();
       big_free.pop_back();
@@ -119,11 +132,24 @@ struct address_space {
       big_next += state_big;
       return p;
     }
-    return reinterpret_cast<uint64_t *>(reserve(big_range));
+    auto * p = reinterpret_cast<uint64_t *>(reserve(big_range));
+    big_reserved.push_back(p);
+    return p;
+  }
+  // level as a whole - system (no live allocations): addresses and pages
+  void destroy() {
+    if(small_base) munmap(small_base, small_range);
+    for(uint64_t * p: big_reserved) munmap(p, big_range);
+    small_base = nullptr;
+    big_reserved.clear();
+    big_free.clear();
+    for(auto & f: small_free) f.clear();
+    dead = true;
   }
   size_t big_limit() const { return banded ? state_big : big_range; }
   // pages to the system, addresses remain behind VM: the range will go to a new vector
   void give_big(uint64_t * p, size_t committed) {
+    --live;
     if(!persistent && !banded) { // Pages remain connected: the range goes as follows
       madvise(p, committed, MADV_DONTNEED);
       mprotect(p, committed, PROT_NONE);

@@ -1,0 +1,24 @@
+// out: 2 10
+// out: 1 11
+// out: конец
+// out: закрыт общий 11
+// Разделяемый объект — ref-объект 
+// 
+//.
+// shared(x): копия — inc (b = a: a читается дальше), конец жизни — dec, последний —
+// destroy хранимого; поле, запись поля и параметр типа хранимого — прозрачно.
+struct file { str name; i64 n; }
+destroy(file f) { print("закрыт", f.name, f.n); }
+touch(file f) { f.n += 1; }
+main() {
+  a = shared(file{"общий", 0});
+  {
+    b = a;
+    b.n = 10;
+    print(shared_count(a), a.n);
+    touch(b);
+  }
+  print(shared_count(a), a.n);
+  c = a;
+  print("конец");
+}

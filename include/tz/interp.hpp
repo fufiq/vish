@@ -1452,6 +1452,15 @@ struct interpreter {
   flow var##_f = (expr);                \
   if(!var##_f.normal()) return var##_f; \
   value var = std::move(var##_f.v)
+// The meaning of the name src goes to a new place: the transfer or copy(T) is only for the
+// resource, without wrapping in flow on the usual path.
+#define TZ_TAKE(var, src, v0, env, frame)                         \
+  value & var = v0;                                               \
+  if(needs_take(src, var)) {                                      \
+    flow var##_t = take(src, std::move(var), env, frame);         \
+    if(!var##_t.normal()) return var##_t;                         \
+    var = std::move(var##_t.v);                                   \
+  }
 
   // --- arena ---
 
@@ -1883,10 +1892,240 @@ struct interpreter {
 
   // --- blockages ---
 
+  // --- resources: destructor, transfer, copy (§12.2) ---
+  //
+  // : type with destroy(T x) is a resource; destroy is called at the end of the variable region (not
+  // transferred), at the overwritten value and at the discarded time. Destructors - "hooks" to track the
+  // time of life;
+  //
+// A copy of the resource is selected by use: the name is no longer readable
+  // - transfer (name hidden), read - copy(T) type
+// No copy is an error; no
+  // ".clone() is everywhere" (Rust critique) *My:* Destroy/copy names (drop in prelude - shutting down the network peer), life - until the end of
+  // the block, resource number: a copy that passed the rule is a mistake in the second destroy, not a double release.
+  std::unordered_map<uint32_t, uint8_t> res_live; // Resource number 1 live, 2 released
+  // Divided object shared(x) - ref object
+// 
+// 
+// My name is shared.
+  // A link to the code), a VM storage slot, each copy has its own resource number.
+  struct shared_slot {
+    value v;
+    uint32_t count = 0;
+  };
+  std::deque<shared_slot> shared_store;
+  bool is_shared(value const & v) const { return v.is<agg_v>() && v.as<agg_v>().rid && types.name(v.as<agg_v>().type) == "shared"; } // No type registration: registry does not change in parsing
+  shared_slot & slot_of(value const & r) { return shared_store[std::size_t(r.as<agg_v>().fields.begin()->second.as<int64_t>())]; }
+  value make_shared(value v) {
+    shared_store.push_back({std::move(v), 1});
+    agg_v g{types.named("shared"), {{sym("slot"), value(int64_t(shared_store.size() - 1))}}};
+    g.rid = ++res_counter;
+    res_live[g.rid] = 1;
+    return value(std::move(g));
+  }
+  uint32_t res_counter = 0;
+  uint64_t drops_called = 0;
+  // destroy(T x): one overload with structure parameter
+  mutable std::size_t res_fns_seen = ~std::size_t{0};
+  mutable bool res_fns = false;
+  mutable std::size_t res_names_seen = ~std::size_t{0}; // function names for the last "destroy no"
+  mutable std::vector<node_id> const * res_list = nullptr; // overload destroy (maps node does not move)
+  [[gnu::always_inline]] bool res_any() const {
+    if(!res_list && res_names_seen == functions.size()) return !shared_store.empty() || (root && root->regions_alive);
+    return res_any_slow();
+  }
+  [[gnu::noinline]] bool res_any_slow() const {
+    if(!shared_store.empty() || (root && root->regions_alive)) return true;
+    if(!res_list) {
+      if(res_names_seen == functions.size()) return false;
+      auto it = functions.find(const_cast<interpreter *>(this)->sym("destroy"));
+      if(it == functions.end()) {
+        res_names_seen = functions.size();
+        return false;
+      }
+      res_list = &it->second;
+    }
+    if(res_fns_seen != res_list->size()) {
+      res_fns_seen = res_list->size();
+      res_fns = std::ranges::any_of(*res_list, [&](node_id f) {
+        auto const & fn = db.as<n_fn>(f);
+        return fn.params.size() == 1 && db.as<n_param>(fn.params[0]).type && db.is<n_ident>(db.as<n_param>(fn.params[0]).type) && structs.contains(db.as<n_ident>(db.as<n_param>(fn.params[0]).type).name);
+      });
+    }
+    return res_fns;
+  }
+  bool is_region(value const & v) const { return v.is<agg_v>() && v.as<agg_v>().rid && types.name(v.as<agg_v>().type) == "region"; }
+  node_id member_fn_of(std::string_view fname, type_id t) {
+    auto it = functions.find(sym(fname));
+    if(it == functions.end()) return {};
+    std::string_view tn = types.name(t);
+    for(node_id f: it->second) {
+      auto const & fn = db.as<n_fn>(f);
+      if(fn.params.size() != 1) continue;
+      node_id pt = db.as<n_param>(fn.params[0]).type;
+      if(pt && db.is<n_ident>(pt) && str(db.as<n_ident>(pt).name) == tn) return f;
+    }
+    return {};
+  }
+  uint64_t resources_made = 0;
+  void mark_resource(agg_v & g) {
+    if(res_any() && member_fn_of("destroy", g.type)) {
+      ++resources_made;
+      g.rid = ++res_counter;
+      res_live[g.rid] = 1;
+    }
+  }
+  bool has_resource(value const & v) const {
+    if(v.is<agg_v>()) {
+      if(v.as<agg_v>().rid) return true;
+      for(auto const & [k, x]: v.as<agg_v>().fields)
+        if(has_resource(x)) return true;
+      return false;
+    }
+    if(v.is<array_v>()) {
+      auto const & a = v.as<array_v>();
+      if(a.size() == 0 || !(a.get(0).is<agg_v>() || a.get(0).is<array_v>())) return false; // scalar
+      for(uint32_t i = 0; i < a.size(); ++i)
+        if(has_resource(a.get(i))) return true;
+    }
+    return false;
+  }
+  // Free value resources: your drop, then fields and elements (in reverse order)
+  void drop_value(value const & v, span where) {
+    if(v.is<array_v>()) {
+      auto const & a = v.as<array_v>();
+      for(uint32_t i = a.size(); i-- > 0;) drop_value(a.get(i), where);
+      return;
+    }
+    if(!v.is<agg_v>()) return;
+    auto const & g = v.as<agg_v>();
+    if(g.rid && is_region(v)) { // Memory level: the last holder is liberation if nothing lives in it
+      auto it = res_live.find(g.rid);
+      if(it == res_live.end()) fail("уровень памяти уже освобождён: копия прошла мимо правила", where);
+      res_live.erase(it);
+      address_space & a = root->regions[std::size_t(g.fields.begin()->second.as<int64_t>())];
+      if(a.holders > 0 && --a.holders == 0) {
+        if(a.live > 0)
+          fail(cat("уровень памяти освобождается, а в нём живут значения (", a.live, "): они пережили бы свою память — «Неявный регион требует отслеживания - всего что в него входит» "), where);
+        a.destroy();
+      }
+      return;
+    }
+    if(g.rid && is_shared(v)) { // shared: dec, the latter releases the stored
+      auto it = res_live.find(g.rid);
+      if(it == res_live.end()) fail("разделяемый объект уже освобождён: копия прошла мимо правила", where);
+      res_live.erase(it);
+      shared_slot & sl = slot_of(v);
+      if(sl.count > 0 && --sl.count == 0) {
+        value held = std::move(sl.v);
+        sl.v = value();
+        drop_value(held, where);
+      }
+      return;
+    }
+    if(g.rid) {
+      auto it = res_live.find(g.rid);
+      if(it == res_live.end())
+        fail(cat("ресурс ", types.name(g.type), " уже освобождён: его значение скопировано мимо правила переноса (нужен copy(", types.name(g.type), ") или перенос)"), where);
+      if(it->second == 2) return; // It is now being released (destroyed).
+      it->second = 2;
+      ++drops_called;
+      node_id f = member_fn_of("destroy", g.type);
+      std::vector<value> vals{v};
+      flow r = invoke(f, vals, {}, globals, {where, cat("destroy(", types.name(g.type), ")"), 0, 0});
+      res_live.erase(g.rid);
+      if(r.kind == flow_kind::thr) uncaught(r);
+    }
+    for(auto const * it = g.fields.end(); it != g.fields.begin();) drop_value((--it)->second, where);
+  }
+  // end of the field: eigenvalues (not alias, not transferred) - in reverse order
+  void run_drops(scope * s, span where) {
+    if(!res_any()) return;
+    for(auto it = s->storage.rbegin(); it != s->storage.rend(); ++it) {
+      if(!it->hidden && !it->is<thunk_v>() && has_resource(*it)) drop_value(*it, where);
+      // What is declared later dies earlier: its memory is at the level immediately (the region
+      // declared earlier sees itself empty); the area captured by the circuit does not have any
+      if(!s->captured && !it->is<thunk_v>() && !checking()) *it = value();
+    }
+  }
+  // Whether the name is read after node at (further in blocks before the function); repeating the cycle
+  // or block of the structure in which the name is not declared is also read (the next iteration).
+  bool used_after(node_id at, symbol name) const {
+    auto mentions = [&](auto && self, node_id c) -> bool {
+      if(!c) return false;
+      if(db.is<n_ident>(c) && db.as<n_ident>(c).name == name) return true;
+      bool r = false;
+      db.for_each_child(c, [&](node_id x) { r = r || self(self, x); });
+      return r;
+    };
+    auto declares = [&](auto && self, node_id c) -> bool {
+      if(!c) return false;
+      if(db.is<n_var>(c) && db.as<n_var>(c).name == name) return true;
+      if(db.is<n_param>(c) && db.as<n_param>(c).name == name) return true;
+      if(db.is<n_op>(c) && str(db.as<n_op>(c).op) == "=" && db.is<n_ident>(db.as<n_op>(c).args[0]) && db.as<n_ident>(db.as<n_op>(c).args[0]).name == name && implicit_decls.contains(c.value)) return true;
+      bool r = false;
+      db.for_each_child(c, [&](node_id x) { r = r || self(self, x); });
+      return r;
+    };
+    for(node_id cur = at, p = db[at].parent; p; cur = p, p = db[p].parent) {
+      if(db.is<n_fn>(p)) return false;
+      if(db.is<n_block>(p)) {
+        auto const & items = db.as<n_block>(p).items;
+        bool after = false;
+        for(node_id x: items) {
+          if(after && mentions(mentions, x)) return true;
+          if(x == cur) after = true;
+        }
+      }
+      if((db.is<n_loop>(p) || db.is<n_lambda>(p)) && !declares(declares, p)) return true;
+    }
+    return false;
+  }
+  // the value of the name goes to a new place (announcement, assignment, return, literal
+  // field): resource - transfer or copy(T)
+  bool needs_take(node_id src, value const & v) const { return res_any() && db.is<n_ident>(src) && has_resource(v); }
+  flow take(node_id src, value v, scope * env, uint32_t frame) {
+    if(!needs_take(src, v)) return ok(std::move(v));
+    symbol name = db.as<n_ident>(src).name;
+    value * cell = find(env, name);
+    if(!cell || cell->is<thunk_v>()) return ok(std::move(v));
+    if(!used_after(src, name)) {
+      hide_cell(cell, src); // Translation: name no longer readable
+      return ok(std::move(v));
+    }
+    if(is_region(v) && v.as<agg_v>().rid) { // level-copy - still the holder
+      ++root->regions[std::size_t(v.as<agg_v>().fields.begin()->second.as<int64_t>())].holders;
+      v.as<agg_v>().rid = ++res_counter;
+      res_live[v.as<agg_v>().rid] = 1;
+      return ok(std::move(v));
+    }
+    if(is_shared(v)) { // copy of the shared - inc, your number
+      ++slot_of(v).count;
+      v.as<agg_v>().rid = ++res_counter;
+      res_live[v.as<agg_v>().rid] = 1;
+      return ok(std::move(v));
+    }
+    node_id c = v.is<agg_v>() ? member_fn_of("copy", v.as<agg_v>().type) : node_id{};
+    if(!c)
+      fail(cat("значение ", types.describe(v), " — ресурс: ", str(name), " читается дальше, а копировать его нечем — объявите copy(", types.describe(v), " x) или не используйте ", str(name), " после"), db[src].where);
+    std::vector<value> vals{v};
+    return invoke(c, vals, {}, globals, {db[src].where, cat("copy(", types.describe(v), ")"), 0, frame});
+  }
+
   flow eval_node(node_id n, n_block const & b, scope * env, uint32_t frame) {
     scope * inner = new_scope(env);
     scope_hold hold{*this, inner};
-    return run_block(b, 0, inner, frame);
+    flow r = run_block(b, 0, inner, frame);
+    if(!res_any()) return r; // without resources - as it was (the resource could appear in the block itself)
+    {
+      if(r.normal() && b.has_value && !b.items.empty() && db.is<n_ident>(b.items.back())) { // the name of the block - transfer
+        flow t = take(b.items.back(), std::move(r.v), inner, frame);
+        if(!t.normal()) return t;
+        r.v = std::move(t.v);
+      }
+      run_drops(inner, db[n].where);
+    }
+    return r;
   }
 
   // Execute the block instructions starting with from. In verification mode,
@@ -1898,8 +2137,9 @@ struct interpreter {
       if(checking() && implicit_declaration(s, inner)) { // x = e without name - as an announcement: splitting
         auto const & o = db.as<n_op>(s);
         mark_executed(s);
-        TZ_TRY(init, eval(o.args[1], inner, frame));
+        TZ_TRY(init0, eval(o.args[1], inner, frame));
         implicit_decls.insert(s.value);
+        TZ_TAKE(init, o.args[1], init0, inner, frame);
         if(init.is<split_v>()) return split_continuation(b, i, s, init, inner, frame);
         emit({report_event::stage, path, std::string(str(db.as<n_ident>(o.args[0]).name)), init.known() ? cat("кт ", show_v(init)) : cat("рт ", types.describe(init)), db[s].where, {}});
         inner->declare(db.as<n_ident>(o.args[0]).name, std::move(init));
@@ -1908,7 +2148,8 @@ struct interpreter {
       if(checking() && db.is<n_var>(s) && !db.as<n_var>(s).ref) {
         auto const & v = db.as<n_var>(s);
         mark_executed(s); // instruction
-        TZ_TRY(init, eval(v.init, inner, frame));
+        TZ_TRY(init0, eval(v.init, inner, frame));
+        TZ_TAKE(init, v.init, init0, inner, frame);
         if(init.is<split_v>()) return split_continuation(b, i, s, init, inner, frame);
         declare_var(s, v, std::move(init), inner);
         continue;
@@ -1916,6 +2157,8 @@ struct interpreter {
       flow f = eval(s, inner, frame);
       if(!f.normal()) return f;
       last = std::move(f.v);
+      // Temporary discarded - the resource is released immediately
+      if(res_any() && (i + 1 < b.items.size() || !b.has_value) && (db.is<n_call>(s) || db.is<n_construct>(s)) && has_resource(last)) drop_value(last, db[s].where);
       // reference &e = xs[k]: her life is the remainder of the block; what changed for her whole
       // (replacement, growth) is a fact for machine code (jit_ref_keeps):
 //  
@@ -2025,7 +2268,8 @@ struct interpreter {
 
   flow eval_node(node_id n, n_var const & v, scope * env, uint32_t frame) {
     if(v.ref) return declare_ref(n, v, env, frame);
-    TZ_TRY(init, eval(v.init, env, frame));
+    TZ_TRY(init0, eval(v.init, env, frame));
+    TZ_TAKE(init, v.init, init0, env, frame);
     declare_var(n, v, std::move(init), env);
     return ok();
   }
@@ -2135,7 +2379,8 @@ struct interpreter {
   flow eval_node(node_id n, n_return const & r, scope * env, uint32_t frame) {
     value v;
     if(r.value) {
-      TZ_TRY(x, eval(r.value, env, frame));
+      TZ_TRY(x0, eval(r.value, env, frame));
+      TZ_TAKE(x, r.value, x0, env, frame); // return x - transfer
       v = std::move(x);
     }
     uint32_t target = r.target ? return_target(db.as<n_ident>(r.target).name, frame, db[n].where) : frame;
@@ -2251,6 +2496,11 @@ struct interpreter {
   enum class fit { no, exact, representable, maybe };
   fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
     out = v;
+    if(want != "shared" && want != "auto" && is_shared(v)) { // Shared - type of stored, value - itself shared (transparent)
+      value got;
+      fit r = type_fit(slot_of(v).v, want, strict, got);
+      return r == fit::no ? fit::no : fit::exact;
+    }
     std::string got_desc = types.describe(v);
     std::string_view got(types.name(types.of(v)));
     if(want == "auto" || got_desc == want || got == want) return fit::exact; // sameness
@@ -3923,7 +4173,8 @@ struct interpreter {
         for(uint32_t k = 0; k < x->as<array_v>().size(); ++k) items.push_back(x->as<array_v>().get(k));
         continue;
       }
-      TZ_TRY(x, eval(item, env, frame));
+      TZ_TRY(x0, eval(item, env, frame));
+      TZ_TAKE(x, item, x0, env, frame);
       items.push_back(std::move(x));
     }
     auto tname = str(db.as<n_ident>(c.type).name);
@@ -3942,6 +4193,7 @@ struct interpreter {
         } else fail(cat(tname, ": не задано поле ", str(f.name)), db[n].where);
         if(f.ct) pin(g.fields.back().second, f.name, db[n].where);
       }
+      mark_resource(g);
       return ok(value(std::move(g)));
     }
     // Tag above representation: i64 {x} is the value represented in i64 (as i64 y = x): the tag is a
@@ -3974,6 +4226,7 @@ struct interpreter {
   }
 
   value member(value const & obj, symbol name, span where) {
+    if(is_shared(obj) && str(name) != "slot") return member(slot_of(obj).v, name, where); // shareable
     if(obj.is<rt_v>()) {
       value const * shape = shape_of(obj);
       if(!shape) return value(rt_v{});
@@ -5545,6 +5798,7 @@ struct interpreter {
     if(db.is_member(n)) { // field
       auto const & m = db.member_of(n);
       value * obj = place(m.object, env, frame);
+      if(obj && is_shared(*obj)) obj = &slot_of(*obj).v; // Shared - transparent: the field of stored
       if(obj && obj->is<rt_v>() && shape_of(*obj) && shape_of(*obj)->is<agg_v>()) *obj = *shape_of(*obj); // erased aggregate - sample fields
       if(!obj || !obj->is<agg_v>()) return nullptr;
       for(auto & [k, v]: obj->as<agg_v>().fields)
@@ -5644,7 +5898,13 @@ struct interpreter {
       return ok(erase(value(true)));
     }
     if(assign_op) {
-      TZ_TRY(rhs, eval(o.args[1], env, frame));
+      TZ_TRY(rhs0, eval(o.args[1], env, frame));
+      value & rhs = rhs0;
+      if(op == "=" && needs_take(o.args[1], rhs)) {
+        flow t = take(o.args[1], std::move(rhs), env, frame);
+        if(!t.normal()) return t;
+        rhs = std::move(t.v);
+      }
       // x = e and no name x is an announcement with type output
       if(op == "=" && db.is<n_ident>(o.args[0]) && [&] {
             value * c = env->find(db.as<n_ident>(o.args[0]).name);
@@ -5726,6 +5986,7 @@ struct interpreter {
     bool pinned = target->pinned;
     bool out_init = op == "=" && db.is<n_ident>(lhs) && out_marker(target->hidden); // Out-Parameter: Recording - Building on Place
     if(!pinned && target->hidden && !out_init) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
+    if(op == "=" && !target->hidden && res_any() && has_resource(*target)) drop_value(*target, where); // Overwrite - the old resource is released
     value result = op == "=" ? std::move(rhs) : binary(std::string_view(op).substr(0, 1), *target, rhs, where);
     if(op == "=" && is_record(result)) result = to_type(std::move(result), place_type(*target), where); // Struct holds it, {x: …} becomes it.
     if(root->state_level && root->state_level->holds(target)) { // place - state of the program: value in its level
@@ -6143,6 +6404,17 @@ struct interpreter {
   flow call_named(symbol name, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
     if(auto it = functions.find(name); it != functions.end())
       return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node, frame});
+    if(args.size() == 1 && str(name) == "shared") { // shared(x) - the value goes to the storage (transfer, like an assignment)
+      TZ_TRY(v0, eval(args[0], env, frame));
+      TZ_TAKE(v, args[0], v0, env, frame);
+      if(checking() && !v.known()) return ok(make_shared(std::move(v)));
+      return ok(make_shared(std::move(v)));
+    }
+    if(args.size() == 1 && str(name) == "shared_count") { // Number of references to stored (observation)
+      TZ_TRY(v, eval(args[0], env, frame));
+      if(!is_shared(v)) fail("shared_count: ожидался shared", where);
+      return ok(value(int64_t(slot_of(v).count)));
+    }
     std::vector<value> vals;
     for(node_id a: args) {
       TZ_TRY(v, eval(a, env, frame));
@@ -6713,6 +6985,16 @@ struct interpreter {
           r = run_frame(fn.body, inner, fn.name, fn.outline, site.frame);
           if(r.kind != flow_kind::thr) write_back_fields(f, fn.params, args, env, inner, site);
           if(r.kind != flow_kind::thr) out_written(fn.params, inner, site);
+          if(res_any()) { // parameter-values (temporary caller, own) - their own: released here
+            for(uint32_t k = 0; k < fn.params.size(); ++k) // a copy of the place (field to parameter) and a value without node (call from VM: drop, copy, text)
+              if(k >= args.size() || db.is_member(args[k]) || db.is_index(args[k]))
+                if(value * c = inner->find(db.as<n_param>(fn.params[k]).name); c && !c->hidden) c->hidden = fn.params[k].value + 1;
+            if(r.kind == flow_kind::ret || r.normal())
+              for(node_id pn: fn.params) // parameter returned by value - transfer
+                if(r.v.is<agg_v>() && r.v.as<agg_v>().rid)
+                  if(value * c = inner->find(db.as<n_param>(pn).name); c && c->is<agg_v>() && c->as<agg_v>().rid == r.v.as<agg_v>().rid) c->hidden = pn.value + 1;
+            run_drops(inner, site.where);
+          }
         } catch(...) {
           throw_sinks.pop_back();
           throw;
@@ -7402,7 +7684,12 @@ struct interpreter {
     if(n == "region" && a.empty()) { // New Memory Level: Your Range of Addresses
       if(checking()) return erase(value(agg_v{types.named("region"), {{sym("id"), value(int64_t(0))}}}));
       root->regions.emplace_back();
-      return value(agg_v{types.named("region"), {{sym("id"), value(int64_t(root->regions.size() - 1))}}});
+      root->regions.back().holders = 1;
+      agg_v g{types.named("region"), {{sym("id"), value(int64_t(root->regions.size() - 1))}}};
+      g.rid = ++res_counter; // level - resource: holders are considered, the latter releases
+      res_live[g.rid] = 1;
+      root->regions_alive = true;
+      return value(std::move(g));
     }
     if(n == "jit_agg_layout" && a.empty()) return value(array_v::of({value(int64_t(agg_layout().data)), value(int64_t(agg_layout().stride)), value(int64_t(agg_layout().scalar))}));
     // field number in type t aggregate (order of type fields: base, declaration, extensions); -1 - no
@@ -7846,7 +8133,8 @@ struct interpreter {
   bool owns_state = false; // Executes the program (run_main, machine): opens its state
   std::optional<address_space> state_level; // non-volatile state level of the program (at the root VM)
   std::set<value const *> state_cells;
-  std::deque<address_space> regions; // region() memory levels (at VM root); live as long as the process is alive
+  std::deque<address_space> regions; // region() memory levels (at VM root); released with last holder
+  bool regions_alive = false;
   symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
   symbol sym_set_ct_state; // ct-state of place (disassembled in place as append)
   // Symbol on the text without internment (journal lines of the base does not change): while the

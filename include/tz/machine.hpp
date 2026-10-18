@@ -637,6 +637,7 @@ struct process_machine {
 
   void start(std::vector<std::string> const & args, std::optional<std::vector<std::string>> input = std::nullopt) {
     st = {};
+    if(helper.res_any()) throw diagnostic("машина процессов: пока не поддержано — ресурсы с destroy (деструкторы)", {});
     if(input) {
       st.queued_input = true;
       for(auto const & l: *input) st.input.emplace_back(l);

@@ -153,6 +153,7 @@ struct field_list {
 struct agg_v {
   type_id type;
   field_list fields;
+  uint32_t rid = 0; // Resource (type with destroy): number - copies divided, destroy - once
 };
 
 // Function as value: a set of overloads by name or lambda with environment.
