@@ -211,9 +211,24 @@ struct state_header {
 };
 static_assert(sizeof(state_header) <= address_space::state_meta);
 
-// Open the status level: the path file; the existing kernel selects the new address - the same ones recorded
-// in the file. Empty and text - it is impossible (occupied with another execution, the address is occupied).
+// Open the status level: the path file; new - addresses in its area (slot on the hash path), existing
+// - the same as those recorded in the file. Empty and text - it is impossible (occupied with another
+// execution, the address is occupied).
 std::vector<std::byte *> & free_bands();
+
+// Level addresses - in their areas, away from what the kernel lays out (libraries, heaps, stacks): the
+// address chosen by the kernel at the first run could be occupied in the next one (state and dump open
+// at the same addresses). States are slots [16, 48] TiB, process bands are [48, 80] TiB; the first is
+// the slot from which to look (*mine*).
+void * reserve_level(uint64_t area_tib, uint64_t first) {
+  for(uint64_t k = 0; k < 32; ++k) {
+    auto * hint = reinterpret_cast<void *>((area_tib + (first + k) % 32) << 40);
+    void * r = mmap(hint, address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if(r == hint) return r;
+    if(r != MAP_FAILED) munmap(r, address_space::state_range);
+  }
+  return mmap(nullptr, address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+}
 
 std::string open_state(address_space & a, std::string const & path) {
   uint64_t base = 0;
@@ -240,7 +255,8 @@ std::string open_state(address_space & a, std::string const & path) {
     r = *it;
     pool.erase(it);
   } else {
-    r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+    r = base ? mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0)
+             : reserve_level(16, std::hash<std::string>{}(path));
     if(r == MAP_FAILED || (base && r != reinterpret_cast<void *>(base))) {
       if(r != MAP_FAILED) munmap(r, address_space::state_range);
       ::close(fd);
@@ -333,7 +349,8 @@ bool open_band(address_space & a, uint64_t base) {
     r = *it;
     pool.erase(it);
   } else {
-    r = mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (base ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+    r = base ? mmap(reinterpret_cast<void *>(base), address_space::state_range, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0)
+             : reserve_level(48, 0);
     if(r == MAP_FAILED || (base && r != reinterpret_cast<void *>(base))) {
       if(r != MAP_FAILED) munmap(r, address_space::state_range);
       return false;
