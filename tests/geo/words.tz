@@ -12,3 +12,7 @@ operand_parens(str kind, str op, bool left, str parent_op, bool assoc) => kind !
 syntax each (x) in (xs) {body} => quote { for(#x : #xs) #body };
 // Клауза с именем и места-блоки: try { … } catch(e) { … } словами.
 syntax attempt {body} rescue (e) {handler} => quote { try { #body } catch(#e) { #handler } };
+// Объявление записью (§4.5, шаг 11.3): та же функция; #name — голое имя, #params — параметры.
+syntax define #name (params, ...) {body} => quote { #name(#params) { #body } };
+syntax define #name (params, ...) means {e}; => quote { #name(#params) => #e; };
+syntax record #name {fields} => quote { struct #name { #fields } };

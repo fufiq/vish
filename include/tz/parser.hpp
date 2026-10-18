@@ -845,6 +845,11 @@ struct parser {
     // Attributes enter the node before being added to the database, otherwise journal will not see them.
     if(is_word("operator")) return operator_decl(std::move(attrs));
     if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl(std::move(attrs));
+    if(attrs.empty() && decl_head())
+      if(auto u = syntax_use(start)) { // define f(x) { … } - Announcement by record (§4.5): ends by itself (or body)
+        tail_statement = false;
+        return *u;
+      }
     // T Name { … } - Name is instance T:
 // 
 // What T is - knows VM (struct).
@@ -1032,14 +1037,31 @@ struct parser {
     n_extend st;
     st.of = ident();
     st.attrs = std::move(attrs);
-    st.name = ident();
+    if(in_template && is_op("#") && ahead(1).kind == tok::ident && ahead(1).glued) { // struct #name { #fields } - the place of workpiece
+      eat_op("#");
+      st.name = db.strings.intern(cat("#", here().text));
+      advance();
+    } else st.name = ident();
     if(is_op(":")) { // struct method error : http { … }
       eat_op(":");
       st.base = ident();
     }
+    st.items = struct_fields();
+    if(is_op(";")) eat_op(";");
+    return db.add(std::move(st), {start, toks[pos - 1].where.end});
+  }
+  // { [ct] T поле [= значение]; … } - Struct fields (and part-block write fields, §4.5)
+  node_list struct_fields() {
+    node_list items;
     expect_open('{');
     while(!is_close('}')) {
       uint32_t f0 = here().where.begin;
+      if(in_template && is_op("#") && ahead(1).kind == tok::ident && ahead(1).glued) {
+        eat_op("#");
+        symbol name = ident();
+        items.push_back(db.add(n_splice{name}, {f0, toks[pos - 1].where.end}));
+        continue;
+      }
       n_var f;
       if(is_word("ct") && ahead(1).kind == tok::ident && ahead(2).kind == tok::ident) { // ct field: compile state
         f.ct = true;
@@ -1053,11 +1075,10 @@ struct parser {
         f.init = value_expr(); // foo f = {} - the default value of the field type
       }
       end_statement();
-      st.items.push_back(db.add(std::move(f), {f0, toks[pos - 1].where.end}));
+      items.push_back(db.add(std::move(f), {f0, toks[pos - 1].where.end}));
     }
     expect_close('}');
-    if(is_op(";")) eat_op(";");
-    return db.add(std::move(st), {start, toks[pos - 1].where.end});
+    return items;
   }
 
   // Announcement of function: [outline] [type] name(s) (=> e; | { ... }) On the
@@ -1072,7 +1093,9 @@ struct parser {
     }
     // [type] name
     uint32_t name_at;
-    if(ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
+    bool hashed = in_template && is_op("#", k) && ahead(k + 1).kind == tok::ident && ahead(k + 1).glued && is_open('(', k + 2); // #name (name/place of workpiece)
+    if(hashed) name_at = k + 1;
+    else if(ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
     // name and word of record (when, otherwise...): => or { - the record does not continue
     // in parentheses;
 // Programme design
@@ -1089,15 +1112,21 @@ struct parser {
       after = c2 + 1 - pos;
     }
     if(!is_op("=>", after) && !is_open('{', after)) return std::nullopt;
-    if(in_block && name_at == k && !is_op("=>", after)) return std::nullopt; // f(x) { … } in the block - a call with a tail
+    if(in_block && !hashed && name_at == k && !is_op("=>", after)) return std::nullopt; // f(x) { … } in the block - a call with a tail
 
     uint32_t start = here().where.begin;
     n_fn f;
     f.attrs = std::move(attrs);
     f.outline = outline;
     if(outline) advance();
-    if(name_at == (outline ? 2u : 1u)) f.result_type = type_expr();
-    f.name = ident();
+    if(hashed) {
+      eat_op("#");
+      f.name = db.strings.intern(cat("#", here().text));
+      advance();
+    } else {
+      if(name_at == (outline ? 2u : 1u)) f.result_type = type_expr();
+      f.name = ident();
+    }
     f.params = param_list();
     while(here().kind == tok::ident && is_open('(', 1)) { // Clause: catch(expr... hs)
       symbol word = ident();
@@ -1122,6 +1151,19 @@ struct parser {
 //.
   bool is_keyword(std::string_view w) const { return core_word(w) || rules.record_words.contains(std::string(w)); }
   static bool core_word(std::string_view w) { return w == "ct" || w == "const" || w == "outline" || w == "module" || w == "operator"; }
+  // Ahead is the head of the ad record (define f(x) { … }): it is tried before the ads of the base
+  // language - otherwise `define f(` would be understood as a function f with the define type.
+  bool decl_head() const {
+    if(here().kind != tok::ident) return false;
+    auto it = db.strings.index.find(here().text);
+    if(it == db.strings.index.end()) return false;
+    auto r = rules.syntaxes.find(it->second.value);
+    if(r == rules.syntaxes.end()) return false;
+    return std::ranges::any_of(r->second, [&](node_id d) {
+      auto rec = record_of(db, d);
+      return rec && rec->kind == record_template && (db.is<n_fn>(rec->tmpl) || db.is<n_extend>(rec->tmpl) || db.is<n_var>(rec->tmpl));
+    });
+  }
   // w is the first word of the declared syntax record (begins the expression)
   bool heads_syntax(std::string_view w) const {
     auto it = db.strings.index.find(std::string(w));
@@ -1144,6 +1186,12 @@ struct parser {
     uint32_t start = here().where.begin;
     n_param p;
     p.clause = clause;
+    if(in_template && is_op("#") && ahead(1).kind == tok::ident && ahead(1).glued) { // #params - place of harvesting
+      eat_op("#");
+      p.name = db.strings.intern(cat("#", here().text));
+      advance();
+      return db.add(std::move(p), {start, toks[pos - 1].where.end});
+    }
     if(is_word("mut")) {
       p.mode = param_mode::mut;
       advance();
@@ -1338,6 +1386,13 @@ struct parser {
     if(is_word("operator")) return operator_decl({});
     if(is_word("syntax") && ahead(1).kind == tok::ident) return syntax_decl({});
     if(is_word("syntax") && is_open('{', 1)) return raw_rule_decl();
+    if(in_template && ahead(0).kind == tok::ident && is_op("#", 1) && ahead(2).kind == tok::ident && is_open('{', 3)) return instance_decl(); // struct #name { … } in the workpiece
+    if(decl_head())
+      if(auto u = syntax_use(here().where.begin)) { // Local announcement by record - ends itself
+        tail_statement = false;
+        last_was_value = false;
+        return *u;
+      }
     if(auto f = try_fn_decl(true)) return *f;
 
     if(is_word("using") && is_word("operator", 1)) { // Using Operator - Redefinition in Context (§8.2)
@@ -1623,6 +1678,13 @@ struct parser {
       } else if(here().kind == tok::ident) {
         f.form.push_back(db.strings.intern(here().text));
         advance();
+      } else if(is_op("#") && ahead(1).kind == tok::ident && ahead(1).glued) { // #name is a naked word-name
+        uint32_t p0 = here().where.begin;
+        eat_op("#");
+        n_param p;
+        p.name = ident();
+        f.params.push_back(db.add(std::move(p), {p0, toks[pos - 1].where.end}));
+        f.form.push_back(db.strings.intern("#"));
       } else if(here().kind == tok::op) {
         f.form.push_back(db.strings.intern(symbol_run()));
       } else throw diagnostic("в записи syntax — слова, символы, ;, (параметр) и {тело}", here().where);
@@ -1640,25 +1702,18 @@ struct parser {
   // The body of the syntax recording is a quote { … } (§4.5): its code is an instruction at
   // the point of use, not module elements (try { … } is a call, not an extension of try).
   bool template_body = false;
+  uint32_t in_template = 0; // parsing recording workpiece: #name(#params) - announcement locations
 
-  // Part k of the record d is the name of the block parameter in its workpiece (#x).
-  bool binder_part(node_id d, std::size_t k) const {
+  // View of the place of part k of the record d (for non-workpieces - node).
+  uint8_t part_of(node_id d, std::size_t k) const {
     auto r = record_of(db, d);
-    if(!r || r->kind != record_template) return false;
-    auto const & f = db.as<n_fn>(d);
-    bool found = false;
-    auto look = [&](this auto const & self, node_id t) -> void {
-      if(db.is<n_param>(t) && template_place(db, f, t) == int(k)) found = true;
-      db.for_each_child(t, [&](node_id c) { self(c); });
-    };
-    look(r->tmpl);
-    return found;
+    return r && r->kind == record_template && k < r->part.size() ? r->part[k] : part_node;
   }
   // Workpiece code t record f with parts of args in the field (§4.5): new node - at the place
   // of use w, parts - as disassembled. Name-place - the disassembled parameter of the part,
   // the connection with the source (x : xs) and the clause - the workpiece; place-block - the
   // block of the part (or the block from its expression).
-  node_id instantiate(n_fn const & f, node_id t, node_list const & args, span w) {
+  node_id instantiate(n_fn const & f, record_info const & r, node_id t, node_list const & args, span w) {
     if(int k = template_block_place(db, f, t); k >= 0) {
       node_id a = args[k];
       if(db.is<n_block>(a) || db.is<n_raw>(a)) return a;
@@ -1681,9 +1736,22 @@ struct parser {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
         using field_t = [:std::meta::type_of(m):];
         if constexpr(std::is_same_v<field_t, node_id>) {
-          if(x.[:m:]) x.[:m:] = instantiate(f, x.[:m:], args, w);
-        } else if constexpr(std::is_same_v<field_t, node_list>)
-          for(node_id & c: x.[:m:]) c = instantiate(f, c, args, w);
+          if(x.[:m:]) x.[:m:] = instantiate(f, r, x.[:m:], args, w);
+        } else if constexpr(std::is_same_v<field_t, node_list>) {
+          int list = x.[:m:].size() == 1 ? template_place(db, f, x.[:m:][0]) : -1;
+          if(list >= 0 && r.part[list] == part_params) { // #params - Part parameters
+            node_id a = args[list];
+            x.[:m:] = db.is<n_construct>(a) ? db.as<n_construct>(a).items : node_list{a};
+          } else if(list >= 0 && r.part[list] == part_items) // #fields - Part fields (disassembled as struct)
+            x.[:m:] = db.as<n_block>(args[list]).items;
+          else
+            for(node_id & c: x.[:m:]) c = instantiate(f, r, c, args, w);
+        } else if constexpr(std::is_same_v<field_t, symbol>) {
+          if(int n = template_name(db, f, x.[:m:]); n >= 0) { // #name - name of part
+            if(!db.is<n_ident>(args[n])) throw diagnostic("ожидалось имя", db[args[n]].where);
+            x.[:m:] = db.as<n_ident>(args[n]).name;
+          }
+        }
       }
     },
         k);
@@ -1755,13 +1823,15 @@ struct parser {
           // (x) is one expression; (xs, ...) is a comma list, place is array {…}
           auto lists = [&](bool list) { std::erase_if(live, [&](node_id d) { return form_list(piece(d, k)) != list; }); };
           node_list items;
-          // part is the name of the parameter of the workpiece (#x): the parameter (x, T x), not the expression
-          bool binds = std::ranges::all_of(live, [&](node_id d) { return binder_part(d, args.size()); });
-          if(!binds) std::erase_if(live, [&](node_id d) { return binder_part(d, args.size()); });
-          if(!is_close(')')) items.push_back(binds ? param() : expression());
+          // part of the workpiece is the name of the block parameter (#x) or the list of
+          // parameters (#params): parameters (x, T x), not expressions
+          uint8_t kind = part_of(live.front(), args.size());
+          std::erase_if(live, [&](node_id d) { return part_of(d, args.size()) != kind; });
+          bool params = kind == part_binder || kind == part_params;
+          if(!is_close(')')) items.push_back(params ? param() : expression());
           while(is_op(",")) {
             eat_op(",");
-            items.push_back(expression());
+            items.push_back(params ? param() : expression());
           }
           // (a, b): as many places as expressions are parts (+,+...)
           auto multi = [&](node_id d) {
@@ -1787,6 +1857,17 @@ struct parser {
           ++k;
           continue;
         }
+        // #name - bare name; and word of record (define when(…) - its construction when): no keywords,
+        // then the ad closes the record (shadow_records )
+        if(auto v = with([](std::string_view p) { return form_word(p); }); !v.empty() && here().kind == tok::ident && !core_word(here().text)) {
+          live = std::move(v);
+          tail_statement = false;
+          uint32_t p0 = here().where.begin;
+          symbol name = ident();
+          args.push_back(db.add(n_ident{name}, {p0, toks[pos - 1].where.end}));
+          ++k;
+          continue;
+        }
         if(auto v = with([](std::string_view p) { return p == "{" || p == "{="; }); !v.empty()) {
           // {} in the slot value is an empty literal, the type is from the place:
 //  
@@ -1798,7 +1879,12 @@ struct parser {
           // body: block (with the rules of body forms - as in the structure; raw - if the form
           // disassembles it with the code) or expression (branch)
           if(literal) args.push_back(record());
-          else if(is_open('{') && !record_ahead()) args.push_back(ruled_block(live));
+          else if(is_open('{') && part_of(live.front(), args.size()) == part_items) { // struct fields: { T x; … }
+            uint32_t b0 = here().where.begin;
+            n_block b;
+            b.items = struct_fields();
+            args.push_back(db.add(std::move(b), {b0, toks[pos - 1].where.end}));
+          } else if(is_open('{') && !record_ahead()) args.push_back(ruled_block(live));
           else { // Branch without brackets - instruction: the tail of the structure at its beginning (if(c) for(x : xs) s);
             uint32_t head_saved = std::exchange(statement_head, here().where.begin);
             args.push_back(expression());
@@ -1814,7 +1900,11 @@ struct parser {
         bool tail = db.strings.text(form.back()).starts_with('{') && !args.empty() && db.is<n_block>(args.back());
         span w{start, toks[pos - 1].where.end};
         if(auto r = record_of(db, d)) {
-          if(r->kind == record_template) return instantiate(db.as<n_fn>(d), r->tmpl, args, w);
+          if(r->kind == record_template) {
+            node_id got = instantiate(db.as<n_fn>(d), *r, r->tmpl, args, w);
+            if(db.is<n_fn>(got)) learn(db.as<n_fn>(got), got); // advert - rules as written
+            return got;
+          }
           std::vector<node_id> places(r->places);
           for(std::size_t i = 0; i < args.size(); ++i) places[r->slot[i]] = args[i];
           if(r->kind >= 0) return db.add(make_node(r->kind, places, r->program), w);
@@ -2341,6 +2431,12 @@ struct parser {
           n_quote q;
           context_scope scope(*this); // workpiece - its context
           bool statements = std::exchange(template_body, false);
+          struct restore {
+            uint32_t & v;
+            uint32_t was;
+            ~restore() { v = was; }
+          } keep{in_template, in_template};
+          if(statements) ++in_template;
           while(!is_close('}') && !at_end()) q.items.push_back(recover_statement([&] { return statements ? statement() : item(); }));
           expect_close('}');
           return db.add(std::move(q), {start, toks[pos - 1].where.end});

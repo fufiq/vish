@@ -1362,7 +1362,11 @@ struct record_info {
   uint32_t places = 0; // body-place
   std::string program; // View declared by the program (kind - n_node): ast.twice
   node_id tmpl; // workpiece: code in quote { … }, places - #x inserts and #x block parameters
+  std::vector<uint8_t> part; // at the workpiece: type of place of each part (part_node ...)
 };
+// Types of workpiece locations: node (insert #x, place-block), block parameter name (#x
+// in for(#x : …)), ad name (#name in function), list of parameters (#params).
+constexpr uint8_t part_node = 0, part_binder = 1, part_name = 2, part_params = 3, part_items = 4; // items - struct fields #name { #fields }
 // Write-workpiece (§4.5, step 11.2): the body is `quote { код }` of the base language, parts of
 // the record are inserted into it: `syntax each (x) in (xs) {body} => quote { for(#x : #xs) #body
 // };`. parsing builds the workpiece code with parts in place, the print recognizes the node by the
@@ -1387,7 +1391,10 @@ bool form_list(std::string_view p) { return p.ends_with("..."); }
 bool form_paren(std::string_view p) { return !p.empty() && p[0] == '('; }
 bool form_open(std::string_view p) { return p == "(+" || p == "()+"; }
 bool form_next(std::string_view p) { return p == ",+" || p == ",)"; }
-bool form_place(std::string_view p) { return form_paren(p) || form_next(p) || p == "{" || p == "{="; }
+bool form_place(std::string_view p) { return form_paren(p) || form_next(p) || p == "{" || p == "{=" || p == "#"; }
+// Part `#имя` is the naked word name (define #name..., §4.5).
+//
+bool form_word(std::string_view p) { return p == "#"; }
 // k-th part of the record without layout marks (empty - no such).
 std::string_view form_piece(ast_db const & db, n_fn const & f, std::size_t k) {
   for(symbol s: f.form) {
@@ -1410,6 +1417,15 @@ int template_place(ast_db const & db, n_fn const & f, node_id t) {
     if(db.strings.text(db.as<n_param>(f.params[k]).name) == name) return int(k);
   return -1;
 }
+// Name-place in the node character field of the workpiece (not the parameter):
+// `#name(#params) { … }` is the part number of the record or -1.
+int template_name(ast_db const & db, n_fn const & f, symbol s) {
+  std::string_view name = db.strings.text(s);
+  if(!s.valid() || !name.starts_with('#')) return -1;
+  for(uint32_t k = 0; k < f.params.size(); ++k)
+    if(db.strings.text(db.as<n_param>(f.params[k]).name) == name.substr(1)) return int(k);
+  return -1;
+}
 // The blank block from one insert is the place-block `{ #body }`: part of the record is the
 // node block (try { … } catch(e) { … } - blocks, not instructions).
 int template_block_place(ast_db const & db, n_fn const & f, node_id t) {
@@ -1427,13 +1443,39 @@ std::optional<record_info> record_of(ast_db const & db, node_id fn) {
     r.kind = record_template;
     r.tmpl = db.as<n_quote>(f.body).items[0];
     r.places = uint32_t(f.params.size());
+    std::vector<std::string_view> pieces; // part of the recording of each parameter (in order of places)
+    for(symbol w: f.form)
+      if(auto p = db.strings.text(w); !form_mark(p) && form_place(p)) pieces.push_back(p);
+    if(pieces.size() != f.params.size()) return std::nullopt;
+    r.part.assign(f.params.size(), part_node);
     std::vector<uint32_t> uses(f.params.size());
+    bool ok = true;
     auto count = [&](this auto const & self, node_id t) -> void {
-      if(int k = template_place(db, f, t); k >= 0) ++uses[k];
+      if(int k = template_place(db, f, t); k >= 0) {
+        ++uses[k];
+        if(db.is<n_param>(t)) r.part[k] = form_list(pieces[k]) ? part_params : part_binder;
+      }
+      std::visit([&](auto const & x) {
+        template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+          using field_t = [:std::meta::type_of(m):];
+          if constexpr(std::is_same_v<field_t, symbol>) {
+            if(int k = db.is<n_param>(t) ? -1 : template_name(db, f, x.[:m:]); k >= 0) {
+              ++uses[k];
+              r.part[k] = part_name;
+            }
+          } else if constexpr(std::is_same_v<field_t, node_list>) {
+            for(node_id c: x.[:m:]) // The list of parameters is the only one in its list.
+              if(int k = template_place(db, f, c); k >= 0 && db.is<n_param>(c) && form_list(pieces[k]) && x.[:m:].size() != 1) ok = false;
+            if(db.is<n_extend>(t) && x.[:m:].size() == 1 && db.is<n_splice>(x.[:m:][0])) // struct #name { #fields } - part-block fields
+              if(int k = template_place(db, f, x.[:m:][0]); k >= 0 && pieces[k] == "{") r.part[k] = part_items;
+          }
+        }
+      },
+          db[t].kind);
       db.for_each_child(t, [&](node_id c) { self(c); });
     };
     count(r.tmpl);
-    if(std::ranges::any_of(uses, [](uint32_t u) { return u != 1; })) return std::nullopt;
+    if(!ok || std::ranges::any_of(uses, [](uint32_t u) { return u != 1; })) return std::nullopt;
     for(uint32_t k = 0; k < f.params.size(); ++k) r.slot.push_back(k);
     return r;
   }

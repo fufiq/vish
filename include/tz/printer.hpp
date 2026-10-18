@@ -299,7 +299,7 @@ struct printer {
         continue;
       }
       bool place = form_place(p);
-      bool after_word = !prev.empty() && lexer::is_ident_start(prev[0]);
+      bool after_word = !prev.empty() && (lexer::is_ident_start(prev[0]) || form_word(prev)); // define total(xs)
       bool glued = p.starts_with("()") || form_next(p) || (!decl && form_paren(p) && after_word);
       bool space = !prev.empty() && !glued && p != ";", newline = false, deeper = false;
       if(decl && !marks.empty()) {
@@ -452,6 +452,7 @@ struct printer {
   // condition).
   bool fits(node_id n, rec const & x) {
     if(!shape_fits(n, x)) return false;
+    if(x.second.kind == record_template && !template_ends(n, x)) return false;
     for(node_id a: db.as<n_fn>(x.first).attrs) {
       if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "prefer") continue;
       auto const & args = db.as<n_call>(a).args;
@@ -467,8 +468,9 @@ struct printer {
   bool shape_fits(node_id n, rec const & x) const {
     auto const & [f, r] = x;
     if(r.kind == record_template) { // workpiece: node - its code, places - parts
-      std::vector<node_id> places(r.places);
-      if(!match_template(n, db.as<n_fn>(f), r.tmpl, places)) return false;
+      if(db.is<n_fn>(n) && (!db[n].parent || !db.is_context(db[n].parent))) return false; // announcement by record - in the module and block
+      std::vector<tmpl_place> places(r.places);
+      if(!match_template(n, db.as<n_fn>(f), r, r.tmpl, places)) return false;
       tmpl_places[{n.value, f.value}] = std::move(places);
       return true;
     }
@@ -490,16 +492,31 @@ struct printer {
       for(int k = 0; k < int(std::variant_size_v<node_kind>); ++k) v.push_back(node_code_fields(k) >= 0);
       return v;
     }();
-    return db.is<n_call>(n) || db.is<n_node>(n) || able[db[n].kind.index()];
+    return db.is<n_call>(n) || db.is<n_node>(n) || able[db[n].kind.index()] || templates();
   }
+  // In the database there are records-workpieces (their node is any kind, including announcements).
+  bool templates() const {
+    if(!templates_scanned) {
+      templates_scanned = true;
+      for(uint32_t i = 0; i < db.size() && !any_template; ++i)
+        if(db.is<n_fn>(node_id(i)) && !db.as<n_fn>(node_id(i)).form.empty() && db.is<n_quote>(db.as<n_fn>(node_id(i)).body)) any_template = true;
+    }
+    return any_template;
+  }
+  mutable bool templates_scanned = false, any_template = false;
 
-  // Node n - the code of the workpiece t of the record f (§4.5): the same view and fields (the layout
-  // - empty lines - not counting), at the places of the workpiece - any node (the name-place -
-  // parameter with the same connection x : xs, at the place-block - block); places - node parts.
-  bool match_template(node_id n, n_fn const & f, node_id t, std::vector<node_id> & places) const {
+  // Node n - workpiece code t record f (§4.5 ): the same view and fields (layout - empty lines
+  // - not counting), at the places of workpiece - any node (name-place - parameter with the
+  // same connection x : xs, at the place-block - block); places - node parts. Part location at
+  // node: the node itself or (name, parameter list) field node node.
+  struct tmpl_place {
+    node_id node;
+    int field = -1;
+  };
+  bool match_template(node_id n, n_fn const & f, record_info const & r, node_id t, std::vector<tmpl_place> & places) const {
     if(int k = template_block_place(db, f, t); k >= 0) {
       if(!db.is<n_block>(n) && !db.is<n_raw>(n)) return false;
-      places[k] = n;
+      places[k] = {n};
       return true;
     }
     if(int k = template_place(db, f, t); k >= 0) {
@@ -509,7 +526,7 @@ struct printer {
         auto const & b = db.as<n_param>(n);
         if(a.source != b.source || a.clause != b.clause) return false;
       }
-      places[k] = n;
+      places[k] = {n};
       return true;
     }
     if(db[n].kind.index() != db[t].kind.index()) return false;
@@ -517,28 +534,87 @@ struct printer {
     std::visit([&](auto const & x) {
       using kind_t = std::remove_cvref_t<decltype(x)>;
       auto const & y = std::get<kind_t>(db[n].kind);
+      int field = 0;
       template for(constexpr auto m: fields_of<kind_t>()) {
         using field_t = [:std::meta::type_of(m):];
         if(same) {
           if constexpr(std::is_same_v<field_t, node_id>)
-            same = x.[:m:] ? y.[:m:] && match_template(y.[:m:], f, x.[:m:], places) : !y.[:m:];
+            same = x.[:m:] ? y.[:m:] && match_template(y.[:m:], f, r, x.[:m:], places) : !y.[:m:];
           else if constexpr(std::is_same_v<field_t, node_list>) {
-            same = x.[:m:].size() == y.[:m:].size();
-            for(std::size_t i = 0; same && i < x.[:m:].size(); ++i) same = match_template(y.[:m:][i], f, x.[:m:][i], places);
+            int list = x.[:m:].size() == 1 ? template_place(db, f, x.[:m:][0]) : -1;
+            if(list >= 0 && r.part[list] == part_params) { // #params - the whole list: parameters without clauses
+              places[list] = {n, field};
+              for(node_id c: y.[:m:]) same = same && db.is<n_param>(c) && !db.as<n_param>(c).clause;
+            } else if(list >= 0 && r.part[list] == part_items) { // #fields - fields
+              places[list] = {n, field};
+              for(node_id c: y.[:m:]) same = same && db.is<n_var>(c);
+            }
+            else {
+              same = x.[:m:].size() == y.[:m:].size();
+              for(std::size_t i = 0; same && i < x.[:m:].size(); ++i) same = match_template(y.[:m:][i], f, r, x.[:m:][i], places);
+            }
+          } else if constexpr(std::is_same_v<field_t, symbol>) {
+            if(int k = template_name(db, f, x.[:m:]); k >= 0) { // #name is the name node: a word (not infix+ operator)
+              places[k] = {n, field};
+              auto name = str(y.[:m:]);
+              same = !name.empty() && lexer::is_ident_start(name[0]) && std::ranges::all_of(name, lexer::is_ident);
+            } else same = x.[:m:] == y.[:m:];
           } else if constexpr(!std::is_same_v<field_t, std::vector<uint32_t>>) // blank, inner - layout
             same = x.[:m:] == y.[:m:];
         }
+        ++field;
       }
     },
         db[t].kind);
     return same;
   }
-  mutable std::map<std::pair<uint32_t, uint32_t>, std::vector<node_id>> tmpl_places; // (knot, recording) → parts
-  // The location of the part k of writing x of node n: the field node, the call argument, or the part of the workpiece.
+  mutable std::map<std::pair<uint32_t, uint32_t>, std::vector<tmpl_place>> tmpl_places; // (knot, recording) → parts
+  // The location of the part k of writing x in node n is the node field, the call argument,
+  // or the part of the workpiece (name and list of parameters are not node: empty).
   node_id place_at(node_id n, rec const & x, std::size_t k) {
     auto const & [f, r] = x;
-    if(r.kind == record_template) return tmpl_places[{n.value, f.value}][r.slot[k]];
+    if(r.kind == record_template) {
+      auto const & p = tmpl_places[{n.value, f.value}][r.slot[k]];
+      return p.field < 0 ? p.node : node_id{};
+    }
     return r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]];
+  }
+  // `;` recording after the body, which itself ends with the instruction (define g() means while(c)
+  // s;), is a double `;`: such a node recording is not suitable (printing is the basic language).
+  bool template_ends(node_id n, rec const & x) {
+    auto const & ps = tmpl_places[{n.value, x.first.value}];
+    std::size_t k = 0;
+    std::string_view prev;
+    for(symbol w: db.as<n_fn>(x.first).form) {
+      auto p = str(w);
+      if(form_mark(p)) continue;
+      if(p == ";" && (prev == "{" || prev == "{=") && ps[k - 1].field < 0 && ends_in_statement(ps[k - 1].node)) return false;
+      if(form_place(p) && p != ";") ++k;
+      prev = p;
+    }
+    return true;
+  }
+  // Part-name or part-list of workpiece: name node/its comma parameters.
+  void template_part(std::string_view piece, tmpl_place const & p) {
+    std::visit([&](auto const & x) {
+      int field = 0;
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if(field++ == p.field) {
+          if constexpr(std::is_same_v<field_t, symbol>) out += form_paren(piece) ? cat("(", str(x.[:m:]), ")") : std::string(str(x.[:m:]));
+          else if constexpr(std::is_same_v<field_t, node_list>) {
+            if(piece == "{") return struct_fields(x.[:m:]); // fields: { T x; T y; }
+            out += '(';
+            for(std::size_t i = 0; i < x.[:m:].size(); ++i) {
+              if(i) out += ", ";
+              item(x.[:m:][i]);
+            }
+            out += ')';
+          }
+        }
+      }
+    },
+        db[p.node].kind);
   }
   bool templated(node_id n) {
     auto rec = record_for(n);
@@ -644,6 +720,13 @@ struct printer {
   }
   void print_record(node_id n, rec const & x) {
     auto const & [f, r] = x;
+    if(r.kind == record_template) {
+      auto const & ps = tmpl_places[{n.value, f.value}];
+      form(db.as<n_fn>(f).form, [&](std::size_t k, std::string_view piece) {
+        if(ps[k].field < 0) part(piece, ps[k].node);
+        else template_part(piece, ps[k]); }, [&](std::size_t k) { return ps[k].field < 0 && block_like(ps[k].node); });
+      return;
+    }
     auto at = [&](std::size_t k) { return place_at(n, x, k); };
     form(db.as<n_fn>(f).form, [&](std::size_t k, std::string_view piece) { part(piece, at(k)); }, [&](std::size_t k) { return block_like(at(k)); });
   }
@@ -927,8 +1010,13 @@ struct printer {
   // T Name [: base] { поля } - instance T (struct)
   void instance_decl(node_id, n_extend const & st) {
     attrs(st.attrs);
-    out += cat(str(st.of), " ", str(st.name), st.base ? cat(" : ", str(st.base)) : std::string(), " {");
-    for(node_id f: st.items) {
+    out += cat(str(st.of), " ", str(st.name), st.base ? cat(" : ", str(st.base)) : std::string(), " ");
+    struct_fields(st.items);
+  }
+  // { [ct] T поле [= значение]; … } - Struct fields (and part-block write fields, §4.5)
+  void struct_fields(node_list const & items) {
+    out += '{';
+    for(node_id f: items) {
       auto const & v = db.as<n_var>(f);
       out += v.ct ? " ct " : " ";
       item(v.type);

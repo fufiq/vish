@@ -5,7 +5,7 @@
 // конструкции программы, печать там пишет узел if записью прелюдии — текст
 // разбирается в то же дерево (tz test --projection — то же для всех тестов).
 // fmt-stable
-// fmt-has: pick(n) => when(n > 1) 10 otherwise 20;
+// fmt-has: define pick(n) means when(n > 1) 10 otherwise 20;
 // fmt-has: when(c, expr yes) otherwise(expr no) => when(c) no otherwise yes;
 // fmt-has: } otherwise {
 // fmt-has:     if(n > 3) break;
