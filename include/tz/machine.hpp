@@ -39,7 +39,8 @@ struct m_type {
 };
 struct m_arr {
   m_list<mval> items;
-  uint64_t gen = 0; // Buffer generation: growth and replacement - new (links to elements, §12.1)
+  uint64_t gen = 0; // Buffer generation: relocation and replacement - new (links to elements, §12.1)
+  bool pinned = false; // pin(xs): model without moving
 };
 struct m_agg {
   type_id type;
@@ -1978,12 +1979,20 @@ struct process_machine {
     symbol name(t.b);
     std::vector<mval> a;
     for(uint32_t i = 0; i < t.a; ++i) a.push_back(deref(fib().vals[t.base + i]));
+    if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: link of the car - cell and number, moving them does not break
+      mval & xs = follow(fib().vals[t.base].as<m_alias>());
+      if(!xs.is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
+      xs.as<m_arr>().pinned = true;
+      return finish(mval{m_unit{}});
+    }
     if(helper.str(name) == "append" && t.a == 2 && fib().vals[t.base].is<m_alias>()) { // push: the place of the caller grows
       m_alias al = fib().vals[t.base].as<m_alias>();
       mval & xs = follow(al);
       if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
-      xs.as<m_arr>().items.push_back(a[1]);
-      xs.as<m_arr>().gen = ++st.array_gen; // growth: support disabled
+      auto & items = xs.as<m_arr>().items;
+      void const * was = items.empty() ? nullptr : items.data();
+      items.push_back(a[1]);
+      if(was && items.data() != was && !xs.as<m_arr>().pinned) xs.as<m_arr>().gen = ++st.array_gen; // Data moved - links broken
       return finish(mval{m_unit{}});
     }
     if(helper.str(name).starts_with("stream_")) { // Can block: the task will remain and repeat

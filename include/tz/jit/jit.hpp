@@ -600,8 +600,9 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
     }
     if(op == 9) { // push when there is no space in words: id is an array cell, bits is an element
       array_v & a = reinterpret_cast<value *>(id)->as<array_v>();
+      void const * was = a.size() ? a.base() : nullptr;
       a.push(jit_bits_value(uint64_t(t), bits));
-      a.gen = ++vm.array_gen; // growth: the buffer could have moved
+      if(was && a.base() != was) a.gen = ++vm.array_gen; // Data moved - links broken
       return 0;
     }
     if(op == 0) {

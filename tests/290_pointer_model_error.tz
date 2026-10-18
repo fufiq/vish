@@ -1,0 +1,16 @@
+// check-error: ссылка на элемент использована после инвалидации опоры (опасное-опасное)
+// check-error: ссылка взята здесь
+// check-error: опора инвалидирована здесь
+// out: 8
+// Своя группа эффекта «compact» в модели strict ломает ссылку — ошибка разбора с местами
+// взятия и инвалидации (модель — у опоры: with_model). Исполнение — по реализации: squeeze
+// данных не двигает, поколение прежнее.
+[[effect(xs, "compact")]] squeeze(mut xs) {}
+strict() => pointer_model{"strict", array{"relocate", "compact"}};
+main() {
+  zs = array{7, 8};
+  with_model(zs, strict());
+  &g = zs[1];
+  squeeze(zs);
+  print(g);
+}

@@ -118,7 +118,15 @@ struct array_v {
   // dense i64/f64 - words in VM pages (pages.hpp): the growing array does not move
   words dense;
   array_v const * borrowed = nullptr;
-  uint64_t gen = 0; // Buffer generation: changes with growth and replacement (element references, §12.1)
+  uint64_t gen = 0; // Buffer generation: changes when moving and replacing (element references, §12.1)
+  bool pinned = false; // pin(xs): Data in its range of addresses, their growth does not move
+  // address of the first element: moved - references to elements of this implementation are broken
+  void const * base() const { return repr == layout::generic ? static_cast<void const *>(items.raw.data) : dense.data; }
+  void pin() {
+    own();
+    pinned = true;
+    (repr == layout::generic ? items.raw : dense).pin();
+  }
 };
 
 // The aggregate fields are in VM pages (§12.2, author's decision 2026-10-01): the field number
@@ -380,6 +388,7 @@ void array_v::to_generic() {
   dense.home = home;
   items = std::move(all);
   repr = layout::generic;
+  if(pinned) items.raw.pin();
 }
 
 void array_v::push(value v) {
@@ -387,6 +396,7 @@ void array_v::push(value v) {
   if(size() == 0 && repr == layout::generic) { // first element selects the layout
     if(v.is<int64_t>()) repr = layout::ints;
     else if(v.is<double>()) repr = layout::floats;
+    if(pinned) (repr == layout::generic ? items.raw : dense).pin();
   }
   if(repr == layout::ints && v.is<int64_t>()) {
     dense.push_back(uint64_t(v.as<int64_t>()));

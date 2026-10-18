@@ -162,10 +162,10 @@ for(xs, expr body) {
 // intercept выбирает первый блок, чей параметр принимает брошенное значение.
 try(expr body) catch(expr... handlers) => intercept(body, handlers);
 
-// push(xs, x) — рост массива: буфер может переехать, ссылки на элементы
-// недействительны (
-//). Семантика — атрибутом библиотеки.
-[[invalidates(xs)]] push(mut xs, x) => append(xs, x);
+// push(xs, x) — рост массива: эффект «relocate» — буфер может переехать (
+//). Ломает ли он
+// ссылки — решает модель указателя опоры (ниже). Семантика — атрибутом библиотеки.
+[[relocates(xs)]] push(mut xs, x) => append(xs, x);
 
 // Опоры ссылок (§12.1) — анализ кодом на языке: ct-состояние + require. 
 // 
@@ -176,16 +176,42 @@ try(expr body) catch(expr... handlers) => intercept(body, handlers);
 // взятии &e = xs[i] (и элемента в изменяемый параметр), ref_used — при каждом
 // использовании; [[g(…)]] у функции, где g — функция, — хук её вызова. В исполняемом
 // коде их нет: при исполнении ссылку проверяет поколение буфера VM (invalidated_alias).
-struct ref_anchor { i64 gen; code at; }
-// опора массива; gen -1 — ссылок на него не брали или массив заменён целиком
-anchor_of(xs) => ct_state(xs, ref_anchor{-1, code()});
-// [[invalidates(xs)]] — новое поколение опоры (если на неё брали ссылки)
-invalidates(mut xs) {
-  if(anchor_of(xs).gen >= 0) set_ct_state(xs, ref_anchor{anchor_of(xs).gen + 1, call_site()});
+//
+// Модели указателей: 
+// 
+// 
+// Операция над опорой объявляет группу эффекта ([[effect(xs, "relocate")]]
+// или своя функция-атрибут, как relocates); модель — какие группы ссылку ломают. Модель —
+// у опоры (ct-состояние), задаёт программа: with_model(xs, m); pin(xs) — данные в своём
+// диапазоне адресов, рост их не двигает — модель без relocate. Замена массива целиком — другой
+// буфер: ломает при любой модели.
+struct pointer_model { str name; array breaks; }
+// по умолчанию — реализация 
+model_moving() => pointer_model{"moving", array{"relocate"}};
+// бесконечный вектор: адреса свои, данные не переезжают
+model_pinned() => pointer_model{"pinned", array{}};
+breaks(pointer_model m, str e) {
+  hit = false;
+  for(b : m.breaks) if(b == e) hit = true;
+  hit
 }
+struct ref_anchor { i64 gen; code at; pointer_model model; }
+// опора массива; gen -1 — ссылок на него не брали или массив заменён целиком
+anchor_of(xs) => ct_state(xs, ref_anchor{-1, code(), model_moving()});
+// эффект группы e над опорой: ломает ссылки, если модель опоры его не терпит
+effect(mut xs, str e) {
+  a = anchor_of(xs);
+  if(a.gen >= 0 && breaks(a.model, e)) set_ct_state(xs, ref_anchor{a.gen + 1, call_site(), a.model});
+}
+relocates(mut xs) => effect(xs, "relocate");
+// модель опоры — хуком разбора: при исполнении тела нет (pin — только ядро pin_storage)
+set_model(mut xs, pointer_model m) => set_ct_state(xs, ref_anchor{anchor_of(xs).gen, anchor_of(xs).at, m});
+[[set_model(xs, m)]] with_model(mut xs, pointer_model m) {}
+[[set_model(xs, model_pinned())]] pin(mut xs) => pin_storage(xs);
 ref_taken(mut xs) {
-  if(anchor_of(xs).gen < 0) set_ct_state(xs, ref_anchor{0, call_site()});
-  ref_anchor{anchor_of(xs).gen, call_site()}
+  a = anchor_of(xs);
+  if(a.gen < 0) set_ct_state(xs, ref_anchor{0, call_site(), a.model});
+  ref_anchor{anchor_of(xs).gen, call_site(), a.model}
 }
 ref_used(xs, ref_anchor r) => require(anchor_of(xs).gen == r.gen,
   "ссылка на элемент использована после инвалидации опоры (опасное-опасное)",
@@ -1856,13 +1882,8 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.address(third, third, 1));
     put_bytes(slot_ld(second, sl));
     put_bytes(cg.store(second, a_size, third));
-    // push инвалидирует опору всегда (§12.1, как у интерпретатора): новое поколение буфера
-    put_bytes(slot_ld(acc, args_slot));
-    put_bytes(cg.load(acc, acc, 8 * (ap + 6)));
-    put_bytes(cg.load(third, acc, 0));
-    put_bytes(cg.address(third, third, 1));
-    put_bytes(cg.store(acc, 0, third));
-    put_bytes(cg.store(second, a_gen, third));
+    // место было — данные на месте, ссылки целы: 
+// переезд — в VM (вызов 9)
     jump(done);
     bind(slow);
     put_bytes(cg.move(ca2, acc));

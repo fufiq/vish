@@ -430,6 +430,11 @@ struct words {
     data[n++] = w;
   }
 
+  // your range of addresses at once: further growth - pages in place, data does not move
+  // 
+  void pin() {
+    if(!big) reserve(std::max<uint64_t>(cap, address_space::small_max) + 1);
+  }
   // place under want words: small grows in classes, then - his range (no longer moves)
   void reserve(uint64_t want) {
     if(want <= cap) return;

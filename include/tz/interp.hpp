@@ -236,6 +236,7 @@ struct interpreter {
     sym_intercept = sym("intercept");
     sym_alloc_in = sym("alloc_in");
     sym_append = sym("append");
+    sym_pin_storage = sym("pin_storage");
     sym_set_ct_state = sym("set_ct_state");
     sym_spawn = sym("fiber_start");
     sym_process = sym("process");
@@ -1127,8 +1128,8 @@ struct interpreter {
   }
 
   // Hook parsing for a program function ([[g(…)]], g is a language function). Without them,
-  // parsing won’t add anything before launch - the launch doesn’t pay for it (mys; the
-  // prelude hooks don’t refuse: invalidates only changes the ct state).
+  // parsing doesn’t add anything before launch - the launch doesn’t pay for it (mys; the
+  // prelude hooks don’t fail: the effects of the supports only change the ct state).
   bool program_hooks() const {
     for(uint32_t i = 0; i < db.size(); ++i) {
       node_id f(i);
@@ -4872,8 +4873,21 @@ struct interpreter {
     return ok();
   }
 
-  // append(xs, x) is the growth of the array, the core push. What growth means for links,
-  // the library declares: [[invalidates(xs)]] by push (parsing hook on the language).
+  // pin_storage(xs) - pin core: array-variable data - in its range of addresses, their growth no
+  // longer moves (pages.hpp); the support pointer model puts prelude.
+  flow pin_storage(node_list const & args, scope * env, node_id n) {
+    span where = db[n].where;
+    if(args.size() != 1 || !db.is<n_ident>(args[0])) fail("pin_storage(массив)", where);
+    value * cell = find(env, db.as<n_ident>(args[0]).name);
+    if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("pin: аргумент — переменная-массив", where);
+    if(checking()) return ok();
+    if(!cell->is<array_v>()) fail(cat("pin: ожидался массив, получено ", types.describe(*cell)), where);
+    cell->as<array_v>().pin();
+    return ok();
+  }
+
+  // append(xs, x) is the growth of the array, the core push. What growth means for links, the library
+  // declares: [[relocates(xs)]] at push and the pivot pointer model (the parsing hook on the language).
   flow append(node_list const & args, scope * env, uint32_t frame, node_id n) {
     span where = db[n].where;
     if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("append(массив, значение)", where);
@@ -4883,8 +4897,12 @@ struct interpreter {
     TZ_TRY(x, eval(args[1], env, frame));
     if(!checking()) {
       if(!cell->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
-      cell->as<array_v>().push(x);
-      cell->as<array_v>().gen = ++array_gen;
+      array_v & a = cell->as<array_v>();
+      void const * was = a.size() ? a.base() : nullptr;
+      a.push(x);
+      // 
+// a generation, only if the data has moved
+      if(was && a.base() != was) a.gen = ++array_gen;
       return ok();
     }
     book.written(cell, true);
@@ -5026,7 +5044,7 @@ struct interpreter {
 
   // [[g(…)]] for a function where g is a function of the language: ct-hook of the call - for parsing
   // each call is executed with the parameters of the function associated with arguments (place -
-  // alias). [[invalidates(xs)]] for push is the code prelude, not the rule of the compiler. The
+  // alias). [[relocates(xs)]] for push is the code prelude, not the rule of the compiler. The
   // argument is split - the call goes on each alternative (dispatch_split), the hook changes it.
   void attribute_hooks(node_id f, std::vector<value> const & vals, node_list const & args, scope * env, call_site const & site) {
     if(!checking()) return;
@@ -6319,6 +6337,7 @@ struct interpreter {
       if(name == sym_intercept && !functions.contains(name)) return intercept(c.args, env, frame, where);
       if(name == sym_alloc_in && !functions.contains(name)) return alloc_in(c.args, env, frame, where);
       if(name == sym_append && !functions.contains(name)) return append(c.args, env, frame, n);
+      if(name == sym_pin_storage && !functions.contains(name)) return pin_storage(c.args, env, n);
       if(name == sym_set_ct_state && !functions.contains(name)) return set_ct_state(c.args, env, frame, where);
       if(name == sym_spawn && !functions.contains(name)) return spawn(c.args, env, frame, where);
       if(name == sym_process && !functions.contains(name)) return start_process(c.args, env, frame, where);
@@ -8135,7 +8154,7 @@ struct interpreter {
   std::set<value const *> state_cells;
   std::deque<address_space> regions; // region() memory levels (at VM root); released with last holder
   bool regions_alive = false;
-  symbol sym_intercept, sym_is_index, sym_append, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
+  symbol sym_intercept, sym_is_index, sym_append, sym_pin_storage, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
   symbol sym_set_ct_state; // ct-state of place (disassembled in place as append)
   // Symbol on the text without internment (journal lines of the base does not change): while the
   // line is not, there is no name with it; it is searched again only when the lines become more.
