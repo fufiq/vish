@@ -16,10 +16,20 @@
 // Save the way. tzdb> write down journal
 // stats base size: node, journal records, .tzdb bytes; growth from past stats
 // roundtrip journal to new base: same projection and run output
+// Proc start [arg...] live process of the machine (§9.3): started, is up to steps
+// proc step N | proc run N steps | to the end; process output from last time
+// proc where step and footage
+// proc call <expression> sample in the clone (fork): expression in the current frame of the stopped
+// process; the process itself does not change
+// Proc stop finishing the edit process in a live process - a hot replacement: new calls - in a new
+// version, started frames live in the old one; editing struct with living values of the old layout
+// - only with migrate(T old) in the same text.
+//
 #pragma once
 
 #include "interp.hpp"
 #include "jit/jit.hpp"
+#include "machine.hpp"
 #include "os.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
@@ -52,6 +62,7 @@ struct vm_session {
       if(cmd == "apply" && args.size() == 1) return apply(args[0]);
       if(cmd == "stats") return stats();
       if(cmd == "roundtrip") return roundtrip();
+      if(cmd == "proc") return proc_cmd(args, line);
       if(cmd == "save" && args.size() == 1) {
         save_db(db, root, args[0]);
         return cat("сохранено: ", args[0], "\n");
@@ -188,6 +199,88 @@ struct vm_session {
     return cat("применена ", fn_name, ": правок ", n, "\n");
   }
 
+  // --- living ---
+  std::string proc_cmd(std::vector<std::string> const & args, std::string const & line) {
+    std::string sub = args.empty() ? std::string() : args[0];
+    if(sub == "start") {
+      proc.reset();
+      proc_out.clear();
+      proc = std::make_unique<process_machine>(db, root, name);
+      proc->captured = &proc_out;
+      proc->start({args.begin() + 1, args.end()}, stdin_lines);
+      return cat("процесс запущен\n");
+    }
+    if(!proc) return "нет живого процесса: proc start\n";
+    if(sub == "step" || sub == "run") {
+      uint64_t n = sub == "run" ? ~uint64_t{0} : args.size() > 1 ? std::stoull(args[1]) : 1;
+      try {
+        proc->run(n);
+      } catch(diagnostic const & d) {
+        proc_out += render(d, name, db);
+        proc->st.done = true;
+      }
+      std::string out = std::exchange(proc_out, {});
+      return out + proc->where_now();
+    }
+    if(sub == "where") return proc->where_now();
+    if(sub == "stop") {
+      proc.reset();
+      return "процесс завершён\n";
+    }
+    if(sub == "call") {
+      std::size_t at = line.find("call");
+      return probe(line.substr(at + 4));
+    }
+    return cat("proc: start, step N, run, where, call <выражение>, stop\n");
+  }
+
+  // Sample - in a clone: fork host copies the VM as a whole (pages - a copy when writing), the clone disassembles
+  // the expression in its database and counts it, the original waits for the result on the channel.
+// 
+//.
+  std::string probe(std::string const & text) {
+    if(proc->st.done) return "процесс завершён: пробовать нечего\n";
+    int fd[2];
+    if(pipe(fd) != 0) return "проба: нет канала\n";
+    std::fflush(stdout);
+    pid_t pid = fork();
+    if(pid < 0) return "проба: fork не удался\n";
+    if(pid == 0) {
+      close(fd[0]);
+      std::string r;
+      try {
+        parser p(db, cat("probe__() => ", text, ";"), "<проба>");
+        p.place(root, {});
+        node_id snippet = p.parse_module();
+        auto errs = p.errors();
+        if(!errs.empty())
+          for(auto & e: errs) r += render(e, "проба", db);
+        else {
+          db.link_parents(snippet);
+          r = proc->probe_here(db.as<n_fn>(db.as<n_module>(snippet).items[0]).body, 1'000'000);
+        }
+      } catch(diagnostic const & d) {
+        r += render(d, name, db);
+      } catch(std::exception const & e) {
+        r += cat("проба: ", e.what(), "\n");
+      }
+      for(std::size_t at = 0; at < r.size();) {
+        ssize_t k = write(fd[1], r.data() + at, r.size() - at);
+        if(k <= 0) break;
+        at += std::size_t(k);
+      }
+      _exit(0);
+    }
+    close(fd[1]);
+    std::string r;
+    char buf[4096];
+    for(ssize_t k; (k = read(fd[0], buf, sizeof buf)) > 0;) r.append(buf, std::size_t(k));
+    close(fd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return r;
+  }
+
   std::string edit(std::string const & fn_name, std::string const & text) {
     parser p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
     node_id at; // parsing rules of the function location (§4.4): announced before it; new - the entire module
@@ -201,6 +294,8 @@ struct vm_session {
       for(auto & e: errs) out += render(e, cat("правка ", fn_name), db);
       return out + "правка отклонена\n";
     }
+    for(node_id item: db.as<n_module>(snippet).items)
+      if(db.is_struct(item) && db.strings.text(db.as<n_extend>(item).name) == fn_name) return edit_struct(item, snippet);
     node_id fresh;
     for(node_id item: db.as<n_module>(snippet).items)
       if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) fresh = item;
@@ -218,7 +313,55 @@ struct vm_session {
     m.items.push_back(fresh);
     db.replace(root, m);
     db.link_parents(root);
+    if(proc) proc->helper.register_item(fresh); // Living process sees new overload
     return cat("функция ", fn_name, " добавлена\n");
+  }
+
+  // Edit struct: node saves id, fields new. The living values of the old layout are via
+  // migrate(T old) from the same text (§9.3); no, editing rejected:
+//.
+  std::string edit_struct(node_id fresh, node_id snippet) {
+    symbol type_name = db.as<n_extend>(fresh).name;
+    std::string tn(db.strings.text(type_name));
+    node_id item;
+    for(node_id x: db.as<n_module>(root).items)
+      if(db.is_struct(x) && db.as<n_extend>(x).name == type_name) item = x;
+    if(!item) return cat("нет struct ", tn, "\n");
+    std::vector<symbol> fields;
+    for(node_id x: db.as<n_extend>(fresh).items)
+      if(db.is<n_var>(x)) fields.push_back(db.as<n_var>(x).name);
+    auto takes = [&](node_id f) {
+      auto const & fn = db.as<n_fn>(f);
+      if(db.strings.text(fn.name) != "migrate" || fn.params.size() != 1) return false;
+      node_id t = db.as<n_param>(fn.params[0]).type;
+      return t && db.is<n_ident>(t) && db.as<n_ident>(t).name == type_name;
+    };
+    node_id mig;
+    for(node_id x: db.as<n_module>(snippet).items)
+      if(db.is<n_fn>(x) && takes(x)) mig = x;
+    type_id t = proc ? proc->helper.types.named(tn) : type_id{};
+    uint64_t stale = proc && !proc->st.done ? proc->stale_values(t, fields) : 0;
+    if(stale && !mig)
+      return cat("правка отклонена: живой процесс держит значений ", tn, " старой раскладки: ", stale,
+        " — нужна migrate(", tn, " old) => ", tn, "{…} в том же тексте (или proc stop)\n");
+    db.replace(item, db[fresh].kind);
+    db.adopt_notes(fresh, item);
+    auto m = db.as<n_module>(root);
+    if(mig) { // The previous migrate of the same type is replaced
+      std::erase_if(m.items, [&](node_id x) { return db.is<n_fn>(x) && takes(x); });
+      m.items.push_back(mig);
+    }
+    db.replace(root, m);
+    db.link_parents(root);
+    std::string out = cat("struct ", tn, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
+    if(!proc || proc->st.done) return out;
+    if(mig) { // overload migrate in the assistant - as in the module
+      proc->helper.functions[db.as<n_fn>(mig).name].clear();
+      for(node_id x: db.as<n_module>(root).items)
+        if(db.is<n_fn>(x) && db.as<n_fn>(x).name == db.as<n_fn>(mig).name) proc->helper.register_item(x);
+    }
+    if(stale) out += cat("перенесено migrate: ", proc->migrate_values(t, fields, mig), "\n");
+    return out;
   }
 
   ast_db & db;
@@ -242,6 +385,8 @@ struct vm_session {
   std::vector<interpreter::trace_rec> trace; // launch-track
   std::map<uint32_t, std::map<std::string, interpreter::layer_info>> layers; // function → layers (contexts)
   std::vector<diagnostic> errors;
+  std::unique_ptr<process_machine> proc; // living process of the machine (proc...)
+  std::string proc_out; // his withdrawal from the previous team
 };
 
 } // namespace tz

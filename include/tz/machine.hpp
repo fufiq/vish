@@ -757,6 +757,93 @@ struct process_machine {
   }
   mval cell_value(place p) { return deref(st.scopes[p.scope].vars[p.slot].v); }
 
+  // --- live process (§9.3): clone test, hot replacement, migration ---
+
+  // Sample:
+//.
+  // The expression is considered in the region and frame of the upper problem of the current fiber (local names
+  // are visible); the result is the output and value. Call in the clone (fork session): the state changes.
+  std::string probe_here(node_id expr, uint64_t max_steps) {
+    uint32_t me = st.current;
+    m_fiber & f = fib();
+    m_task const * t = f.tasks.empty() ? nullptr : &f.tasks.back();
+    uint32_t scope = t && t->scope != m_none ? t->scope : st.globals;
+    uint32_t frame = t ? t->frame : 0;
+    std::size_t depth = f.tasks.size();
+    std::string out;
+    captured = &out;
+    push_eval(expr, scope, frame);
+    try {
+      while(max_steps-- > 0 && st.fibers[me].tasks.size() > depth && step()) {}
+    } catch(diagnostic const & d) {
+      return out + render(d, name, db);
+    }
+    if(st.fibers[me].tasks.size() > depth) return out + "проба: не закончилась за отведённые шаги\n";
+    if(st.fibers[me].vals.empty()) return out;
+    return out + helper.print_text(to_value(st.fibers[me].vals.back())) + "\n";
+  }
+
+  // Where the process stands: step and frames of the current fiber (bottom up).
+  std::string where_now() {
+    std::string r = cat("шаг ", st.steps, st.done ? ", завершён" : "", "; кадры:");
+    for(auto const & fr: fib().frames) r += cat(" ", helper.str(fr.name));
+    return r + "\n";
+  }
+
+  // All values of the process: variables of living areas, stacks of values fiber, signals,
+  // buffers of flows; f sees and nested (elements, fields) - first internal.
+  void each_value(auto && f) {
+    auto walk = [&](auto && self, mval & x) -> void {
+      if(x.is<m_arr>())
+        for(auto & e: x.as<m_arr>().items) self(self, e);
+      else if(x.is<m_agg>())
+        for(auto & fl: x.as<m_agg>().fields) self(self, fl.v);
+      f(x);
+    };
+    for(auto & sc: st.scopes)
+      if(sc.live)
+        for(auto & v: sc.vars) walk(walk, v.v);
+    for(auto & fb: st.fibers) {
+      for(auto & v: fb.vals) walk(walk, v);
+      walk(walk, fb.pending.v);
+    }
+    for(auto & sm: st.streams)
+      for(auto & v: sm.buf) walk(walk, v);
+  }
+  static bool same_layout(m_agg const & g, std::vector<symbol> const & fields) {
+    if(g.fields.size() != fields.size()) return false;
+    for(std::size_t i = 0; i < fields.size(); ++i)
+      if(g.fields[i].name != fields[i]) return false;
+    return true;
+  }
+  // Living values of type t with old layout (fields not as fields)
+  uint64_t stale_values(type_id t, std::vector<symbol> const & fields) {
+    uint64_t n = 0;
+    each_value([&](mval & x) {
+      if(x.is<m_agg>() && x.as<m_agg>().type == t && !same_layout(x.as<m_agg>(), fields)) ++n;
+    });
+    return n;
+  }
+  // 
+// (§9.3): each value of the old layout is via migrate program (assistant)
+  // It performs it as an ordinary call; the fields of the old meaning are read by name.
+  uint64_t migrate_values(type_id t, std::vector<symbol> const & fields, node_id fn) {
+    uint64_t n = 0;
+    each_value([&](mval & x) {
+      if(!x.is<m_agg>() || x.as<m_agg>().type != t || same_layout(x.as<m_agg>(), fields)) return;
+      std::vector<value> vals{to_value(x)};
+      span where = db[fn].where;
+      auto r = helper.invoke(fn, vals, {}, helper.globals, {where, "migrate", 0, 0});
+      if(!r.normal()) throw diagnostic("migrate: не вернула значение", where);
+      mval y = from_value(r.v, where);
+      if(!y.is<m_agg>() || y.as<m_agg>().type != t || !same_layout(y.as<m_agg>(), fields))
+        throw diagnostic(cat("migrate: ожидалось значение новой раскладки ", helper.types.name(t)), where);
+      x = std::move(y);
+      ++n;
+    });
+    return n;
+  }
+
   // --- раскрутка ------------------------------------------------------------------------------
 
   void unwind() {

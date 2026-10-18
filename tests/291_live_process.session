@@ -1,0 +1,49 @@
+// Living process: the machine stands between steps; the sample is in the clone (fork):
+// 
+// Hot replacement: new calls - in a new version, started frames live in the old; editing struct
+// with living values - only with
+// migrate(T old).
+// program: live_process.tz
+proc start
+// expect: процесс запущен
+proc step 60
+// expect: кадры: main for
+// expect-not: шаг 0
+proc call total
+// expect: 0
+proc call label(p) * 100
+// expect: 300
+proc call total = 999
+proc call total
+// expect: 0
+// expect-not: 999
+proc call print("в клоне", p.x)
+// expect: в клоне 1
+edit label
+label(point p) => (p.x + p.y) * 10;
+.
+// expect: функция label заменена
+proc step 60
+// expect: шаг 0 30
+edit point
+struct point { i64 x; i64 y; i64 z; }
+.
+// expect: правка отклонена: живой процесс держит значений point старой раскладки: 1
+edit point
+struct point { i64 x; i64 y; i64 z; }
+migrate(point old) => point{old.x, old.y, 7};
+.
+// expect: struct point заменена
+// expect: перенесено migrate: 1
+proc call p
+// expect: point{x: 1, y: 2, z: 7}
+edit label
+label(point p) => p.x + p.y + p.z;
+.
+proc run
+// expect: шаг 1 40
+// expect: шаг 2 50
+// expect: шаг 3 60
+// expect: завершён
+proc call p
+// expect: процесс завершён: пробовать нечего

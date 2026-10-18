@@ -1,0 +1,15 @@
+// out: шаг 0 3
+// out: шаг 1 6
+// out: шаг 2 9
+// out: шаг 3 12
+// Программа сессии 291 (живой процесс).
+struct point { i64 x; i64 y; }
+label(point p) => p.x + p.y;
+main() {
+  p = point{1, 2};
+  total = 0;
+  for(i : range(4)) {
+    total += label(p);
+    print("шаг", i, total);
+  }
+}
