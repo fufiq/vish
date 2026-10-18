@@ -691,16 +691,19 @@ struct process_machine {
     helper.check_before_run(); // parsing before execution: errors of hooks parsing - before the first step
     for(auto const & [k, v]: helper.ct_memo)
       if(portable(v)) st.ct_memo.push_back({node_id(k.first), k.second, from_value(v, {})});
-    for(node_id item: db.as<n_module>(root).items)
-      if(db.is<n_var>(item)) {
-        auto const & v = db.as<n_var>(item);
-        if(!v.ct) continue; // Outside of non-ct functions is parsing error; it doesn't get there
-        value * x = helper.globals->find(v.name);
-        if(!x) throw diagnostic(cat("ct ", helper.str(v.name), ": нет значения"), db[item].where);
-        st.ct_vars.push_back(v.name);
-        // the result, depending on the forks (branches give different), is not a value: read it ct- node from the memo
-        if(portable(*x)) declare(st.globals, v.name, from_value(*x, db[item].where));
-      }
+    std::vector<node_id> modules = helper.module_order; // Variables of all modules of the program (the last one)
+    if(modules.empty()) modules.push_back(root);
+    for(node_id m: modules)
+      for(node_id item: db.as<n_module>(m).items)
+        if(db.is<n_var>(item)) {
+          auto const & v = db.as<n_var>(item);
+          if(!v.ct) continue; // Outside of non-ct functions is parsing error; it doesn't get there
+          value * x = helper.globals->find(v.name);
+          if(!x) throw diagnostic(cat("ct ", helper.str(v.name), ": нет значения"), db[item].where);
+          st.ct_vars.push_back(v.name);
+          // the result, depending on the forks (branches give different), is not a value: read it ct- node from the memo
+          if(portable(*x)) declare(st.globals, v.name, from_value(*x, db[item].where));
+        }
     for(node_id item: db.as<n_module>(root).items) // [[state]] - value from the state of the program
       if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) {
         value * x = helper.globals->find(db.as<n_var>(item).name);
@@ -1394,14 +1397,19 @@ struct process_machine {
     if(p.scope == m_none) {
       std::string_view s = helper.str(x.name);
       if(s == "true" || s == "false") return finish(mval{s == "true"});
+      if(auto st = helper.structs.find(x.name); st != helper.structs.end()) { // entity struct - value (previously registry: there and others)
+        if(node_id home = helper.module_of(st->second), m = helper.module_of(n); helper.module_order.size() > 1 && m && !helper.sees_directly(m, home, x.name))
+          throw diagnostic(helper.not_visible("тип", x.name, home), db[n].where);
+        return finish(mval{m_type{helper.types.named(s)}});
+      }
       if(auto ty = helper.types.builtin(s)) return finish(mval{m_type{ty}});
-      if(helper.structs.contains(x.name)) return finish(mval{m_type{helper.types.named(s)}}); // entity struct - value
       if(auto it = helper.functions.find(x.name); it != helper.functions.end()) {
         for(node_id f: it->second)
           if(helper.inline_required(f))
             throw diagnostic(cat("функция ", s, " использует семантику инлайна (expr-параметр или return(…)) и не может быть значением; вызывайте её напрямую"), db[n].where);
         return finish(mval{m_fn{x.name, {}, m_none}});
       }
+      if(node_id home = module_var_home(x.name); home && find(t.scope, x.name).scope != m_none) throw diagnostic(helper.not_visible("переменная", x.name, home), db[n].where);
       throw diagnostic(cat("неизвестное имя ", s), db[n].where);
     }
     if(p.scope == st.globals && std::ranges::contains(st.ct_vars, x.name) && !in_ct()) // ct-variable - in place (§7.3)
@@ -2633,10 +2641,18 @@ struct process_machine {
   // The program module variable found in the module domain is foreign to the module code that the
   // program does not see (the structure body prelude): like interpreter::foreign_global.
   bool foreign_module_var(place p, symbol name, node_id at) {
-    if(p.scope != st.globals || !db.is<n_module>(root)) return false;
-    bool module_var = std::ranges::any_of(db.as<n_module>(root).items, [&](node_id i) { return db.is<n_var>(i) && db.as<n_var>(i).name == name; });
+    if(p.scope != st.globals) return false;
+    node_id home = module_var_home(name);
     node_id m = helper.module_of(at);
-    return module_var && m && m != root && !helper.definition_sees(m, root);
+    return home && m && !helper.sees_directly(m, home, name); // use is non-transitive (tail of step 10)
+  }
+  // The program module that declared the variable name (the last in the order of modules).
+  node_id module_var_home(symbol name) const {
+    std::vector<node_id> modules = helper.module_order;
+    if(modules.empty() && db.is<n_module>(root)) modules.push_back(root);
+    for(auto it = modules.rbegin(); it != modules.rend(); ++it)
+      if(std::ranges::any_of(db.as<n_module>(*it).items, [&](node_id i) { return db.is<n_var>(i) && db.as<n_var>(i).name == name; })) return *it;
+    return {};
   }
   static bool elem_place(ast_db const & db, node_id x) { return db.is_index(x) && db.is<n_ident>(db.index_of(x).object); }
 

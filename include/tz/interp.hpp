@@ -277,6 +277,54 @@ struct interpreter {
         if(db.is<n_extend>(item) && !db.is_struct(item) && m != db.prelude && visible_item(m, item) && !db.inst_emits.contains(item.value)) register_item(item);
     }
     registering = node_id{};
+    if(module_order.size() > 1)
+      for(node_id m: module_order) check_type_names(m, m);
+  }
+
+  // Isolation of submodules and for type names (tail of step 10): the name struct in the code of the
+  // module m - parameter type, variable and result, Name {…}, sample, base, extension Name { … } - can
+  // be seen if the struct is declared in m, in prelude or in the module that m takes use directly.
+  //  
+// The value of the type by name (typeof(x) ==T) is when calculating the eval name.
+  void check_type_names(node_id m, node_id x) {
+    auto name_at = [&](node_id t) { return t && db.is<n_ident>(t) ? db.as<n_ident>(t).name : symbol{}; };
+    auto use = [&](symbol name, node_id at) {
+      if(!name) return;
+      auto it = structs.find(name);
+      if(it == structs.end()) return;
+      if(node_id home = module_of(it->second); !sees_directly(m, home, name)) fail(not_visible("тип", name, home), db[at].where);
+    };
+    if(db.is<n_param>(x)) use(name_at(db.as<n_param>(x).type), x);
+    else if(db.is<n_var>(x)) use(name_at(db.as<n_var>(x).type), x);
+    else if(db.is<n_construct>(x)) use(name_at(db.as<n_construct>(x).type), x);
+    else if(db.is<n_pat>(x)) use(name_at(db.as<n_pat>(x).type), x);
+    else if(db.is<n_fn>(x)) use(name_at(db.as<n_fn>(x).result_type), x);
+    else if(db.is<n_extend>(x)) {
+      if(!db.as<n_extend>(x).of) use(db.as<n_extend>(x).name, x); // extension of another struct - his name
+      use(db.as<n_extend>(x).base, x);
+    }
+    db.for_each_child(x, [&](node_id c) { check_type_names(m, c); });
+  }
+  // Module m sees the name announcement of the home module directly: its own, prelude, use home
+  // (use home. {…} - named; operators - always). use is not transitive.
+  bool sees_directly(node_id m, node_id home, symbol name) const {
+    if(!m || !home || m == home || home == db.prelude) return true;
+    for(node_id item: db.as<n_module>(m).items)
+      if(db.is<n_use>(item) && db.as<n_use>(item).key == db.as<n_module>(home).name) {
+        auto const & u = db.as<n_use>(item);
+        if(u.names.empty() || std::ranges::contains(u.names, name) || operator_name(str(name))) return true;
+      }
+    return false;
+  }
+  std::string not_visible(std::string_view what, symbol name, node_id home) const {
+    std::string_view k = home && db.as<n_module>(home).name ? str(db.as<n_module>(home).name) : std::string_view("?");
+    return cat(what, " ", str(name), what == "переменная" ? " объявлена" : " объявлен", " в модуле ", k, ", а use его здесь нет: модули изолированы, use не транзитивен — use ", k, ";");
+  }
+  // A variable module with this name that the place does not see (for the "unknown name" error).
+  node_id unseen_module_var(symbol name) {
+    value * c = globals ? globals->find(name) : nullptr;
+    auto it = c ? global_home.find(c) : global_home.end();
+    return it == global_home.end() ? node_id{} : it->second;
   }
 
   // --- Modules (§9.1): use - semantic key inclusion ---
@@ -330,16 +378,7 @@ struct interpreter {
     if(!m || module_order.size() <= 1) return true;
     auto [it, fresh] = name_seen.try_emplace((uint64_t(m.value) << 32) | name.value, true);
     if(!fresh) return it->second;
-    auto sees = [&](node_id d) {
-      if(!d || d == m || d == db.prelude) return true;
-      for(node_id item: db.as<n_module>(m).items)
-        if(db.is<n_use>(item) && db.as<n_use>(item).key == db.as<n_module>(d).name) {
-          auto const & u = db.as<n_use>(item);
-          if(u.names.empty() || std::ranges::contains(u.names, name) || operator_name(str(name))) return true;
-        }
-      return false;
-    };
-    it->second = std::ranges::any_of(decls, [&](node_id f) { return sees(module_of(f)); });
+    it->second = std::ranges::any_of(decls, [&](node_id f) { return sees_directly(m, module_of(f), name); });
     return it->second;
   }
   std::unordered_map<uint64_t, bool> name_seen;
@@ -526,7 +565,7 @@ struct interpreter {
     auto it = global_home.find(c);
     if(it == global_home.end()) return false;
     node_id m = module_of(at);
-    return m && m != it->second && !definition_sees(m, it->second);
+    return m && !sees_directly(m, it->second, name); // use is non-transitive - and for variable modules (tail of step 10)
   }
 
   // entity operator node: infix+/prefix-/postfix++.
@@ -1938,8 +1977,12 @@ struct interpreter {
     }
     if(str(x.name) == "true") return ok(value(true));
     if(str(x.name) == "false") return ok(value(false));
+    if(auto st = structs.find(x.name); st != structs.end()) { // entity struct - value (previously registry: there and others)
+      if(module_order.size() > 1)
+        if(node_id home = module_of(st->second), m = module_of(n); m && !sees_directly(m, home, x.name)) fail(not_visible("тип", x.name, home), db[n].where);
+      return ok(value(type_v{types.named(str(x.name))}));
+    }
     if(auto t = types.builtin(str(x.name))) return ok(value(type_v{t}));
-    if(structs.contains(x.name)) return ok(value(type_v{types.named(str(x.name))})); // entity struct - value
     // Type node code - tag (n_op, n_if...):
     if(is_node_kind(str(x.name))) return ok(value(type_v{types.named(str(x.name))}));
     if(auto it = functions.find(x.name); it != functions.end()) {
@@ -1949,6 +1992,7 @@ struct interpreter {
               db[n].where);
       return ok(value(fn_v{x.name, {}, nullptr}));
     }
+    if(node_id home = unseen_module_var(x.name)) fail(not_visible("переменная", x.name, home), db[n].where);
     fail(cat("неизвестное имя ", str(x.name)), db[n].where);
   }
 
