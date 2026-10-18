@@ -288,7 +288,9 @@ struct jit_machine {
     auto type_value = [&](interpreter & in, jt t) { return value(type_v{in.types.named(jt_name(t))}); };
     value r;
     try {
+      std::string quiet; // Compiler elaboration is not program execution: Ct { print … } module is not output
       interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.capture_output(&quiet);
       comp.jit_analysis = an_for_lang;
       comp.jit_trace = &out.queries;
       // bootstrapping: static compiler functions (encoders, functions over node-struct) compiles
@@ -366,7 +368,9 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
 //  
   bool streams = false;
   try {
+    std::string quiet; // prefilter - not the execution of the program (ct-output module - not the output)
     interpreter pre(db, mod, {"jit"}, mode::run);
+    pre.capture_output(&quiet);
     if(node_id pc = lang_fn("jit_precheck")) {
       value r = pre.analyze_instance(pc, {pre.code_value(fn)});
       if(r.is<array_v>() && r.as<array_v>().size() == 2) {
@@ -458,7 +462,9 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
     for(uint32_t k: rt_index[rt_key]) {
       jit_fn & other = fns[k];
       if(&other == &out || !other.ok || !other.by_lang || !still_valid(other)) continue;
+      std::string quiet;
       interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.capture_output(&quiet);
       comp.jit_analysis = &an;
       bool same = false;
       try {
