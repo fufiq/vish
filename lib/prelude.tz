@@ -1261,7 +1261,6 @@ jit_precheck(f) {
   ast.function{_, params, _, body, _, _, _, _, _} = f;
   for(p : params) {
     ast.parameter{_, t, mode, pack, _, _, _} = p;
-    if(given(t) && (code_kind(t) == ast.pattern)) return array{p, "параметр-образец (распаковка) — интерпретатор"};
     if(pack && (mode == 0)) return array{p, "хвост аргументов ...xs — интерпретатор"};
   }
   jit_rejects(body, code_module(f))
@@ -1901,23 +1900,34 @@ jit_compile(cg, f, types, type result) {
   // битами, значение VM — копией в памяти вызова. Тип имени — из разбора (его наблюдение)
   gen_unpack(e) => {
     ast.unpack{pat, val, test} = e;
-    ast.pattern{_, items} = pat;
-    names = array{};
-    for(it : items) {
-      if(code_kind(it) != ast.parameter) bad("образец: вложенный или значение");
-      else {
-        ast.parameter{pname, _, _, _, _, _, _} = it;
-        if(pname != "_") names.push(it);
-      }
+    unpack_with(pat, test, e, ty(val), val, -1);
+  };
+  // имена образца — в глубину (как служба op 11): элементы, поля интерфейса, вложенные образцы
+  pattern_names(p, names) => {
+    k = code_kind(p);
+    if(k == ast.pattern_field) {
+      ast.pattern_field{_, sub} = p;
+      pattern_names(sub, names);
+    } else if(k == ast.pattern) {
+      ast.pattern{_, items} = p;
+      for(it : items) pattern_names(it, names);
+    } else if(k == ast.parameter) {
+      ast.parameter{pname, _, _, _, _, _, _} = p;
+      if(pname != "_") names.push(p);
     }
-    vt = ty(val);
+  };
+  // распаковка значения val (узел) или слота vslot (параметр-образец на входе — at — сам
+  // параметр): VM распаковывает службой 11/12, имена — в слоты
+  unpack_with(pat, bool test, at, vt, val, i64 vslot) => {
+    names = array{};
+    pattern_names(pat, names);
     if(!is_handle(vt)) bad(fmt"распаковка {vt}");
     else if(ok) {
       n = names.size;
       w = 2 + (2 * n);
       k0 = alloc(w);
       bsl(i64 j) => (k0 + w) - (1 + j);
-      gen(val);
+      if(vslot >= 0) put_bytes(slot_ld(acc, vslot)) else gen(val);
       put_bytes(slot_st(bsl(1), acc));
       mem_to(acc);
       put_bytes(slot_st(bsl(0), acc));
@@ -1930,7 +1940,7 @@ jit_compile(cg, f, types, type result) {
         put_bytes(slot_st(bsl(2 + (2 * i)), acc));
       }
       put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
-      vm_service(if(test) 12 else 11, unit, e); // предикат — истина/ложь в acc, имена — при успехе
+      vm_service(if(test) 12 else 11, unit, at); // предикат — истина/ложь в acc, имена — при успехе
       res = alloc(1);
       put_bytes(slot_st(res, acc));
       for(i : range(n)) if(ok) {
@@ -3424,9 +3434,11 @@ jit_compile(cg, f, types, type result) {
   put_bytes(frame_size(0));
   ast.function{_, fps, _, fbody, _, _, _, _, _} = f;
   ap = 0; // слово в области аргументов
+  pslots = array{}; // слоты параметров
   for(i : range(fps.size)) {
     ast.parameter{pname, _, _, _, _, _, _} = fps[i];
     s = declare(pname, types[i]);
+    pslots.push(s);
     if(types[i] != unit) {
       put_bytes(cg.load(acc, argbase, 8 * ap));
       put_bytes(slot_st(s, acc));
@@ -3437,6 +3449,12 @@ jit_compile(cg, f, types, type result) {
   put_bytes(slot_st(args_slot, argbase));
   outer_save = alloc(1); // регистр кадра объемлющей — сохраняемый (C ABI): вернуть вызвавшему
   put_bytes(slot_st(outer_save, outer_r));
+  // параметр-образец (хвост шага 10): кандидата по значению выбрала VM, имена — распаковкой
+  // значения параметра на входе, как у инструкции образец = значение (служба 11)
+  for(i : range(fps.size)) {
+    ast.parameter{_, pt, _, _, _, _, _} = fps[i];
+    if(given(pt) && (code_kind(pt) == ast.pattern)) unpack_with(pt, false, fps[i], types[i], pt, pslots[i]);
+  }
   if(ok) gen(fbody);
   if(gens.size > 0) bad("spawn (файбер) — интерпретатор");
   bind(ret);

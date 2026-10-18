@@ -1168,7 +1168,15 @@ struct interpreter {
     auto const & fn = db.as<n_fn>(f);
     scope * inner = new_scope(globals);
     scope_hold hold{*this, inner};
-    for(uint32_t i = 0; i < fn.params.size() && i < args.size(); ++i) inner->declare(db.as<n_param>(fn.params[i]).name, args[i]);
+    for(uint32_t i = 0; i < fn.params.size() && i < args.size(); ++i) {
+      auto const & p = db.as<n_param>(fn.params[i]);
+      if(p.type && db.is<n_pat>(p.type)) { // parameter-sample: names - unpacking the sample value (like a call)
+        unpack_into(p.type, args[i], inner, inner, 0, db[fn.params[i]].where);
+        inner->declare(p.name, args[i]); // The value itself is a slot of a machine code parameter
+        continue;
+      }
+      inner->declare(p.name, args[i]);
+    }
     flow r = run_frame(fn.body, inner, fn.name, fn.outline);
     return r.v;
   }

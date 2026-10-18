@@ -595,20 +595,32 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       auto * buf = reinterpret_cast<uint64_t *>(id); // {call memory, value cell, (view, bits) to name}
       auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
       value const & v = *reinterpret_cast<value const *>(buf[1]);
-      auto const & u = vm.db.as<n_unpack>(at);
+      // sample - at unpacking or at the sample parameter (input instance, tail of step 10)
+      node_id pattern = vm.db.is<n_unpack>(at) ? vm.db.as<n_unpack>(at).pattern : vm.db.as<n_param>(at).type;
       scope * s = vm.new_scope(vm.globals);
-      auto r = vm.unpack_into(u.pattern, v, s, s, 0, vm.db[at].where);
+      auto r = vm.unpack_into(pattern, v, s, s, 0, vm.db[at].where);
       if(r == interpreter::unpacked::no && op == 12) { // Predicate: not unpacked - lie, no names
         vm.drop_scope(s);
         return 0;
       }
       if(r == interpreter::unpacked::no) {
         vm.drop_scope(s);
-        vm.fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(vm.db).print(u.pattern), " ← ", vm.show_v(v)), vm.db[at].where);
+        vm.fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(vm.db).print(pattern), " ← ", vm.show_v(v)), vm.db[at].where);
       }
+      // sample names - by traversing in depth, like the pattern_names compiler: elements,
+      // interface fields (.f: subsample), nested samples
+      std::vector<node_id> names;
+      auto walk = [&](this auto const & self, node_id p) -> void {
+        if(vm.db.is<n_pat_field>(p)) return self(vm.db.as<n_pat_field>(p).sub);
+        if(vm.db.is<n_pat>(p)) {
+          for(node_id it: vm.db.as<n_pat>(p).items) self(it);
+          return;
+        }
+        if(vm.db.is<n_param>(p) && vm.db.strings.text(vm.db.as<n_param>(p).name) != "_") names.push_back(p);
+      };
+      walk(pattern);
       uint64_t k = 0;
-      for(node_id it: vm.db.as<n_pat>(u.pattern).items) {
-        if(!vm.db.is<n_param>(it) || vm.db.strings.text(vm.db.as<n_param>(it).name) == "_") continue;
+      for(node_id it: names) {
         value const & x = *s->find(vm.db.as<n_param>(it).name);
         uint64_t kind = buf[2 + 2 * k];
         buf[3 + 2 * k] = kind == 9 ? reinterpret_cast<uint64_t>(mem.add(x)) : jit_value_bits(x, kind);
