@@ -1,7 +1,7 @@
 #!/bin/sh
 # Complete check before the committ: three assemblies - simultaneously (code generation each -
 # on the cores, -flto=auto), tests of the mode - immediately upon the readiness of its assembly.
-# ./check.sh - release, debug, asan + --a64, TZ_JIT_SELF, editor
+#   ./check.sh          — release, debug, asan + --a64, TZ_JIT_SELF, проекция, редактор
 # ./check.sh Quick - Release only and its tests
 # ./check.sh full - as without a key, plus TZ_JIT_SELF under asan (≈7.5 min) Exit code
 # 0 - all green. Logs - out/check/. Working out/tz - release.
@@ -34,6 +34,7 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     cp $b out/tz
     suite a64 $L/t_a64.log $b test tests --a64 &
     TZ_JIT_SELF=1 suite self $L/t_self.log $b test tests &
+    suite projection $L/t_projection.log $b test tests --projection geo.words & # второй язык: тот же АСТ (§4.5)
     if [ -d editor/node_modules ]; then
       $b schema > editor/src/protocol/schema.json
       (cd editor && npx tsc --noEmit && npx vitest run) > $L/t_editor.log 2>&1

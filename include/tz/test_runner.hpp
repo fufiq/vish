@@ -33,6 +33,7 @@
 #include "server.hpp"
 #include "machine.hpp"
 #include "jit/jit.hpp"
+#include "dump.hpp"
 
 #include <filesystem>
 #include <thread>
@@ -43,13 +44,14 @@ struct test_runner {
   bool a64 = false; // --a64: each instance JIT is also coded AArch64 in qemu
   uint32_t a64_checked = 0, a64_skipped = 0;
   std::set<std::string> a64_notes;
+  std::string projection; // Projection k: only reversibility of programs in projection k (§4.5)
 
   int run(std::string const & dir) {
     std::vector<std::filesystem::path> files;
     if(std::filesystem::is_regular_file(dir)) files.push_back(dir); // test
     else
       for(auto & e: std::filesystem::directory_iterator(dir))
-        if(e.path().extension() == ".tz" || e.path().extension() == ".session" || e.path().extension() == ".wire") files.push_back(e.path());
+        if(e.path().extension() == ".tz" || (projection.empty() && (e.path().extension() == ".session" || e.path().extension() == ".wire"))) files.push_back(e.path());
     std::ranges::sort(files);
     uint32_t passed = 0;
     auto show = [&](std::filesystem::path const & f, std::string const & why) {
@@ -550,7 +552,56 @@ struct test_runner {
     return text.substr(at);
   }
 
+  // A second language on top of a single AST (§4.5): a program printed in projection k - the
+  // text that itself tells you how to parse it (use k; at the beginning) - is disassembled
+  // into the same tree, and its printing is stable.
+// 
+  // The tree is compared with a dump (without node numbers).
+  std::string roundtrip(std::filesystem::path const & path) {
+    os::mapped_file file(path.string());
+    std::string src(file.text());
+    auto dir = path.parent_path();
+    auto module = [&](ast_db const & db) {
+      auto it = db.strings.index.find(projection);
+      return it != db.strings.index.end() ? find_module(db, it->second) : node_id{};
+    };
+    auto print = [&](ast_db & db, node_id root) {
+      std::vector<diagnostic> ignored = preload_uses(db, cat("use ", projection, ";"), dir);
+      printer pr(db);
+      pr.projection = module(db);
+      pr.header = true;
+      return pr.projection ? pr.print(root) : std::string{};
+    };
+    ast_db db, db2;
+    std::vector<diagnostic> errors, errors2;
+    node_id root = parse_program(db, src, dir, errors);
+    std::string once = print(db, root);
+    if(once.empty()) return cat("    нет модуля проекции ", projection, "\n");
+    node_id root2 = parse_program(db2, once, dir, errors2);
+    if(errors.empty() && !errors2.empty()) return cat("    текст в проекции не разбирается: ", render(errors2.front(), "проекция", db2), once);
+    std::string twice = print(db2, root2);
+    if(once != twice) return cat("    печать в проекции нестабильна:\n", first_difference(once, twice));
+    std::string a = dumper(db).dump(root), b = dumper(db2).dump(root2);
+    std::string use = cat("  n_use key=", projection, "\n");
+    if(std::size_t at = b.find(use); at != std::string::npos && !a.contains(use)) b.erase(at, use.size());
+    if(a != b) return cat("    другое дерево после разбора проекции:\n", first_difference(a, b), "    текст:\n", once);
+    return {};
+  }
+  // The first differing line of two texts is with neighboring ones (was/became).
+  static std::string first_difference(std::string const & a, std::string const & b) {
+    auto la = lines_of(a), lb = lines_of(b);
+    std::size_t k = 0;
+    while(k < la.size() && k < lb.size() && la[k] == lb[k]) ++k;
+    std::string out;
+    for(std::size_t i = k >= 3 ? k - 3 : 0; i < k + 3; ++i) {
+      if(i < la.size()) out += cat("      было  ", i + 1, ": ", la[i], "\n");
+      if(i < lb.size() && i >= k) out += cat("      стало ", i + 1, ": ", lb[i], "\n");
+    }
+    return out;
+  }
+
   std::string run_one(std::filesystem::path const & path) {
+    if(!projection.empty()) return roundtrip(path);
     if(path.extension() == ".session" || path.extension() == ".wire") return run_session(path);
     os::mapped_file file(path.string());
     std::string src(file.text());

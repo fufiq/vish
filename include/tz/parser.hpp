@@ -198,6 +198,7 @@ struct parser {
           if(lexer::is_ident_start(db.strings.text(w)[0])) rules.record_words.insert(std::string(db.strings.text(w)));
       return;
     }
+    shadow_records(f.name);
     learn_operator(f);
     bool any_clause = false;
     uint32_t head = 0;
@@ -222,6 +223,24 @@ struct parser {
       bool known = std::ranges::any_of(c.clauses, [&](auto const & w) { return w.first == p.clause; });
       if(!known) c.clauses.push_back({p.clause, p.pack});
     }
+  }
+
+  // The function or design of a program with the name of the head of a record (when is a
+  // second language word, §4.5) closes these records from itself to the end of the context:
+  // then when is its call.
+// 
+// Printing a closed record
+  // Takes (printer::shadowed).
+  void shadow_records(symbol name) {
+    if(!rules.syntaxes.contains(name.value)) return;
+    touch();
+    rules.syntaxes.erase(name.value);
+    rules.record_words.clear();
+    for(auto const & [head, ds]: rules.syntaxes)
+      for(node_id d: ds)
+        if(record_of(db, d))
+          for(symbol w: db.as<n_fn>(d).form)
+            if(lexer::is_ident_start(db.strings.text(w)[0])) rules.record_words.insert(std::string(db.strings.text(w)));
   }
 
   construct const * construct_of(node_id callee) const {
@@ -1054,13 +1073,17 @@ struct parser {
     // [type] name
     uint32_t name_at;
     if(ahead(k).kind == tok::ident && ahead(k + 1).kind == tok::ident && is_open('(', k + 2)) name_at = k + 1;
-    else if(ahead(k).kind == tok::ident && is_open('(', k + 1) && !is_keyword(ahead(k).text)) name_at = k;
+    // name and word of record (when, otherwise...): => or { - the record does not continue
+    // in parentheses;
+// Programme design
+    // The name of a second language word (§4.5) is declared as any word.
+    else if(ahead(k).kind == tok::ident && is_open('(', k + 1) && !core_word(ahead(k).text)) name_at = k;
     else return std::nullopt;
     // after ) - clauses word(...) and then => or {
     uint32_t close = match[pos + name_at + 1];
     if(close == ~uint32_t{0}) return std::nullopt;
     uint32_t after = close + 1 - pos;
-    while(ahead(after).kind == tok::ident && is_open('(', after + 1) && !is_keyword(ahead(after).text)) {
+    while(ahead(after).kind == tok::ident && is_open('(', after + 1) && !core_word(ahead(after).text)) {
       uint32_t c2 = match[pos + after + 1];
       if(c2 == ~uint32_t{0}) return std::nullopt;
       after = c2 + 1 - pos;
@@ -1097,9 +1120,8 @@ struct parser {
   // the area (if, else, loop, return... - prelude):
 // 
 //.
-  bool is_keyword(std::string_view w) const {
-    return w == "ct" || w == "const" || w == "outline" || w == "module" || w == "operator" || rules.record_words.contains(std::string(w));
-  }
+  bool is_keyword(std::string_view w) const { return core_word(w) || rules.record_words.contains(std::string(w)); }
+  static bool core_word(std::string_view w) { return w == "ct" || w == "const" || w == "outline" || w == "module" || w == "operator"; }
   // w is the first word of the declared syntax record (begins the expression)
   bool heads_syntax(std::string_view w) const {
     auto it = db.strings.index.find(std::string(w));

@@ -13,6 +13,7 @@
 #include <map>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace tz {
 
@@ -128,6 +129,14 @@ struct printer {
       out += cat("module ", str(m.name), ";\n");
     }
     bool first = !m.name;
+    // The text in projection itself tells you how to disassemble it:
+// - use k; first;
+    // an element if the program module projection does not fully connect (*my*: line is normal
+    // use, module rules at use point are §4.4).
+    if(header && projection && module != projection && !uses_projection(m)) {
+      out += cat(first ? "" : "\n", "use ", str(db.as<n_module>(projection).name), ";\n");
+      first = false;
+    }
     bool joined = false; // after the draft: the separator of the following element - in its text
     bool top = layouts && open.size() == 1; // module
     if(top) {
@@ -496,6 +505,37 @@ struct printer {
     return c.args.size() == x.second.places ? &x : nullptr; // The number of seats is not the same.
   }
 
+  // The head w record is closed in place n by the program announcement (function, construction)
+  // between the record and n: parsing there sees the ad, not the record (parser::shadow_records) -
+  // the print on it would be sorted into another tree. Home - the context of the record (its
+  // element home_at; -1 - the recording of the call block, all elements of the home below it),
+  // empty - external (prelude, projection): closes any ad on the way.
+  bool shadowed(node_id n, rec const & x, node_id home = {}, int64_t home_at = -1) {
+    if(!fn_names_scanned) {
+      fn_names_scanned = true;
+      for(uint32_t i = 0; i < db.size(); ++i)
+        if(db.is<n_fn>(node_id(i)) && db.as<n_fn>(node_id(i)).form.empty() && db.as<n_fn>(node_id(i)).name) fn_names.insert(db.as<n_fn>(node_id(i)).name.value);
+    }
+    symbol w = db.as<n_fn>(x.first).name;
+    if(!fn_names.contains(w.value)) return false;
+    auto declares = [&](node_id i) {
+      auto is_w = [&](node_id f) { return db.is<n_fn>(f) && db.as<n_fn>(f).name == w && db.as<n_fn>(f).form.empty(); };
+      if(is_w(i)) return true;
+      return db.is<n_extend>(i) && std::ranges::any_of(db.as<n_extend>(i).items, is_w);
+    };
+    for(node_id at = n, c = db[n].parent; c; at = c, c = db[c].parent) {
+      if(!db.is_context(c)) continue;
+      auto const & xs = db.context_items(c);
+      auto pos = std::ranges::find(xs, at);
+      for(auto it = xs.begin(); it != pos && it != xs.end(); ++it)
+        if((c != home || it - xs.begin() > home_at) && declares(*it)) return true;
+      if(c == home) return false;
+    }
+    return false;
+  }
+  bool fn_names_scanned = false;
+  std::unordered_set<uint32_t> fn_names; // Base function names (not records): records are closed only by them
+
   // Write node n (body locations а node field or call arguments); empty - no.
   rec const * record_for(node_id n) {
     if(!record_kind(n)) return nullptr;
@@ -507,7 +547,7 @@ struct printer {
     int r = -1;
     if(projection) // projection Presentation - First: Its Records Replace Place Records
       for(auto const & x: context_recs(projection))
-        if(fits(n, rec_pool[x.rec])) {
+        if(fits(n, rec_pool[x.rec]) && !shadowed(n, rec_pool[x.rec])) {
           r = int(x.rec);
           found[n.value] = r;
           return &rec_pool[r];
@@ -521,14 +561,14 @@ struct printer {
         auto pos = item_at.find(at.value);
         if(pos == item_at.end()) continue;
         for(auto const & x: rs)
-          if(x.at < pos->second && fits(n, rec_pool[x.rec])) {
+          if(x.at < pos->second && fits(n, rec_pool[x.rec]) && !shadowed(n, rec_pool[x.rec], c, int64_t(x.at))) {
             r = int(x.rec);
             break;
           }
       } else if(node_id call = block_call(c, at))
         for(node_id d: call_rec_decls(call)) {
           for(uint32_t x: body_recs(d))
-            if(fits(n, rec_pool[x])) {
+            if(fits(n, rec_pool[x]) && !shadowed(n, rec_pool[x], at)) {
               r = int(x);
               break;
             }
@@ -537,7 +577,7 @@ struct printer {
     }
     if(r < 0 && db.prelude && top != db.prelude)
       for(auto const & x: context_recs(db.prelude))
-        if(fits(n, rec_pool[x.rec])) {
+        if(fits(n, rec_pool[x.rec]) && !shadowed(n, rec_pool[x.rec])) {
           r = int(x.rec);
           break;
         }
@@ -1008,6 +1048,11 @@ struct printer {
   // functions); its records are the first, before the location records. Empty - by default:
   // entries by scope, prelude - C-like projection (D3).
   node_id projection;
+  bool header = false; // text in projection - with use k; at the beginning (tz fmt-projection), no representation of the editor
+  bool uses_projection(n_module const & m) const {
+    symbol key = db.as<n_module>(projection).name;
+    return std::ranges::any_of(m.items, [&](node_id x) { return db.is<n_use>(x) && db.as<n_use>(x).key == key && db.as<n_use>(x).names.empty(); });
+  }
 
   // [[associative]] in the operator, visible in place lexically: module elements and prelude,
   // the operators of the blocks declared above. The context of the execution (using operator
