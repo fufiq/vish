@@ -7777,7 +7777,10 @@ struct interpreter {
     // Data offsets and the size of the dense array in the VM value cell (§12.2): machine code reads
     // them from memory
     if(n == "region" && a.empty()) { // New Memory Level: Your Range of Addresses
-      if(checking()) return erase(value(agg_v{types.named("region"), {{sym("id"), value(int64_t(0))}}}));
+      if(checking()) { // level - resource: its release is conducted by the interpreter (JIT does not take such instance)
+        ++resources_made;
+        return erase(value(agg_v{types.named("region"), {{sym("id"), value(int64_t(0))}}}));
+      }
       root->regions.emplace_back();
       root->regions.back().holders = 1;
       agg_v g{types.named("region"), {{sym("id"), value(int64_t(root->regions.size() - 1))}}};

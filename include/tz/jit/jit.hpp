@@ -30,6 +30,7 @@ namespace tz {
 enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4, thrown = 5, vm_error = 6 };
 // clang-format on
 uint64_t jit_fault = 0;
+std::vector<address_space *> jit_spaces; // with_alloc in machine code: levels included
 uint64_t jit_fault_node = 0;
 // The exception that comes out of machine code is the "second way"
 // value and its type.
@@ -234,7 +235,14 @@ struct jit_machine {
     f->params = types;
     f->extra = extra;
     f->extra_from = from;
-    compile(fn, *f);
+    { // Compilation - Default memory level: compiler lives longer than context
+      // with_alloc(r) of the program, its values should not be in pages r (§12.2)
+      struct default_level {
+        address_space * saved = std::exchange(current_space, nullptr);
+        ~default_level() { current_space = saved; }
+      } level;
+      compile(fn, *f);
+    }
     return f->ok ? f : nullptr;
   }
 
@@ -553,6 +561,23 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
     // the address of the cell value of VM; modified s - back to the buffer; bits - the type of result
     //
     if(op == 8) return jit_eval_node(vm, at, reinterpret_cast<uint64_t *>(id), bits);
+    // with_alloc(r) in machine code: 13 - enter the memory level r (bits - the address of the region
+    // value cell), 14 - exit; the level when entering the VM code restores and by mistake
+    if(op == 13) {
+      value const * c = reinterpret_cast<value const *>(bits);
+      value const * sh = c ? shape_of(*c) : nullptr;
+      if(!sh || !sh->is<agg_v>() || vm.types.name(sh->as<agg_v>().type) != "region") throw diagnostic("with_alloc: ожидался уровень памяти region", vm.db[at].where);
+      jit_spaces.push_back(current_space);
+      current_space = &vm.root->regions[std::size_t(sh->as<agg_v>().fields[0].second.as<int64_t>())];
+      return 0;
+    }
+    if(op == 14) {
+      if(!jit_spaces.empty()) {
+        current_space = jit_spaces.back();
+        jit_spaces.pop_back();
+      }
+      return 0;
+    }
     if(op == 6 || op == 7) {
       auto & pa = reinterpret_cast<jit_call_mem *>(id)->print_args;
       if(op == 7) pa.push_back(value(vm.db.as<n_str>(at).value));
@@ -740,8 +765,14 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   // next service call from the external code takes the interpreter, which no longer exists.
   struct restore_vm {
     interpreter * outer;
-    ~restore_vm() { jit_vm = outer; }
-  } restore{std::exchange(jit_vm, this)};
+    address_space * space;
+    std::size_t spaces;
+    ~restore_vm() {
+      jit_vm = outer;
+      current_space = space; // with_alloc interrupted by an error is the previous level
+      jit_spaces.resize(spaces);
+    }
+  } restore{std::exchange(jit_vm, this), current_space, jit_spaces.size()};
   auto entry =reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
   uint64_t bits;
   jit_call_mem mem;

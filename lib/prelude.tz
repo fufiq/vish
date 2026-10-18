@@ -1384,7 +1384,10 @@ jit_compile(cg, f, types, type result) {
   is_arr(type t) => (t == array(i64)) || (t == array(f64));
   // массив с типом элементов, известным позже (array{} до push): в слоте всё равно адрес ячейки
   arr_like(type t) => is_arr(t) || (type_family(t) == type_family(array(i64)));
-  late_arr = typeof(array{}); // array<?>: элементы ещё неизвестны
+  // array<?>: элементы ещё неизвестны (объявлен пустым литералом, узнан ростом). Было
+  // typeof(array{}) — это тип array, а разбор называет такой массив array<?>: сравнение не
+  // срабатывало, размер читался из общего списка, цикл по массиву шёл без итераций (тихо)
+  late(type t) => fmt"{t}" == "array<?>";
   // тип массива переменной s по месту o: у разбора — по месту использования
   arr_type(i64 s, o) => if(is_arr(env[s].kind)) env[s].kind else {
     u = jit_type(o, ctx);
@@ -1613,7 +1616,9 @@ jit_compile(cg, f, types, type result) {
     t = jit_type(e, ctx);
     if(v >= 0) {
       w = env[v];
-      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else if(w.kind == jc_ref) ref_elem(v) else w.kind
+      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else if(w.kind == jc_ref) ref_elem(v)
+      else if(!is_arr(w.kind) && (arr_like(w.kind) && (given(t) && late(w.kind)))) t // array{} — тип элементов здесь знает разбор
+      else w.kind
     } else if(given(t)) t
     else if((k == ast.call) && (local_fns(callee_name(code_items(e)[0])).size > 0)) { // рекурсия локальной — тип её внешнего вызова
       r = unit;
@@ -2009,7 +2014,7 @@ jit_compile(cg, f, types, type result) {
   // кортежи — значения VM) — список значений; массив без известных элементов — слова
   arr_size_of(i64 r, i64 s, o) => {
     t = arr_type(s, o);
-    if(is_arr(t) || (t == late_arr)) arr_size(r, env[s].slot)
+    if(is_arr(t) || late(t)) arr_size(r, env[s].slot)
     else {
       put_bytes(slot_ld(r, env[s].slot));
       put_bytes(cg.load(r, r, a_items_n));
@@ -2095,7 +2100,7 @@ jit_compile(cg, f, types, type result) {
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
     else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
     else if(!arr_like(env[s].kind)) bad("индекс не массива");
-    else if(!is_arr(arr_type(s, o)) && (arr_type(s, o) != late_arr)) vm_or_bad(e, "элемент — значение VM"); // копия в памяти вызова
+    else if(!is_arr(arr_type(s, o)) && !late(arr_type(s, o))) vm_or_bad(e, "элемент — значение VM"); // копия в памяти вызова
     else if(!is_arr(arr_type(s, o))) bad("тип элементов массива неизвестен");
     else {
       gen(ix);
@@ -2464,6 +2469,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(cg.to_i64(acc, acc_f));
     } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) — граница
     else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
+    else if((name == "alloc_in") && (xs.size == 2)) gen_alloc_in(e, xs);
     else if((name == "fiber_start") && (xs.size == 1)) gen_spawn(e, xs[0]);
     else if(name == "print") gen_print(e, xs);
     else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // примитив ядра a[i]
@@ -2936,6 +2942,27 @@ jit_compile(cg, f, types, type result) {
   };
   // try { тело } catch(T e) { … } … = intercept(тело, блоки): 
 // catch — по типу, при компиляции
+  // with_alloc(r) { тело } — ядро alloc_in: уровень r — VM (службы 13/14), тело — здесь же
+  // 
+  gen_alloc_in(e, xs) => {
+    b = var_of(xs[1]);
+    if((b < 0) || !env[b].thunk) bad("alloc_in не над expr-параметром");
+    else if(tries.size > 0) bad("with_alloc внутри try");
+    else {
+      vm_eval(xs[0], ty(xs[0])); // адрес ячейки region — в acc
+      put_bytes(cg.move(ca2, acc));
+      vm_service(13, unit, e);
+      bv = env[b];
+      in_view(bv.th_top, bv.th_base, bv.th_ctx, bv.th_ret, () => gen(bv.th));
+      t = ty(e);
+      keep = alloc(1);
+      if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+      put_bytes(slot_st(keep, acc));
+      vm_service(14, unit, e);
+      put_bytes(slot_ld(acc, keep));
+      if(t == f64) put_bytes(cg.move_to_f64(acc_f, acc));
+    }
+  };
   gen_intercept(xs) => {
     b = var_of(xs[0]);
     h = var_of(xs[1]);
