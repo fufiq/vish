@@ -1,6 +1,7 @@
 // check-error: чтение закрытого файла
 // check-error: закрыт здесь
 // check-error: в read
+// machine
 // out: 30
 // error: чтение закрытого файла
 // fmt-stable

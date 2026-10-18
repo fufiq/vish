@@ -1,4 +1,6 @@
 // args: 2
+// machine
+// machine-dump: 200
 // out: 30 -1
 // check: require_failed
 // check-lacks: ошибка

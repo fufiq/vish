@@ -1,4 +1,5 @@
 // args: 2
+// machine
 // out: 30
 // check-error: чтение закрытого файла
 // check-error: закрыт здесь

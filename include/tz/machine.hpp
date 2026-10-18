@@ -74,6 +74,9 @@ struct m_alias {
 };
 struct mval {
   std::variant<m_unit, bool, int64_t, double, m_str, m_type, m_arr, m_agg, m_fn, m_thunk, m_alias> v;
+  // ct-state of value (§5.6 as value::ct interpreter): the number in m_state::ct_states+1 travels with
+  // copies of the value; set_ct_state(x, s) puts it in place x
+  uint32_t ct = 0;
 
   mval() = default;
   mval(auto x)
@@ -227,11 +230,12 @@ struct m_state {
   uint32_t res_counter = 0;
   m_list<uint32_t> res_live;
   m_list<m_shared> shared;
+  m_list<mval> ct_states; // ct-state of values (mval::ct - number + 1)
 };
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "TZPROC07";
+  std::string magic = "TZPROC08";
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -2288,6 +2292,21 @@ struct process_machine {
       take_from(args[0], v, t.scope);
       return finish(make_shared(std::move(v)));
     }
+    // ct-state of value (§5.6): one semantics with an interpreter - set_ct_state(x, s) sets the
+    // state to place x (variable, via alias), ct_state(x, иначе) reads it
+    if(helper.str(name) == "set_ct_state" && t.a == 2 && !helper.functions.contains(name)) {
+      mval * place = nullptr;
+      if(fib().vals[t.base].is<m_alias>()) place = &follow(fib().vals[t.base].as<m_alias>());
+      else if(db.is<n_ident>(args[0])) {
+        auto p = find(t.scope, db.as<n_ident>(args[0]).name);
+        if(p.scope != m_none) place = &cell(p);
+      }
+      if(!place) throw diagnostic("set_ct_state: первый аргумент — переменная", db[n].where);
+      st.ct_states.push_back(a[1]);
+      place->ct = uint32_t(st.ct_states.size());
+      return finish(mval{m_unit{}});
+    }
+    if(helper.str(name) == "ct_state" && t.a == 2 && !helper.functions.contains(name)) return finish(a[0].ct ? mval(st.ct_states[a[0].ct - 1]) : a[1]);
     if(helper.str(name) == "shared_count" && t.a == 1 && !helper.functions.contains(name)) {
       if(!is_shared_v(a[0])) throw diagnostic("shared_count: ожидался shared", db[n].where);
       return finish(mval{int64_t(slot_of(a[0]).count)});
@@ -2927,7 +2946,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(std::string_view(h.magic) != "TZPROC07") throw diagnostic("не дамп процесса tz", {});
+    if(std::string_view(h.magic) != "TZPROC08") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }
