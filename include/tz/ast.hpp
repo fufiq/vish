@@ -1190,6 +1190,16 @@ node_id find_module(ast_db const & db, symbol key) {
     if(db.is<n_module>(node_id(i)) && db.as<n_module>(node_id(i)).name == key) found = node_id(i);
   return found;
 }
+// The key of the node chain of names: geo.vec is a member of the vec name geo; not the chain of names is empty.
+std::string module_path(ast_db const & db, node_id x) {
+  std::string key;
+  while(db.is_member(x)) {
+    key = "." + std::string(db.strings.text(db.member_of(x).name)) + key;
+    x = db.member_of(x).object;
+  }
+  if(!db.is<n_ident>(x)) return {};
+  return std::string(db.strings.text(db.as<n_ident>(x).name)) + key;
+}
 
 // Diagnostics on the basis: the text is taken from the import to which the node belongs.
 std::string render(diagnostic const & d, std::string_view file, ast_db const & db) {

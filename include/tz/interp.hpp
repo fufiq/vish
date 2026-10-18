@@ -282,7 +282,8 @@ struct interpreter {
   // --- Modules (§9.1): use - semantic key inclusion ---
 
   // Modules in order of registration: used before, your last; selective use k. {a, b} - only
-  // named (use k; somewhere else - all).
+  // named (use k; somewhere else - all). Who sees what name is name_visible (use is not
+  // transitive).
   void order_modules(node_id root) {
     std::set<uint32_t> done;
     auto visit = [&](auto && self, node_id m) -> void {
@@ -302,7 +303,67 @@ struct interpreter {
       module_order.push_back(m);
     };
     visit(visit, root);
+    // Qualified name modules (geo.vec.norm(…) without use) are registered in its entirety: the
+    // name is named in full, isolation does not hide it
+    std::vector<node_id> named;
+    auto scan = [&](auto && self, node_id x) -> void {
+      if(db.is<n_call>(x) && db.is_member(db.as<n_call>(x).callee))
+        if(node_id q = module_by_path(db.member_of(db.as<n_call>(x).callee).object); q && !done.contains(q.value)) named.push_back(q);
+      db.for_each_child(x, [&](node_id c) { self(self, c); });
+    };
+    for(node_id m: module_order) scan(scan, m);
+    for(node_id q: named) {
+      whole_modules.insert(q.value);
+      std::vector<node_id> tail;
+      std::swap(tail, module_order);
+      visit(visit, q);
+      std::swap(tail, module_order);
+      module_order.insert(module_order.end() - 1, tail.begin(), tail.end()); // before his (last)
+    }
   }
+  // Insulation of sub-modules:
+//  
+// The name is visible in modulus m, if at least one of its announcements is in m, in prelude or in
+  // A module that m takes use directly (use k. {…} - named); use is not transitive. The
+  // overload visible name from the other modules involved is extensibility (§7.3).
+  bool name_visible(node_id m, symbol name, std::vector<node_id> const & decls) {
+    if(!m || module_order.size() <= 1) return true;
+    auto [it, fresh] = name_seen.try_emplace((uint64_t(m.value) << 32) | name.value, true);
+    if(!fresh) return it->second;
+    auto sees = [&](node_id d) {
+      if(!d || d == m || d == db.prelude) return true;
+      for(node_id item: db.as<n_module>(m).items)
+        if(db.is<n_use>(item) && db.as<n_use>(item).key == db.as<n_module>(d).name) {
+          auto const & u = db.as<n_use>(item);
+          if(u.names.empty() || std::ranges::contains(u.names, name) || operator_name(str(name))) return true;
+        }
+      return false;
+    };
+    it->second = std::ranges::any_of(decls, [&](node_id f) { return sees(module_of(f)); });
+    return it->second;
+  }
+  std::unordered_map<uint64_t, bool> name_seen;
+  // Qualified name module: geo.vec in geo.vec.norm(…) is a chain of names, the first is not
+  // variable; no such module is empty.
+  node_id qualified_module(node_id obj, scope * env) {
+    node_id x = obj;
+    while(db.is_member(x)) x = db.member_of(x).object;
+    if(!db.is<n_ident>(x) || find(env, db.as<n_ident>(x).name)) return {};
+    return module_by_path(obj);
+  }
+  // module on the chain of names (geo.vec); base modules - by name, recalculation as the base grows
+  node_id module_by_path(node_id obj) {
+    for(; modules_seen < db.size(); ++modules_seen) // new node databases - once
+      if(node_id m(modules_seen); m != db.prelude && db.is<n_module>(m) && db.as<n_module>(m).name) modules_by_name[db.as<n_module>(m).name.value] = m;
+    if(modules_by_name.empty()) return {};
+    std::string key = module_path(db, obj);
+    auto it = db.strings.index.find(key);
+    if(it == db.strings.index.end()) return {};
+    auto m = modules_by_name.find(it->second.value);
+    return m == modules_by_name.end() ? node_id{} : m->second;
+  }
+  uint32_t modules_seen = 0;
+  std::unordered_map<uint32_t, node_id> modules_by_name;
   bool visible_item(node_id m, node_id item) const {
     if(m == mod || m == db.prelude || whole_modules.contains(m.value)) return true;
     symbol name =  db.is<n_fn>(item) ? db.as<n_fn>(item).name
@@ -6293,6 +6354,14 @@ struct interpreter {
       auto const & m = db.member_of(c.callee);
       // entity .f(…) is a function declared in the body of the entity function:
 //  
+      if(node_id qm = qualified_module(m.object, env)) { // geo.vec.norm(…) - overload declared in the module
+        std::vector<node_id> set;
+        if(auto it = functions.find(m.name); it != functions.end())
+          for(node_id f: it->second)
+            if(module_of(f) == qm) set.push_back(f);
+        if(set.empty()) fail(cat("в модуле ", str(db.as<n_module>(qm).name), " нет функции ", str(m.name)), where);
+        return call_overloaded(set, c.args, env, frame, {where, std::string(str(m.name)), n.value, frame});
+      }
       if(db.is<n_ident>(m.object)) {
         std::optional<fn_v> ent;
         if(value * cell = find(env, db.as<n_ident>(m.object).name)) {
@@ -6421,8 +6490,15 @@ struct interpreter {
   }
 
   flow call_named(symbol name, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
-    if(auto it = functions.find(name); it != functions.end())
+    if(auto it = functions.find(name); it != functions.end()) {
+      if(node && module_order.size() > 1 && !name_visible(module_of(node_id(node)), name, it->second)) {
+        node_id home = module_of(it->second.front());
+        fail(cat("функция ", str(name), " объявлена в модуле ", home ? str(db.as<n_module>(home).name) : "?",
+          ", а use его здесь нет: модули изолированы, use не транзитивен — use ", home ? str(db.as<n_module>(home).name) : "?",
+          "; или квалифицированно: ", home ? str(db.as<n_module>(home).name) : "?", ".", str(name), "(…)"), where);
+      }
       return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node, frame});
+    }
     if(args.size() == 1 && str(name) == "shared") { // shared(x) - the value goes to the storage (transfer, like an assignment)
       TZ_TRY(v0, eval(args[0], env, frame));
       TZ_TAKE(v, args[0], v0, env, frame);

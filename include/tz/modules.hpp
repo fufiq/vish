@@ -39,13 +39,40 @@ std::vector<std::string> use_keys(std::string_view text) {
   return out;
 }
 
+// Keys of qualified text names: geo.vec.norm( - chain prefixes that have a module file
+// (geo/vec.tz); the module is taken without use - the name is named in its entirety.
+std::vector<std::string> qualified_keys(std::string_view text, std::filesystem::path const & dir) {
+  lexer lx(text);
+  auto toks = lx.run();
+  std::vector<std::string> out;
+  for(std::size_t i = 0; i < toks.size(); ++i) {
+    if(toks[i].kind != tok::ident || (i > 0 && toks[i - 1].ch() == '.')) continue;
+    std::vector<std::string_view> parts{toks[i].text};
+    std::size_t j = i;
+    while(j + 2 < toks.size() && toks[j + 1].ch() == '.' && toks[j + 2].kind == tok::ident) {
+      parts.push_back(toks[j + 2].text);
+      j += 2;
+    }
+    if(parts.size() < 2 || j + 1 >= toks.size() || toks[j + 1].ch() != '(') continue;
+    std::string key, rel;
+    for(std::size_t k = 0; k + 1 < parts.size(); ++k) {
+      key += (k ? "." : "") + std::string(parts[k]);
+      rel += (k ? "/" : "") + std::string(parts[k]);
+      if(std::filesystem::exists(dir / (rel + ".tz"))) out.push_back(key);
+    }
+  }
+  return out;
+}
+
 // Modules from use k; text to the database before the text itself (like prelude): use brings
 // module shapes (syntax, operator, design) into context at the use point - the main module's
 // parsing sees them. Recursively; the use cycle is a pass. Errors parsing modules; "no module"
 // - load_uses (use location known after parsing).
 std::vector<diagnostic> preload_uses(ast_db & db, std::string_view text, std::filesystem::path const & dir, std::set<std::string> & loading) {
   std::vector<diagnostic> errors;
-  for(auto const & key: use_keys(text)) {
+  auto keys = use_keys(text);
+  for(auto & k: qualified_keys(text, dir)) keys.push_back(std::move(k));
+  for(auto const & key: keys) {
     auto it = db.strings.index.find(key);
     if((it != db.strings.index.end() && find_module(db, it->second)) || loading.contains(key)) continue;
     std::string rel = key;

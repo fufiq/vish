@@ -1917,7 +1917,17 @@ struct process_machine {
   std::vector<node_id> entity_members(node_id n, uint32_t scope) {
     if(!db.is<n_call>(n) || !db.is_member(db.as<n_call>(n).callee)) return {};
     auto const & m = db.member_of(db.as<n_call>(n).callee);
-    if(!db.is<n_ident>(m.object) || find(scope, db.as<n_ident>(m.object).name).scope != m_none) return {};
+    node_id head = m.object;
+    while(db.is_member(head)) head = db.member_of(head).object;
+    if(!db.is<n_ident>(head) || find(scope, db.as<n_ident>(head).name).scope != m_none) return {};
+    if(node_id qm = helper.module_by_path(m.object)) { // geo.vec.norm(…) - overload declared in the module
+      std::vector<node_id> set;
+      if(auto it = helper.functions.find(m.name); it != helper.functions.end())
+        for(node_id f: it->second)
+          if(helper.module_of(f) == qm) set.push_back(f);
+      return set;
+    }
+    if(!db.is<n_ident>(m.object)) return {};
     auto it = helper.functions.find(db.as<n_ident>(m.object).name);
     if(it == helper.functions.end()) return {};
     std::vector<node_id> set;
@@ -1966,7 +1976,8 @@ struct process_machine {
   std::vector<node_id> overloads_of(node_id n, node_id any, uint32_t scope, uint32_t * env = nullptr) {
     if(db.is<n_node>(n)) return kind_evals(db.as<n_node>(n));
     if(auto set = entity_members(n, scope); !set.empty()) {
-      if(env) *env = entity_scope(db.as<n_ident>(db.member_of(db.as<n_call>(n).callee).object).name);
+      node_id obj = db.member_of(db.as<n_call>(n).callee).object;
+      if(env) *env = helper.module_by_path(obj) ? m_none : entity_scope(db.as<n_ident>(obj).name); // module - global field
       return set;
     }
     symbol local; // Local dial: call by name or operator declared in the block
