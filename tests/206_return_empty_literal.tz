@@ -5,7 +5,8 @@
 // out: 5 ()
 // out: {}
 // out: 3
-// jit-stats: origin(i64): компилятор языка: анонимный литерал
+// jit-compiled: origin
+// jit-stats: zero_i(): компилятор языка: анонимный литерал {…} не на месте результата или T x
 // jit-stats: block_value() →
 // check: fail() бросает: {}
 // machine

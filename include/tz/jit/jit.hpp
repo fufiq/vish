@@ -537,6 +537,9 @@ uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t wa
     return 0;
   }
   if(!r.normal()) throw diagnostic("внутренняя ошибка JIT: return/break в узле, который вычисляет VM", vm.db[at].where);
+  // {…}: type - from place (§4.3) - same rule as compiler (literal_place)
+  if(vm.db.is<n_construct>(at) && !vm.db.as<n_construct>(at).type)
+    if(std::string t = vm.literal_place(at); vm.aggregate_struct(t)) r.v = vm.to_type(std::move(r.v), t, vm.db[at].where);
   if(want == 0) return 0;
   if(want == 9) return reinterpret_cast<uint64_t>(mem.add(std::move(r.v)));
   uint64_t b = jit_value_bits(r.v, want);

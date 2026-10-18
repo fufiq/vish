@@ -2818,6 +2818,34 @@ struct interpreter {
     if(record_fit(v, want, got, &why) == fit::no) fail(cat(types.describe(v), " не становится ", want, ": ", why), where);
     return got;
   }
+  // The type of place of the anonymous letter {…} on AST (§4.3): the result of the function (=> e,
+  // return e, the value of the block-body) or T x = {…}; empty - there is no space in the text
+  // (argument, etc.). It is used by JIT (VM cites the literature that was calculated for machine
+  // code) and the compiler in the language (jit_literal_place), one rule on both sides.
+  std::string literal_place(node_id e) const {
+    node_id up = e ? db[e].parent : node_id{};
+    auto named = [&](node_id t) { return t && db.is<n_ident>(t) ? std::string(db.strings.text(db.as<n_ident>(t).name)) : std::string(); };
+    if(!up) return {};
+    if(db.is<n_fn>(up) && db.as<n_fn>(up).body == e) return named(db.as<n_fn>(up).result_type);
+    if(db.is<n_var>(up) && db.as<n_var>(up).init == e) return named(db.as<n_var>(up).type);
+    if(db.is<n_return>(up) && db.as<n_return>(up).value == e && !db.as<n_return>(up).target) {
+      node_id f = up;
+      while(f && !db.is<n_fn>(f)) f = db[f].parent;
+      return f ? named(db.as<n_fn>(f).result_type) : std::string();
+    }
+    if(db.is<n_block>(up) && db.as<n_block>(up).has_value && !db.as<n_block>(up).items.empty() && db.as<n_block>(up).items.back() == e)
+      if(node_id f = db[up].parent; f && db.is<n_fn>(f) && db.as<n_fn>(f).body == up) return named(db.as<n_fn>(f).result_type);
+    return {};
+  }
+  // struct unit (not tagged above: struct i64 { __int64 value; } - scalar)
+  bool aggregate_struct(std::string_view name) {
+    if(name.empty()) return false;
+    auto it = structs.find(sym(name));
+    if(it == structs.end()) return false;
+    auto const & st = db.as<n_extend>(it->second);
+    return !(st.items.size() == 1 && db.is<n_var>(st.items[0]) && db.is<n_ident>(db.as<n_var>(st.items[0]).type) && str(db.as<n_var>(st.items[0]).name) == "value" &&
+        type_registry::machine(str(db.as<n_ident>(db.as<n_var>(st.items[0]).type).name)));
+  }
   // The place holds the value of the type: struct is its name, otherwise it is empty (*my:* type of place is the type of its meaning).
   std::string place_type(value const & cur) const {
     value const * x = shape_of(cur);
@@ -8027,6 +8055,19 @@ struct interpreter {
       for(uint32_t k = 0; k < fs.size(); ++k)
         if(str(db.as<n_var>(fs[k]).name) == a[1].as<str_v>().view()) return value(int64_t(k));
       return value(int64_t(-1));
+    }
+    if(n == "jit_literal_place" && a.size() == 1) { // type-aggregate place anonymous literature (or ')
+      std::string t = literal_place(code_node(a[0], where));
+      return value(aggregate_struct(t) ? t : std::string());
+    }
+    if(n == "jit_str_layout" && a.empty()) { // the string in the value cell: data (bytes) and length (32 bits)
+      static std::array<int64_t, 2> const off = [] {
+        value v{str_v{}};
+        auto const * b = reinterpret_cast<char const *>(&v);
+        auto const & x = v.as<str_v>();
+        return std::array<int64_t, 2>{int64_t(reinterpret_cast<char const *>(&x.w.data) - b), int64_t(reinterpret_cast<char const *>(&x.len) - b)};
+      }();
+      return value(array_v::of({value(off[0]), value(off[1])}));
     }
     if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().gen)), value(int64_t(array_layout().items_n))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no

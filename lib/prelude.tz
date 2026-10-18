@@ -386,6 +386,8 @@ x64_u64(i64 v) => array{v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) &
 
 // [база + индекс * 8]: ModRM 00 r 100 + SIB 11 индекс база; база rbp/r13 — через
 // disp8 = 0 (mod 01)
+// [база + индекс]: SIB с масштабом 1 — байты строки (строка — байты, §4.0)
+x64_sib1(i64 r, i64 base, i64 index) => if((base & 7) == 5) array{0x44 | ((r & 7) << 3), ((index & 7) << 3) | (base & 7), 0x0} else array{0x4 | ((r & 7) << 3), ((index & 7) << 3) | (base & 7)};
 x64_sib(i64 r, i64 base, i64 index) => if((base & 7) == 5) array{0x44 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7), 0x0} else array{0x4 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7)};
 
 // сравнения f64 (ucomisd): с NaN всё, кроме !=, ложно; результат — 0/1 в acc
@@ -465,6 +467,8 @@ amd64(expr body) {
   store_f64(i64 base, i64 disp, i64 s) => x64_sse_rm(0xF2, 0x11, s, base, disp);
   load_const(i64 d, i64 v) => array{0x48 | (d >> 3), 0xB8 + (d & 7), ...x64_u64(v)}; // movabs d, v
   load_index(i64 d, i64 base, i64 index) => array{...x64_rex(1, d, index, base), 0x8B, ...x64_sib(d, base, index)};
+  load32(i64 d, i64 base, i64 disp) => array{...x64_rex(0, d, 0, base), 0x8B, ...x64_mem(d, base, disp)}; // mov d32, [base + disp]: старшие биты — нули
+  load_byte_index(i64 d, i64 base, i64 index) => array{...x64_rex(0, d, index, base), 0xF, 0xB6, ...x64_sib1(d, base, index)}; // movzx d32, byte [base + index]
   store_index(i64 base, i64 index, i64 s) => array{...x64_rex(1, s, index, base), 0x89, ...x64_sib(s, base, index)};
   load_index_f64(i64 d, i64 base, i64 index) => array{0xF2, ...x64_rex(0, d, index, base), 0xF, 0x10, ...x64_sib(d, base, index)};
   store_index_f64(i64 base, i64 index, i64 s) => array{0xF2, ...x64_rex(0, s, index, base), 0xF, 0x11, ...x64_sib(s, base, index)};
@@ -594,6 +598,8 @@ arm64(expr body) {
   store_f64(i64 base, i64 disp, i64 s) => a64_mem(0xFC000000, 0xFC206800, s, base, a64_scaled(base, disp));
   load_const(i64 d, i64 v) => a64_imm64(d, v);
   load_index(i64 d, i64 base, i64 index) => a64_word(0xF8607800 | (index << 16) | (base << 5) | d); // ldr d, [base, index, lsl 3]
+  load32(i64 d, i64 base, i64 disp) => a64_mem(0xB8400000, 0xB8606800, d, base, a64_scaled(base, disp)); // ldur/ldr w: старшие биты — нули
+  load_byte_index(i64 d, i64 base, i64 index) => a64_word(0x38606800 | (index << 16) | (base << 5) | d); // ldrb w, [base, index]
   store_index(i64 base, i64 index, i64 s) => a64_word(0xF8207800 | (index << 16) | (base << 5) | s);
   load_index_f64(i64 d, i64 base, i64 index) => a64_word(0xFC607800 | (index << 16) | (base << 5) | d);
   store_index_f64(i64 base, i64 index, i64 s) => a64_word(0xFC207800 | (index << 16) | (base << 5) | s);
@@ -1314,6 +1320,7 @@ jit_compile(cg, f, types, type result) {
   // массив — адрес ячейки значения VM; данные и размер код читает из неё в момент обращения
   // (§12.2: память — у VM, без копий в кадре): смещения сообщает VM
   array{a_data, a_size, a_cap, a_gen, a_items_n} = jit_layout(); // размер общей раскладки — a_items_n
+  array{s_data, s_len} = jit_str_layout(); // строка — байты в словах и длина (32 бита)
   // агрегат — поля в памяти ячейки по номеру поля типа: данные полей, шаг, скаляр в поле
   array{ag_data, ag_stride, ag_scalar} = jit_agg_layout();
   bad(str w) => {
@@ -1803,6 +1810,7 @@ jit_compile(cg, f, types, type result) {
         want = type_of_code(vt);
         t = ty(init);
         if(want == t) assign(name, init, true);
+        else if(is_handle(want) && ((code_kind(init) == ast.construct) && (jit_literal_place(init) != ""))) assign_handle(name, init, want, true); // T x = {…}: тип имени — T (поля — по T), литерал приводит VM
         else if((want == f64) && (t == i64)) {
           gen(init);
           put_bytes(cg.to_f64(acc_f, acc));
@@ -1813,8 +1821,7 @@ jit_compile(cg, f, types, type result) {
     } else if(k == ast.throw) gen_throw(e);
     else if(k == ast.function) { // локальная функция: кода на месте нет — встраивается в вызовы
       ast.function{nm, _, _, _, _, _, _, sc, _} = e;
-      if(!sc && op_name(nm)) bad(fmt"оператор в блоке ({nm}) — интерпретатор");
-      lfns.push(jc_lfn{nm, e, top, base, ctx, cur});
+      lfns.push(jc_lfn{nm, e, top, base, ctx, cur}); // и оператор блока: встраивается в свои операции (gen_op)
     }
     else if(k == ast.construct) gen_construct(e);
     else if(k == ast.unpack) gen_unpack(e);
@@ -1961,8 +1968,14 @@ jit_compile(cg, f, types, type result) {
     t = ty(e);
     ast.construct{tn, items, _} = e;
     fits = is_arr(t) && (given(tn) && (code_name(tn) == "array"));
-    // {x: …} без типа: тип — от места (параметр, поле, результат), это семантика VM
-    if(!given(tn)) bad("анонимный литерал {…} — интерпретатор");
+    // {x: …} без типа: тип — от места (§4.3). Место по тексту — результат функции или T x =
+    // {…} со struct-агрегатом: литерал вычисляет VM и приводит к нему (jit_literal_place —
+    // правило VM); иначе (аргумент, скалярное место) — интерпретатор
+    if(!given(tn)) {
+      if(jit_literal_place(e) == "") bad("анонимный литерал {…} не на месте результата или T x — интерпретатор");
+      else vm_or_bad(e, "анонимный литерал {…}");
+      return unit;
+    }
     n = 0;
     for(x : items) if(fits) {
       if(code_kind(x) == ast.spread) {
@@ -2109,6 +2122,7 @@ jit_compile(cg, f, types, type result) {
     s = var_of(o);
     if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
     else if(env[s].kind == jc_range) gen(ix); // элемент range(n) по индексу is_index — сам индекс
+    else if(env[s].kind == str) gen_str_index(e, s, ix); // s[k] — байт строки
     else if(!arr_like(env[s].kind)) bad("индекс не массива");
     else if(!is_arr(arr_type(s, o)) && !late(arr_type(s, o))) vm_or_bad(e, "элемент — значение VM"); // копия в памяти вызова
     else if(!is_arr(arr_type(s, o))) bad("тип элементов массива неизвестен");
@@ -2122,6 +2136,7 @@ jit_compile(cg, f, types, type result) {
     if((code_kind(e) == ast.lambda) && (fresh || (find(name) < 0))) return put(jc_var{name, unit, 0, true, e, ctx, top, base, cur}); // f = (x) => … — как локальная функция
     t = if(is_call_of(e, "range")) jc_range else ty(e);
     if(is_handle(t)) assign_handle(name, e, t, fresh);
+    else if(t == unit) bad("у значения нет одного типа на все шаги (кортеж растёт разнотипно) — интерпретатор"); //  
     else if(!scalar(t) && (t != jc_range)) bad(fmt"присваивание значения {t}");
     else assign_scalar(name, e, t, fresh);
   };
@@ -2327,7 +2342,25 @@ jit_compile(cg, f, types, type result) {
     if((s < 0) || env[s].thunk) bad("обращение .size не к переменной");
     else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]);
     else if(env[s].kind == jc_range) put_bytes(slot_ld(acc, env[s].slot));
-    else bad(".size не массива");
+    else if(env[s].kind == str) str_size(acc, env[s].slot);
+    else bad(".size не массива и не строки");
+  };
+  // строка-переменная (значение VM — адрес ячейки): длина и байты — по смещениям VM (хвост
+  // шага 10: parse_int и помощники разбора были интерпретатору); строка не меняется на месте —
+  // данные читаются при каждом обращении (s = s + … — новая строка в ячейке)
+  str_size(i64 r, i64 sl) => {
+    put_bytes(slot_ld(r, sl));
+    put_bytes(cg.load32(r, r, s_len));
+  };
+  gen_str_index(e, i64 s, ix) => {
+    gen(ix);
+    if(!jit_proven(e)) {
+      str_size(second, env[s].slot);
+      jump_to(trap(1, e), 3, acc, second);
+    }
+    put_bytes(slot_ld(second, env[s].slot));
+    put_bytes(cg.load(second, second, s_data));
+    put_bytes(cg.load_byte_index(acc, second, acc));
   };
   // p.x — поле агрегата-переменной p: номер поля типа k (статичен); пусто — не поле
   field_slot(e) => if((code_kind(e) == ast.operation) && dotted(e)) {
@@ -2364,8 +2397,13 @@ jit_compile(cg, f, types, type result) {
     } else vm_or_bad(e, fmt"запись поля {t}");
   };
   gen_op(e) => {
-    ast.operation{op, xs, _} = e;
-    if(op == "[]") gen_index_op(e, xs);
+    ast.operation{op, xs, post} = e;
+    // оператор, объявленный в блоке, — локальная функция (хвост шага 10): подходящая
+    // перегрузка встраивается, как вызов; нет её — встроенная операция (тоже кандидат)
+    ent = if(xs.size == 2) "infix" + op else if(post) "postfix" + op else "prefix" + op;
+    local = (op != "[]") && ((op != ".size") && (!starts(op, ".") && (!assign_symbol(op) && (local_fns(ent).size > 0))));
+    if(local && (choose_from(local_fns(ent), xs).size == 1)) gen_local_call(e, ent, xs);
+    else if(op == "[]") gen_index_op(e, xs);
     else if(op == ".size") gen_size(xs);
     else if(field_slot(e).size == 2) gen_field(e, field_slot(e));
     else if(xs.size == 1) {
@@ -3334,6 +3372,7 @@ jit_compile(cg, f, types, type result) {
   vm_kind(type t) => if(is_handle(t)) 9 else jt_code(t);
   // правила разбора в теле (operator, syntax, конструкция — §4.4): блоки конструкции
   // исполняются с ними — слой правил у интерпретатора; машинный код их не видит
+  assign_symbol(str op) => (op == "=") || ((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/="))));
   starts(str s, str p) => (s.size > p.size) && {
     same = true;
     for(i : range(p.size)) if(s[i] != p[i]) same = false;
