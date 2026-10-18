@@ -2054,8 +2054,8 @@ jit_compile(cg, f, types, type result) {
   // не проверяется: 
 // Индекс — в слоте (регистре), чтение и запись — элемент массива.
   gen_ref_decl(e, str name, init) => {
-    if(!jit_ref_keeps(e)) bad("ссылка: массив за её жизнь меняется целиком — интерпретатор (поколения)");
-    else if(index_parts(init).size != 2) bad("ссылка не на элемент массива");
+    if(index_parts(init).size != 2) bad("ссылка-путь (поле, элемент поля) — интерпретатор");
+    else if(!jit_ref_keeps(e)) bad("ссылка: массив за её жизнь меняется целиком — интерпретатор (поколения)");
     else {
       array{o, ix} = index_parts(init);
       s = var_of(o);

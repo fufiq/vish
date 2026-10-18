@@ -4938,14 +4938,172 @@ struct interpreter {
   flow declare_ref(node_id n, n_var const & v, scope * env, uint32_t frame) {
     if(db.is<n_ident>(v.init)) { // auto&a = b is the second name of the same cell.
       value * cell = find(env, db.as<n_ident>(v.init).name);
-      if(!cell || cell->is<thunk_v>()) fail("auto& — ссылка на переменную или элемент массива", db[v.init].where);
+      if(!cell || cell->is<thunk_v>()) fail("auto& — ссылка на переменную, поле или элемент массива", db[v.init].where);
       not_hidden(*cell, db.as<n_ident>(v.init).name, db[v.init].where);
       env->alias(v.name, cell);
       return ok();
     }
     auto r = element_ref(v.init, env, frame, n);
-    if(!r) fail("auto& — ссылка на переменную или элемент массива переменной", db[v.init].where);
+    if(!r) r = path_ref(v.init, env, frame, n);
+    if(!r) fail("auto& — ссылка на переменную, поле или элемент массива", db[v.init].where);
     env->declare(v.name, std::move(*r));
+    return ok();
+  }
+
+  // --- link-path (§12.1, tail of step 10)
+  // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// (§12.1, D13). root
+  // - Variable cell, steps - field and element (buffer generation when taking); the place is searched anew with
+  // each call - to hang nothing, like the field in the variable parameter (§6.2): the field of the replaced
+  // aggregate - the field of the new, the element of the moved buffer - "dangerous-dangerous" invalidated_alias
+  // . * My: * up to three steps (without a heap: steps - in the link itself); parsing follows hooks for the
+  // support-variable first step, supports inside (b.xs, g[1]) - generation of execution.
+  static ref_step step_of(ref_v const & r, uint32_t k) { return k == 0 ? ref_step{r.index, r.gen, r.field, r.rt_index} : r.rest[k - 1]; }
+  static void set_step(ref_v & r, uint32_t k, ref_step const & s) {
+    if(k == 0) {
+      r.index = s.index;
+      r.gen = s.gen;
+      r.field = s.field;
+      r.rt_index = s.rt_index;
+    } else {
+      r.rest[k - 1] = s;
+      r.more = uint8_t(k);
+    }
+  }
+  std::optional<value> path_ref(node_id place_node, scope * env, uint32_t frame, node_id born) {
+    std::vector<node_id> chain;
+    node_id x = place_node;
+    while(db.is_index(x) || db.is_member(x)) {
+      chain.push_back(x);
+      x = db.is_index(x) ? db.index_of(x).object : db.member_of(x).object;
+    }
+    if(!db.is<n_ident>(x) || chain.empty()) return std::nullopt;
+    symbol root_name = db.as<n_ident>(x).name;
+    value * cell = find(env, root_name);
+    if(!cell || cell->is<thunk_v>()) return std::nullopt;
+    not_hidden(*cell, root_name, db[place_node].where);
+    span where = db[place_node].where;
+    ref_v r;
+    uint32_t n = 0;
+    if(cell->is<ref_v>()) { // link from the link: its path, then its steps
+      r = cell->as<ref_v>();
+      n = 1 + r.more;
+    } else {
+      r.cell = cell;
+      r.name = root_name;
+    }
+    r.born = born.value + 1;
+    for(auto it = chain.rbegin(); it != chain.rend(); ++it) {
+      if(n == 3) fail("ссылка — не глубже трёх шагов (поле, элемент)", where);
+      ref_step st;
+      if(db.is_member(*it)) st.field = db.member_of(*it).name;
+      else {
+        flow fi = eval(db.index_of(*it).index, env, frame);
+        if(!fi.normal()) return std::nullopt;
+        value box = n ? path_value(r, n, where) : *r.cell; // stride
+        if(!checking()) {
+          if(!box.is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(box), " — не массив"), where);
+          st.index = checked_index(box, fi.v, where);
+          st.gen = box.as<array_v>().gen;
+        } else if(box.is<array_v>() && fi.v.known()) st.index = checked_index(box, fi.v, where);
+        else {
+          st.rt_index = true;
+          rt_check("out_of_bounds", where);
+        }
+      }
+      set_step(r, n++, st);
+      if(!checking() && st.field) path_place(r, n, where); // The field is - immediately (parsing - in value below)
+    }
+    if(checking()) {
+      value probe = path_value(r, n, where); // Type of place - field error here, not when reading
+      (void)probe;
+      if(r.cell == cell && !r.field && !cell->is<ref_v>() && array_like(*cell)) r.memo = hook_ref_taken(cell, root_name, born, where, frame);
+    }
+    return value(r);
+  }
+  // Place cell after the first n steps (execution): the element is a cell of the common array; the
+  // buffer is changed - invalidated_alias. soft - parsing: no cell (run-time - value) - empty.
+  value * path_place(ref_v const & r, uint32_t n, span where, bool soft = false) {
+    value * c = r.cell;
+    for(uint32_t k = 0; k < n; ++k) {
+      ref_step st = step_of(r, k);
+      if(is_shared(*c)) c = &slot_of(*c).v; // shareable
+      if(st.field) {
+        value * f = nullptr;
+        if(c->is<agg_v>())
+          for(auto & [name, v]: c->as<agg_v>().fields)
+            if(name == st.field) f = &v;
+        if(!f) {
+          if(soft) return nullptr;
+          fail(cat("у значения типа ", types.describe(*c), " нет поля ", str(st.field)), where);
+        }
+        c = f;
+        continue;
+      }
+      if(soft && (st.rt_index || !c->is<array_v>())) return nullptr;
+      if(!checking() && (!c->is<array_v>() || c->as<array_v>().gen != st.gen))
+        fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+      uint32_t i = checked_index(*c, value(st.index), where);
+      value * e = c->as<array_v>().generic_cell(i);
+      if(!e) {
+        if(soft) return nullptr;
+        fail(cat("элемент массива ", types.describe(*c), " — значение, а не место: дальше пути нет"), where);
+      }
+      c = e;
+    }
+    return c;
+  }
+  // The value after the first n steps is by value (parsing: run-time -index - element type, field
+  // run-time -aggregate - by sample).
+  value path_value(ref_v const & r, uint32_t n, span where) {
+    value cur = *r.cell;
+    for(uint32_t k = 0; k < n; ++k) {
+      ref_step st = step_of(r, k);
+      if(st.field) {
+        symbol f = st.field;
+        cur = lift(cur, [&](value const & o) { return member(o, f, where); });
+      } else if(!st.rt_index && cur.is<array_v>()) {
+        if(!checking() && cur.as<array_v>().gen != st.gen) fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+        value e = cur.as<array_v>().get(checked_index(cur, value(st.index), where));
+        cur = std::move(e);
+      } else cur = lift(cur, [&](value const & a) { return element_type(a, where); });
+    }
+    return cur;
+  }
+  value path_deref(ref_v const & r, span where) {
+    if(checking()) {
+      hook_ref_used(r, where);
+      return path_value(r, 1 + r.more, where);
+    }
+    uint32_t n = 1 + r.more;
+    ref_step last = step_of(r, n - 1);
+    if(last.field) return *path_place(r, n, where);
+    value * box = path_place(r, n - 1, where);
+    if(!box->is<array_v>() || box->as<array_v>().gen != last.gen) fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+    return box->as<array_v>().get(checked_index(*box, value(last.index), where));
+  }
+  flow path_assign(ref_v const & r, std::string_view op, value const & rhs, span where) {
+    value cur = path_deref(r, where);
+    value res = op == "=" ? rhs : binary(op.substr(0, 1), cur, rhs, where);
+    if(op == "=" && is_record(res)) res = to_type(std::move(res), place_type(cur), where); // Struct holds it, {x: …} becomes it.
+    if(!unknown(cur) && !unknown(res) && types.describe(erase(cur)) != types.describe(erase(res)))
+      fail(cat("место ссылки типа ", types.describe(cur), " нельзя заменить значением типа ", types.describe(res)), where);
+    uint32_t n = 1 + r.more;
+    ref_step last = step_of(r, n - 1);
+    if(last.field) {
+      if(value * p = path_place(r, n, where, checking())) {
+        if(op == "=" && res_any() && has_resource(*p)) drop_value(*p, where); // Overwrite - the old resource is released
+        *p = std::move(res);
+      } else *r.cell = erase(*r.cell); // parsing: the place behind run-time-step is the value of the variable run-time
+      return ok();
+    }
+    value * box = path_place(r, n - 1, where, checking());
+    if(box && box->is<array_v>() && !last.rt_index && (!checking() || (res.known() && cur.known()))) {
+      box->as<array_v>().set(checked_index(*box, value(last.index), where), std::move(res));
+      return ok();
+    }
+    if(box) *box = erase(*box); // element on run-time -index changed - array run-time
+    else *r.cell = erase(*r.cell);
     return ok();
   }
 
@@ -4956,6 +5114,7 @@ struct interpreter {
   }
 
   value deref(ref_v const & r, span where) {
+    if(r.path()) return path_deref(r, where);
     ref_valid(r, where);
     value const & a = *r.cell;
     if(!r.rt_index && a.is<array_v>()) return a.as<array_v>().get(checked_index(a, value(r.index), where));
@@ -4963,6 +5122,7 @@ struct interpreter {
   }
 
   flow ref_assign(ref_v const & r, std::string_view op, value const & rhs, span where) {
+    if(r.path()) return path_assign(r, op, rhs, where);
     ref_valid(r, where);
     value cur = deref(r, where);
     value res = op == "=" ? rhs : binary(op.substr(0, 1), cur, rhs, where);
@@ -5908,7 +6068,19 @@ struct interpreter {
 
   value * place(node_id n, scope * env, uint32_t frame) {
     if(db.is<n_ident>(n)) {
-      if(value * c = find(env, db.as<n_ident>(n).name)) return c;
+      if(value * c = find(env, db.as<n_ident>(n).name)) {
+        // reference is its place (q.y = 40 at &q = ps[1]); the scalar array element is not a cell
+        if(c->is<ref_v>() && db[n].parent && (db.is_member(db[n].parent) || db.is_index(db[n].parent))) {
+          ref_v const & r = c->as<ref_v>();
+          if(!r.path()) {
+            ref_valid(r, db[n].where);
+            if(checking() || !r.cell->is<array_v>()) return nullptr;
+            return r.cell->as<array_v>().generic_cell(checked_index(*r.cell, value(r.index), db[n].where));
+          }
+          return path_place(r, 1 + r.more, db[n].where, checking());
+        }
+        return c;
+      }
       fail(cat("неизвестная переменная ", str(db.as<n_ident>(n).name)), db[n].where);
     }
     if(db.is_index(n)) { // cell of the element is only in a common array
@@ -6087,6 +6259,13 @@ struct interpreter {
       value cur = arr->as<array_v>().get(k);
       arr->as<array_v>().set(k, op == "=" ? (is_record(rhs) ? to_type(std::move(rhs), place_type(cur), where) : std::move(rhs)) : binary(std::string_view(op).substr(0, 1), cur, rhs, where));
       return ok();
+    }
+    if(db.is_member(lhs) || db.is_index(lhs)) { // q.y = v, r[k] = v through a link - a record along its path (and in parsing )
+      node_id root = lhs;
+      while(db.is_member(root) || db.is_index(root)) root = db.is_member(root) ? db.member_of(root).object : db.index_of(root).object;
+      if(db.is<n_ident>(root))
+        if(value * c = find(env, db.as<n_ident>(root).name); c && c->is<ref_v>())
+          if(auto r = path_ref(lhs, env, frame, lhs)) return path_assign(r->as<ref_v>(), op, rhs, where);
     }
     value * target = place(lhs, env, frame);
     if(!target) {

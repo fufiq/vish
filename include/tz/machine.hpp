@@ -71,6 +71,17 @@ struct m_alias {
   uint32_t index = m_none;
   uint64_t gen = 0;
   uint32_t field = m_none; // variable aggregate field: b.xs to variable parameter (§6.2)
+  // link-path (§12.1, tail of step 10): &e = p.x, &f = ps[i].y, &e = r[k] from the link - the steps
+  // lie in the area where the link is declared (live with it), from the variable (scope, slot)
+  uint32_t path_scope = m_none;
+  uint16_t path_at = 0;
+  uint8_t path_n = 0;
+};
+// Step of the link path: field (number in aggregate) or element (index and buffer generation when taking).
+struct m_step {
+  uint32_t at = 0;
+  uint64_t gen = 0;
+  bool field = false;
 };
 struct mval {
   std::variant<m_unit, bool, int64_t, double, m_str, m_type, m_arr, m_agg, m_fn, m_thunk, m_alias> v;
@@ -115,6 +126,7 @@ struct m_scope {
   uint32_t caller = m_none; // Body root function: call environment (O4)
   uint32_t fn = m_none;
   bool layer = false; // layer of design rules over the domain of the caller (ruled_scope)
+  m_list<m_step> steps; // steps of link-paths declared in the field
 };
 
 struct m_frame {
@@ -245,7 +257,7 @@ struct dump_head {
   std::vector<address_space::piece> pieces;
 };
 
-enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept, m_elem_ref };
+enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept, m_elem_ref, m_path_ref };
 enum : uint8_t { sig_none, sig_break, sig_continue, sig_return, sig_throw };
 
 struct process_machine {
@@ -401,6 +413,30 @@ struct process_machine {
   mval & follow(m_alias al) {
     mval * c = &st.scopes[al.scope].vars[al.slot].v;
     if(c->is<m_alias>()) c = &follow(c->as<m_alias>());
+    if(al.path_scope != m_none) { // The path is step by step from the variable (place is sought again: there is nothing to hang)
+      for(uint32_t k = 0; k < al.path_n; ++k) {
+        m_step const & s = st.scopes[al.path_scope].steps[al.path_at + k];
+        if(c->is<m_agg>() && is_shared_v(*c)) c = &slot_of(*c).v;
+        if(s.field) {
+          if(!c->is<m_agg>() || s.at >= c->as<m_agg>().fields.size()) {
+            diagnostic d("ссылка на поле использована после замены агрегата", here(), diag_kind::runtime);
+            d.type = "invalidated_alias";
+            throw d;
+          }
+          c = &c->as<m_agg>().fields[s.at].v;
+          continue;
+        }
+        if(!c->is<m_arr>() || c->as<m_arr>().gen != s.gen) {
+          diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
+          d.type = "invalidated_alias";
+          throw d;
+        }
+        auto & xs = c->as<m_arr>().items;
+        if(s.at >= xs.size()) out_of_bounds(s.at, xs.size(), here());
+        c = &xs[s.at];
+      }
+      return *c;
+    }
     if(al.field != m_none) { // path by field number - allowed at each request, there is nothing to hang
       if(!c->is<m_agg>() || al.field >= c->as<m_agg>().fields.size()) {
         diagnostic d("ссылка на поле использована после замены агрегата", here(), diag_kind::runtime);
@@ -750,6 +786,7 @@ struct process_machine {
         case m_lambda_body: lambda_body_step(); break;
         case m_intercept: intercept_step(); break;
         case m_elem_ref: elem_ref_step(); break;
+        case m_path_ref: path_ref_step(); break;
         default: throw diagnostic("машина: неизвестная задача", {});
       }
     } catch(diagnostic const & d) {
@@ -2615,6 +2652,88 @@ struct process_machine {
     if(al.index != m_none) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where); // interpreter-like
     finish(mval{m_alias{al.scope, al.slot, uint32_t(k), arr.as<m_arr>().gen}});
   }
+  // The root of the place is the variable that the link itself (r[k] from &r = ...): then this is the path.
+  bool ref_root(node_id x, uint32_t scope) {
+    while(db.is_member(x) || db.is_index(x)) x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    if(!db.is<n_ident>(x)) return false;
+    place p = find(scope, db.as<n_ident>(x).name);
+    if(p.scope == m_none) return false;
+    mval const & v = st.scopes[p.scope].vars[p.slot].v;
+    return v.is<m_alias>() && (v.as<m_alias>().index != m_none || v.as<m_alias>().field != m_none || v.as<m_alias>().path_scope != m_none);
+  }
+  // Link-to-path (§12.1, tail of step 10): chain indexes take turns (phases), then steps to the area
+  // where the link is declared; like an interpreter, up to three steps.
+  void push_path_ref(node_id n, uint32_t scope, uint32_t frame) {
+    auto & f = fib();
+    f.tasks.push_back(m_task{m_path_ref, n, 0, scope, frame, uint32_t(f.vals.size())});
+    if(f.tasks.size() > 1) f.tasks.back().ctx = f.tasks[f.tasks.size() - 2].ctx;
+  }
+  void path_ref_step() {
+    m_task & t = top();
+    std::vector<node_id> chain; // root-out
+    node_id x = t.node;
+    while(db.is_member(x) || db.is_index(x)) {
+      chain.push_back(x);
+      x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    }
+    std::ranges::reverse(chain);
+    std::vector<node_id> indices;
+    for(node_id c: chain)
+      if(db.is_index(c)) indices.push_back(db.index_of(c).index);
+    if(t.phase < indices.size()) return push_eval(indices[t.phase++], t.scope, t.frame);
+    if(!db.is<n_ident>(x)) throw diagnostic("auto& — ссылка на переменную, поле или элемент массива", db[t.node].where);
+    symbol name = db.as<n_ident>(x).name;
+    place p = find(t.scope, name);
+    if(p.scope == m_none) throw diagnostic(cat("неизвестное имя ", helper.str(name)), db[x].where);
+    not_hidden(p, name, db[t.node].where);
+    std::vector<m_step> steps;
+    m_alias al{p.scope, p.slot};
+    if(mval const & root = st.scopes[p.scope].vars[p.slot].v; root.is<m_alias>()) { // link from the link: its path, then its steps
+      m_alias const & r = root.as<m_alias>();
+      al = m_alias{r.scope, r.slot};
+      if(r.path_scope != m_none)
+        for(uint32_t k = 0; k < r.path_n; ++k) steps.push_back(st.scopes[r.path_scope].steps[r.path_at + k]);
+      else if(r.index != m_none) steps.push_back({r.index, r.gen, false});
+      else if(r.field != m_none) steps.push_back({r.field, 0, true});
+    }
+    uint32_t next = 0;
+    for(node_id c: chain) {
+      m_alias prefix = al;
+      uint32_t at = uint32_t(st.scopes[t.scope].steps.size());
+      for(auto const & s: steps) st.scopes[t.scope].steps.push_back(s);
+      prefix.path_scope = t.scope;
+      prefix.path_at = uint16_t(at);
+      prefix.path_n = uint8_t(steps.size());
+      mval & box = steps.empty() ? follow(al) : follow(prefix); // step-up
+      st.scopes[t.scope].steps.resize(at);
+      if(db.is_member(c)) {
+        symbol f = db.member_of(c).name;
+        mval * agg = &box;
+        if(agg->is<m_agg>() && is_shared_v(*agg)) agg = &slot_of(*agg).v;
+        if(!agg->is<m_agg>()) throw diagnostic(cat("у значения ", describe(*agg), " нет поля ", helper.str(f)), db[c].where);
+        auto const & fs = agg->as<m_agg>().fields;
+        uint32_t k = 0;
+        while(k < fs.size() && fs[k].name != f) ++k;
+        if(k == fs.size()) throw diagnostic(cat("у значения ", describe(*agg), " нет поля ", helper.str(f)), db[c].where);
+        steps.push_back({k, 0, true});
+      } else {
+        mval i = deref(fib().vals[t.base + next++]);
+        if(!box.is<m_arr>() || !i.is<int64_t>()) throw diagnostic(cat("ссылка на элемент: ", describe(box), " — не массив"), db[c].where);
+        int64_t k = i.as<int64_t>();
+        auto size = box.as<m_arr>().items.size();
+        if(k < 0 || uint64_t(k) >= size) out_of_bounds(k, size, db[c].where);
+        steps.push_back({uint32_t(k), box.as<m_arr>().gen, false});
+      }
+      if(steps.size() > 3) throw diagnostic("ссылка — не глубже трёх шагов (поле, элемент)", db[t.node].where);
+    }
+    fib().vals.resize(t.base);
+    uint32_t at = uint32_t(st.scopes[t.scope].steps.size());
+    for(auto const & s: steps) st.scopes[t.scope].steps.push_back(s);
+    al.path_scope = t.scope;
+    al.path_at = uint16_t(at);
+    al.path_n = uint8_t(steps.size());
+    finish(mval{al});
+  }
   // b.f in the variable parameter - alias on the field (as an array element): "parameter - alias"
   // (§6.2). Only the field of the variable (a.b.c)
   bool field_alias(node_id x, uint32_t scope) {
@@ -2661,12 +2780,13 @@ struct process_machine {
     if(v.ref) { // &a = b is the second name of the same cell; &e = v[i] is a reference to an element
       if(t.phase == 0) {
         t.phase = 1;
-        if(elem_place(db, v.init)) return push_elem_ref(v.init, t.scope, t.frame);
-        if(!db.is<n_ident>(v.init)) throw diagnostic("auto& — ссылка на переменную или элемент массива", db[v.init].where);
+        if(elem_place(db, v.init) && !ref_root(v.init, t.scope)) return push_elem_ref(v.init, t.scope, t.frame);
+        if(db.is_member(v.init) || db.is_index(v.init)) return push_path_ref(v.init, t.scope, t.frame); // path: field, field element, from reference
+        if(!db.is<n_ident>(v.init)) throw diagnostic("auto& — ссылка на переменную, поле или элемент массива", db[v.init].where);
         return push_eval(v.init, t.scope, t.frame);
       }
       mval x = pop_val();
-      if(!x.is<m_alias>()) throw diagnostic("auto& — ссылка на переменную или элемент массива", db[v.init].where);
+      if(!x.is<m_alias>()) throw diagnostic("auto& — ссылка на переменную, поле или элемент массива", db[v.init].where);
       declare(t.scope, v.name, std::move(x));
       return finish(mval{m_unit{}});
     }

@@ -205,17 +205,32 @@ struct split_v {
   std::vector<value> alts;
 };
 
-// Reference to the array element (§12.1): the support is the array buffer in the
-// cell. Lives only in the auto& variable and in the parameter; when reading, check
-// the generation (execution) or cell version (parsing), then the element.
-struct ref_v { // The order of fields is tight: the value does not grow
-  value * cell = nullptr;
+// Step of the link path after the first (§12.1, tail of step 10): the array element is the index and
+// the buffer generation when taking, the aggregate field is the name.
+struct ref_step {
   int64_t index = 0;
+  uint64_t gen = 0;
+  symbol field; // field; empty - element
+  bool rt_index = false; // parsing: The index is known only in runtime
+};
+
+// Reference to place (§12.1): the root is a variable cell, the path is up to three steps: the element
+// (the support is an array buffer, when reading - checking the generation or version of the cell in
+// parsing) and the field (the support is an aggregate). &e = v[i] is one step-element; &e = p.x, &f =
+// ps[i].y, &e = r[k] from the link r is a path; the place is searched anew at each call - there is
+// nothing to hang. It lives only in the auto and parameter variable.
+struct ref_v { // The order of the fields is tight: the value size does not grow (more - in array_v).
+  value * cell = nullptr;
+  int64_t index = 0; // first step: element
   uint64_t gen = 0; // buffer generation (performance)
   uint32_t born = 0; // node where (+1) is taken
   symbol name; // The name of the array-support: hooks parsing get its place
   uint32_t memo = 0; // parsing: what the link remembered when taking (ref_taken), the number in ct_states +1
+  symbol field; // The first step is a field (otherwise an element).
   bool rt_index = false; // The index is known only in runtime (parsing).
+  uint8_t more = 0; // steps after the first
+  ref_step rest[2];
+  bool path() const { return more || field.valid(); }
 };
 
 struct value {
