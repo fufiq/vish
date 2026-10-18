@@ -306,6 +306,7 @@ struct vm_session {
         db.replace(item, db[fresh].kind);
         db.adopt_notes(fresh, item); // Commentary on the new text - the preserved id
         db.link_parents(root);
+        if(proc && !proc->st.done) proc->refresh_ct(); // ct new body - in place in canonical order
         return cat("функция ", fn_name, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
       }
     // No new function was added to the module (changes the set of overloads)
@@ -314,6 +315,7 @@ struct vm_session {
     db.replace(root, m);
     db.link_parents(root);
     if(proc) proc->helper.register_item(fresh); // Living process sees new overload
+    if(proc && !proc->st.done) proc->refresh_ct();
     return cat("функция ", fn_name, " добавлена\n");
   }
 
@@ -327,9 +329,12 @@ struct vm_session {
     for(node_id x: db.as<n_module>(root).items)
       if(db.is_struct(x) && db.as<n_extend>(x).name == type_name) item = x;
     if(!item) return cat("нет struct ", tn, "\n");
-    std::vector<symbol> fields;
+    std::vector<process_machine::field_decl> fields; // layout - names and types of fields
     for(node_id x: db.as<n_extend>(fresh).items)
-      if(db.is<n_var>(x)) fields.push_back(db.as<n_var>(x).name);
+      if(db.is<n_var>(x)) {
+        node_id ty = db.as<n_var>(x).type;
+        fields.push_back({db.as<n_var>(x).name, ty && db.is<n_ident>(ty) ? std::string(db.strings.text(db.as<n_ident>(ty).name)) : std::string()});
+      }
     auto takes = [&](node_id f) {
       auto const & fn = db.as<n_fn>(f);
       if(db.strings.text(fn.name) != "migrate" || fn.params.size() != 1) return false;

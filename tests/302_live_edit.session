@@ -1,0 +1,26 @@
+// Live process after editing (§9.3, tail step 10). ct of the new body - in place in canonical
+// order: parsing of the program again, the results - in memory of the process (was: the new body
+// read ct k with the final elaboration value - 500 instead of 100). Struct layout - names and
+// types of fields: i64 v → f64 v - old layout, you need migrate(cell old).
+// program: live_ct.tz
+proc start
+// expect: процесс запущен
+proc step 40
+edit f
+f() => k * 100;
+.
+// expect: функция f заменена
+edit cell
+struct cell { f64 v; }
+.
+// expect: правка отклонена: живой процесс держит значений cell старой раскладки: 1
+edit cell
+struct cell { f64 v; }
+migrate(cell old) => cell{f64(old.v)};
+.
+// expect: struct cell заменена
+// expect: перенесено migrate: 1
+proc run
+// expect: 100 3.0
+// expect-not: 500
+// expect: завершён

@@ -987,14 +987,41 @@ struct process_machine {
     for(auto & sm: st.streams)
       for(auto & v: sm.buf) walk(walk, v);
   }
-  static bool same_layout(m_agg const & g, std::vector<symbol> const & fields) {
+  // The layout is the names and types of fields (the tail of step 10: f64 instead of i64 for the
+  // same name is also a different layout, the value must be transferred migrate).
+  struct field_decl {
+    symbol name;
+    std::string type; // field-type
+  };
+  bool same_layout(m_agg const & g, std::vector<field_decl> const & fields) {
     if(g.fields.size() != fields.size()) return false;
     for(std::size_t i = 0; i < fields.size(); ++i)
-      if(g.fields[i].name != fields[i]) return false;
+      if(g.fields[i].name != fields[i].name || !field_fits(g.fields[i].v, fields[i].type)) return false;
     return true;
   }
+  bool field_fits(mval const & v, std::string_view t) {
+    if(t.empty()) return true;
+    std::string d = describe(v);
+    if(d == t || d.starts_with(cat(t, "<"))) return true;
+    return v.is<m_agg>() && helper.types.is_a(helper.types.name(v.as<m_agg>().type), t); // heir
+  }
+  // After editing the living process (§9.3, tail of step 10): ct of the new code - parsing of the
+  // program again in canonical order, the results - in memory of the process; the former node - the
+  // former (started frames live in the old body). The new body read the ct-variable by the final
+  // elaboration value rather than by place (§7.3).
+  void refresh_ct() {
+    interpreter a(db, root, std::vector<std::string>{name}, mode::run);
+    a.check_before_run();
+    for(auto const & [k, v]: a.ct_memo) {
+      if(!portable(v)) continue;
+      mval x = from_value(v, {});
+      auto it = std::ranges::find_if(st.ct_memo, [&](m_ct const & m) { return m.node.value == k.first && m.ctx == k.second; });
+      if(it != st.ct_memo.end()) it->v = std::move(x);
+      else st.ct_memo.push_back({node_id(k.first), k.second, std::move(x)});
+    }
+  }
   // Living values of type t with old layout (fields not as fields)
-  uint64_t stale_values(type_id t, std::vector<symbol> const & fields) {
+  uint64_t stale_values(type_id t, std::vector<field_decl> const & fields) {
     uint64_t n = 0;
     each_value([&](mval & x) {
       if(x.is<m_agg>() && x.as<m_agg>().type == t && !same_layout(x.as<m_agg>(), fields)) ++n;
@@ -1004,7 +1031,7 @@ struct process_machine {
   // 
 // (§9.3): each value of the old layout is via migrate program (assistant)
   // It performs it as an ordinary call; the fields of the old meaning are read by name.
-  uint64_t migrate_values(type_id t, std::vector<symbol> const & fields, node_id fn) {
+  uint64_t migrate_values(type_id t, std::vector<field_decl> const & fields, node_id fn) {
     uint64_t n = 0;
     each_value([&](mval & x) {
       if(!x.is<m_agg>() || x.as<m_agg>().type != t || same_layout(x.as<m_agg>(), fields)) return;
