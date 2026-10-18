@@ -1,5 +1,6 @@
 // out: 5 [1, 0] 2
 // out: 2 7
+// machine
 // check: setp(c): меняет c
 // check: fill0(a): меняет a
 // check: via(x): меняет x

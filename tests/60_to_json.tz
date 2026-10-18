@@ -2,6 +2,7 @@
 // out: {"id":7,"name":"box","size":{"w":2,"h":3}}
 // fmt-stable
 // store-roundtrip
+// machine
 // Рефлексия агрегатов вместо derive (§7.4, критерий M4): одна to_json для всех
 // агрегатов — цикл по fields(T) при компиляции, поле по дескриптору v.[f].
 struct size { i64 w; i64 h; }

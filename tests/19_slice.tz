@@ -1,6 +1,7 @@
 // stdin: 1 2 3
 // out: 14.0
 // out: 3
+// machine
 // slice: main total
 // slice-has: xs = read_floats(stdin);
 // slice-has: for(x : xs) total = total + (x * x);

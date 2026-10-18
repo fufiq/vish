@@ -1,6 +1,7 @@
 // store-roundtrip
 // out: 11
 // out: [1, 2, 30]
+// machine
 // Параметры — алиасы ячеек вызывающего (§6.2).
 inc(mut x) { x = x + 1; }
 set_last(mut a, v) { a[a.size - 1] = v; }

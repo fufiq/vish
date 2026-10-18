@@ -1,6 +1,7 @@
 // stdin: 1 2 3
 // out: 32.0
 // out: 14.0
+// machine
 // check: u = кт [1.0, 2.0, 3.0]
 // check: xs = рт array<f64>
 // check: dot  ×1

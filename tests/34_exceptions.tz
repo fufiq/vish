@@ -5,6 +5,7 @@
 // out: индекс 5 вне границ массива размера 2
 // out: 10
 // out: 7
+// machine
 // check: parse_code(рт str) бросает: http_error
 // check: guarded() бросает: out_of_bounds
 // fmt-stable

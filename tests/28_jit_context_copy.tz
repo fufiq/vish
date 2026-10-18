@@ -5,6 +5,7 @@
 // jit-compiled: mixed
 // jit-compiled: consts
 // jit-compiled: nested_mix
+// machine
 // Копия функции под каждый контекст вызова 
 // Один
 // помощник встраивается с i64 и с f64, с разными кт-значениями: у каждого

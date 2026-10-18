@@ -2,6 +2,7 @@
 // out: small
 // out: big
 // out: odd
+// machine
 // require в начале тела — ограничение кандидата; побеждает самый специфичный.
 kind(x) { require(x < 10); "small" }
 kind(x) { require(x >= 10); "big" }

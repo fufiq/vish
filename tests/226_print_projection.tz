@@ -1,3 +1,4 @@
+// machine
 // Проекция — группа записей syntax (§4.5, вариант C — решение автора
 // 2026-10-05): модуль geo.words печатает те же узлы (ast.loop, ast.if) словами и
 // ставит скобки своей функцией operand_parens. tz fmt --projection geo.words —

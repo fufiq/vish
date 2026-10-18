@@ -3,6 +3,7 @@
 // out: f64 2.0
 // out: i64 3 f64 4.5
 // out: 2
+// machine
 // check: t2 = рт tuple<i64, f64>
 // check: u = кт [3, 4]
 // check: show(рт i64)  ×

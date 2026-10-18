@@ -45,6 +45,7 @@ struct m_arr {
 struct m_agg {
   type_id type;
   m_list<m_field> fields;
+  uint32_t rid = 0; // Resource (type with destroy, shared): number - copies divided, destroy - once
 };
 // Function as a value: overload by name or lambda by environment (area number).
 struct m_fn {
@@ -90,6 +91,12 @@ struct mval {
 struct m_field {
   symbol name;
   mval v;
+};
+
+// shared(x) storage: value and number of references (§12.2)
+struct m_shared {
+  mval v;
+  uint32_t count = 0;
 };
 
 struct m_var {
@@ -215,11 +222,16 @@ struct m_state {
   m_list<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
   m_list<symbol> ct_vars; // ct-variable module (change - only ct-code)
   m_list<m_entity> entities; // entity Body Area Functions for entity .f(…)
+  // resources (§12.2): live numbers, shared storage; res_on - destroy or shared
+  bool res_on = false;
+  uint32_t res_counter = 0;
+  m_list<uint32_t> res_live;
+  m_list<m_shared> shared;
 };
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "TZPROC06";
+  std::string magic = "TZPROC07";
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -244,12 +256,15 @@ struct process_machine {
   address_space * outer_space = machine_space; // level of the car that was before
   m_state & st;
   std::string * captured = nullptr; // output - in line (tests), otherwise stdout
+  std::string elab_out; // withdrawal of assistant elaboration (ct modules) to start
 
   process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {}, int dump_fd = -1)
       : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump, dump_fd)) {
     try { // The strip is already open: there will be no destructor - close it here
       helper.owns_state = true;
+      helper.capture_output(&elab_out); // output of ct modules at the beginning of the process output (as in the interpreter)
       helper.elaborate(); // [[state]] - the assistant opens the state of the program (cell - it)
+      helper.capture_output(nullptr);
       if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
     } catch(...) {
       st.~m_state();
@@ -327,6 +342,14 @@ struct process_machine {
   }
   void release_scope(uint32_t id) {
     if(id == m_none || st.scopes[id].captured) return;
+    if(st.res_on) // In the reverse order of the announcement, alias and the transferred are not its own.
+      for(uint32_t i = uint32_t(st.scopes[id].vars.size()); i-- > 0;) {
+        m_var & v = st.scopes[id].vars[i];
+        if(v.hidden || v.v.is<m_alias>() || v.v.is<m_thunk>() || v.v.is<m_fn>() || !has_res(v.v)) continue;
+        mval x = std::move(v.v);
+        v.v = mval{m_unit{}};
+        drop_value(x, {});
+      }
     st.scopes[id].vars.clear();
     st.scopes[id].live = false;
     st.free_scopes.push_back(id);
@@ -638,7 +661,15 @@ struct process_machine {
 
   void start(std::vector<std::string> const & args, std::optional<std::vector<std::string>> input = std::nullopt) {
     st = {};
-    if(helper.res_any()) throw diagnostic("машина процессов: пока не поддержано — ресурсы с destroy (деструкторы)", {});
+    if(!elab_out.empty()) { // ct modules printed during elaboration
+      if(captured) *captured += elab_out;
+      else {
+        put(stdout, elab_out);
+        std::fflush(stdout);
+      }
+      elab_out.clear();
+    }
+    st.res_on = helper.res_any();
     if(input) {
       st.queued_input = true;
       for(auto const & l: *input) st.input.emplace_back(l);
@@ -756,6 +787,108 @@ struct process_machine {
     } else save_state(*helper.state_level);
   }
   mval cell_value(place p) { return deref(st.scopes[p.scope].vars[p.slot].v); }
+
+  // --- resources§12.2): rules of the interpreter
+  // --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- destroy(T) и copy(T)
+  // The program is performed by the assistant: a function over its parameter (there are no variables of the module during execution), the output is performed in the output of the process.
+  value helper_call(node_id fn, mval const & v, span where, std::string what) {
+    std::string * was = helper.captured;
+    helper.capture_output(captured);
+    struct back {
+      interpreter & h;
+      std::string * w;
+      ~back() { h.capture_output(w); }
+    } restore{helper, was};
+    std::vector<value> vals{to_value(v)};
+    auto r = helper.invoke(fn, vals, {}, helper.globals, {where, std::move(what), 0, 0});
+    if(r.kind == interpreter::flow_kind::thr) throw diagnostic("исключение из destroy/copy", where);
+    return r.v;
+  }
+  bool is_shared_v(mval const & v) const { return v.is<m_agg>() && v.as<m_agg>().rid && helper.types.name(v.as<m_agg>().type) == "shared"; }
+  m_shared & slot_of(mval const & v) { return st.shared[std::size_t(v.as<m_agg>().fields[0].v.as<int64_t>())]; }
+  bool has_res(mval const & v) const {
+    if(v.is<m_agg>()) {
+      if(v.as<m_agg>().rid) return true;
+      for(auto const & f: v.as<m_agg>().fields)
+        if(has_res(f.v)) return true;
+    } else if(v.is<m_arr>())
+      for(auto const & e: v.as<m_arr>().items)
+        if(e.is<m_agg>() || e.is<m_arr>()) {
+          if(has_res(e)) return true;
+        } else return false; // scalar
+    return false;
+  }
+  // new value of the type with destroy - resource (and attached, came from the assistant without numbers)
+  void mark_deep(mval & v) {
+    if(!st.res_on) return;
+    if(v.is<m_arr>())
+      for(auto & e: v.as<m_arr>().items) mark_deep(e);
+    if(!v.is<m_agg>()) return;
+    auto & g = v.as<m_agg>();
+    for(auto & f: g.fields) mark_deep(f.v);
+    if(!g.rid && helper.member_fn_of("destroy", g.type)) {
+      g.rid = ++st.res_counter;
+      st.res_live.push_back(g.rid);
+    }
+  }
+  void drop_value(mval const & v, span where) {
+    if(v.is<m_arr>()) {
+      auto const & xs = v.as<m_arr>().items;
+      for(std::size_t i = xs.size(); i-- > 0;) drop_value(xs[i], where);
+      return;
+    }
+    if(!v.is<m_agg>()) return;
+    auto const & g = v.as<m_agg>();
+    if(g.rid) {
+      auto it = std::ranges::find(st.res_live, g.rid);
+      if(it == st.res_live.end()) throw diagnostic(cat("ресурс ", helper.types.name(g.type), " уже освобождён: копия прошла мимо правила"), where);
+      st.res_live.erase(it);
+      if(is_shared_v(v)) { // shared: dec, the latter releases the stored
+        m_shared & sl = slot_of(v);
+        if(sl.count > 0 && --sl.count == 0) {
+          mval held = std::move(sl.v);
+          sl.v = mval{m_unit{}};
+          drop_value(held, where);
+        }
+        return;
+      }
+      if(node_id d = helper.member_fn_of("destroy", g.type)) helper_call(d, v, where, cat("destroy(", helper.types.name(g.type), ")"));
+    }
+    for(std::size_t i = g.fields.size(); i-- > 0;) drop_value(g.fields[i].v, where);
+  }
+  // the value of the name src goes to a new place: the name is no longer read - transfer (name
+  // hidden), reads - copy(T) of the program (shared - inc), no it - error
+  void take_from(node_id src, mval & v, uint32_t scope) {
+    if(!st.res_on || !db.is<n_ident>(src) || !has_res(v)) return;
+    symbol name = db.as<n_ident>(src).name;
+    span where = db[src].where;
+    if(!helper.used_after(src, name)) {
+      if(place p = find(scope, name); p.scope != m_none) var_of(p).hidden = src.value + 1;
+      return;
+    }
+    if(is_shared_v(v)) {
+      ++slot_of(v).count;
+      v.as<m_agg>().rid = ++st.res_counter;
+      st.res_live.push_back(v.as<m_agg>().rid);
+      return;
+    }
+    node_id c = v.is<m_agg>() ? helper.member_fn_of("copy", v.as<m_agg>().type) : node_id{};
+    if(!c) {
+      std::string tn = describe(v);
+      throw diagnostic(cat("значение ", tn, " — ресурс: ", helper.str(name), " читается дальше, а копировать его нечем — объявите copy(", tn, " x) или не используйте ", helper.str(name), " после"), where);
+    }
+    v = from_value(helper_call(c, v, where, cat("copy(", describe(v), ")")), where);
+    mark_deep(v);
+  }
+  mval make_shared(mval v) {
+    st.res_on = true;
+    st.shared.push_back({std::move(v), 1});
+    m_agg g{helper.types.named("shared"), {}};
+    g.fields.push_back({helper.sym("id"), mval{int64_t(st.shared.size() - 1)}});
+    g.rid = ++st.res_counter;
+    st.res_live.push_back(g.rid);
+    return mval{std::move(g)};
+  }
 
   // --- live process (§9.3): clone test, hot replacement, migration ---
 
@@ -1166,6 +1299,12 @@ struct process_machine {
       return;
     }
     mval r = result_in_type(t.node, deref(pop_val())); // a value, not a alias, on an area that is now freed up
+    if(st.res_on) {
+      if(!db.is<n_block>(body)) take_from(body, r, t.scope); // => x - transfer
+      if(r.is<m_agg>() && r.as<m_agg>().rid && t.owned != m_none) // parameter returned by value - transfer
+        for(auto & v: st.scopes[t.owned].vars)
+          if(v.v.is<m_agg>() && v.v.as<m_agg>().rid == r.as<m_agg>().rid) v.hidden = 1;
+    }
     end_frame(t);
     finish(std::move(r));
   }
@@ -1289,6 +1428,9 @@ struct process_machine {
       t.owned = new_scope(t.scope);
       t.scope = t.owned;
     } else if(!(b.has_value && t.phase == b.items.size())) {
+      if(st.res_on && (db.is<n_call>(b.items[t.phase - 1]) || db.is<n_construct>(b.items[t.phase - 1]))) // Temporary discarded - released
+        for(std::size_t i = t.base; i < fib().vals.size(); ++i)
+          if(!fib().vals[i].is<m_alias>() && has_res(fib().vals[i])) drop_value(mval(fib().vals[i]), db[b.items[t.phase - 1]].where);
       fib().vals.resize(t.base); // The meaning of the instruction is not
     }
     if(t.phase < b.items.size()) {
@@ -1298,6 +1440,7 @@ struct process_machine {
     }
     if(b.has_value && !b.items.empty()) {
       mval v = deref(pop_val());
+      take_from(b.items.back(), v, t.scope); // the name of the block - transfer
       return finish(std::move(v));
     }
     (void)n;
@@ -1346,6 +1489,10 @@ struct process_machine {
   // is imaginable (out - in the type of parameter), 0 - no.
   int type_fit(mval const & v, std::string_view want, bool strict, mval & out) {
     out = v;
+    if(is_shared_v(v) && want != "shared") { // Shared is suitable where stored (transparent)
+      mval in;
+      return type_fit(slot_of(v).v, want, strict, in) ? 2 : 0;
+    }
     std::string have = describe(v);
     if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2; // identity is here
     // The ratio of unequal types is the same rule as that of the interpreter (fit_rule prelude, M6)
@@ -1413,6 +1560,23 @@ struct process_machine {
     auto const & p = db.as<n_pat>(pat);
     std::string_view kind = p.type ? helper.str(db.as<n_ident>(p.type).name) : std::string_view();
     mval v = deref(v0);
+    if(helper.node_kind_named(kind) || (v.is<m_agg>() && helper.types.name(v.as<m_agg>().type) == "code")) {
+      // sample above the code (ast.if {c, …} = node) - unpacks the assistant, names - here
+      scope * probe = helper_probe({pat}, into);
+      scope * got = helper.new_scope(probe);
+      struct drop {
+        interpreter & h;
+        scope * a;
+        scope * b;
+        ~drop() {
+          h.drop_scope(a);
+          h.drop_scope(b);
+        }
+      } hold{helper, got, probe};
+      if(helper.unpack_into(pat, to_value(v), got, probe, 0, where) != interpreter::unpacked::yes) return false;
+      for(auto const & [name, cellp]: got->vars) declare(into, name, from_value(*cellp, where));
+      return true;
+    }
     auto elem = [&](node_id item, mval const & e) -> bool {
       if(db.is<n_pat>(item)) return unpack_into(item, e, into, where);
       if(db.is<n_param>(item)) {
@@ -1575,6 +1739,7 @@ struct process_machine {
       return push_eval(r.value, t.scope, t.frame);
     }
     mval v = r.value ? deref(pop_val()) : mval{m_unit{}};
+    if(r.value) take_from(r.value, v, t.scope); // return x - transfer
     uint32_t target = r.target ? return_target(db.as<n_ident>(r.target).name, t.frame, db[n].where) : t.frame;
     raise({sig_return, std::move(v), target});
   }
@@ -1586,6 +1751,12 @@ struct process_machine {
       return push_eval(m.object, t.scope, t.frame);
     }
     mval o = deref(pop_val());
+    if(is_shared_v(o)) o = slot_of(o).v; // shared - transparently
+    if(is_code(o)) { // c.cond - node field of code: reads the assistant
+      auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
+      if(!v) throw diagnostic(cat("у узла кода нет поля ", helper.str(m.name)), db[n].where);
+      return finish(std::move(*v));
+    }
     if(helper.str(m.name) == "size") {
       if(o.is<m_arr>()) return finish(mval{int64_t(o.as<m_arr>().items.size())});
       if(o.is<m_str>()) return finish(mval{int64_t(o.as<m_str>().size())});
@@ -1683,9 +1854,19 @@ struct process_machine {
     return eval_call_args(n, it->second, o.args, true);
   }
 
+  bool is_code(mval const & v) const { return v.is<m_agg>() && helper.types.name(v.as<m_agg>().type) == "code"; }
   void eval_assign(node_id n, n_op const & o, std::string_view op) {
     m_task & t = top();
     node_id lhs = o.args[0];
+    if(t.phase == 0 && db.is_member(lhs)) { // f.body = ... - editing live node code: assistant (node - common, in the database)
+      node_id x = lhs;
+      while(db.is_member(x)) x = db.member_of(x).object;
+      if(db.is<n_ident>(x))
+        if(place p = find(t.scope, db.as<n_ident>(x).name); p.scope != m_none && is_code(cell(p))) {
+          if(!helper_eval(n, t.scope, std::nullopt, db[n].where)) throw diagnostic("правка узла кода не удалась", db[n].where);
+          return finish(mval{m_unit{}});
+        }
+    }
     if(t.phase == 0) {
       t.phase = 1;
       return push_eval(o.args[1], t.scope, t.frame);
@@ -1697,6 +1878,7 @@ struct process_machine {
       // Visibility hygiene (as interpreter::foreign_global): the variable module of the program is not
       // visible to the code of the module that does not see it (the body of the construction prelude).
       if(op == "=" && foreign_module_var(p, name, n)) p = {};
+      if(op == "=") take_from(o.args[1], rhs, t.scope);
       if(p.scope == m_none) {
         if(op != "=") throw diagnostic(cat("неизвестное имя ", helper.str(name)), db[lhs].where);
         declare(t.scope, name, std::move(rhs)); // x = e is an announcement if there is no name.
@@ -1714,8 +1896,15 @@ struct process_machine {
       mval & c = cell(p);
       bool whole = !st.scopes[p.scope].vars[p.slot].v.is<m_alias>() || st.scopes[p.scope].vars[p.slot].v.as<m_alias>().index == m_none;
       if(op == "=" && is_record(rhs)) rhs = to_type(std::move(rhs), place_type(c), db[n].where); // Struct holds it, {x: …} becomes it.
-      c = op == "=" ? std::move(rhs) : primitive(prim_of(op), {c, rhs}, db[n].where);
-      if(whole && c.is<m_arr>()) c.as<m_arr>().gen = ++st.array_gen; // New buffer - old links are invalid
+      if(op == "=" && st.res_on && !var_of(p).hidden && has_res(c)) { // Overwrite - the old resource is released
+        mval old = std::move(c);
+        c = mval{m_unit{}};
+        drop_value(old, db[n].where);
+      }
+      if(op == "=") var_of(p).hidden = 0;
+      mval & c2 = cell(p);
+      c2 = op == "=" ? std::move(rhs) : primitive(prim_of(op), {c2, rhs}, db[n].where);
+      if(whole && c2.is<m_arr>()) c2.as<m_arr>().gen = ++st.array_gen; // New buffer - old links are invalid
       return finish(mval{m_unit{}});
     }
     if(db.is_index(lhs) && db.is<n_ident>(db.index_of(lhs).object)) { // xs[i] = e
@@ -1752,6 +1941,7 @@ struct process_machine {
         not_hidden(p, db.as<n_ident>(x).name, db[lhs].where);
         mval * target = &cell(p);
         for(auto it = path.rbegin(); it != path.rend(); ++it) {
+          if(is_shared_v(*target)) target = &slot_of(*target).v; // shared - transparently
           if(!target->is<m_agg>()) throw diagnostic(cat("у значения типа ", describe(*target), " нет поля ", helper.str(*it)), db[lhs].where);
           mval * next = nullptr;
           for(auto & f: target->as<m_agg>().fields)
@@ -1836,6 +2026,10 @@ struct process_machine {
         if(it == helper.functions.end()) return builtin_call(n, m.name, args);
         return eval_call_args(n, it->second, args, false);
       }
+      if(db.is<n_ref>(c.callee) && db.is<n_fn>(node_id(db.as<n_ref>(c.callee).target))) { // Reference to function - its current name
+        auto it = helper.functions.find(db.as<n_fn>(node_id(db.as<n_ref>(c.callee).target)).name);
+        if(it != helper.functions.end()) return eval_call_args(n, it->second, c.args, false);
+      }
       if(!db.is<n_ident>(c.callee)) unsupported("вызов значения-выражения", n);
       symbol name = db.as<n_ident>(c.callee).name;
       place p = find(t.scope, name);
@@ -1855,6 +2049,7 @@ struct process_machine {
         unsupported("вызов значения", n);
       }
       auto it = helper.functions.find(name);
+      if(it == helper.functions.end() && helper.str(name) == "code" && c.args.empty()) return finish(from_value(helper.code_value(node_id()), db[n].where)); // knot
       if(it == helper.functions.end() && helper.str(name) == "code" && c.args.size() == 1) { // AST
         node_id e = c.args[0];
         uint32_t sc = t.scope;
@@ -1866,7 +2061,18 @@ struct process_machine {
           sc = th.env;
         }
         if(db.is<n_raw>(e) && db.as<n_raw>(e).rule) e = helper.raw_result(e); // The block disassembled by the code - its result
+        if(db.is<n_ident>(e) && find(sc, db.as<n_ident>(e).name).scope == m_none && e == c.args[0]) { // code(f) - entity Advertisement: The Assistant
+          auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
+          if(v) return finish(std::move(*v));
+        }
         return finish(from_value(helper.code_value(e), db[n].where));
+      }
+      if(it == helper.functions.end() && helper.str(name) == "alloc_in" && c.args.size() == 2) {
+        // with_alloc(r) { … } - Body at the call site: machine memory - process pages (dump writes them
+        // as is), your region level inside the process - not separate addresses (mine)
+        t.node = c.args[1];
+        t.phase = 0;
+        return;
       }
       if(it == helper.functions.end() && helper.str(name) == "intercept") return begin_intercept(n, c.args);
       if(it == helper.functions.end() && helper.str(name) == "fiber_start") return begin_spawn(n, c.args);
@@ -2077,6 +2283,15 @@ struct process_machine {
     symbol name(t.b);
     std::vector<mval> a;
     for(uint32_t i = 0; i < t.a; ++i) a.push_back(deref(fib().vals[t.base + i]));
+    if(helper.str(name) == "shared" && t.a == 1 && !helper.functions.contains(name)) { // vault
+      mval v = a[0];
+      take_from(args[0], v, t.scope);
+      return finish(make_shared(std::move(v)));
+    }
+    if(helper.str(name) == "shared_count" && t.a == 1 && !helper.functions.contains(name)) {
+      if(!is_shared_v(a[0])) throw diagnostic("shared_count: ожидался shared", db[n].where);
+      return finish(mval{int64_t(slot_of(a[0]).count)});
+    }
     if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: link of the car - cell and number, moving them does not break
       mval & xs = follow(fib().vals[t.base].as<m_alias>());
       if(!xs.is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
@@ -2439,6 +2654,7 @@ struct process_machine {
       if(type_fit(x, helper.str(db.as<n_ident>(v.type).name), false, got) == 1) x = std::move(got);
     }
     if(v.type && db.is<n_ident>(v.type) && !v.strict) x = to_type(std::move(x), helper.str(db.as<n_ident>(v.type).name), db[v.init].where); // point p = {x: …}
+    if(v.init) take_from(v.init, x, t.scope);
     declare(t.scope, v.name, std::move(x));
     finish(mval{m_unit{}});
   }
@@ -2457,6 +2673,11 @@ struct process_machine {
         fs.push_back({c.names[i], to_value(deref(fib().vals[t.base + i]))});
       }
       return finish(from_value(helper.record_value(std::move(fs)), db[n].where));
+    }
+    if(!db.is<n_ident>(c.type) || helper.node_kind_named(helper.str(db.as<n_ident>(c.type).name))) { // ast.call {…} - node type of program: builds an assistant
+      auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
+      if(!v) throw diagnostic("узел кода: не удалось построить", db[n].where);
+      return finish(std::move(*v));
     }
     symbol tname = db.as<n_ident>(c.type).name;
     auto st_it = helper.structs.find(tname);
@@ -2486,7 +2707,12 @@ struct process_machine {
         if(f.type && db.is<n_ident>(f.type)) v = to_type(std::move(v), helper.str(db.as<n_ident>(f.type).name), db[i < c.items.size() ? c.items[i] : f.init].where);
         g.fields.push_back({f.name, std::move(v)});
       }
-      return finish(mval{std::move(g)});
+      mval r{std::move(g)};
+      if(st.res_on) {
+        for(uint32_t i = 0; i < c.items.size(); ++i) take_from(c.items[i], r.as<m_agg>().fields[i].v, t.scope); // name-field
+        mark_deep(r);
+      }
+      return finish(std::move(r));
     }
     if(helper.str(tname) != "array" && helper.types.builtin(helper.str(tname)) && c.items.size() == 1) { // Tag: i64 {x} - as i64 y = x
       std::string_view want = helper.str(tname);
@@ -2601,6 +2827,23 @@ struct process_machine {
     finish(deref(pop_val()));
   }
 
+  // link to the ad (ast.reference): function - value by current name, type, ct-variable
+  void eval_node(node_id n, n_ref const & r) {
+    node_id d(r.target);
+    if(db.is<n_fn>(d)) return finish(mval{m_fn{db.as<n_fn>(d).name, {}, m_none}});
+    if(db.is_struct(d)) return finish(mval{m_type{helper.types.named(helper.str(db.as<n_extend>(d).name))}});
+    if(db.is<n_var>(d))
+      if(place p = find(st.globals, db.as<n_var>(d).name); p.scope != m_none) return finish(cell_value(p));
+    throw diagnostic("ref: цель ссылки не объявлена", db[n].where);
+  }
+
+  // { … } - code value: considers assistant (free names - domain values), code value - node of
+  // the base, common to the process and assistant
+  void eval_node(node_id n, n_quote const &) {
+    auto v = helper_eval(n, top().scope, std::nullopt, db[n].where);
+    if(!v) throw diagnostic("quote: не удалось построить код", db[n].where);
+    finish(std::move(*v));
+  }
   void eval_node(node_id n, auto const &) { unsupported(kind_name(db[n]), n); }
 
   // Call phases with numbers: 1 - 2 - overload, 3 - built-in, 4 - 5 - construction block. Call
@@ -2684,7 +2927,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(std::string_view(h.magic) != "TZPROC06") throw diagnostic("не дамп процесса tz", {});
+    if(std::string_view(h.magic) != "TZPROC07") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }

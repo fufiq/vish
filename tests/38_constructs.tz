@@ -5,6 +5,7 @@
 // jit-compiled: nested
 // jit-compiled: first_neg
 // jit-compiled: safe_div
+// machine
 
 // fmt-stable
 // store-roundtrip

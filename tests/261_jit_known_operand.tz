@@ -7,6 +7,7 @@
 // jit-compiled: wide
 // jit-compiled: shifts
 // jit-compiled: cmps
+// machine
 // Второй операнд, известный при компиляции, — значением в кодогенератор контекста known цели
 // (add r, imm32 / cmp r, imm32; jcc), вне imm32 — через регистр, как раньше. 
 //.

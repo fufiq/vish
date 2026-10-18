@@ -3,6 +3,7 @@
 // out: 7 2
 // fmt-stable
 // store-roundtrip
+// machine
 // Typestate (§5.6, M2b): 
 //   — ct-поле агрегата —
 // состояние при компиляции; операции его меняют, require проверяет. own и

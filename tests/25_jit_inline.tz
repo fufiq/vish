@@ -9,6 +9,7 @@
 // jit-compiled: counters
 // jit-compiled: pick
 // jit-compiled: nested
+// machine
 // Встраивание в машинном коде (M1b, D10): тело вызываемой функции
 // встраивается в контекст вызова, параметры — алиасы мест вызывающего,
 // expr-параметр вычисляется при упоминании, return(caller)/return(f) —

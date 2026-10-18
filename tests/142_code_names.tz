@@ -3,6 +3,7 @@
 // out: both(helper) => helper(1) + helper;
 // fmt-stable
 // store-roundtrip
+// machine
 // Имена в созданном коде (решение автора 2026-10-02): ast.name{"x"} — имя, его
 // связывает анализ в месте, куда узел попал: 
 //;

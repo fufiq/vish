@@ -5,6 +5,7 @@
 // out: 32.0
 // out: 32.0
 // out: 14
+// machine
 // instances: dot(array<f64>, array<f64>)
 // instances: dot(array<i64>, array<i64>)
 // jit-compiled: dot

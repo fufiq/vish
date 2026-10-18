@@ -5,6 +5,7 @@
 // out: 32.0
 // out: 32.0
 // out: 14
+// machine
 // residual: 5
 // residual-has: print(32.0);
 // residual-has: print(14);

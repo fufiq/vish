@@ -1,5 +1,6 @@
 // args: 42
 // out: 42
+// machine
 // check: p = рт i64
 // check: try(expr)  ×1
 // Тип результата try выводится по всем путям: return(caller) r и r.value.

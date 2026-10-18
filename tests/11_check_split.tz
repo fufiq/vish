@@ -1,4 +1,5 @@
 // out: 0
+// machine
 // check: w → 2 продолжения: array<f64> | array<i64>
 // check: dot(рт array<f64>, рт array<f64>)   [w: array<f64>]
 // check: dot(рт array<i64>, рт array<i64>)   [w: array<i64>]

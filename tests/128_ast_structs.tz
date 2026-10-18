@@ -3,6 +3,7 @@
 // out: a
 // out: 12
 // out: 2 100 0
+// machine
 // jit-compiled: show
 // jit-compiled: pairsum
 // jit-compiled: kind_of

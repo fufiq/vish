@@ -14,6 +14,7 @@
 // jit-stats: for по потоку генератора — не в области spawn
 // jit-stats: переменную генератора меняют после spawn
 // jit-compiled: twice
+// machine
 // Генератор → цикл (шаг 2 плана, O11): пара
 // s = stream(…); spawn { W }; for(x : s) B компилируется без файбера — в месте
 // for исполняется W, где write(s, v) — это B с x = v: 

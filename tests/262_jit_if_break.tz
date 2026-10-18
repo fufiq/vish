@@ -1,6 +1,7 @@
 // args: 10
 // out: 45 25 17 3
 // jit-compiled: sums
+// machine
 // if(c) break; / if(c) continue; — ветка из одного перехода: условие в контексте when с целью
 // цикла, один условный переход.
 sums(i64 n) {

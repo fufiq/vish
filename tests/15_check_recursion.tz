@@ -2,6 +2,7 @@
 // args: 5
 // out: 120
 // out: 120
+// machine
 // check: fact  ×5
 // check: fact(рт i64)  ×1
 // check: r = рт i64

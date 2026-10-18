@@ -1,6 +1,7 @@
 // args: abc
 // out: before
 // out: load failed
+// machine
 // Семантический инлайн: return(caller) в теле try выходит из load, а не из try.
 try(expr e) {
   r = e;
