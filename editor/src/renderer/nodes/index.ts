@@ -1,43 +1,16 @@
-// All types of node: Imports register elements tz-<view>. List of species -
-// node_kinds scheme (from node_kind to include/tz/ast.hpp); index.test.ts checks
-// that each species is registered.
-import './declarations/module';
-import './declarations/fn';
-import './declarations/param';
-import './declarations/var';
-import './declarations/extend';
-import './declarations/use';
-import './statements/block';
-import './statements/if';
-import './statements/loop';
-import './statements/break';
-import './statements/continue';
-import './statements/return';
-import './statements/throw';
-import './statements/ct';
-import './statements/unpack';
-import './expressions/ident';
-import './expressions/int';
-import './expressions/float';
-import './expressions/str';
-import './expressions/call';
-import './expressions/op';
-import './expressions/chain';
-import './expressions/lambda';
-import './expressions/construct';
-import './expressions/quote';
-import './expressions/splice';
-import './expressions/hole';
-import './expressions/pat';
-import './expressions/pat_field';
-import './expressions/subject';
-import './expressions/spread';
-import './expressions/native';
-import './expressions/ref';
-import './expressions/raw';
-import './expressions/sym';
-import './expressions/node';
+import { schema } from '../../protocol/messages';
+import { RecordNode } from './record_node';
 
 export function tagOf(kind: string): string {
   return `tz-${kind.replace(/^n_/, '').replaceAll('_', '-')}`;
+}
+
+// The element for each type of node (tz-<view>: DOM - direct projection AST, as in smisl) - one
+// common class RecordNode: syntax sends VM, classes by type are not written by hand (§4.5, step
+// 11.4). Types - node_kinds circuits (from node_kind to include/tz/ast.hpp).
+for (const kind of schema.node_kinds) {
+  const tag = tagOf(kind);
+  if (!customElements.get(tag)) {
+    customElements.define(tag, class extends RecordNode {});
+  }
 }

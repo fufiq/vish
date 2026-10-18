@@ -17,7 +17,7 @@ import {
   type NodeMarks,
   type PieceText,
 } from './nodes/ast_node';
-import { BlockNode } from './nodes/block_node';
+import { RecordNode } from './nodes/record_node';
 import { tagOf } from './nodes/index';
 
 // Representation of the module in the window: node elements on the pieces sent, the
@@ -330,8 +330,8 @@ export class ViewElement {
   // Click point → place in the text node (indicator for VM).
   placeAt(x: number, y: number): (PieceText & { offset: number }) | undefined {
     const shadowRoots = [...this.byId.values()]
-      .filter((n) => n instanceof BlockNode)
-      .map((n) => n.shadow);
+      .filter((n) => n instanceof RecordNode && n.composite)
+      .flatMap((n) => (n.shadowRoot ? [n.shadowRoot] : []));
     const pos = document.caretPositionFromPoint(x, y, { shadowRoots });
     if (!pos || !(pos.offsetNode instanceof Text)) return undefined;
     const where = pieceOfText.get(pos.offsetNode);
