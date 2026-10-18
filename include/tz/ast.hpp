@@ -1357,11 +1357,22 @@ node_id node_place(node_kind const & k, uint32_t place) {
 // record is not a function (not registered, not called). `_` in the body is an empty field.
 //
 struct record_info {
-  int kind = -1; // node (number in node_kind); -1 - kernel call with head name
+  int kind = -1; // node (number in node_kind); -1 - kernel call with head name; record_template - workpiece
   std::vector<uint32_t> slot; // parameter k → place in the body (field node / call argument)
   uint32_t places = 0; // body-place
   std::string program; // View declared by the program (kind - n_node): ast.twice
+  node_id tmpl; // workpiece: code in quote { … }, places - #x inserts and #x block parameters
 };
+// Write-workpiece (§4.5, step 11.2): the body is `quote { код }` of the base language, parts of
+// the record are inserted into it: `syntax each (x) in (xs) {body} => quote { for(#x : #xs) #body
+// };`. parsing builds the workpiece code with parts in place, the print recognizes the node by the
+// workpiece - the second language writes the same node as the base language (for, try...),
+// including blocks that enter names (Q`#x` is the name of the block parameter). ;
+//
+// 
+// *My:* workpiece - quote, `#x` in the name place, block from one insert `{
+// #body }` - place-block.
+constexpr int record_template = -3;
 
 // Marking layout in the syntax record (§4.4, projection): `[[line]] else` - part from the
 // new line, `[[indent]] {x}` - body-non-block from the new line deeper, `[[space]]` -
@@ -1388,12 +1399,44 @@ std::string_view form_piece(ast_db const & db, n_fn const & f, std::size_t k) {
   return {};
 }
 
+// Place of workpiece t record f: #x insert or #x block parameter is the number of the write
+// parameter (-1 is not the place).
+int template_place(ast_db const & db, n_fn const & f, node_id t) {
+  std::string_view name;
+  if(db.is<n_splice>(t)) name = db.strings.text(db.as<n_splice>(t).name);
+  else if(db.is<n_param>(t) && db.strings.text(db.as<n_param>(t).name).starts_with('#')) name = db.strings.text(db.as<n_param>(t).name).substr(1);
+  else return -1;
+  for(uint32_t k = 0; k < f.params.size(); ++k)
+    if(db.strings.text(db.as<n_param>(f.params[k]).name) == name) return int(k);
+  return -1;
+}
+// The blank block from one insert is the place-block `{ #body }`: part of the record is the
+// node block (try { … } catch(e) { … } - blocks, not instructions).
+int template_block_place(ast_db const & db, n_fn const & f, node_id t) {
+  if(!db.is<n_block>(t) || db.as<n_block>(t).items.size() != 1 || !db.is<n_splice>(db.as<n_block>(t).items[0])) return -1;
+  return template_place(db, f, db.as<n_block>(t).items[0]);
+}
+
 std::optional<record_info> record_of(ast_db const & db, node_id fn) {
   if(!db.is<n_fn>(fn)) return std::nullopt;
   auto const & f = db.as<n_fn>(fn);
   if(f.form.empty() || !f.body) return std::nullopt;
   record_info r;
   node_list items;
+  if(db.is<n_quote>(f.body) && db.as<n_quote>(f.body).items.size() == 1) { // Preparation: Each part is exactly one place
+    r.kind = record_template;
+    r.tmpl = db.as<n_quote>(f.body).items[0];
+    r.places = uint32_t(f.params.size());
+    std::vector<uint32_t> uses(f.params.size());
+    auto count = [&](this auto const & self, node_id t) -> void {
+      if(int k = template_place(db, f, t); k >= 0) ++uses[k];
+      db.for_each_child(t, [&](node_id c) { self(c); });
+    };
+    count(r.tmpl);
+    if(std::ranges::any_of(uses, [](uint32_t u) { return u != 1; })) return std::nullopt;
+    for(uint32_t k = 0; k < f.params.size(); ++k) r.slot.push_back(k);
+    return r;
+  }
   if(db.is<n_construct>(f.body) && db.is<n_ident>(db.as<n_construct>(f.body).type)) {
     std::string_view kind = db.strings.text(db.as<n_ident>(db.as<n_construct>(f.body).type).name);
     r.kind = node_kind_index(kind);

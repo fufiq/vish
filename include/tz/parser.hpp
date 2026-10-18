@@ -1628,12 +1628,66 @@ struct parser {
       } else throw diagnostic("в записи syntax — слова, символы, ;, (параметр) и {тело}", here().where);
     }
     expect_op("=>");
+    template_body = is_word("quote") && is_open('{', 1); // recording - place of use code
     f.body = is_open('{') && !record_ahead() ? block() : expr_body();
+    template_body = false;
     f.expr_body = true;
     end_expr_body();
     node_id id = db.add(std::move(f), {start, toks[pos - 1].where.end});
     learn(db.as<n_fn>(id), id);
     return id;
+  }
+  // The body of the syntax recording is a quote { … } (§4.5): its code is an instruction at
+  // the point of use, not module elements (try { … } is a call, not an extension of try).
+  bool template_body = false;
+
+  // Part k of the record d is the name of the block parameter in its workpiece (#x).
+  bool binder_part(node_id d, std::size_t k) const {
+    auto r = record_of(db, d);
+    if(!r || r->kind != record_template) return false;
+    auto const & f = db.as<n_fn>(d);
+    bool found = false;
+    auto look = [&](this auto const & self, node_id t) -> void {
+      if(db.is<n_param>(t) && template_place(db, f, t) == int(k)) found = true;
+      db.for_each_child(t, [&](node_id c) { self(c); });
+    };
+    look(r->tmpl);
+    return found;
+  }
+  // Workpiece code t record f with parts of args in the field (§4.5): new node - at the place
+  // of use w, parts - as disassembled. Name-place - the disassembled parameter of the part,
+  // the connection with the source (x : xs) and the clause - the workpiece; place-block - the
+  // block of the part (or the block from its expression).
+  node_id instantiate(n_fn const & f, node_id t, node_list const & args, span w) {
+    if(int k = template_block_place(db, f, t); k >= 0) {
+      node_id a = args[k];
+      if(db.is<n_block>(a) || db.is<n_raw>(a)) return a;
+      n_block b;
+      b.items.push_back(a);
+      return db.add(std::move(b), db[a].where);
+    }
+    if(int k = template_place(db, f, t); k >= 0) {
+      node_id a = args[k];
+      if(!db.is<n_param>(t)) return a;
+      if(!db.is<n_param>(a)) throw diagnostic("ожидалось имя", db[a].where);
+      n_param p = db.as<n_param>(a);
+      p.source = db.as<n_param>(t).source;
+      p.clause = db.as<n_param>(t).clause;
+      db.replace(a, std::move(p));
+      return a;
+    }
+    node_kind k = db[t].kind; // Copy: base could move
+    std::visit([&](auto & x) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if constexpr(std::is_same_v<field_t, node_id>) {
+          if(x.[:m:]) x.[:m:] = instantiate(f, x.[:m:], args, w);
+        } else if constexpr(std::is_same_v<field_t, node_list>)
+          for(node_id & c: x.[:m:]) c = instantiate(f, c, args, w);
+      }
+    },
+        k);
+    return db.add(std::move(k), w);
   }
 
   // Record syntax ads with this first word. Forms with a common beginning are parsed
@@ -1701,7 +1755,10 @@ struct parser {
           // (x) is one expression; (xs, ...) is a comma list, place is array {…}
           auto lists = [&](bool list) { std::erase_if(live, [&](node_id d) { return form_list(piece(d, k)) != list; }); };
           node_list items;
-          if(!is_close(')')) items.push_back(expression());
+          // part is the name of the parameter of the workpiece (#x): the parameter (x, T x), not the expression
+          bool binds = std::ranges::all_of(live, [&](node_id d) { return binder_part(d, args.size()); });
+          if(!binds) std::erase_if(live, [&](node_id d) { return binder_part(d, args.size()); });
+          if(!is_close(')')) items.push_back(binds ? param() : expression());
           while(is_op(",")) {
             eat_op(",");
             items.push_back(expression());
@@ -1757,6 +1814,7 @@ struct parser {
         bool tail = db.strings.text(form.back()).starts_with('{') && !args.empty() && db.is<n_block>(args.back());
         span w{start, toks[pos - 1].where.end};
         if(auto r = record_of(db, d)) {
+          if(r->kind == record_template) return instantiate(db.as<n_fn>(d), r->tmpl, args, w);
           std::vector<node_id> places(r->places);
           for(std::size_t i = 0; i < args.size(); ++i) places[r->slot[i]] = args[i];
           if(r->kind >= 0) return db.add(make_node(r->kind, places, r->program), w);
@@ -2068,7 +2126,7 @@ struct parser {
     node_id body;
     std::vector<node_id> decls = con ? con->decls : std::vector<node_id>{};
     if(is_open('{')) body = ruled_block(decls);
-    else if(word == symbol{} && con && con->tail && head_of_statement && here().kind == tok::ident && (!rules.record_words.contains(std::string(here().text)) || heads_syntax(here().text))) {
+    else if(word == symbol{} && con && con->tail && head_of_statement && ((here().kind == tok::ident && (!rules.record_words.contains(std::string(here().text)) || heads_syntax(here().text))) || (is_op("#") && ahead(1).kind == tok::ident))) { // #body - tail-place workpiece
       body = ruled(decls, [&] { return statement(); });
       tail_statement = true;
     }
@@ -2172,8 +2230,16 @@ struct parser {
   // (catch) - and `e`, `T e` (type is not written - it is output:).
   //
   std::optional<std::pair<n_param, uint32_t>> binder(bool packed) {
-    if(ahead(0).kind != tok::ident) return std::nullopt;
     auto closes = [&](uint32_t k) { return is_op(",", k) || (ahead(k).kind == tok::close && ahead(k).ch() == ')'); };
+    if(is_op("#") && ahead(1).kind == tok::ident && (is_op(":", 2) || (packed && closes(2)))) { // #x - name/place of recording (§4.5)
+      uint32_t start = here().where.begin;
+      eat_op("#");
+      n_param p;
+      p.name = db.strings.intern(cat("#", here().text));
+      advance();
+      return std::pair{std::move(p), start};
+    }
+    if(ahead(0).kind != tok::ident) return std::nullopt;
     bool typed = ahead(1).kind == tok::ident && (is_op(":", 2) || closes(2));
     bool bare = is_op(":", 1) || (packed && closes(1));
     if(!typed && !bare) return std::nullopt;
@@ -2274,7 +2340,8 @@ struct parser {
           expect_open('{');
           n_quote q;
           context_scope scope(*this); // workpiece - its context
-          while(!is_close('}') && !at_end()) q.items.push_back(recover_statement([&] { return item(); }));
+          bool statements = std::exchange(template_body, false);
+          while(!is_close('}') && !at_end()) q.items.push_back(recover_statement([&] { return statements ? statement() : item(); }));
           expect_close('}');
           return db.add(std::move(q), {start, toks[pos - 1].where.end});
         }

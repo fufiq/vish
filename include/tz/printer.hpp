@@ -466,6 +466,12 @@ struct printer {
   }
   bool shape_fits(node_id n, rec const & x) const {
     auto const & [f, r] = x;
+    if(r.kind == record_template) { // workpiece: node - its code, places - parts
+      std::vector<node_id> places(r.places);
+      if(!match_template(n, db.as<n_fn>(f), r.tmpl, places)) return false;
+      tmpl_places[{n.value, f.value}] = std::move(places);
+      return true;
+    }
     if(r.kind >= 0) {
       if(int(db[n].kind.index()) != r.kind) return false;
       if(!r.program.empty() && db.as<n_node>(n).kind != r.program) return false; // type of program - by name
@@ -485,6 +491,58 @@ struct printer {
       return v;
     }();
     return db.is<n_call>(n) || db.is<n_node>(n) || able[db[n].kind.index()];
+  }
+
+  // Node n - the code of the workpiece t of the record f (§4.5): the same view and fields (the layout
+  // - empty lines - not counting), at the places of the workpiece - any node (the name-place -
+  // parameter with the same connection x : xs, at the place-block - block); places - node parts.
+  bool match_template(node_id n, n_fn const & f, node_id t, std::vector<node_id> & places) const {
+    if(int k = template_block_place(db, f, t); k >= 0) {
+      if(!db.is<n_block>(n) && !db.is<n_raw>(n)) return false;
+      places[k] = n;
+      return true;
+    }
+    if(int k = template_place(db, f, t); k >= 0) {
+      if(db.is<n_param>(t)) {
+        if(!db.is<n_param>(n)) return false;
+        auto const & a = db.as<n_param>(t);
+        auto const & b = db.as<n_param>(n);
+        if(a.source != b.source || a.clause != b.clause) return false;
+      }
+      places[k] = n;
+      return true;
+    }
+    if(db[n].kind.index() != db[t].kind.index()) return false;
+    bool same = true;
+    std::visit([&](auto const & x) {
+      using kind_t = std::remove_cvref_t<decltype(x)>;
+      auto const & y = std::get<kind_t>(db[n].kind);
+      template for(constexpr auto m: fields_of<kind_t>()) {
+        using field_t = [:std::meta::type_of(m):];
+        if(same) {
+          if constexpr(std::is_same_v<field_t, node_id>)
+            same = x.[:m:] ? y.[:m:] && match_template(y.[:m:], f, x.[:m:], places) : !y.[:m:];
+          else if constexpr(std::is_same_v<field_t, node_list>) {
+            same = x.[:m:].size() == y.[:m:].size();
+            for(std::size_t i = 0; same && i < x.[:m:].size(); ++i) same = match_template(y.[:m:][i], f, x.[:m:][i], places);
+          } else if constexpr(!std::is_same_v<field_t, std::vector<uint32_t>>) // blank, inner - layout
+            same = x.[:m:] == y.[:m:];
+        }
+      }
+    },
+        db[t].kind);
+    return same;
+  }
+  mutable std::map<std::pair<uint32_t, uint32_t>, std::vector<node_id>> tmpl_places; // (knot, recording) → parts
+  // The location of the part k of writing x of node n: the field node, the call argument, or the part of the workpiece.
+  node_id place_at(node_id n, rec const & x, std::size_t k) {
+    auto const & [f, r] = x;
+    if(r.kind == record_template) return tmpl_places[{n.value, f.value}][r.slot[k]];
+    return r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]];
+  }
+  bool templated(node_id n) {
+    auto rec = record_for(n);
+    return rec && rec->second.kind == record_template;
   }
 
   // Syntax form call (c.form - link to the ad, it was chosen by parsing): the record - the ad
@@ -586,7 +644,7 @@ struct printer {
   }
   void print_record(node_id n, rec const & x) {
     auto const & [f, r] = x;
-    auto at = [&](std::size_t k) { return r.kind >= 0 ? node_place(db[n].kind, r.slot[k]) : db.as<n_call>(n).args[r.slot[k]]; };
+    auto at = [&](std::size_t k) { return place_at(n, x, k); };
     form(db.as<n_fn>(f).form, [&](std::size_t k, std::string_view piece) { part(piece, at(k)); }, [&](std::size_t k) { return block_like(at(k)); });
   }
   // node itself sets `;` (return x; break;)
@@ -783,7 +841,7 @@ struct printer {
     if(db.is<n_block>(s) || db.is<n_raw>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
     if(closed(s)) return;
-    if(db.is<n_call>(s)) {
+    if(db.is<n_call>(s) && !templated(s)) {
       auto const & c = db.as<n_call>(s);
       if(!c.words.empty() || c.tail) return; // Block or tail instruction sets `;` itself
     }
@@ -795,7 +853,7 @@ struct printer {
   // s;): её `;` - and the end of the announcement.
   //
   bool ends_in_statement(node_id x) {
-    if(db.is<n_call>(x)) {
+    if(db.is<n_call>(x) && !templated(x)) { // Printed in the form (below)
       auto const & c = db.as<n_call>(x);
       if(!c.tail || c.args.empty() || (!c.words.empty() && c.words.back())) return false;
       node_id b = c.args.back();
@@ -807,7 +865,7 @@ struct printer {
     auto const & [f, r] = *rec;
     auto last = str(db.as<n_fn>(f).form.back());
     if((last != "{" && last != "{=") || r.slot.empty()) return false;
-    return ends_in_statement(r.kind >= 0 ? node_place(db[x].kind, r.slot.back()) : db.as<n_call>(x).args[r.slot.back()]);
+    return ends_in_statement(place_at(x, *rec, r.slot.size() - 1));
   }
 
   bool closed(node_id n) {
@@ -817,9 +875,10 @@ struct printer {
     auto last = str(db.as<n_fn>(f).form.back());
     if(last == ";") return true;
     if((last != "{" && last != "{=") || r.slot.empty()) return false;
-    node_id x = r.kind >= 0 ? node_place(db[n].kind, r.slot.back()) : db.as<n_call>(n).args[r.slot.back()];
-    // branch - construction with tail-instruction or clauses (if(c) for(x : xs) s;) puts `;` itself
-    bool self_closing = db.is<n_call>(x) && (db.as<n_call>(x).tail || !db.as<n_call>(x).words.empty());
+    node_id x = place_at(n, *rec, r.slot.size() - 1);
+    // branch - construction with a tail-instruction or clauses (if(c) for(x : xs) s;) puts `;` itself; printed
+    // with a workpiece - no (`;` - the instructions outside)
+    bool self_closing = db.is<n_call>(x) && !templated(x) && (db.as<n_call>(x).tail || !db.as<n_call>(x).words.empty());
     return db.is<n_block>(x) || db.is<n_raw>(x) || self_closing || closed(x);
   }
 
