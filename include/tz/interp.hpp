@@ -847,7 +847,7 @@ struct interpreter {
         vm.db.end_elaboration(mark);
         if(done && !mark.nested) vm.db.elab_edits = vm.db.edits; // result is valid until edited
       }
-    } eh{*this, db.begin_elaboration()};
+    } eh{*this, detached ? db.nested_elaboration() : db.begin_elaboration()};
     elab_base = db.births;
     elab_nested = eh.mark.nested;
     elaborating = true;
@@ -4013,7 +4013,7 @@ struct interpreter {
       return value(array_v::of(std::move(ys)));
     } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
       std::vector<value> ys;
-      for(symbol y: f) ys.push_back(value(std::string(str(y))));
+      for(symbol y: f) ys.push_back(value(std::string(y ? str(y) : ""))); // an empty name, like a field name
       return value(array_v::of(std::move(ys)));
     } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) { // layout
       std::vector<value> ys;
@@ -4163,7 +4163,7 @@ struct interpreter {
       field_t xs;
       items([&](value const & x) {
         if(!x.is<str_v>()) fail(cat(what, ": ожидались строки, получено ", types.describe(x)), where);
-        xs.push_back(sym(x.as<str_v>().view()));
+        xs.push_back(x.as<str_v>().view().empty() ? symbol{} : sym(x.as<str_v>().view()));
       });
       f = std::move(xs);
     } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) {
@@ -5110,6 +5110,9 @@ struct interpreter {
   std::vector<chain_job *> chain_jobs;
   interpreter * chain_subject = nullptr; // Whose helper (chain_probe, chain_key)
   bool chain_helper = false;
+  // the program does not touch (the code of the editor in the language, his assistants):
+  // elaboration - nested, mutations of the ct program and its "active result" - as were
+  bool detached = false;
   int helper_depth = 0; // Rule interpreter level (0 is not an assistant)
   node_id chain_fn;
   std::deque<interpreter> chain_langs;
@@ -5126,6 +5129,7 @@ struct interpreter {
     if(chain_langs.empty()) {
       chain_langs.emplace_back(db, db.prelude ? db.prelude : mod, std::vector<std::string>{"chain"}, mode::run);
       chain_langs.back().chain_helper = true;
+      chain_langs.back().detached = detached;
       chain_langs.back().helper_depth = helper_depth + 1;
       chain_langs.back().chain_subject = this;
     }

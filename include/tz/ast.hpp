@@ -671,6 +671,12 @@ struct ast_db {
   // program - node as is, as in nested elaboration. Otherwise, each parsing instance for JIT
   // would re-execute the ct code of all instance programs.
   bool elab_current() const { return elab_edits == edits; }
+  // elaboration, which does not touch the program (editor code in the language): nested - does not roll
+  // back the mutations of the ct program and does not declare its result to be valid
+  elab_mark nested_elaboration() {
+    ++elab_depth;
+    return {{}, 0, 0, true};
+  }
   elab_mark begin_elaboration() {
     if(elab_depth++ || elab_current()) return {{}, 0, 0, true};
     elab_edits = ~uint64_t{0}; // Goes again: not finished (error) - does not work

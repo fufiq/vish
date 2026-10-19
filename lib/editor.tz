@@ -6,6 +6,10 @@
 // ввод — функции этого модуля: что сделать, решает код на языке. Своя функция с тем же именем в
 // проекции представления или в программе — первой (как operand_parens).
 //
+// Цепочки одного ассоциативного оператора (a + b + c) здесь — скобками: дерево такой цепочки VM
+// строит при первом исполнении производными узлами базы, а код редактора базу программы не
+// трогает (*моё*).
+//
 // *Моё (решение автора 2026-10-19):* модуль отдельный — его грузит только сервер
 // редактора, программы его не разбирают. Состояние представления (курсор, выделение, черновик,
 // раскладка) пока у VM: язык видит его примитивами native "cpp" ниже — представление v — номер
@@ -124,7 +128,7 @@ replace(i64 v, i64 from, i64 to, str s, i64 caret) => native "cpp" {
   return value(int64_t(0));
 };
 // курсор передвинут: набор слова кончился, дополнение закрыто, черновик — к канону, если курсор
-// из него ушёл; курсор и подсказка — клиенту
+// из него ушёл; курсор — клиенту
 cursor_moved(i64 v) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
   editor_host->cursor_moved(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
@@ -133,11 +137,6 @@ cursor_moved(i64 v) => native "cpp" {
 send_cursor(i64 v) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
   editor_host->send_cursor(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
-  return value(int64_t(0));
-};
-send_hint(i64 v) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  editor_host->send_hint(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
   return value(int64_t(0));
 };
 hide_hint(i64 v) => native "cpp" {
@@ -150,11 +149,76 @@ close_completion(i64 v) => native "cpp" {
   editor_host->close_completion(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
   return value(int64_t(0));
 };
-// пункт списка перехода: открыть функцию или добавить сигнатуру
-nav_accept(i64 v) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  editor_host->nav_accept(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+// пункт k списка перехода: функция (пусто — «добавить») и сигнатура, которую добавить
+nav_fn(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(editor_host->view_now((a[0]).as<int64_t>()).targets[uint32_t((a[1]).as<int64_t>())].fn);
+};
+nav_add(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  return value(editor_host->view_now((a[0]).as<int64_t>()).targets[uint32_t((a[1]).as<int64_t>())].add);
+};
+// список перехода у курсора: варианты (completion) и цели — array{функция, добавить}
+show_nav(i64 v, items, targets) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto const & db = s.session.db;
+  auto & w = s.view_now((a[0]).as<int64_t>());
+  auto field = [&](value const & x, std::string_view f) -> value const & {
+    for(auto const & [k, fv]: x.as<agg_v>().fields)
+      if(db.strings.text(k) == f) return fv;
+    throw diagnostic(cat("completion: нет поля ", f), where);
+  };
+  w.items.clear();
+  w.targets.clear();
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) {
+    value x = (a[1]).as<array_v>().get(k);
+    w.items.push_back({std::string(field(x, "name").as<str_v>().view()), std::string(field(x, "kind").as<str_v>().view()), std::string(field(x, "detail").as<str_v>().view()), uint32_t(field(x, "depth").as<int64_t>())});
+    value t = (a[2]).as<array_v>().get(k);
+    w.targets.push_back({s.node_or_none(vm, t.as<array_v>().get(0), where), std::string(t.as<array_v>().get(1).as<str_v>().view())});
+  }
+  w.selected = 0;
+  w.word_begin = w.cursor;
+  w.completing = true;
+  s.send_completion(*s.now_peer, w);
   return value(int64_t(0));
+};
+// открыть функцию во второй панели (у клиента одно представление функции)
+open_fn(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->open_fn(*editor_host->now_peer, vm.code_node(a[0], where));
+  return value(int64_t(0));
+};
+// добавить внутренний элемент модуля программы (текст объявления) и открыть его
+add_inner(str text, str sig) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  editor_host->add_inner(*editor_host->now_peer, std::string((a[0]).as<str_v>().view()), std::string((a[1]).as<str_v>().view()));
+  return value(int64_t(0));
+};
+// типы узла по всем экземплярам
+node_types(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto it = editor_host->session.node_types.find(vm.code_node(a[0], where).value); it != editor_host->session.node_types.end())
+    for(auto const & t: it->second) xs.push_back(value(t));
+  return value(array_v::of(std::move(xs)));
+};
+// a.f — значение слева
+member_object(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(editor_host->session.db.member_of(vm.code_node(a[0], where)).object);
+};
+// черновики всех представлений клиента — к канону
+finalize_views() => native "cpp" {
+  editor_host->finalize_peer(*editor_host->now_peer);
+  return value(int64_t(0));
+};
+// байты [from, to)
+slice_text(str s, i64 from, i64 to) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
+  auto v = (a[0]).as<str_v>().view();
+  std::size_t f = std::size_t(std::clamp<int64_t>((a[1]).as<int64_t>(), 0, int64_t(v.size()))), t = std::size_t(std::clamp<int64_t>((a[2]).as<int64_t>(), int64_t(f), int64_t(v.size())));
+  return value(std::string(v.substr(f, t - f)));
 };
 // черновик представления — к канону
 finalize(i64 v) => native "cpp" {
@@ -166,11 +230,6 @@ finalize(i64 v) => native "cpp" {
 finalize_others(i64 v) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
   editor_host->finalize_peer(*editor_host->now_peer, &editor_host->view_now((a[0]).as<int64_t>()));
-  return value(int64_t(0));
-};
-goto_call(i64 v) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  editor_host->goto_call(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
   return value(int64_t(0));
 };
 undo(i64 v, bool again) => native "cpp" {
@@ -188,6 +247,454 @@ report(str s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
   editor_host->send(*editor_host->now_peer, proto::s_error{std::string((a[0]).as<str_v>().view())});
   return value(int64_t(0));
+};
+
+// --- примитивы: раскладка представления и подсказки ------------------------------------
+// номер раскладки узла в представлении (-1 — узла нет); места его текста [from, to)
+layout_of(i64 v, n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  uint32_t k = editor_host->view_now((a[0]).as<int64_t>()).layout_of(vm.code_node(a[1], where));
+  return value(k == ~uint32_t{0} ? int64_t(-1) : int64_t(k));
+};
+range_from(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now((a[0]).as<int64_t>()).range[uint32_t((a[1]).as<int64_t>())].first));
+};
+range_to(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now((a[0]).as<int64_t>()).range[uint32_t((a[1]).as<int64_t>())].second));
+};
+// перегрузки, выбранные разбором у вызова (по всем экземплярам)
+call_targets(c) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto it = editor_host->session.call_targets.find(vm.code_node(a[0], where).value); it != editor_host->session.call_targets.end())
+    for(uint32_t f: it->second) xs.push_back(vm.code_value(node_id(f)));
+  return value(array_v::of(std::move(xs)));
+};
+// голова объявления — проекция без тела: when(c, expr yes) otherwise(expr no)
+head_text(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->head_text(vm.code_node(a[0], where)));
+};
+// типы (и значения) узла и имени в его области — по всем экземплярам; пусто — неизвестно
+has_types(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->session.node_types.contains(vm.code_node(a[0], where).value));
+};
+shown_node(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->shown_node(vm.code_node(a[0], where)));
+};
+shown_name(n, str name) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & s = *editor_host;
+  return value(s.shown_name(s.scope_of(vm.code_node(a[0], where)), s.session.db.strings.intern((a[1]).as<str_v>().view())));
+};
+// a.f — имя члена ("" — не член)
+member_name(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto const & db = editor_host->session.db;
+  node_id x = vm.code_node(a[0], where);
+  return value(db.is_member(x) ? std::string(db.strings.text(db.member_of(x).name)) : std::string());
+};
+// вид параметра: let, mut, own, out, expr, ct, implicit
+param_mode(p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  static constexpr std::string_view names[] = {"let", "mut", "own", "out", "expr", "ct", "implicit"};
+  return value(std::string(names[uint32_t(editor_host->session.db.as<n_param>(vm.code_node(a[0], where)).mode)]));
+};
+// комментарии перед объявлением
+note_lead(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto const * nt = editor_host->session.db.note_of(vm.code_node(a[0], where)))
+    for(auto const & l: nt->lead) xs.push_back(value(l));
+  return value(array_v::of(std::move(xs)));
+};
+// внутренний элемент модуля программы; в прелюдии
+is_inner(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->is_inner(vm.code_node(a[0], where)));
+};
+in_prelude(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  auto const & db = editor_host->session.db;
+  return value(db[vm.code_node(a[0], where)].where.source == db[db.prelude].where.source);
+};
+// значение узла в слое представления ("" — нет)
+layer_literal(i64 v, n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  if(auto const * l = editor_host->layer_of(editor_host->view_now((a[0]).as<int64_t>())))
+    if(auto it = l->literal.find(vm.code_node(a[1], where).value); it != l->literal.end()) return value(it->second);
+  return value(std::string());
+};
+// тексты ошибок разбора у узла
+error_texts(i64 v, n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  node_id n = vm.code_node(a[1], where);
+  std::vector<value> xs;
+  for(auto const & m: editor_host->marks_errors(editor_host->view_now((a[0]).as<int64_t>())))
+    if(m.node == n) xs.push_back(value(m.text));
+  return value(array_v::of(std::move(xs)));
+};
+hint_shown(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->view_now((a[0]).as<int64_t>()).hint_shown);
+};
+// подсказка набора у места anchor (-1 — без места); пусто — скрыть
+show_hint(i64 v, i64 anchor, lines) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto & w = s.view_now((a[0]).as<int64_t>());
+  int64_t k = (a[1]).as<int64_t>();
+  caret c = k >= 0 && k < int64_t(w.places.size()) ? w.places[uint32_t(k)] : caret{};
+  auto ls = s.wire_lines(vm, a[2], where);
+  w.hint_shown = !ls.empty();
+  s.send(*s.now_peer, proto::s_hint{w.id, c.node, c.piece, c.offset, std::move(ls)});
+  return value(int64_t(0));
+};
+// подсказка наведения на узел
+show_hover(i64 v, n, lines) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto & w = s.view_now((a[0]).as<int64_t>());
+  s.send(*s.now_peer, proto::s_hover{w.id, vm.code_node(a[1], where), s.wire_lines(vm, a[2], where)});
+  return value(int64_t(0));
+};
+
+// --- примитивы: инспектор (поля узлов, записи, печать) ------------------------------------
+// дети узла с именами полей (рефлексия вида узла): array{узел, "cond" | "args[1]"}
+child_roles(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  for(auto const & [c, name]: editor_host->child_roles(vm.code_node(a[0], where))) xs.push_back(value(array_v::of({vm.code_value(c), value(name)})));
+  return value(array_v::of(std::move(xs)));
+};
+// запись syntax узла (печать и разбор по ней): array{объявление, array{array{ребёнок, параметр}…}}; нет — array{}
+record_rule(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  auto const & db = s.session.db;
+  node_id n = vm.code_node(a[0], where);
+  printer pr(db);
+  auto const * r = pr.record_for(n);
+  if(!r) return value(array_v::of({}));
+  auto const & [d, info] = *r;
+  auto const & fn = db.as<n_fn>(d);
+  std::vector<value> roles;
+  for(uint32_t k = 0; k < fn.params.size() && k < info.slot.size(); ++k) {
+    node_id at = info.kind >= 0 ? node_place(db[n].kind, info.slot[k]) : db.as<n_call>(n).args[info.slot[k]];
+    if(at) roles.push_back(value(array_v::of({vm.code_value(at), value(std::string(db.strings.text(db.as<n_param>(fn.params[k]).name)))})));
+  }
+  return value(array_v::of({vm.code_value(d), value(array_v::of(std::move(roles)))}));
+};
+// узел переписан трансформатором или изменён ct-кодом (§7.4): источник; нет — code()
+rewritten_by(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  node_id n = vm.code_node(a[0], where), by;
+  for(auto const & mu: editor_host->session.db.mutations)
+    if(mu.target == n.value && mu.source) by = node_id(mu.source - 1);
+  return vm.code_value(by);
+};
+// проекция узла
+print_node(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(printer(editor_host->session.db).print(vm.code_node(a[0], where)));
+};
+// тело с подставленными аргументами (имя → узел; выражение-операция — в скобках вне скобок места)
+print_with_args(body, names, args) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
+  auto const & db = editor_host->session.db;
+  std::map<std::string, node_id> by;
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) by[std::string((a[1]).as<array_v>().get(k).as<str_v>().view())] = vm.code_node((a[2]).as<array_v>().get(k), where);
+  printer::substitution sub;
+  sub.text = [&](node_id x) -> std::optional<std::string> {
+    if(!db.is<n_ident>(x)) return std::nullopt;
+    auto it = by.find(std::string(db.strings.text(db.as<n_ident>(x).name)));
+    if(it == by.end()) return std::nullopt;
+    std::string t = printer(db).print(it->second);
+    node_id up = db[x].parent; // в скобках места (условие, аргумент) — без своих
+    bool bracketed = up && (db.is<n_if>(up) || db.is<n_call>(up) || db.is<n_loop>(up));
+    return db.is<n_op>(it->second) && !bracketed ? cat("(", t, ")") : t;
+  };
+  return value(printer(db, {}, sub).print(vm.code_node(a[0], where)));
+};
+// строка в одну строку текста, до n кодовых точек (длиннее — «…»)
+clip(str s, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  std::string t((a[0]).as<str_v>().view());
+  for(auto & c: t)
+    if(c == '\n') c = ' ';
+  uint32_t n = uint32_t((a[1]).as<int64_t>());
+  if(code_points(t) > n) {
+    std::size_t b = 0;
+    for(uint32_t k = 0; k < n && b < t.size(); ++k) b += cp_len(t, b);
+    t = t.substr(0, b) + "…";
+  }
+  return value(std::move(t));
+};
+// хвост строки с байта k
+text_from(str s, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto v = (a[0]).as<str_v>().view();
+  std::size_t k = std::size_t(std::max<int64_t>(0, (a[1]).as<int64_t>()));
+  return value(std::string(k < v.size() ? v.substr(k) : std::string_view()));
+};
+// корень представления (модуль или функция)
+view_root(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(editor_host->view_now((a[0]).as<int64_t>()).root);
+};
+// инспектор: дерево (inode), фокус, раскрытие (line)
+show_inspect(i64 v, root, focus, nodes, expand) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known() || !(a[4]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto const & db = s.session.db;
+  auto field = [&](value const & x, std::string_view f) -> value const & {
+    for(auto const & [k, fv]: x.as<agg_v>().fields)
+      if(db.strings.text(k) == f) return fv;
+    throw diagnostic(cat("inode: нет поля ", f), where);
+  };
+  auto text = [&](value const & x, std::string_view f) { return std::string(field(x, f).as<str_v>().view()); };
+  proto::s_inspect out{s.view_now((a[0]).as<int64_t>()).id, s.node_or_none(vm, a[1], where), s.node_or_none(vm, a[2], where), {}, s.wire_lines(vm, a[4], where)};
+  for(uint32_t k = 0; k < (a[3]).as<array_v>().size(); ++k) {
+    value x = (a[3]).as<array_v>().get(k);
+    out.nodes.push_back({s.node_or_none(vm, field(x, "node"), where), uint32_t(field(x, "depth").as<int64_t>()), text(x, "role"), text(x, "kind"), text(x, "text"), text(x, "rule"), s.node_or_none(vm, field(x, "rule_at"), where), text(x, "types")});
+  }
+  s.send(*s.now_peer, out);
+  return value(int64_t(0));
+};
+
+// --- примитивы: метки проверки и слои --------------------------------------------------
+// узлы раскладки представления (по порядку проекции)
+view_nodes(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  for(auto const & l: editor_host->view_now((a[0]).as<int64_t>()).layouts) xs.push_back(vm.code_value(l.node));
+  return value(array_v::of(std::move(xs)));
+};
+// вид представления: module — модуль, fn — одна функция
+view_kind(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->view_now((a[0]).as<int64_t>()).kind);
+};
+// выбран слой (контекст экземпляра) функции
+in_layer(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->layer_of(editor_host->view_now((a[0]).as<int64_t>())) != nullptr);
+};
+// наблюдения слоя: типы узла; узел исполнялся в этом контексте
+layer_types(i64 v, n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto const * l = editor_host->layer_of(editor_host->view_now((a[0]).as<int64_t>())))
+    if(auto it = l->types.find(vm.code_node(a[1], where).value); it != l->types.end())
+      for(auto const & t: it->second) xs.push_back(value(t));
+  return value(array_v::of(std::move(xs)));
+};
+layer_has(i64 v, n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  auto const * l = editor_host->layer_of(editor_host->view_now((a[0]).as<int64_t>()));
+  node_id n = editor_host->node_or_none(vm, a[1], where);
+  return value(l && n && l->types.contains(n.value));
+};
+// ошибки разбора на узлах представления (место в прелюдии — первое место программы из трейса):
+// array{узел, текст, from, to}
+error_marks(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  for(auto const & m: editor_host->marks_errors(editor_host->view_now((a[0]).as<int64_t>())))
+    xs.push_back(value(array_v::of({vm.code_value(m.node), value(m.text), value(int64_t(m.from)), value(int64_t(m.to))})));
+  return value(array_v::of(std::move(xs)));
+};
+// метки (mark) — клиенту
+show_marks(i64 v, marks) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto const & db = s.session.db;
+  auto field = [&](value const & x, std::string_view f) -> value const & {
+    for(auto const & [k, fv]: x.as<agg_v>().fields)
+      if(db.strings.text(k) == f) return fv;
+    throw diagnostic(cat("mark: нет поля ", f), where);
+  };
+  std::vector<proto::s_mark> out;
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) {
+    value x = (a[1]).as<array_v>().get(k);
+    out.push_back({s.node_or_none(vm, field(x, "node"), where), std::string(field(x, "kind").as<str_v>().view()), std::string(field(x, "text").as<str_v>().view()), uint32_t(field(x, "from").as<int64_t>()), uint32_t(field(x, "to").as<int64_t>())});
+  }
+  auto & w = s.view_now((a[0]).as<int64_t>());
+  s.send(*s.now_peer, proto::s_decor{w.id, db.revision, std::move(out)});
+  return value(int64_t(0));
+};
+// слои функции представления: array{ключ, кт | рт}; выбранный
+layers_of(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  std::vector<value> xs;
+  if(auto fl = s.session.layers.find(s.view_now((a[0]).as<int64_t>()).root.value); fl != s.session.layers.end())
+    for(auto const & [key, l]: fl->second) xs.push_back(value(array_v::of({value(key), value(std::string(l.ct ? "кт" : "рт"))})));
+  return value(array_v::of(std::move(xs)));
+};
+view_layer(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->view_now((a[0]).as<int64_t>()).layer);
+};
+show_layers(i64 v, layers) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto & w = s.view_now((a[0]).as<int64_t>());
+  proto::s_layers out{w.id, {}, w.layer};
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) {
+    value one = (a[1]).as<array_v>().get(k);
+    auto const & x = one.as<array_v>();
+    out.layers.push_back({std::string(x.get(0).as<str_v>().view()), std::string(x.get(1).as<str_v>().view())});
+  }
+  s.send(*s.now_peer, out);
+  return value(int64_t(0));
+};
+
+// --- примитивы: трасса запуска (отладчик) ---------------------------------------------
+// клиент смотрит трассу: клавиши шагов — отладчику
+debugging() => native "cpp" { return value(editor_host->now_peer->debugging); };
+set_debugging(bool on) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->now_peer->debugging = (a[0]).as<bool>();
+  return value(int64_t(0));
+};
+trace_pos() => native "cpp" { return value(int64_t(editor_host->now_peer->trace_pos)); };
+set_trace_pos(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->now_peer->trace_pos = uint32_t((a[0]).as<int64_t>());
+  return value(int64_t(0));
+};
+// шаги трассы: узел, глубина вызова, сколько вывода к нему, значение
+trace_size() => native "cpp" { return value(int64_t(editor_host->session.trace.size())); };
+trace_node(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(node_id(editor_host->session.trace[uint32_t((a[0]).as<int64_t>())].node));
+};
+trace_depth(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->session.trace[uint32_t((a[0]).as<int64_t>())].depth));
+};
+trace_value(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->session.trace[uint32_t((a[0]).as<int64_t>())].value);
+};
+// вывод программы до шага k (k — -1: весь) и ошибка запуска
+trace_output(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & s = *editor_host;
+  int64_t k = (a[0]).as<int64_t>();
+  if(k < 0) return value(s.trace_output);
+  return value(s.trace_output.substr(0, std::min<std::size_t>(s.session.trace[uint32_t(k)].out, s.trace_output.size())));
+};
+trace_error() => native "cpp" { return value(editor_host->trace_error); };
+// трасса — клиенту: открыта ли, шаг, всего, узел шага, стек, вывод, ошибка
+show_trace(bool active, i64 step, i64 total, n, stack, str out, str error) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_trace t{(a[0]).as<bool>(), uint32_t((a[1]).as<int64_t>()), uint32_t((a[2]).as<int64_t>()), s.node_or_none(vm, a[3], where), {}, std::string((a[5]).as<str_v>().view()), std::string((a[6]).as<str_v>().view())};
+  for(uint32_t k = 0; k < (a[4]).as<array_v>().size(); ++k) t.stack.push_back(std::string((a[4]).as<array_v>().get(k).as<str_v>().view()));
+  s.send(*s.now_peer, t);
+  return value(int64_t(0));
+};
+// представления клиента (номера)
+peer_views() => native "cpp" {
+  std::vector<value> xs;
+  for(auto const & w: editor_host->now_peer->views)
+    if(w.root) xs.push_back(value(int64_t(w.id)));
+  return value(array_v::of(std::move(xs)));
+};
+// --- примитивы: команды VM (запуск, база, слияние, проекция) -------------------------------
+// main() текущего состояния базы в этой же VM: array{вывод, без ошибки}
+run_program(str args, str input) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto & s = editor_host->session;
+  s.stdin_lines.clear();
+  for(auto l: lines_of((a[1]).as<str_v>().view())) s.stdin_lines.emplace_back(l);
+  std::vector<std::string> args;
+  for(auto w: words_of((a[0]).as<str_v>().view())) args.emplace_back(w);
+  bool ok = true;
+  std::string out = s.run(args, ok);
+  return value(array_v::of({value(std::move(out)), value(ok)}));
+};
+// запуск с трассой (шаги — по ней)
+trace_program(str args, str input) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & h = *editor_host;
+  h.session.stdin_lines.clear();
+  for(auto l: lines_of((a[1]).as<str_v>().view())) h.session.stdin_lines.emplace_back(l);
+  std::vector<std::string> args;
+  for(auto w: words_of((a[0]).as<str_v>().view())) args.emplace_back(w);
+  bool ok = true;
+  h.trace_output = h.session.trace_run(args, ok, h.trace_error);
+  return value(int64_t(0));
+};
+show_output(str out, bool ok) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>()});
+  return value(int64_t(0));
+};
+// имя программы сессии (путь, как открыта)
+program_name() => native "cpp" { return value(editor_host->session.name); };
+// журнал базы — в файл .tzdb
+save_program(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  std::string path((a[0]).as<str_v>().view());
+  save_db(s.session.db, s.session.root, path);
+  s.send(*s.now_peer, proto::s_saved{path});
+  return value(int64_t(0));
+};
+// функция правки программы: итог (применена… — правки в базе); все представления — заново
+apply_edit(str fn) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & s = *editor_host;
+  s.finalize_all();
+  std::string r = s.session.apply(std::string((a[0]).as<str_v>().view()));
+  if(r.starts_with("применена")) s.refresh_all();
+  return value(std::move(r));
+};
+// слияние с другой копией базы (§9.4): "" — слито (конфликты — у VM до решения), иначе — ошибка
+merge_from(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->merge_from(std::string((a[0]).as<str_v>().view())));
+};
+// решить конфликт: их вариант или мой; false — нет такого
+take_version(str key, bool theirs) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  return value(editor_host->take_version(std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>()));
+};
+// черновики всех клиентов — к канону
+finalize_everyone() => native "cpp" {
+  editor_host->finalize_all();
+  return value(int64_t(0));
+};
+// слой представления функции; проекция представления (модуль записей по ключу; "" — по умолчанию)
+set_layer(i64 v, str key) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  editor_host->view_now((a[0]).as<int64_t>()).layer = std::string((a[1]).as<str_v>().view());
+  return value(int64_t(0));
+};
+set_projection(i64 v, str key) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  return value(editor_host->set_projection(editor_host->view_now((a[0]).as<int64_t>()), std::string((a[1]).as<str_v>().view())));
+};
+// представление заново (раскладка, курсор, метки)
+show_view(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->show_view(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+// курсор на начало узла n в представлении (-1 — узла в нём нет)
+node_place(i64 v, n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  uint32_t k = w.layout_of(vm.code_node(a[1], where));
+  return value(k == ~uint32_t{0} ? int64_t(-1) : int64_t(w.range[k].first));
 };
 
 // --- примитивы: факты разбора и базы (у VM) ---------------------------------------------
@@ -446,7 +953,7 @@ add_name(found, str name, str kind, str detail, i64 depth) {
 // «перегрузки». Порядок — по имени, затем по порядку находки: один проход
 uniq(found) {
   keys = array{};
-  for(k : range(found.size)) keys.push(found[k].name + "\n" + digits3(k / 1000) + digits3(k % 1000));
+  for(k : range(found.size)) keys.push(((found[k].name + "\n") + digits3(k / 1000)) + digits3(k % 1000));
   kept = array{};
   for(k : sorted_indices(keys)) {
     x = found[k];
@@ -462,7 +969,7 @@ param_list(ps, i64 from) {
   r = "(";
   for(k : range(ps.size)) if(k >= from) {
     ast.parameter{pname, _, _, _, _, _, _} = ps[k];
-    r = r + (if(k > from) ", " else "") + pname;
+    r = (r + (if(k > from) ", " else "")) + pname;
   }
   r + ")"
 }
@@ -569,14 +1076,14 @@ member_names(types) {
   found = array{};
   for(t : types) {
     base = before(t, '<');
-    if((base == "array") || (base == type_tag(4))) add_member(found, "size", "поле", type_tag(2) + " — " + t, 0);
-    for(part : record_parts(t)) add_member(found, part[0], "поле", part[1] + " — " + t, 0);
+    if((base == "array") || (base == type_tag(4))) add_member(found, "size", "поле", (type_tag(2) + " — ") + t, 0);
+    for(part : record_parts(t)) add_member(found, part[0], "поле", (part[1] + " — ") + t, 0);
     for(m : array{program(), prelude()}) if(given(m)) for(n : code_items(m)) if(code_kind(n) == ast.extension) {
       ast.extension{en, xs, _, _, _, _} = n;
       if(en == base) for(x : xs) {
         if(code_kind(x) == ast.variable) {
           ast.variable{fname, ft, _, _, _, _, _, _} = x;
-          add_member(found, fname, "поле", type_text(ft) + " — " + t, 0);
+          add_member(found, fname, "поле", (type_text(ft) + " — ") + t, 0);
         }
         if(code_kind(x) == ast.function) {
           ast.function{fname, ps, _, _, _, _, _, _, _} = x;
@@ -628,7 +1135,7 @@ take(kept, keys, x, str n, str w) {
   r = rank(n, w);
   if((r >= 0) && shown(x, n, w)) {
     kept.push(x);
-    keys.push(text(r) + digits3(x.depth) + x.name);
+    keys.push((text(r) + digits3(x.depth)) + x.name);
   }
   true
 }
@@ -645,7 +1152,7 @@ filtered(near, bool far, str word) {
   }
   // повторы имён среди подошедших: остаётся ближний (по имени, затем по глубине)
   by_name = array{};
-  for(k : range(kept.size)) by_name.push(kept[k].name + "\n" + digits3(kept[k].depth) + digits3(k / 1000) + digits3(k % 1000));
+  for(k : range(kept.size)) by_name.push((((kept[k].name + "\n") + digits3(kept[k].depth)) + digits3(k / 1000)) + digits3(k % 1000));
   hidden = array{};
   for(k : range(kept.size)) hidden.push(false);
   last = "";
@@ -679,6 +1186,827 @@ complete(i64 v, bool forced) {
   show_completion(v, items, b);
 }
 
+// --- подсказки: наведение, форма конструкции, сигнатура -----------------------------------
+// 
+// подсказка — строки из АСТ и
+// разбора (тип по всем экземплярам, значение в слое, ошибка, объявления со ссылками), а не
+// текст. *Моё:* состав строк.
+struct line { str kind; str text; code node; i64 from; i64 to; }
+
+// объявления имени в прелюдии: не меняются — один раз на имя
+prelude_declarations(str name) {
+  key = "decl " + name;
+  done = remembered(key);
+  if(typeof(done) != unit) return done;
+  found = array{};
+  for(f : code_items(prelude())) if(code_kind(f) == ast.function) {
+    ast.function{fname, _, _, _, _, _, _, _, _} = f;
+    if(fname == name) found.push(f);
+  }
+  remember(key, found)
+}
+// объявления имени: функции модуля программы (с внутренними) и прелюдии
+declarations(str name) {
+  found = array{};
+  for(f : code_items(program())) if(code_kind(f) == ast.function) {
+    ast.function{fname, _, _, _, _, _, _, _, _} = f;
+    if(fname == name) found.push(f);
+  }
+  for(f : prelude_declarations(name)) found.push(f);
+  found
+}
+has_code(xs, c) {
+  r = false;
+  for(x : xs) if(code_id(x) == code_id(c)) r = true;
+  r
+}
+// выбранные разбором — первыми (порядок прочих — как был)
+chosen_first(fns, chosen) {
+  r = array{};
+  for(f : fns) if(has_code(chosen, f)) r.push(f);
+  for(f : fns) if(!has_code(chosen, f)) r.push(f);
+  r
+}
+declaration_lines(lines, str name, chosen) {
+  n = 0;
+  for(f : chosen_first(declarations(name), chosen)) if(n < 8) {
+    n += 1;
+    here = has_code(chosen, f);
+    at = if(here) "выбрана здесь" else if(in_prelude(f)) "прелюдия" else if(is_inner(f)) "внутренняя" else "";
+    lines.push(line{if(construction(f)) "форма" else "объявление", head_text(f) + (if(at == "") "" else "  — " + at), f, 0, 0});
+    for(l : note_lead(f)) if(l != "") lines.push(line{"комментарий", l, code(), 0, 0});
+  }
+  true
+}
+callee_of(c) => if(given(c) && (code_kind(c) == ast.call)) {
+  ast.call{f, _, _, _, _, _, _} = c;
+  f
+} else code();
+name_of(c) => if(given(c) && (code_kind(c) == ast.name)) {
+  ast.name{nm} = c;
+  nm
+} else "";
+// наведение на узел n
+on_hover(i64 v, n) {
+  lines = array{};
+  if(given(n)) {
+    k = code_kind(n);
+    if(k == ast.hole) {
+      ast.hole{_, reason} = n;
+      lines.push(line{"дыра", reason, code(), 0, 0});
+    }
+    // тип: у имени-объявления — по всем его упоминаниям, иначе — узла
+    up = code_parent(n);
+    ts = "";
+    if(k == ast.parameter) {
+      ast.parameter{pn, _, _, _, _, _, _} = n;
+      ts = shown_name(n, pn);
+    } else if(k == ast.variable) {
+      ast.variable{vn, _, init, _, _, _, _, _} = n;
+      ts = if(given(init)) shown_node(init) else shown_name(n, vn);
+    } else if(has_types(n)) ts = shown_node(n);
+    else if(k == ast.name) ts = shown_name(n, name_of(n));
+    called = given(callee_of(up)) && (code_id(callee_of(up)) == code_id(n));
+    if((ts != "") && !called) lines.push(line{"тип", ts, code(), 0, 0});
+    lit = layer_literal(v, n);
+    if(lit != "") lines.push(line{"значение", lit, code(), 0, 0});
+    for(e : error_texts(v, n)) lines.push(line{"ошибка", e, code(), 0, 0});
+    // имя функции или конструкции — объявления со ссылками (выбранные в экземплярах — первыми)
+    name = "";
+    if(k == ast.function) {
+      ast.function{fname, _, _, _, _, _, _, _, _} = n;
+      name = fname;
+    } else if(k == ast.name) name = name_of(n);
+    else if((member_name(n) != "") && (given(up) && (code_kind(up) == ast.call))) name = member_name(n);
+    else if(k == ast.call) name = name_of(callee_of(n));
+    if(name != "") {
+      call = if(k == ast.call) n else if(called) up else code();
+      declaration_lines(lines, name, if(given(call)) call_targets(call) else array{});
+    }
+  }
+  show_hover(v, n, lines);
+}
+// строка сигнатуры: текущий параметр arg — [from, to) в кодовых точках
+signature_line(f, str name, i64 arg) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  s = name + "(";
+  from = 0;
+  to = 0;
+  head = 0;
+  stop = false;
+  for(p : ps) if(!stop) {
+    ast.parameter{pn, pt, _, pack, clause, _, _} = p;
+    if(clause != "") stop = true; // клаузы — после головы
+    else {
+      if(head > 0) s = s + ", ";
+      one = if(given(pt) && (code_kind(pt) == ast.name)) type_text(pt) + " " else "";
+      if(param_mode(p) == "expr") one = "expr " + one;
+      one = one + pn;
+      if((head == arg) || (pack && (arg >= head))) {
+        from = code_points(s);
+        to = from + code_points(one);
+      }
+      s = s + one;
+      head += 1;
+    }
+  }
+  line{"сигнатура", s + ")", f, from, to}
+}
+// Подсказка набора: курсор внутри скобок вызова — сигнатуры с текущим параметром; слово перед
+// курсором — имя конструкции — её форма. Иначе — скрыть.
+send_hint(i64 v) {
+  lines = array{};
+  anchor = -1;
+  c = cursor(v);
+  b = c;
+  while((b > 0) && ident_byte(lead(v, b - 1))) b -= 1;
+  word = text_of(v, b, c);
+  if((word.size > 0) && !((c < places(v)) && ident_byte(lead(v, c)))) {
+    for(f : declarations(word)) if(construction(f) && (lines.size < 6)) lines.push(line{"форма", head_text(f), f, 0, 0});
+    if(lines.size > 0) anchor = b;
+  }
+  // вызов вокруг курсора: скобки его аргументов
+  n = if((lines.size == 0) && (c > 0)) place_node(v, c - 1) else code();
+  done = false;
+  while(given(n) && !done) {
+    callee = callee_of(n);
+    if(given(callee) && (code_kind(callee) == ast.name)) {
+      k = layout_of(v, n);
+      ck = layout_of(v, callee);
+      if((k < 0) || (ck < 0)) done = true;
+      else {
+        open = range_to(v, ck); // `(` сразу после имени
+        if((open < places(v)) && ((lead(v, open) == '(') && ((c > open) && (c < range_to(v, k))))) { // после `)` — уже не в скобках
+          ast.call{_, args, _, _, _, _, _} = n;
+          arg = 0; // текущий параметр — по аргументам, кончившимся до курсора
+          for(x : args) {
+            ak = layout_of(v, x);
+            if((ak >= 0) && (range_to(v, ak) < c)) {
+              q = range_to(v, ak);
+              if(lead(v, lesser(q, end_of(v))) == ',') arg += 1;
+              else {
+                while((q < c) && (lead(v, q) == ' ')) q += 1;
+                if((q < c) && (lead(v, q) == ',')) arg += 1;
+              }
+            }
+          }
+          name = name_of(callee);
+          for(f : chosen_first(declarations(name), call_targets(n))) if(lines.size < 6) lines.push(signature_line(f, name, arg));
+          if(lines.size > 0) anchor = range_from(v, ck);
+          done = true;
+        }
+      }
+    }
+    if(!done) n = code_parent(n);
+  }
+  if((lines.size == 0) && !hint_shown(v)) return 0;
+  show_hint(v, anchor, lines);
+}
+
+// --- инспектор АСТ: что чем является и кем разобрано -----------------------------------
+// 
+// 
+// *Моё:* дерево элемента модуля с местами в
+// родителе (поле узла и параметр записи или конструкции), кем разобран узел, раскрытие фокуса.
+struct inode { code node; i64 depth; str role; str kind; str text; str rule; code rule_at; str types; }
+// правило узла: запись syntax или конструкция, которую он вызывает; места детей — её параметры
+// (array{ребёнок, параметр}); нет правила — decl пустой
+struct rule { code decl; str what; array places; }
+
+// короткий свой текст узла: имя, литерал, оператор, причина дыры
+own_text(n) {
+  k = code_kind(n);
+  if((k == ast.name) || ((k == ast.function) || ((k == ast.parameter) || (k == ast.variable)))) return code_name(n);
+  if(k == ast.operation) {
+    ast.operation{op, _, _} = n;
+    return op;
+  }
+  if((k == ast.int) || ((k == ast.float) || (k == ast.string))) return clip(print_node(n), 40);
+  if(k == ast.hole) {
+    ast.hole{t, _} = n;
+    return clip(t, 40);
+  }
+  if(k == ast.raw) {
+    ast.raw{_, _, t, _, _} = n;
+    return clip(t, 40);
+  }
+  ""
+}
+rule_for(n) {
+  rec = record_rule(n);
+  if(rec.size == 2) return rule{rec[0], "запись", rec[1]};
+  callee = callee_of(n);
+  if(!given(callee) || (code_kind(callee) != ast.name)) return rule{code(), "", array{}};
+  ast.call{_, args, words, _, _, _, _} = n;
+  for(f : chosen_first(declarations(name_of(callee)), call_targets(n))) if(construction(f)) {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    // аргументы — параметрам по порядку внутри головы и каждой клаузы
+    clauses = array{};
+    used = array{};
+    places = array{};
+    for(i : range(args.size)) {
+      w = if(i < words.size) words[i] else "";
+      u = -1;
+      for(j : range(clauses.size)) if(clauses[j] == w) u = j;
+      if(u < 0) {
+        clauses.push(w);
+        used.push(0);
+        u = clauses.size - 1;
+      }
+      seen = 0;
+      matched = false;
+      for(pa : ps) if(!matched) {
+        ast.parameter{pn, _, _, pack, clause, _, _} = pa;
+        if(clause == w) {
+          skip = (seen < used[u]) && !pack;
+          seen += 1;
+          if(!skip) {
+            places.push(array{args[i], if(w != "") (w + ": ") + pn else pn});
+            if(!pack) used[u] = used[u] + 1;
+            matched = true;
+          }
+        }
+      }
+    }
+    return rule{f, "конструкция", places};
+  }
+  rule{code(), "", array{}}
+}
+place_of(r, c) {
+  p = "";
+  for(x : r.places) if(code_id(x[0]) == code_id(c)) p = x[1];
+  p
+}
+inspect_tree(found, n, i64 depth, str role) {
+  if(found.size >= 2000) return false;
+  r = rule_for(n);
+  rw = rewritten_by(n);
+  text_rule = "";
+  at = code();
+  if(given(rw) && (code_kind(rw) == ast.function)) {
+    text_rule = "переписан " + head_text(rw);
+    at = rw;
+  } else if(given(rw)) {
+    text_rule = "изменён ct-кодом";
+    at = rw;
+  } else if(given(r.decl)) {
+    text_rule = (r.what + " ") + head_text(r.decl);
+    at = r.decl;
+  } else if(code_kind(n) == ast.call) { // вызов функции — выбранная в экземплярах перегрузка
+    ts = call_targets(n);
+    if(ts.size > 0) {
+      text_rule = "вызов " + head_text(ts[0]);
+      at = ts[0];
+    }
+  }
+  found.push(inode{n, depth, role, text(code_kind(n)), own_text(n), text_rule, at, shown_node(n)});
+  for(cr : child_roles(n)) {
+    p = place_of(r, cr[0]);
+    inspect_tree(found, cr[0], depth + 1, if((p == "") || (p == cr[1])) cr[1] else (cr[1] + " → ") + p);
+  }
+  true
+}
+// Инспектор узла focus: дерево его элемента модуля и раскрытие фокуса (или ближайшего выше узла
+// с правилом)
+on_inspect(i64 v, focus) {
+  if(!given(focus)) return show_inspect(v, code(), code(), array{}, array{});
+  // корень — элемент модуля (в представлении функции — она)
+  top = view_root(v);
+  root = focus;
+  while(given(code_parent(root)) && ((code_id(root) != code_id(top)) && (code_kind(code_parent(root)) != ast.module))) root = code_parent(root);
+  found = array{};
+  inspect_tree(found, root, 0, "");
+  expand = array{};
+  n = focus;
+  done = false;
+  while(given(n) && !done) {
+    r = rule_for(n);
+    if(given(r.decl)) {
+      expand.push(line{r.what, head_text(r.decl), r.decl, 0, 0});
+      names = array{};
+      args = array{};
+      for(cr : child_roles(n)) {
+        p = place_of(r, cr[0]);
+        if(p != "") {
+          expand.push(line{"параметр", (p + " = ") + print_node(cr[0]), cr[0], 0, 0});
+          colon = find_text(p, ": ");
+          names.push(if(colon >= 0) text_from(p, colon + 2) else p);
+          args.push(cr[0]);
+        }
+      }
+      if(r.what == "запись") { // итог — узел с полями
+        fields = "";
+        for(cr : child_roles(n)) fields = (((fields + (if(fields == "") "" else ", ")) + cr[1]) + ": ") + print_node(cr[0]);
+        expand.push(line{"итог", ((text(code_kind(n)) + "{") + fields) + "}", code(), 0, 0});
+      } else {
+        ast.function{_, _, _, body, _, _, _, _, _} = r.decl;
+        if(given(body)) expand.push(line{"раскрытие", print_with_args(body, names, args), code(), 0, 0}); // тело с подставленными аргументами
+      }
+      done = true;
+    } else if(code_id(n) == code_id(root)) done = true;
+    else n = code_parent(n);
+  }
+  show_inspect(v, root, focus, found, expand);
+}
+
+// --- метки проверки: типы и ошибки на месте ---------------------------------------------
+// После каждой ревизии — реактивный check сессии (пересчитываются только затронутые экземпляры,
+// §10.1); типы узла — по всем контекстам экземпляров. Как в KDevelop: 
+// ошибка — в месте использования с трейсом (§13.4).
+struct mark { code node; str kind; str text; i64 from; i64 to; }
+
+// типы по имени: порядок контекстов — хэши; показываем по имени
+join_types(ts) {
+  r = "";
+  for(k : sorted_indices(ts)) r = (r + (if(r == "") "" else " | ")) + ts[k];
+  r
+}
+// x = e: левая часть, если имя ("" — нет)
+assign_target(n) => if(code_kind(n) == ast.operation) {
+  ast.operation{op, xs, _} = n;
+  if((op == "=") && ((xs.size == 2) && (code_kind(xs[0]) == ast.name))) xs[0] else code()
+} else code();
+type_marks(found, i64 v) {
+  for(n : view_nodes(v)) {
+    k = code_kind(n);
+    if(k == ast.parameter) {
+      ts = shown_name(n, code_name(n));
+      if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+    } else if(k == ast.variable) {
+      ast.variable{vn, _, init, _, _, _, _, _} = n;
+      ts = if(given(init)) shown_node(init) else shown_name(n, vn);
+      if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+    } else if(given(assign_target(n))) {
+      // x = e объявляет, если имени ещё нет (решение автора: без auto); у объявления — тип
+      // и значение в этот момент (инициализатор), а не будущие значения имени (2026-10-13)
+      lhs = assign_target(n);
+      name = name_of(lhs);
+      known = false;
+      for(c : context_names(n)) if((c.name == name) && ((c.kind == "переменная") || (c.kind == "параметр"))) known = true;
+      if(!known) {
+        ast.operation{_, xs, _} = n;
+        ts = shown_node(xs[1]);
+        if(ts != "") found.push(mark{lhs, "type", ts, 0, 0});
+      }
+    }
+  }
+  true
+}
+enclosing_fn(n) {
+  x = code_parent(n);
+  while(given(x) && (code_kind(x) != ast.function)) x = code_parent(x);
+  x
+}
+// типы имени в слое: все его упоминания в поддереве (без вложенных функций)
+layer_name_types(i64 v, n, str name, ts) {
+  if((code_kind(n) == ast.name) && (name_of(n) == name)) for(t : layer_types(v, n)) {
+    fresh = true;
+    for(x : ts) if(x == t) fresh = false;
+    if(fresh) ts.push(t);
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) layer_name_types(v, c, name, ts);
+  true
+}
+// Метки слоя: типы объявлений в этом контексте, известные значения имён, не исполнявшееся в нём —
+// приглушить (верхний такой узел)
+layer_marks(found, i64 v) {
+  f = view_root(v);
+  for(n : view_nodes(v)) {
+    k = code_kind(n);
+    up = code_parent(n);
+    if(k == ast.parameter) {
+      ts = array{};
+      layer_name_types(v, f, code_name(n), ts);
+      if(ts.size > 0) found.push(mark{n, "type", join_types(ts), 0, 0});
+    }
+    // значения: имена и условия развилок (известное условие — какая ветка живёт)
+    cond = given(up) && ((code_kind(up) == ast.if) && {
+      ast.if{c, _, _} = up;
+      code_id(c) == code_id(n)
+    });
+    if(((k == ast.name) && (given(up) && (code_kind(up) != ast.call))) || cond) {
+      lit = layer_literal(v, n);
+      if(lit != "") found.push(mark{n, "value", lit, 0, 0});
+    }
+    // не исполнялось в этом контексте: узел тела без наблюдения, родитель — с наблюдением
+    body = (code_id(n) != code_id(f)) && ((code_id(enclosing_fn(n)) == code_id(f)) && ((k != ast.parameter) && !(given(up) && (code_kind(up) == ast.parameter))));
+    if(body && (!layer_has(v, n) && ((code_id(up) == code_id(f)) || layer_has(v, up)))) found.push(mark{n, "dead", "не исполняется в этом контексте", 0, 0});
+  }
+  true
+}
+// Вкладки слоёв функции: «все» и контексты её использования
+send_layers(i64 v) => show_layers(v, layers_of(v));
+send_marks(i64 v) {
+  found = array{};
+  if(in_layer(v)) layer_marks(found, v) else type_marks(found, v);
+  for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
+  show_marks(v, found);
+  if(view_kind(v) == "fn") send_layers(v) else 0
+}
+
+// --- переход и «добавить по месту» ------------------------------------------------------
+// 
+// 
+// 
+// F12 на вызове — перегрузки, выбранные в
+// экземплярах («трейсинг»), все остальные и «добавить» для типов аргументов без перегрузки;
+// Ctrl+P — то же по набранной сигнатуре. Добавленная — внутренний элемент модуля, открывается во
+// второй панели.
+
+// перегрузки имени: модуль программы (с внутренними) и прелюдия, без записей syntax
+overloads(str name) {
+  found = array{};
+  for(f : declarations(name)) if(!is_record(f)) found.push(f);
+  found
+}
+signature(f) {
+  ast.function{name, ps, _, _, _, _, _, _, _} = f;
+  s = name + "(";
+  for(k : range(ps.size)) {
+    ast.parameter{pn, pt, _, _, _, _, _} = ps[k];
+    if(k > 0) s = s + ", ";
+    if(given(pt) && (code_kind(pt) == ast.name)) s = (s + type_text(pt)) + " ";
+    s = s + pn;
+  }
+  s + ")"
+}
+// подходит ли перегрузка к типам (параметр без типа — к любому)
+accepts(f, types) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  if(ps.size != types.size) return false;
+  r = true;
+  for(k : range(types.size)) {
+    ast.parameter{_, pt, _, _, _, _, _} = ps[k];
+    if(given(pt) && ((code_kind(pt) == ast.name) && (type_text(pt) != before(types[k], '<')))) r = false;
+  }
+  r
+}
+// точно ли типизирована под эти типы (все параметры с типом)
+exact(f, types) {
+  if(!accepts(f, types)) return false;
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  r = true;
+  for(p : ps) {
+    ast.parameter{_, pt, _, _, _, _, _} = p;
+    if(!given(pt)) r = false;
+  }
+  r
+}
+add_text(str name, types) {
+  s = name + "(";
+  for(k : range(types.size)) s = (s + (if(k > 0) ", " else "")) + types[k];
+  s + ")"
+}
+// примечание пункта: выбрана здесь, внутренняя, прелюдия
+with_note(str detail, str note) => if(detail == "") note else (detail + ", ") + note;
+// список перехода; пусто — сказать
+nav(i64 v, items, targets) => if(items.size == 0) report("переход: ничего не найдено") else show_nav(v, items, targets);
+// пункт «добавить» — в начало списка
+prepend(xs, x) {
+  r = array{x};
+  for(y : xs) r.push(y);
+  r
+}
+// F12: вызов в месте курсора — его перегрузки
+goto_call(i64 v) {
+  at = if(cursor(v) < places(v)) cursor(v) else 0;
+  call = code();
+  for(k : array{at, if(at > 0) at - 1 else at}) {
+    n = if(given(call)) code() else place_node(v, k);
+    while(given(n) && !given(call)) {
+      callee = callee_of(n);
+      if(given(callee) && ((code_kind(callee) == ast.name) || (member_name(callee) != ""))) call = n;
+      n = code_parent(n);
+    }
+  }
+  if(!given(call)) return report("F12: курсор не на вызове функции");
+  ast.call{callee, given_args, _, _, _, _, _} = call;
+  args = array{};
+  name = name_of(callee);
+  if(code_kind(callee) != ast.name) { // a.f(b) ≡ f(a, b) (§4.5)
+    name = member_name(callee);
+    args.push(member_object(callee));
+  }
+  for(x : given_args) args.push(x);
+  chosen = call_targets(call);
+  items = array{};
+  targets = array{};
+  fns = chosen_first(overloads(name), chosen);
+  for(f : fns) {
+    detail = if(has_code(chosen, f)) "выбрана здесь" else "";
+    if(is_inner(f)) detail = with_note(detail, "внутренняя");
+    if(in_prelude(f)) detail = with_note(detail, "прелюдия");
+    items.push(completion{signature(f), "перегрузка", detail, 0});
+    targets.push(array{f, ""});
+  }
+  // типы аргументов по всем экземплярам: сочетания без подходящей перегрузки — «добавить»
+  combos = array{array{}};
+  for(x : args) {
+    ts = node_types(x);
+    if(ts.size == 0) return nav(v, items, targets); // тип аргумента неизвестен — только переход
+    next = array{};
+    for(cmb : combos) for(t : ts) if(next.size < 8) {
+      one = cmb;
+      one.push(t);
+      next.push(one);
+    }
+    combos = next;
+  }
+  for(cmb : combos) {
+    fits = false;
+    for(f : fns) if(accepts(f, cmb)) fits = true;
+    if(!fits) {
+      items = prepend(items, completion{"добавить " + add_text(name, cmb), "добавить", "внутренняя перегрузка", 0});
+      targets = prepend(targets, array{code(), add_text(name, cmb)});
+    }
+  }
+  nav(v, items, targets);
+}
+trim(str s) {
+  from = 0;
+  to = s.size;
+  while((from < to) && (s[from] == ' ')) from += 1;
+  while((to > from) && (s[to - 1] == ' ')) to -= 1;
+  slice_text(s, from, to)
+}
+// Ctrl+P: «foo(i64, str)» или «foo» — перегрузки и «добавить»
+on_goto(i64 v, str text) {
+  finalize_views();
+  t = trim(text);
+  open = find_text(t, "(");
+  name = trim(if(open >= 0) slice_text(t, 0, open) else t);
+  if(name == "") return report("переход: нужна сигнатура вида foo(i64)");
+  typed = open >= 0;
+  types = array{};
+  if(typed) {
+    close = -1;
+    for(k : range(t.size)) if(t[k] == ')') close = k;
+    inside = slice_text(t, open + 1, if(close > open) close else t.size);
+    from = 0;
+    while(from <= inside.size) {
+      comma = find_text(text_from(inside, from), ",");
+      to = if(comma >= 0) from + comma else inside.size;
+      part = trim(slice_text(inside, from, to));
+      if(part != "") types.push(part);
+      from = to + 1;
+    }
+  }
+  fns = overloads(name);
+  if(typed) { // точные, потом подходящие, потом прочие — порядок внутри — как был
+    sorted = array{};
+    for(f : fns) if(exact(f, types)) sorted.push(f);
+    for(f : fns) if(!exact(f, types) && accepts(f, types)) sorted.push(f);
+    for(f : fns) if(!accepts(f, types)) sorted.push(f);
+    fns = sorted;
+  }
+  items = array{};
+  targets = array{};
+  for(f : fns) {
+    detail = if(typed && exact(f, types)) "точно" else if(typed && accepts(f, types)) "подходит" else "";
+    if(is_inner(f)) detail = with_note(detail, "внутренняя");
+    items.push(completion{signature(f), "перегрузка", detail, 0});
+    targets.push(array{f, ""});
+  }
+  exactly = false;
+  for(f : fns) if(exact(f, types)) exactly = true;
+  if(typed && !exactly) {
+    items = prepend(items, completion{"добавить " + add_text(name, types), "добавить", "внутренняя перегрузка", 0});
+    targets = prepend(targets, array{code(), add_text(name, types)});
+  }
+  nav(v, items, targets);
+}
+// Добавить внутреннюю перегрузку «foo(i64, str)»: имена параметров — как у перегрузки той же
+// арности, иначе a, b, c…; тело — пустая строка для набора
+add_overload(str sig) {
+  open = find_text(sig, "(");
+  name = slice_text(sig, 0, open);
+  inside = slice_text(sig, open + 1, sig.size - 1);
+  types = array{};
+  from = 0;
+  while(from <= inside.size) {
+    comma = find_text(text_from(inside, from), ",");
+    to = if(comma >= 0) from + comma else inside.size;
+    part = trim(slice_text(inside, from, to));
+    if(part != "") types.push(part);
+    from = to + 1;
+  }
+  names = array{};
+  for(f : overloads(name)) if(names.size == 0) {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    if(ps.size == types.size) for(p : ps) {
+      ast.parameter{pn, _, _, _, _, _, _} = p;
+      names.push(pn);
+    }
+  }
+  s = name + "(";
+  for(k : range(types.size)) s = (((s + (if(k > 0) ", " else "")) + before(types[k], '<')) + " ") + (if(k < names.size) names[k] else text_byte('a' + k));
+  add_inner(s + ") {\n\n}\n", sig);
+}
+// пункт списка перехода: открыть функцию или добавить сигнатуру
+nav_accept(i64 v) {
+  k = selected(v);
+  f = nav_fn(v, k);
+  add = nav_add(v, k);
+  close_completion(v);
+  if(given(f)) open_fn(f) else add_overload(add);
+}
+
+// --- отладчик: трасса запуска ---------------------------------------------------------
+// Решение автора: путь исполнения (§13.2) записан при запуске, шаги — по нему вперёд и
+// назад; VM не останавливается. 
+//;
+// встроенные вызовы — обычные шаги (
+//).
+
+// инструкция: элемент блока или выражение-тело функции (тело-блок — не шаг, шаги — его инструкции)
+is_stmt(i64 k) {
+  n = trace_node(k);
+  up = code_parent(n);
+  if(code_kind(n) == ast.block) return false;
+  given(up) && ((code_kind(up) == ast.block) || ((code_kind(up) == ast.function) && {
+    ast.function{_, _, _, body, _, _, _, _, _} = up;
+    code_id(body) == code_id(n)
+  }))
+}
+// следующая (или предыдущая) инструкция не глубже max_depth (-1 — любая); нет — остаться
+next_stmt(i64 from, bool back, i64 max_depth) {
+  total = trace_size();
+  if(total == 0) return 0;
+  deep = (max_depth < 0);
+  if(!back) {
+    k = from;
+    while(k < total) {
+      if(is_stmt(k) && (deep || (trace_depth(k) <= max_depth))) return k;
+      k += 1;
+    }
+  } else {
+    k = from;
+    while(k >= 0) {
+      if(is_stmt(k) && (deep || (trace_depth(k) <= max_depth))) return k;
+      k -= 1;
+    }
+  }
+  lesser(from, total - 1)
+}
+// значок значения лишний: литерал (значение и так в тексте), блок, имя вызываемой функции
+quiet_value(n) {
+  k = code_kind(n);
+  if((k == ast.int) || ((k == ast.float) || ((k == ast.string) || (k == ast.block)))) return true;
+  up = code_parent(n);
+  given(callee_of(up)) && (code_id(callee_of(up)) == code_id(n))
+}
+step_to(i64 pos) {
+  set_trace_pos(pos);
+  total = trace_size();
+  if(total == 0) return show_trace(true, pos, 0, code(), array{}, trace_output(-1), trace_error());
+  node = trace_node(pos);
+  depth = trace_depth(pos);
+  // стек: для каждой глубины — функция последнего шага этой глубины
+  stack = array{};
+  want = depth;
+  k = pos;
+  while((want >= 1) && (k >= 0)) {
+    if(trace_depth(k) == want) {
+      f = enclosing_fn(trace_node(k));
+      stack.push(if(given(f)) code_name(f) else "?");
+      want -= 1;
+    } else k -= 1;
+  }
+  show_trace(true, pos, total, node, stack, trace_output(pos), trace_error());
+  // значения подвыражений текущей инструкции (той же глубины) — значками
+  from = pos;
+  while((from > 0) && !(is_stmt(from - 1) && (trace_depth(from - 1) == depth))) from -= 1;
+  nodes = array{};
+  values = array{};
+  for(i : range((pos - from) + 1)) {
+    k2 = from + i;
+    val = trace_value(k2);
+    if((trace_depth(k2) == depth) && ((val != "") && (val != "()"))) {
+      n = trace_node(k2);
+      at = -1;
+      for(j : range(nodes.size)) if(code_id(nodes[j]) == code_id(n)) at = j;
+      if(at >= 0) values[at] = val else {
+        nodes.push(n);
+        values.push(val);
+      }
+    }
+  }
+  for(w : peer_views()) {
+    found = array{};
+    for(j : range(nodes.size)) if((layout_of(w, nodes[j]) >= 0) && !quiet_value(nodes[j])) found.push(mark{nodes[j], "value", values[j], 0, 0});
+    if(layout_of(w, node) >= 0) found.push(mark{node, "current", "", 0, 0});
+    show_marks(w, found);
+  }
+  true
+}
+// клавиши отладчика: true — обработана
+debug_key(i64 v, str key, i64 mods) {
+  pos = trace_pos();
+  depth = if(trace_size() == 0) 0 else trace_depth(pos);
+  shift = (mods & 1) != 0;
+  if(key == "Escape") {
+    set_debugging(false);
+    show_trace(false, 0, 0, code(), array{}, "", "");
+    for(w : peer_views()) send_marks(w);
+    return true;
+  }
+  if(key == "F10") {
+    step_to(if(shift) next_stmt(if(pos > 0) pos - 1 else 0, true, depth) else next_stmt(pos + 1, false, depth));
+    return true;
+  }
+  if(key == "F11") {
+    step_to(if(shift) next_stmt(pos + 1, false, if(depth > 0) depth - 1 else 0) else next_stmt(pos + 1, false, -1));
+    return true;
+  }
+  if(key == "F4") { // до инструкции под курсором
+    at = place_node(v, cursor(v));
+    while(given(at) && (given(code_parent(at)) && (code_kind(code_parent(at)) != ast.block))) at = code_parent(at);
+    k = pos + 1;
+    while(k < trace_size()) {
+      if(code_id(trace_node(k)) == code_id(at)) {
+        step_to(k);
+        return true;
+      }
+      k += 1;
+    }
+    report("F4: эта инструкция дальше не исполняется");
+    return true;
+  }
+  false
+}
+// трасса записана: шаг — к первой инструкции
+on_trace(i64 v) {
+  set_debugging(true);
+  set_trace_pos(0);
+  step_to(next_stmt(0, false, -1));
+}
+
+// --- команды: запуск, сохранение, правка функцией, слияние, слой, проекция --------------------
+ends_with(str s, str tail) => (tail.size <= s.size) && (find_text(text_from(s, s.size - tail.size), tail) == 0);
+// запуск (F5) — принятого текста
+on_run(str args, str input) {
+  finalize_views();
+  r = run_program(args, input);
+  show_output(r[0], r[1]);
+}
+// запуск с трассой (F6)
+on_trace_run(i64 v, str args, str input) {
+  finalize_views();
+  trace_program(args, input);
+  on_trace(v);
+}
+// .tzdb рядом с программой: stats.tz → stats.tzdb (база — источник истины, §3.1)
+on_save() {
+  finalize_views();
+  name = program_name();
+  save_program(if(ends_with(name, ".tz")) name + "db" else if(ends_with(name, ".tzdb")) name else name + ".tzdb");
+}
+// функция правки программы (решение автора 2026-10-17): правки — в базу
+on_apply(str fn) {
+  r = apply_edit(fn);
+  show_output(r, starts_with(r, "применена"));
+}
+// слияние: путь — относительно программы
+on_merge(str path) {
+  finalize_everyone();
+  full = path;
+  if(!starts_with(path, "/")) {
+    name = program_name();
+    slash = -1;
+    for(k : range(name.size)) if(name[k] == '/') slash = k;
+    if(slash >= 0) full = slice_text(name, 0, slash + 1) + path;
+  }
+  error = merge_from(full);
+  if(error != "") report("слияние: " + error) else 0
+}
+on_take(str key, bool theirs) {
+  finalize_everyone();
+  if(!take_version(key, theirs)) report("нет конфликта " + key) else 0
+}
+// слой представления функции (контекст экземпляра): метки — заново
+on_layer(i64 v, str key) {
+  if(view_kind(v) != "fn") return report("слои — у представления функции");
+  set_layer(v, key);
+  send_marks(v);
+}
+// проекция представления (§4.4):  
+// 
+on_projection(i64 v, str key) {
+  finalize_views();
+  error = set_projection(v, key);
+  if(error != "") return report(error);
+  set_cursor(v, 0);
+  show_view(v);
+}
+// открыть узел: функция — во второй панели, иначе — курсор на него
+on_open(i64 v, n) {
+  finalize_views();
+  if(code_kind(n) == ast.function) return open_fn(n);
+  k = node_place(v, n);
+  if(k < 0) return report("узла нет в этом представлении");
+  move_to(v, k, false, false);
+}
+
 // --- курсор -----------------------------------------------------------------------------
 // курсор на место t (shift — выделение тянется)
 move_to(i64 v, i64 t, bool shift, bool keep_goal) {
@@ -688,6 +2016,7 @@ move_to(i64 v, i64 t, bool shift, bool keep_goal) {
   set_cursor(v, lesser(t, end_of(v)));
   if(!keep_goal) set_goal(v, -1);
   cursor_moved(v);
+  send_hint(v);
 }
 // клавиша движения: новое место курсора (-1 — не движение); у ↑/↓ колонка запоминается
 motion(i64 v, str key, i64 mods) {
@@ -740,7 +2069,7 @@ newline(i64 v) {
   while(((f + 1) < places(v)) && (lead(v, f) == ' ')) f += 1;
   close = open && (lead(v, f) == '}');
   pad = spaces(ind + (if(open) 2 else 0));
-  if(close) return replace(v, s, f, "\n" + pad + "\n" + spaces(ind), 1 + pad.size);
+  if(close) return replace(v, s, f, ((("\n" + pad) + "\n") + spaces(ind)), 1 + pad.size);
   replace(v, s, e, "\n" + pad, -1);
 }
 // Tab / Shift+Tab: отступ строк выделения на 2 (без выделения Tab — пробелы до следующей
@@ -758,7 +2087,7 @@ indent(i64 v, bool out) {
     n = 0;
     if(out) while((n < 2) && (((k + n) < stop) && (lead(v, k + n) == ' '))) n += 1;
     pre = if(!out && (stop > k)) "  " else "";
-    done = done + pre + text_of(v, k + n, stop);
+    done = (done + pre) + text_of(v, k + n, stop);
     if(stop < to) done = done + "\n";
     k = stop + 1;
   }
@@ -798,6 +2127,7 @@ delete_at(i64 v, bool back, bool ctrl) {
 letter(str key, str lo, str up, str ru) => (key == lo) || ((key == up) || (key == ru));
 // клавиша; mods: 1 Shift, 2 Ctrl, 4 Alt, 8 Meta
 on_key(i64 v, str key, i64 mods) {
+  if(debugging() && debug_key(v, key, mods)) return true; // клавиши шагов — отладчику
   if(completing(v)) {
     if((key == "ArrowDown") || (key == "ArrowUp")) {
       n = completion_count(v);
