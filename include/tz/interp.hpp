@@ -30,7 +30,9 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <list>
 #include <set>
+#include <shared_mutex>
 
 namespace tz {
 
@@ -231,6 +233,49 @@ std::pair<node_id, node_id> find_codegen(ast_db const & db, std::string_view tar
   return {};
 }
 
+// --- VM bands (§9.5, step 12.3b) ---
+//
+// 
+// 
+// The program (monopoly) is the main stream of host on the production cores, without a VM scheduler;
+// background processes are their own band: host stream on energy-efficient cores, their scheduler, their
+// ring; the process receives a band at start-up and does not move (author's decision 2026-10-19: "in the
+// interpreter now"). Between the bands are only flows (data) and the outcome of processes. The code (base)
+// changes only the main one - with the background stopped: the background keeps it reading while it
+// performs, and releases it in safe points and while waiting (*mine*).
+//
+//
+std::shared_mutex code_lock;
+std::atomic<uint32_t> code_writers{0};
+std::recursive_mutex vm_lock; // Flows between processes, VM processes, incoming bands
+std::recursive_mutex out_lock; // output
+thread_local bool on_bg_lane = false;
+thread_local uint32_t code_write_depth = 0; // Writer Inside Writer (compilation from compilation)
+// Code Writer (process elaboration, JIT compilation): background bar standing while he writes
+struct code_write {
+  bool counted = lanes_on.load(std::memory_order_acquire) && !on_bg_lane;
+  bool on = counted && code_write_depth++ == 0;
+  code_write() {
+    if(!on) return;
+    code_writers.fetch_add(1);
+    code_lock.lock();
+  }
+  ~code_write() {
+    if(counted) --code_write_depth;
+    if(!on) return;
+    code_lock.unlock();
+    code_writers.fetch_sub(1);
+    code_writers.notify_all();
+  }
+  code_write(code_write const &) = delete;
+};
+// The background bar gives way to the code to the writer: let go of reading, wait, take again
+void code_pause() {
+  code_lock.unlock_shared();
+  for(uint32_t w; (w = code_writers.load()) != 0;) code_writers.wait(w);
+  code_lock.lock_shared();
+}
+
 struct interpreter {
   // residual program inputs: known arguments and strings of stdin (§13.2).
   struct known_inputs {
@@ -238,10 +283,11 @@ struct interpreter {
   };
 
   // Parent is a process (or sample) within the same VM: a common type registry and scheduler.
+  // lane_of - Mainband VM: This root is the background band scheduler (step 12.3b)
   interpreter(ast_db & db, node_id module, std::vector<std::string> args, mode m = mode::run,
-      std::optional<known_inputs> known = std::nullopt, check_cache * cache = nullptr, interpreter * parent = nullptr)
-      : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)), types(parent ? parent->types : own_types),
-        root(parent ? parent->root : this) {
+      std::optional<known_inputs> known = std::nullopt, check_cache * cache = nullptr, interpreter * parent = nullptr, interpreter * lane_of = nullptr)
+      : db(db), mod(module), run_mode(m), cache(cache), inputs(std::move(known)), types(lane_of ? lane_of->types : parent ? parent->types : own_types),
+        root(parent ? parent->root : this), vm_root(lane_of ? lane_of : parent ? parent->vm_root : this) {
     sym_intercept = sym("intercept");
     sym_alloc_in = sym("alloc_in");
     sym_append = sym("append");
@@ -934,7 +980,7 @@ struct interpreter {
 
   void declare_state(node_id item) {
     auto const & v = db.as<n_var>(item);
-    if(checking() || !root->owns_state) { // parsing - run-time (value from past launches); assistants (compiler in language) - without a file
+    if(checking() || !vm_root->owns_state) { // parsing - run-time (value from past launches); assistants (compiler in language) - without a file
       flow f = eval(v.init, globals, 0);
       if(f.kind == flow_kind::thr) uncaught(f);
       global_home[globals->declare(v.name, checking() ? erase(f.v) : f.v)] = module_of(item);
@@ -963,7 +1009,7 @@ struct interpreter {
     }
     globals->alias(v.name, cell);
     global_home[cell] = module_of(item);
-    root->state_cells.insert(cell);
+    vm_root->state_cells.insert(cell);
   }
 
   // Number → name tables for root field types and names; metadata per disk
@@ -1033,6 +1079,7 @@ struct interpreter {
       r = call_overloaded(it->second, {}, globals, 0, site);
       if(r.kind == flow_kind::thr) uncaught(r);
       if(!checking()) join_all(); // VM awaits fiber program
+      stop_lanes(false);
     } catch(...) {
       cancel_fibers();
       throw;
@@ -1269,7 +1316,7 @@ struct interpreter {
       interpreter & a = level_runs.emplace_back(db, mod, std::vector<std::string>{"ct"}, mode::check, std::nullopt, nullptr, this);
       a.fuel = 2000000;
       a.stream_shapes = stream_shapes;
-      std::size_t first = root->streams.size();
+      std::size_t first = vm_root->streams.size();
       try {
         a.run_main();
       } catch(diagnostic const & d) {
@@ -1281,8 +1328,8 @@ struct interpreter {
       // parsing threads (root common): type of elements at the place of creation; different - not type
       std::map<std::pair<uint64_t, uint64_t>, value> found;
       std::set<std::pair<uint64_t, uint64_t>> mixed;
-      for(std::size_t k = first; k < root->streams.size(); ++k) {
-        auto const & s = root->streams[k];
+      for(std::size_t k = first; k < vm_root->streams.size(); ++k) {
+        auto const & s = vm_root->streams[k];
         if(!s.typed || unknown(s.shape) || s.net || s.file_fd >= 0) continue;
         std::pair key{s.born_ctx, s.born_at};
         auto [it, fresh] = found.try_emplace(key, s.shape);
@@ -2068,11 +2115,11 @@ struct interpreter {
   mutable std::size_t res_names_seen = ~std::size_t{0}; // function names for the last "destroy no"
   mutable std::vector<node_id> const * res_list = nullptr; // overload destroy (maps node does not move)
   [[gnu::always_inline]] bool res_any() const {
-    if(!res_list && res_names_seen == functions.size()) return !shared_store.empty() || (root && root->regions_alive);
+    if(!res_list && res_names_seen == functions.size()) return !shared_store.empty() || (root && vm_root->regions_alive);
     return res_any_slow();
   }
   [[gnu::noinline]] bool res_any_slow() const {
-    if(!shared_store.empty() || (root && root->regions_alive)) return true;
+    if(!shared_store.empty() || (root && vm_root->regions_alive)) return true;
     if(!res_list) {
       if(res_names_seen == functions.size()) return false;
       auto it = functions.find(const_cast<interpreter *>(this)->sym("destroy"));
@@ -2161,7 +2208,7 @@ struct interpreter {
       auto it = res_live.find(g.rid);
       if(it == res_live.end()) fail("уровень памяти уже освобождён: копия прошла мимо правила", where);
       res_live.erase(it);
-      address_space & a = root->regions[std::size_t(g.fields.begin()->second.as<int64_t>())];
+      address_space & a = vm_root->regions[std::size_t(g.fields.begin()->second.as<int64_t>())];
       if(a.holders > 0 && --a.holders == 0) {
         if(a.live > 0)
           fail(cat("уровень памяти освобождается, а в нём живут значения (", a.live, "): они пережили бы свою память — «Неявный регион требует отслеживания - всего что в него входит» "), where);
@@ -2263,7 +2310,7 @@ struct interpreter {
       return ok(std::move(v));
     }
     if(is_region(v) && v.as<agg_v>().rid) { // level-copy - still the holder
-      ++root->regions[std::size_t(v.as<agg_v>().fields.begin()->second.as<int64_t>())].holders;
+      ++vm_root->regions[std::size_t(v.as<agg_v>().fields.begin()->second.as<int64_t>())].holders;
       v.as<agg_v>().rid = ++res_counter;
       res_live[v.as<agg_v>().rid] = 1;
       return ok(std::move(v));
@@ -3540,7 +3587,7 @@ struct interpreter {
     if(checking() || !r.known()) return eval(args[1], env, frame);
     int64_t id = r.as<agg_v>().fields[0].second.as<int64_t>();
     address_space * saved = current_space;
-    current_space = &root->regions[std::size_t(id)];
+    current_space = &vm_root->regions[std::size_t(id)];
     struct back {
       address_space * s;
       ~back() { current_space = s; }
@@ -3677,7 +3724,8 @@ struct interpreter {
   std::list<interpreter> analysis_vm; // List: Type not yet complete (as choice_vms)
   interpreter & analysis() {
     if(checking()) return *this; // parsing (and elaboration in performance) - observations
-    if(root != this) return root->analysis();
+    if(on_bg_lane) fail("разбор программы из фонового процесса — нельзя: он меняет базу (полосы, шаг 12.3b)", {});
+    if(vm_root != this) return vm_root->analysis();
     if(analysis_vm.empty()) {
       analysis_vm.emplace_back(db, mod, std::vector<std::string>{prog_path}, mode::check);
       try {
@@ -3743,7 +3791,7 @@ struct interpreter {
   std::vector<node_id> targets_of(node_id call) {
     std::vector<node_id> out;
     if(!db.is<n_call>(call)) return out;
-    if(auto it = root->resolved_calls.find(call.value); it != root->resolved_calls.end())
+    if(auto it = vm_root->resolved_calls.find(call.value); it != vm_root->resolved_calls.end())
       for(uint32_t f: it->second) out.push_back(node_id(f));
     if(!out.empty()) return out;
     node_id callee = db.as<n_call>(call).callee;
@@ -5506,6 +5554,10 @@ struct interpreter {
     f.vm = this;
     f.stack.emplace(std::size_t(64) << 20);
     f.rsp = f.stack->start(&fiber_main, &f);
+    if(on_bg_lane) {
+      std::lock_guard g(vm_lock);
+      ++root->lane_live;
+    }
     root->ready.push_back(&f);
     return f;
   }
@@ -5574,20 +5626,27 @@ struct interpreter {
   }
   bool psi_armed = false;
   // Pressure: Background handlers first ("the rest of the trash"), then programs (*my*: order)
+  void run_pressure(interpreter & vm) {
+    for(auto const & h: vm.pressure_handlers) {
+      fiber_rec & f = vm.new_fiber();
+      f.body = h.body;
+      f.env = h.env;
+      f.frame = h.frame;
+      f.body_ctx = h.ctx;
+    }
+  }
   void pressure() {
     interpreter & r = *root;
-    auto run = [&](interpreter & vm) {
-      for(auto const & h: vm.pressure_handlers) {
-        fiber_rec & f = vm.new_fiber();
-        f.body = h.body;
-        f.env = h.env;
-        f.frame = h.frame;
-        f.body_ctx = h.ctx;
+    if(r.bg) { // In the background, in his lane: asks her
+      {
+        std::lock_guard g(vm_lock);
+        r.bg->lane_pressure = true;
       }
-    };
-    for(auto & p: r.procs)
-      if(p.background) run(p);
-    run(r);
+      poke(*r.bg);
+    } else
+      for(auto & p: r.procs)
+        if(p.background) run_pressure(p);
+    run_pressure(r);
   }
 
   static void fiber_main(void * arg) {
@@ -5618,11 +5677,16 @@ struct interpreter {
     }
     f.state = fiber_rec::done;
     if(f.entry) vm.process_done(f);
-    for(fiber_rec * w: std::exchange(vm.root->joiners, {})) vm.wake(w);
+    {
+      lane_guard g(vm_lock);
+      if(on_bg_lane) --vm.root->lane_live;
+      for(fiber_rec * w: std::exchange(vm.vm_root->joiners, {})) vm.wake(w);
+    }
     vm.schedule(); // They don't come back
   }
 
   void wake(fiber_rec * f) {
+    if(lanes_on.load(std::memory_order_relaxed) && f->vm->root != root) return post(f); // fiber of the other band
     if(f->state != fiber_rec::blocked) return;
     f->state = fiber_rec::ready;
     root->ready.push_back(f);
@@ -5634,11 +5698,159 @@ struct interpreter {
   // Otherwise, the fiber pair will take away the core from the rest forever. The car, too.
   static constexpr uint32_t handoff_limit = 128;
   void wake_direct(fiber_rec * f) {
+    if(lanes_on.load(std::memory_order_relaxed) && f->vm->root != root) return post(f);
     if(f->state != fiber_rec::blocked) return;
     f->state = fiber_rec::ready;
     if(root->handoff_run >= handoff_limit) return root->ready.push_back(f);
     f->direct = true;
     root->ready.push_front(f);
+  }
+
+  // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  // The state of the filer changes only its bandwidth (drain inbox).
+  //
+  std::vector<fiber_rec *> inbox;
+  int wake_fd = -1; // eventfd bands: wakes her waiting in the ring
+  bool wake_armed = false;
+  uint64_t wake_buf = 0;
+  bool lane_idle = false; // background sleeps without applications and incoming (under vm_lock)
+  bool lane_stop = false; // The main request is to stop (under vm_lock).
+  bool lane_cancel = false; // ... and promote fiber (program error)
+  bool lane_pressure = false; // pressure: background handlers - on their lane
+  uint32_t lane_live = 0; // live fiber background band (under vm_lock)
+  interpreter * bg = nullptr; // primary root: background band
+  std::list<interpreter> lane_vms; // its root (list: type not yet complete)
+  pthread_t lane_thread{};
+  bool lane_running = false;
+
+  void post(fiber_rec * f) {
+    interpreter & L = *f->vm->root;
+    {
+      std::lock_guard g(vm_lock);
+      L.inbox.push_back(f);
+    }
+    poke(L);
+  }
+  static void poke(interpreter & L) {
+    uint64_t one = 1;
+    if(L.wake_fd >= 0) (void)!::write(L.wake_fd, &one, sizeof one);
+  }
+  void drain_inbox() {
+    interpreter & r = *root;
+    std::vector<fiber_rec *> in;
+    bool press = false, stop = false;
+    {
+      std::lock_guard g(vm_lock);
+      in.swap(r.inbox);
+      press = std::exchange(r.lane_pressure, false);
+      stop = r.lane_stop && (r.lane_live == 0 || r.lane_cancel);
+    }
+    for(fiber_rec * f: in)
+      if(f->state == fiber_rec::blocked) {
+        f->state = fiber_rec::ready;
+        r.ready.push_back(f);
+      }
+    if(press) // pressure (from the main): background process handlers - fiber of this band
+      for(auto & p: vm_root->procs) run_pressure(p);
+    if(stop && !r.fibers.empty() && r.fibers[0].state == fiber_rec::blocked) { // main fiber band - to the exit
+      r.fibers[0].state = fiber_rec::ready;
+      r.ready.push_back(&r.fibers[0]);
+    }
+  }
+  void arm_wake() {
+    interpreter & r = *root;
+    if(r.wake_armed) return;
+    r.wake_armed = true;
+    io().read(r.wake_fd, reinterpret_cast<char *>(&r.wake_buf), sizeof r.wake_buf, ~uint64_t{0}, io_tag(op_wake, 0, 0)); // program
+  }
+  // Background falls asleep: releases the code (the writer does not wait), without applications and
+  // incoming - “simple”; the main one recognizes the mutual blocking of both bands (push - to check)
+  void lane_sleep(bool asleep) {
+    interpreter & r = *root;
+    if(asleep) {
+      bool idle;
+      {
+        std::lock_guard g(vm_lock);
+        idle = r.lane_idle = r.io_pending == 0 && r.inbox.empty();
+      }
+      code_lock.unlock_shared();
+      if(idle) poke(*vm_root);
+      return;
+    }
+    code_lock.lock_shared();
+    std::lock_guard g(vm_lock);
+    r.lane_idle = false;
+  }
+  // Main: waiting for someone - the background sleeps without applications, no one enters
+  bool lane_deadlock() {
+    if(on_bg_lane) return false;
+    interpreter & r = *root;
+    std::lock_guard g(vm_lock);
+    return r.bg && r.bg->lane_idle && r.bg->inbox.empty() && r.inbox.empty();
+  }
+  // Background band - according to the first process(…): its root-planner and host flow on
+  // energy-efficient cores; the main - on productive cores
+// 
+  interpreter & bg_lane() {
+    interpreter & v = *vm_root;
+    if(v.bg) return *v.bg;
+    db.prepare_lanes(); // base caches by character numbers - capacity in advance
+    v.wake_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    interpreter & b = v.lane_vms.emplace_back(db, mod, std::vector<std::string>{"process"}, mode::run, std::nullopt, nullptr, nullptr, &v);
+    b.wake_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    b.slice_points = v.slice_points;
+    b.captured = v.captured;
+    v.bg = &b;
+    if(!v.ring) v.ring.emplace();
+    lanes_on.store(true, std::memory_order_release);
+    os::pin_to(os::core_kind::performance);
+    b.lane_thread = os::start_thread(std::size_t(256) << 20, [](void * p) { static_cast<interpreter *>(p)->lane_main(); }, &b);
+    b.lane_running = true;
+    return b;
+  }
+  // Background Band Flow: The main fiber band gives way to the core of its fiber until the main one
+  // asks to stop (and all of its fiber runs out - or spin them)
+  void lane_main() {
+    on_bg_lane = true;
+    os::pin_to(os::core_kind::efficiency);
+    ring.emplace();
+    running(); // main fiber band - flow stack
+    code_lock.lock_shared();
+    for(;;) {
+      {
+        std::lock_guard g(vm_lock);
+        if(lane_stop && (lane_live == 0 || lane_cancel)) break;
+      }
+      fibers[0].state = fiber_rec::blocked;
+      schedule();
+    }
+    if(lane_cancel) // Program error: fiber processes are unwinded like the main
+      for(auto & p: vm_root->procs)
+        for(auto & f: p.fibers) {
+          if(f.state == fiber_rec::done || !f.stack) continue;
+          f.cancel = true;
+          f.state = fiber_rec::ready;
+          ready.push_front(&f);
+          fibers[0].state = fiber_rec::ready;
+          ready.push_back(&fibers[0]);
+          schedule();
+        }
+    code_lock.unlock_shared();
+  }
+  // End of the program: background band - stop and wait (its fiber ended or unwind); after - no
+  // stripes
+  void stop_lanes(bool cancel) {
+    interpreter & v = *vm_root;
+    if(!v.bg || !v.bg->lane_running) return;
+    interpreter & b = *v.bg;
+    {
+      std::lock_guard g(vm_lock);
+      b.lane_stop = true;
+      b.lane_cancel = cancel;
+    }
+    poke(b);
+    pthread_join(b.lane_thread, nullptr);
+    b.lane_running = false;
   }
 
   // Give the kernel to the next finished fiber. "" There are no ready ones, the current
@@ -5649,9 +5861,17 @@ struct interpreter {
     auto drop_stale = [&] {
       while(!r.ready.empty() && r.ready.front()->state != fiber_rec::ready) r.ready.pop_front();
     };
+    bool lanes = lanes_on.load(std::memory_order_acquire);
+    if(lanes) drain_inbox();
     drop_stale();
-    while(r.ready.empty() && r.io_pending > 0 && me.state != fiber_rec::ready) { // We are all waiting for host: sleep in io_uring
-      for(auto const & c: r.ring->wait()) io_complete(c);
+    while(r.ready.empty() && me.state != fiber_rec::ready && (r.io_pending > 0 || lanes)) { // All wait for host (or other band): sleep in io_uring
+      if(lanes && r.io_pending == 0 && lane_deadlock()) break;
+      if(lanes) arm_wake();
+      if(on_bg_lane) lane_sleep(true);
+      auto cs = r.ring->wait();
+      if(on_bg_lane) lane_sleep(false);
+      for(auto const & c: cs) io_complete(c);
+      if(lanes) drain_inbox();
       drop_stale();
     }
     if(r.ready.empty()) {
@@ -5719,28 +5939,32 @@ struct interpreter {
   // edge - reverse edge; call - point only for the quantum in time (TZ_SLICE considers iterations
   // of cycles: the same for the interpreter and the machine)
   [[gnu::always_inline]] void safe_point(bool edge) {
-    if(background && (edge || !root->slice_points) && --preempt_left == 0) preempt_point();
+    if(!background) return;
+    if(code_writers.load(std::memory_order_relaxed) && on_bg_lane) code_pause(); // The main one is writing code - stand.
+    if((edge || !root->slice_points) && --preempt_left == 0) preempt_point();
   }
   [[gnu::noinline]] void preempt_point() {
     interpreter & r = *root;
     preempt_left = r.slice_points ? r.slice_points : 1024;
+    if(lanes_on.load(std::memory_order_relaxed) && on_bg_lane) drain_inbox(); // could have come from the main
     if(r.ready.empty()) return;
     if(!r.slice_points && os::uring::now_ms() - r.slice_start < slice_ms) return;
     ++r.preemptions;
     yield();
+    if(running().cancel) throw fiber_cancel{}; // end of the program with an error: repressed - to promote
   }
 
   void each_fiber(auto && f) {
     for(auto & x: root->fibers) f(x);
-    for(auto & p: root->procs)
+    for(auto & p: vm_root->procs)
       for(auto & x: p.fibers) f(x);
   }
 
   // fiber, left to wait (the program ended in error), are unwinded: their areas and
   // values are released as in the usual output.
   void cancel_fibers() {
-    if(root != this || root->fibers.empty() || root->running_fiber != &root->fibers[0]) return;
-    each_fiber([&](fiber_rec & f) {
+    if(root != this || root->fibers.empty() || root->running_fiber != &root->fibers[0]) return stop_lanes(true);
+    auto cancel = [&](fiber_rec & f) {
       if(f.state == fiber_rec::done || !f.stack) return;
       f.cancel = true;
       f.state = fiber_rec::ready;
@@ -5748,21 +5972,32 @@ struct interpreter {
       fibers[0].state = fiber_rec::ready;
       ready.push_back(&fibers[0]);
       schedule();
-    });
+    };
+    if(lanes_on.load(std::memory_order_acquire)) // fiber background spins their band
+      for(auto & f: fibers) cancel(f);
+    else each_fiber(cancel);
+    stop_lanes(true);
   }
 
   // The end of the main: VM awaits fiber and processes; the program's fiber error is its error
   // 
 //.
   void join_all() {
-    if(root != this || fibers.size() <= 1) return;
+    if(root != this || (fibers.size() <= 1 && !bg)) return;
     for(;;) {
       bool alive = false;
-      each_fiber([&](fiber_rec & f) {
+      auto see = [&](fiber_rec & f) {
         if(&f != &fibers[0] && f.state != fiber_rec::done) alive = true;
-      });
+      };
+      if(lanes_on.load(std::memory_order_acquire)) // processes in the background: their fiber she considers
+        for(auto & f: fibers) see(f);
+      else each_fiber(see);
+      {
+        lane_guard g(vm_lock);
+        if(bg && bg->lane_live > 0) alive = true;
+        if(alive) joiners.push_back(&fibers[0]);
+      }
       if(!alive) break;
-      joiners.push_back(&fibers[0]);
       park();
     }
     for(auto & f: fibers)
@@ -5808,17 +6043,46 @@ struct interpreter {
       if(!transferable(v)) fail(cat("process: аргумент типа ", types.describe(v), " не передаётся между процессами (только данные)"), db[a].where);
       vals.push_back(std::move(v));
     }
-    interpreter & child = root->procs.emplace_back(db, mod, std::vector<std::string>{"process"}, mode::run, std::nullopt, nullptr, root);
-    child.jit = nullptr; // background: without machine code - it is replaced at secure points of the interpreter
-    child.background = true;
-    child.captured = captured;
-    auto & meta = root->proc_meta.emplace_back();
-    meta.vm = &child;
-    fiber_rec & f = child.new_fiber();
-    f.entry = fname;
-    f.entry_args = std::move(vals);
-    f.proc = uint32_t(root->proc_meta.size() - 1);
-    return ok(value(agg_v{types.named("process"), {{sym("id"), value(int64_t(f.proc))}}}));
+    // background process - in the background band (step 12.3b); TZ_LANES = 0 - in the same (without streams)
+    if(on_bg_lane) fail("process(…) из фонового процесса — пока нельзя: процессы запускает программа (полосы, шаг 12.3b)", where);
+    static bool const lanes_wanted = !std::getenv("TZ_LANES") || std::string_view(std::getenv("TZ_LANES")) != "0";
+    interpreter * lane = lanes_wanted ? &bg_lane() : root;
+    interpreter * childp;
+    uint32_t pid;
+    {
+      code_write cw; // background: the process starts and elaborates (base changes)
+      childp = &vm_root->procs.emplace_back(db, mod, std::vector<std::string>{"process"}, mode::run, std::nullopt, nullptr, lane);
+      childp->jit = nullptr; // background: without machine code - it is replaced at secure points of the interpreter
+      childp->background = true;
+      childp->captured = captured;
+      if(lane != root) childp->elaborate(); // Here, not in its lane: elaboration changes the base
+      auto & meta = vm_root->proc_meta.emplace_back();
+      meta.vm = childp;
+      pid = uint32_t(vm_root->proc_meta.size() - 1);
+    }
+    interpreter & child = *childp;
+    if(lane == root) {
+      fiber_rec & f = child.new_fiber();
+      f.entry = fname;
+      f.entry_args = std::move(vals);
+      f.proc = pid;
+    } else { // fiber is the background band: it makes it ready (incoming)
+      fiber_rec & f = child.fibers.emplace_back();
+      f.id = uint32_t(child.fibers.size() - 1);
+      f.vm = &child;
+      f.stack.emplace(std::size_t(64) << 20);
+      f.rsp = f.stack->start(&fiber_main, &f);
+      f.state = fiber_rec::blocked;
+      f.entry = fname;
+      f.entry_args = std::move(vals);
+      f.proc = pid;
+      {
+        std::lock_guard g(vm_lock);
+        ++lane->lane_live;
+      }
+      post(&f);
+    }
+    return ok(value(agg_v{types.named("process"), {{sym("id"), value(int64_t(pid))}}}));
   }
 
   void process_main(fiber_rec & f) {
@@ -5830,7 +6094,8 @@ struct interpreter {
   }
 
   void process_done(fiber_rec & f) {
-    auto & m = root->proc_meta[f.proc];
+    lane_guard g(vm_lock); // finale
+    auto & m = vm_root->proc_meta[f.proc];
     m.done = true;
     if(f.error) {
       m.failed = true;
@@ -5844,8 +6109,8 @@ struct interpreter {
     value const * v = shape_of(p);
     if(!v || !v->is<agg_v>() || types.name(v->as<agg_v>().type) != "process") fail("ожидался процесс", where);
     value const & id = v->as<agg_v>().fields[0].second;
-    if(!id.is<int64_t>() || uint64_t(id.as<int64_t>()) >= root->proc_meta.size()) fail("неизвестный процесс", where);
-    return root->proc_meta[std::size_t(id.as<int64_t>())];
+    if(!id.is<int64_t>() || uint64_t(id.as<int64_t>()) >= vm_root->proc_meta.size()) fail("неизвестный процесс", where);
+    return vm_root->proc_meta[std::size_t(id.as<int64_t>())];
   }
 
   value process_op(std::string_view n, std::vector<value> & a, span where) {
@@ -5853,13 +6118,15 @@ struct interpreter {
       rt_effect();
       return n == "process_wait" ? erase(value(true)) : erase(value(std::string("x")));
     }
-    auto & m = proc_of(a[0], where);
-    while(!m.done) {
-      m.waiters.push_back(&running());
+    for(;;) {
+      {
+        lane_guard g(vm_lock); // process
+        auto & m = proc_of(a[0], where);
+        if(m.done) return n == "process_wait" ? value(!m.failed) : value(m.error);
+        m.waiters.push_back(&running());
+      }
       park();
     }
-    if(n == "process_wait") return value(!m.failed);
-    return value(m.error);
   }
 
   // --- host : io_uring (M3b) ---
@@ -5879,7 +6146,8 @@ struct interpreter {
     op_connect,
     op_fread,
     op_fwrite,
-    op_psi };
+    op_psi,
+    op_wake };
   static uint64_t io_tag(io_op op, std::size_t stream, std::size_t peer) { return (uint64_t(op) << 56) | (uint64_t(stream) << 24) | uint64_t(peer); }
 
   os::uring & io() {
@@ -5913,7 +6181,7 @@ struct interpreter {
   }
 
   void send_next(std::size_t sid, std::size_t p) {
-    auto & pr = root->streams[sid].peers[p];
+    auto & pr = vm_root->streams[sid].peers[p];
     if(pr.sending || pr.out.empty() || pr.fd < 0) return;
     pr.sending = true;
     ++root->io_pending;
@@ -5921,7 +6189,7 @@ struct interpreter {
   }
 
   void arm_recv(std::size_t sid, std::size_t p) {
-    auto & pr = root->streams[sid].peers[p];
+    auto & pr = vm_root->streams[sid].peers[p];
     if(pr.fd < 0) return;
     ++root->io_pending;
     io().recv_all(pr.fd, io_tag(op_recv, sid, p));
@@ -5931,6 +6199,10 @@ struct interpreter {
   void io_complete(os::uring::completion const & c) {
     if(!c.tag) return; // cancellation
     auto op = io_op(c.tag >> 56);
+    if(op == op_wake) { // push of the other lane: incoming will analyze the schedule
+      root->wake_armed = false;
+      return;
+    }
     if(op == op_psi) { // host lacks memory:
       root->psi_armed = false;
       if(c.res >= 0) {
@@ -5939,10 +6211,11 @@ struct interpreter {
       }
       return;
     }
+    lane_guard g(vm_lock); // flux
     std::size_t sid = (c.tag >> 24) & 0xFFFFFFFF, p = c.tag & 0xFFFFFF;
     bool more = c.flags & IORING_CQE_F_MORE;
     if(!more) --root->io_pending;
-    stream_rec & s = root->streams[sid];
+    stream_rec & s = vm_root->streams[sid];
     switch(op) {
       case op_accept:
         if(c.res >= 0 && !s.closed) {
@@ -6022,7 +6295,7 @@ struct interpreter {
   }
 
   void file_write_next(std::size_t sid) {
-    stream_rec & s = root->streams[sid];
+    stream_rec & s = vm_root->streams[sid];
     auto & q = s.peers[0];
     if(s.io_busy || q.out.empty()) {
       if(q.out.empty())
@@ -6034,25 +6307,42 @@ struct interpreter {
     io().write(s.file_fd, q.out.front().data() + q.sent, q.out.front().size() - q.sent, s.offset, io_tag(op_fwrite, sid, 0));
   }
 
+  // Locking the flows between the bands (step 12.3b): the operation takes it, waiting (park) releases
+  struct stream_lock {
+    std::unique_lock<std::recursive_mutex> lk{vm_lock, std::defer_lock};
+    stream_lock() {
+      if(lanes_on.load(std::memory_order_acquire)) lk.lock();
+    }
+    void park(interpreter & vm) {
+      bool had = lk.owns_lock();
+      if(had) lk.unlock();
+      vm.park();
+      if(had) lk.lock();
+    }
+  };
+
   uint32_t stream_id(value const & s, span where) {
+    lane_guard g(vm_lock);
     value const * v = shape_of(s);
     if(!v || !v->is<agg_v>() || types.name(v->as<agg_v>().type) != "stream" || v->as<agg_v>().fields.empty()) fail("ожидался поток", where);
     value const & id = v->as<agg_v>().fields[0].second;
-    if(!id.is<int64_t>() || id.as<int64_t>() < 0 || uint64_t(id.as<int64_t>()) >= root->streams.size()) fail("неизвестный поток", where);
+    if(!id.is<int64_t>() || id.as<int64_t>() < 0 || uint64_t(id.as<int64_t>()) >= vm_root->streams.size()) fail("неизвестный поток", where);
     return uint32_t(id.as<int64_t>());
   }
 
   // parsing: The value of the flow carries the type of elements, if it is known at creation
   // - the fusion (cycle, branches) erases the number, but not the type.
   value stream_value(std::size_t id) {
+    lane_guard g(vm_lock);
     agg_v a{types.named("stream"), {{sym("id"), value(int64_t(id))}}};
-    if(checking() && id < root->streams.size() && root->streams[id].typed) a.fields.push_back({sym("elem"), erase(root->streams[id].shape)});
+    if(checking() && id < vm_root->streams.size() && vm_root->streams[id].typed) a.fields.push_back({sym("elem"), erase(vm_root->streams[id].shape)});
     return value(std::move(a));
   }
 
   // Network and file operations (net *, file *): in parsing, only types.
   value io_op_call(std::string_view n, std::vector<value> & a, span where) {
-    auto & ss = root->streams;
+    lane_guard g(vm_lock); // flow table - common for bands
+    auto & ss = vm_root->streams;
     if(checking()) {
       rt_effect();
       rt_check("io_error", where);
@@ -6126,14 +6416,8 @@ struct interpreter {
   }
 
   // Flow host: Closing cancels orders; file adds queue.
-  void close_host(std::size_t sid) {
-    stream_rec & s = root->streams[sid];
-    if(s.file_fd >= 0 && s.file_write) {
-      while(!s.peers[0].out.empty()) {
-        s.writers.push_back(&running());
-        park();
-      }
-    }
+  void close_host(std::size_t sid) { // The queue of the file has already been completed (stream_do)
+    stream_rec & s = vm_root->streams[sid];
     if(s.listen_fd >= 0) {
       io().cancel_fd(s.listen_fd);
       ::close(s.listen_fd);
@@ -6155,7 +6439,8 @@ struct interpreter {
   value stream_op(std::string_view n, std::vector<value> & a, span where) {
     if(n == "stream_new") {
       if(checking()) rt_effect(); // Flow - Execution Resource: Creation does not fold into compile-time
-      auto & ss = root->streams;
+      lane_guard g(vm_lock);
+      auto & ss = vm_root->streams;
       ss.emplace_back();
       if(a.size() == 1 && a[0].is<int64_t>() && a[0].as<int64_t>() > 0) ss.back().cap = std::size_t(a[0].as<int64_t>());
       ss.back().born_ctx = ctx;
@@ -6168,8 +6453,9 @@ struct interpreter {
       return stream_value(ss.size() - 1);
     }
     std::size_t sid = stream_id(a[0], where);
-    stream_rec & s = root->streams[sid];
     if(checking()) { // parsing: type only; flow operation - runtime effect
+      lane_guard g(vm_lock);
+      stream_rec & s = vm_root->streams[sid];
       rt_effect();
       if(n == "stream_write") {
         value e = erase(a[1]);
@@ -6195,7 +6481,8 @@ struct interpreter {
   // vector - input for machine code. x is recorded (s_write).
   enum : uint8_t { s_write, s_read, s_more, s_close, s_bad };
   value stream_do(uint8_t op, std::size_t sid, value & x, span where) {
-    stream_rec & s = root->streams[sid];
+    stream_lock sl; // flow can touch both lanes
+    stream_rec & s = vm_root->streams[sid]; // Deque: The link is experiencing anticipation
     fiber_rec * me = &running();
     if(op == s_write) {
       if(s.net) fail("в сеть — send(сеть, peer, байты)", where);
@@ -6209,7 +6496,7 @@ struct interpreter {
       if(!transferable(x)) fail(cat("в поток — только данные: ", types.describe(x)), where);
       while(s.buf.size() >= s.cap && !s.closed) {
         s.writers.push_back(me);
-        park();
+        sl.park(*this);
       }
       if(s.closed) fail_rt("closed_stream", "запись в закрытый поток", where);
       s.buf.push_back(std::move(x));
@@ -6228,7 +6515,7 @@ struct interpreter {
           io().read(s.file_fd, s.io_buf.data(), s.io_buf.size(), s.offset, io_tag(op_fread, sid, 0));
         }
         s.readers.push_back(me);
-        park();
+        sl.park(*this);
       }
       if(op == s_more) return value(!s.buf.empty());
       if(s.buf.empty()) fail_rt("closed_stream", "чтение из закрытого пустого потока", where);
@@ -6241,6 +6528,11 @@ struct interpreter {
       return v;
     }
     if(op == s_close) {
+      if(s.file_fd >= 0 && s.file_write)
+        while(!s.peers[0].out.empty()) { // queue
+          s.writers.push_back(me);
+          sl.park(*this);
+        }
       close_host(sid);
       s.closed = true;
       for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
@@ -6477,9 +6769,9 @@ struct interpreter {
     if(op == "=" && !target->hidden && res_any() && has_resource(*target)) drop_value(*target, where); // Overwrite - the old resource is released
     value result = op == "=" ? std::move(rhs) : binary(std::string_view(op).substr(0, 1), *target, rhs, where);
     if(op == "=" && is_record(result)) result = to_type(std::move(result), place_type(*target), where); // Struct holds it, {x: …} becomes it.
-    if(root->state_level && root->state_level->holds(target)) { // place - state of the program: value in its level
+    if(vm_root->state_level && vm_root->state_level->holds(target)) { // place - state of the program: value in its level
       try {
-        result = adopt_into(std::move(result), &*root->state_level);
+        result = adopt_into(std::move(result), &*vm_root->state_level);
       } catch(diagnostic const & d) {
         fail(d.what(), where);
       }
@@ -7602,7 +7894,7 @@ struct interpreter {
     if(auto it = types_prefix.find(n); it != types_prefix.end()) return it->second;
     uint64_t h = 1469598103934665603ull;
     for(uint32_t i = 0; i < n; ++i) {
-      for(char c: types.names[i]) h = (h ^ uint8_t(c)) * 1099511628211ull;
+      for(char c: types.nm(i)) h = (h ^ uint8_t(c)) * 1099511628211ull;
       h = (h ^ 0xff) * 1099511628211ull;
     }
     return types_prefix[n] = h;
@@ -7931,7 +8223,7 @@ struct interpreter {
   // the editor. The internal ones (stream *, net *, * checked, file *) wrap prelude -
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
-      {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
+      {"print", "(x)"}, {"process_class", "()"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
       {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
@@ -7993,11 +8285,18 @@ struct interpreter {
       t->push_back(std::move(q));
       return r;
     }
+    // process class (§9.5): monopoly - program (main band), background - process(…); parsing - run-time
+    // (one parsing for both classes)
+    if(n == "process_class" && a.empty()) {
+      std::string k = background ? "фоновый" : "монопольный";
+      return checking() ? erase(value(k)) : value(k);
+    }
     if(n == "print") {
       rt_effect();
       if(checking()) return {};
       std::string line;
       for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + print_text(a[i]);
+      lane_guard g(out_lock); // line
       if(captured) *captured += line + "\n";
       else put(stdout, cat(line, "\n"));
       return {};
@@ -8214,7 +8513,7 @@ struct interpreter {
       if(value const * x = shape_of(o->v); x && x->is<agg_v>() && jit_analysis->types.name(x->as<agg_v>().type) == "stream" && !x->as<agg_v>().fields.empty()) {
         auto const & fs = x->as<agg_v>().fields;
         value const & id = fs[0].second;
-        auto const & ss = jit_analysis->root->streams;
+        auto const & ss = jit_analysis->vm_root->streams;
         value shape;
         if(id.is<int64_t>() && id.as<int64_t>() >= 0 && uint64_t(id.as<int64_t>()) < ss.size() && ss[std::size_t(id.as<int64_t>())].typed) shape = ss[std::size_t(id.as<int64_t>())].shape;
         else if(fs.size() > 1) shape = fs[1].second;
@@ -8230,12 +8529,12 @@ struct interpreter {
         ++resources_made;
         return erase(value(agg_v{types.named("region"), {{sym("id"), value(int64_t(0))}}}));
       }
-      root->regions.emplace_back();
-      root->regions.back().holders = 1;
-      agg_v g{types.named("region"), {{sym("id"), value(int64_t(root->regions.size() - 1))}}};
+      vm_root->regions.emplace_back();
+      vm_root->regions.back().holders = 1;
+      agg_v g{types.named("region"), {{sym("id"), value(int64_t(vm_root->regions.size() - 1))}}};
       g.rid = ++res_counter; // level - resource: holders are considered, the latter releases
       res_live[g.rid] = 1;
-      root->regions_alive = true;
+      vm_root->regions_alive = true;
       return value(std::move(g));
     }
     if(n == "jit_agg_layout" && a.empty()) return value(array_v::of({value(int64_t(agg_layout().data)), value(int64_t(agg_layout().stride)), value(int64_t(agg_layout().scalar))}));
@@ -8736,7 +9035,8 @@ struct interpreter {
 
   std::deque<fiber_rec> fibers; // root 0 is the main
   // at the root of VM (common to processes): scheduler, threads, expectation host
-  interpreter * root = this;
+  interpreter * root = this; // Lane scheduler: ready, ring, main fiber
+  interpreter * vm_root = this; // general VM: threads, processes, program state (the background band is the main root)
   fiber_rec * running_fiber = nullptr;
   std::deque<fiber_rec *> ready;
   uint32_t handoff_run = 0; // direct

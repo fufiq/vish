@@ -23,7 +23,7 @@ key 1 ArrowDown
 // expect-not: cursor
 key 1 ArrowUp
 key 1 ArrowUp
-// expect: selected=27
+// expect: selected=28
 // Enter - Accept: word replaced by selected, list closed
 key 1 ArrowDown
 key 1 Enter

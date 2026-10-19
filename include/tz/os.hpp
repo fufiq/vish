@@ -14,6 +14,8 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sched.h>
+#include <sys/eventfd.h>
 #include <pthread.h>
 #include <liburing.h>
 #include <sys/mman.h>
@@ -394,6 +396,61 @@ struct uring {
     return out;
   }
 };
+// Core Types (§9.5, step 12.3b): Intel’s hybrid processor has /sys/devices/cpu_core/cpus
+// (performance) and cpu_atom/cpus (energy efficient). Not both, untethered.
+enum class core_kind { performance, efficiency };
+bool cpu_list(char const * path, cpu_set_t & set) {
+  CPU_ZERO(&set);
+  int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+  if(fd < 0) return false;
+  char buf[256];
+  ssize_t n = ::read(fd, buf, sizeof buf - 1);
+  ::close(fd);
+  if(n <= 0) return false;
+  std::string_view t(buf, std::size_t(n));
+  bool any = false;
+  while(!t.empty()) { // "0-11" or "0-3.8-11"
+    std::size_t comma = t.find(',');
+    std::string_view part = t.substr(0, comma);
+    t = comma == std::string_view::npos ? std::string_view() : t.substr(comma + 1);
+    unsigned a = 0, b = 0;
+    auto [p1, e1] = std::from_chars(part.data(), part.data() + part.size(), a);
+    if(e1 != std::errc{}) continue;
+    b = a;
+    if(p1 < part.data() + part.size() && *p1 == '-') std::from_chars(p1 + 1, part.data() + part.size(), b);
+    for(unsigned c = a; c <= b && c < CPU_SETSIZE; ++c) {
+      CPU_SET(c, &set);
+      any = true;
+    }
+  }
+  return any;
+}
+void pin_to(core_kind k) {
+  cpu_set_t perf, eff;
+  if(!cpu_list("/sys/devices/cpu_core/cpus", perf) || !cpu_list("/sys/devices/cpu_atom/cpus", eff)) return;
+  ::sched_setaffinity(0, sizeof(cpu_set_t), k == core_kind::performance ? &perf : &eff); // flow
+}
+// host stream with its own stack (VM band): starts fn(arg); waits for it pthread_join
+pthread_t start_thread(size_t bytes, void (*fn)(void *), void * arg) {
+  struct job {
+    void (*fn)(void *);
+    void * arg;
+  };
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  pthread_attr_setstacksize(&a, bytes);
+  pthread_t t;
+  auto * j = new job{fn, arg};
+  int e = pthread_create(&t, &a, [](void * p) -> void * {
+    job j = *static_cast<job *>(p);
+    delete static_cast<job *>(p);
+    j.fn(j.arg);
+    return nullptr;
+  }, j);
+  pthread_attr_destroy(&a);
+  if(e != 0) throw diagnostic(cat("поток полосы: ", std::strerror(e)), {});
+  return t;
+}
 // Memory pressure host (Linux PSI): trigger-descriptor triggered by POLLPRI. The window is
 // a multiple of 2 s: this is possible without root rights. No PSI-1.
 int memory_pressure_fd() {

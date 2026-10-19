@@ -134,8 +134,8 @@ jt jt_of(value const & v, interpreter const * in = nullptr) {
     auto const & fs = x->as<agg_v>().fields;
     value const & id = fs[0].second;
     value shape;
-    if(id.is<int64_t>() && id.as<int64_t>() >= 0 && uint64_t(id.as<int64_t>()) < in->root->streams.size() && in->root->streams[std::size_t(id.as<int64_t>())].typed)
-      shape = in->root->streams[std::size_t(id.as<int64_t>())].shape;
+    if(id.is<int64_t>() && id.as<int64_t>() >= 0 && uint64_t(id.as<int64_t>()) < in->vm_root->streams.size() && in->vm_root->streams[std::size_t(id.as<int64_t>())].typed)
+      shape = in->vm_root->streams[std::size_t(id.as<int64_t>())].shape;
     else if(fs.size() > 1) shape = fs[1].second; // number erased by fusion - type of meaning
     else return jt::other;
     jt e = jt_of(shape);
@@ -242,6 +242,7 @@ struct jit_machine {
         address_space * saved = std::exchange(current_space, nullptr);
         ~default_level() { current_space = saved; }
       } level;
+      code_write cw; // Language compiler changes base: background bar stands (step 12.3b)
       compile(fn, *f);
     }
     return f->ok ? f : nullptr;
@@ -405,7 +406,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
         continue;
       }
       if(is_stream(t)) { // flow-parameter: parsing flow with element type
-        auto & ss = in.root->streams;
+        auto & ss = in.vm_root->streams;
         ss.emplace_back();
         ss.back().typed = true;
         ss.back().shape = jt_shape(elem_of(t));
@@ -424,13 +425,13 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
     interpreter first(db, mod, {"jit"}, mode::check);
     first.set_fuel(200000);
     auto shapes = shapes_for(first);
-    std::size_t from = first.root->streams.size();
+    std::size_t from = first.vm_root->streams.size();
     try {
       first.analyze_instance(fn, shapes);
     } catch(diagnostic const &) {
     }
-    for(std::size_t k = from; k < first.root->streams.size(); ++k)
-      if(auto const & s = first.root->streams[k]; s.typed && !interpreter::unknown(s.shape)) seeded.try_emplace({s.born_ctx, s.born_at}, port_value(s.shape, first.types, an.types));
+    for(std::size_t k = from; k < first.vm_root->streams.size(); ++k)
+      if(auto const & s = first.vm_root->streams[k]; s.typed && !interpreter::unknown(s.shape)) seeded.try_emplace({s.born_ctx, s.born_at}, port_value(s.shape, first.types, an.types));
   }
   an.set_fuel(200000);
   an.stream_shapes = std::move(seeded);
@@ -585,7 +586,7 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       value const * sh = c ? shape_of(*c) : nullptr;
       if(!sh || !sh->is<agg_v>() || vm.types.name(sh->as<agg_v>().type) != "region") throw diagnostic("with_alloc: ожидался уровень памяти region", vm.db[at].where);
       jit_spaces.push_back(current_space);
-      current_space = &vm.root->regions[std::size_t(sh->as<agg_v>().fields[0].second.as<int64_t>())];
+      current_space = &vm.vm_root->regions[std::size_t(sh->as<agg_v>().fields[0].second.as<int64_t>())];
       return 0;
     }
     if(op == 14) {

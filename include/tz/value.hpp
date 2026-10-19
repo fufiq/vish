@@ -704,8 +704,8 @@ struct type_registry {
   }
 
   type_id builtin(std::string_view name) const {
-    for(uint32_t i = 0; i < names.size(); ++i)
-      if(names[i] == name) return type_id(i);
+    for(uint32_t i = 0, n = names.size(); i < n; ++i)
+      if(nm(i) == name) return type_id(i);
     for(uint32_t i = 1; i < std::size(machine_names); ++i) // presentation - and under his own name
       if(machine_names[i] == name) return type_id(i);
     return {};
@@ -718,10 +718,11 @@ struct type_registry {
   }
   // The prelude tag gives the view a name; false is the name of another type.
   bool bind_tag(uint32_t m, std::string_view name) {
-    if(names[m] == name) return true;
-    if(names[m] != machine_names[m]) return false; // There is already a tag (the other type above it is not yet)
+    lane_guard g(lock);
+    if(nm(m) == name) return true;
+    if(nm(m) != machine_names[m]) return false; // There is already a tag (the other type above it is not yet)
     if(type_id other = builtin(name); other && other.value != m) return false;
-    names[m] = std::string(name);
+    nm(m) = std::string(name);
     tag_names[m] = std::string(name);
     return true;
   }
@@ -729,12 +730,14 @@ struct type_registry {
   static inline std::string tag_names[5];
   static std::string_view tag(uint32_t m) { return tag_names[m].empty() ? machine_names[m] : std::string_view(tag_names[m]); }
   // Tag names (in C++ - representations only): bool, i64, f64, str prelude.
-  std::string_view bool_name() const { return names[m_bool]; }
-  std::string_view int_name() const { return names[m_int]; }
-  std::string_view float_name() const { return names[m_float]; }
-  std::string_view str_name() const { return names[m_bytes]; }
+  std::string_view bool_name() const { return nm(m_bool); }
+  std::string_view int_name() const { return nm(m_int); }
+  std::string_view float_name() const { return nm(m_float); }
+  std::string_view str_name() const { return nm(m_bytes); }
 
   type_id named(std::string_view name) { // nominal
+    if(auto t = builtin(name)) return t;
+    lane_guard g(lock); // Two stripes don't get the same name twice.
     if(auto t = builtin(name)) return t;
     return intern_builtin(name);
   }
@@ -743,6 +746,8 @@ struct type_registry {
 // 
   //;.
   void set_parent(type_id t, type_id p) {
+    lane_guard g(lock);
+    if(parents.capacity() == 0) parents.reserve(1u << 16); // Do not move: parents read without lock
     if(parents.size() <= t.value) parents.resize(t.value + 1);
     parents[t.value] = p;
   }
@@ -750,11 +755,11 @@ struct type_registry {
   // have - want or his heir
   bool is_a(std::string_view have, std::string_view want) const {
     for(type_id t = builtin(have); t; t = parent(t))
-      if(names[t.value] == want) return true;
+      if(nm(t.value) == want) return true;
     return false;
   }
 
-  std::string_view name(type_id t) const { return t ? std::string_view(names[t.value]) : "?"; }
+  std::string_view name(type_id t) const { return t ? std::string_view(nm(t.value)) : "?"; }
 
   // Anonymous aggregate {x: 1.0} is a type by structure: the name is a record of {x: f64} fields
   // (names and types in order), one structure is one type.
@@ -823,12 +828,20 @@ struct type_registry {
     return std::string(name(of(x)));
   }
   type_id intern_builtin(std::string_view n) {
-    names.emplace_back(n);
-    return type_id(uint32_t(names.size() - 1));
+    lane_guard g(lock);
+    return type_id(names.add(std::string(n)).value);
   }
-
-  std::vector<std::string> names;
+  // Names - stable arena: read unlocked while another band turns type (step 12.3b)
+  struct name_tag;
+  std::string const & nm(uint32_t i) const { return names[id<name_tag>(i)]; }
+  std::string & nm(uint32_t i) { return names[id<name_tag>(i)]; }
+  void assign_names(auto const & xs) { // Type numbers - as in a dump (machine)
+    names.clear();
+    for(auto const & x: xs) names.add(std::string(x));
+  }
+  arena<std::string, name_tag> names;
   std::vector<type_id> parents; // nominal parent (empty - root)
+  std::recursive_mutex lock;
 };
 
 std::string show(value const & x, type_registry const & types, interner const & strings) {

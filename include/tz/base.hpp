@@ -5,9 +5,11 @@
 // arenas.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <mutex>
 #include <charconv>
 #include <concepts>
 #include <cstdio>
@@ -83,26 +85,59 @@ struct id {
   uint32_t value = none_value;
 };
 
-// Arena: a dense array of objects of the same kind addressed by the index.
+// VM bands (§9.5, step 12.3b): monopolistic process and background - in different host threads; they
+// have a common code base, lines, types, level memory, threads between processes. Protection is
+// included with the first background band: without processes, the path is the same, there are no locks.
+std::atomic<bool> lanes_on{false};
+struct lane_guard {
+  std::recursive_mutex & m;
+  bool on;
+  explicit lane_guard(std::recursive_mutex & m) : m(m), on(lanes_on.load(std::memory_order_acquire)) {
+    if(on) m.lock();
+  }
+  ~lane_guard() {
+    if(on) m.unlock();
+  }
+  lane_guard(lane_guard const &) = delete;
+};
+
+// Arena: a dense array of objects of the same kind addressed by the index. Pieces of 4096 - the catalog
+// is set in advance and does not move, elements too: you can read without a lock, while another band
+// adds (the base grows and during execution: quote / emit), the calling links do not hang.
 template<typename T, typename tag = T>
 struct arena {
   using handle = id<tag>;
+  static constexpr uint32_t chunk_bits = 12, chunk_size = 1u << chunk_bits, max_chunks = 1u << 16;
+
+  arena() = default;
+  arena(arena const &) = delete;
+  ~arena() { clear(); }
 
   handle add(T value) {
-    items.push_back(std::move(value));
-    return handle(uint32_t(items.size() - 1));
+    lane_guard g(grow);
+    uint32_t n = count.load(std::memory_order_relaxed);
+    if((n & (chunk_size - 1)) == 0) {
+      if(chunks.capacity() == 0) chunks.reserve(max_chunks); // catalogue doesn't move
+      chunks.push_back(static_cast<T *>(::operator new(sizeof(T) * chunk_size)));
+    }
+    new(chunks[n >> chunk_bits] + (n & (chunk_size - 1))) T(std::move(value));
+    count.store(n + 1, std::memory_order_release);
+    return handle(n);
   }
 
-  T & operator[](handle h) pre(h.value < items.size()) { return items[h.value]; }
-  T const & operator[](handle h) const pre(h.value < items.size()) { return items[h.value]; }
+  T & operator[](handle h) pre(h.value < size()) { return chunks[h.value >> chunk_bits][h.value & (chunk_size - 1)]; }
+  T const & operator[](handle h) const pre(h.value < size()) { return chunks[h.value >> chunk_bits][h.value & (chunk_size - 1)]; }
 
-  uint32_t size() const { return uint32_t(items.size()); }
-  auto begin() const { return items.begin(); }
-  auto end() const { return items.end(); }
-  void clear() { items.clear(); }
-  // deque: ссылки на элементы стабильны при росте — база растёт и во время
-  // performances (quote/emit generate node) as long as the
-  std::deque<T> items;
+  uint32_t size() const { return count.load(std::memory_order_acquire); }
+  void clear() {
+    for(uint32_t i = 0, n = size(); i < n; ++i) (*this)[handle(i)].~T();
+    for(T * c: chunks) ::operator delete(c);
+    chunks.clear();
+    count.store(0, std::memory_order_release);
+  }
+  std::vector<T *> chunks;
+  std::atomic<uint32_t> count{0};
+  std::recursive_mutex grow;
 };
 
 // Internated line: Comparison - Comparison of numbers.
@@ -117,20 +152,23 @@ struct text_hash {
 
 struct interner {
   symbol intern(std::string_view s) {
+    lane_guard g(lock); // search and paste - under the lock of stripes (reading text - without it)
     if(auto it = index.find(s); it != index.end()) return it->second;
-    symbol sym(uint32_t(strings.size()));
-    strings.emplace_back(s);
-    index.emplace(strings.back(), sym);
+    symbol sym(strings.size());
+    auto h = strings.add(std::string(s));
+    index.emplace(strings[h], sym);
     return sym;
   }
 
-  uint32_t size() const { return uint32_t(strings.size()); }
+  uint32_t size() const { return strings.size(); }
 
   std::string_view text(symbol s) const {
-    return s.valid() ? std::string_view(strings[s.value]) : std::string_view("<none>");
+    return s.valid() ? std::string_view(strings[id<string_tag>(s.value)]) : std::string_view("<none>");
   }
-  std::deque<std::string> strings; // Line addresses are stable: string_view from text() does not hang when growing
+  struct string_tag;
+  arena<std::string, string_tag> strings; // Line addresses are stable: string_view from text() does not hang when growing
   std::unordered_map<std::string, symbol, text_hash, std::equal_to<>> index;
+  std::recursive_mutex lock;
 };
 
 // Position in the text projection (for diagnostics and feedback with the editor).

@@ -38,6 +38,7 @@ struct address_space {
   size_t small_used = 0, small_committed = 0;
   std::vector<uint64_t *> small_free[classes];
   std::vector<uint64_t *> big_free; // ranges with given pages - for new vectors
+  std::recursive_mutex lock;
 
   // Non-volatile layer (program state, §12.2): The pages of the file that the VM holds are at the
   // same addresses each time you run.
@@ -66,6 +67,7 @@ struct address_space {
     return static_cast<std::byte *>(p);
   }
   void commit(void * at, size_t n) {
+    lane_guard g(lock); // Stripes (step 12.3b): the piece is given and taken from different streams
     if(!persistent) {
       if(mprotect(at, n, PROT_READ | PROT_WRITE) != 0) throw std::bad_alloc();
       if(banded) { // for the dump; adjacent parts - one
@@ -94,6 +96,7 @@ struct address_space {
   bool dead = false;
   std::vector<uint64_t *> big_reserved; // Ranges of growing vectors (level release)
   uint64_t * take_small(uint32_t k) {
+    lane_guard g(lock); // Stripes (step 12.3b): the piece is given and taken from different streams
     if(dead) throw std::bad_alloc();
     ++live;
     if(!small_free[k].empty()) {
@@ -114,11 +117,13 @@ struct address_space {
     return p;
   }
   void give_small(uint64_t * p, uint32_t k) {
+    lane_guard g(lock); // Stripes (step 12.3b): the piece is given and taken from different streams
     --live;
     small_free[k].push_back(p);
   }
 
   uint64_t * take_big() {
+    lane_guard g(lock); // Stripes (step 12.3b): the piece is given and taken from different streams
     if(dead) throw std::bad_alloc();
     ++live;
     if(!big_free.empty()) {
@@ -149,6 +154,7 @@ struct address_space {
   size_t big_limit() const { return banded ? state_big : big_range; }
   // pages to the system, addresses remain behind VM: the range will go to a new vector
   void give_big(uint64_t * p, size_t committed) {
+    lane_guard g(lock); // Stripes (step 12.3b): the piece is given and taken from different streams
     --live;
     if(!persistent && !banded) { // Pages remain connected: the range goes as follows
       madvise(p, committed, MADV_DONTNEED);
@@ -159,6 +165,7 @@ struct address_space {
   // lane: how much is connected to each growing range (repeated - only the tail)
   std::vector<std::pair<std::byte *, size_t>> big_have;
   void commit_big(std::byte * p, size_t need) {
+    lane_guard g(lock); // Stripes (step 12.3b): the piece is given and taken from different streams
     for(auto & [at, have]: big_have)
       if(at == p) {
         if(need > have) {
@@ -182,7 +189,7 @@ address_space & default_space() {
 }
 // The memory level in which values are now created: the context with_alloc(r) { … } (§12.2),
 // without it - the level of the caller; fiber - its own (VM changes when switching).
-address_space * current_space = nullptr;
+thread_local address_space * current_space = nullptr; // on the lane - its own (step 12.3b)
 address_space & space() { return current_space ? *current_space : default_space(); }
 
 // The title of the program status file: allocator metadata and roots - in their pages at the
@@ -393,7 +400,7 @@ void space_free(void * p, size_t bytes) {
 }
 
 // The level of the process the machine is currently building (the containers of the machine are its pages)
-address_space * machine_space = nullptr;
+thread_local address_space * machine_space = nullptr;
 // Distributor of process machine containers: pages of its level, dump - they are also. Template - because
 // that's how std containers are arranged (*mine*: an exception to "auto instead of template<>").
 template<typename T>

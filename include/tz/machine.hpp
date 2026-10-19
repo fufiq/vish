@@ -347,7 +347,7 @@ struct process_machine {
       helper.capture_output(&elab_out); // output of ct modules at the beginning of the process output (as in the interpreter)
       helper.elaborate(); // [[state]] - the assistant opens the state of the program (cell - it)
       helper.capture_output(nullptr);
-      if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
+      if(!dump.empty()) helper.types.assign_names(st.type_names); // type numbers - as in a dump
       if(!dump.empty()) host_lost();
       if(!dump.empty() && !st.pressure.empty()) arm_pressure(); // Pressure handlers - and in the new VM
     } catch(...) {
@@ -2789,6 +2789,7 @@ struct process_machine {
     node_list args = call_args(n);
     if(have < t.a) return push_eval(args[have], t.scope, t.frame);
     symbol name(t.b);
+    if(helper.str(name) == "process_class" && t.a == 0) return finish(mval{std::string_view(fib().proc ? "фоновый" : "монопольный")});
     if(helper.str(name) == "is_index" && t.a == 2) { // massifless
       mval const & i = ref_of(fib().vals[t.base]);
       mval const & xs = ref_of(fib().vals[t.base + 1]);
@@ -3586,7 +3587,7 @@ struct process_machine {
   std::string dump() {
     save_state_vars(false); // Program state to disk: the resumed process has the same
     st.type_names.clear();
-    for(auto const & n: helper.types.names) st.type_names.emplace_back(n);
+    for(uint32_t i = 0; i < helper.types.names.size(); ++i) st.type_names.emplace_back(helper.types.nm(i));
     dump_head h;
     h.name = name;
     h.root = root.value;

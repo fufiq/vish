@@ -405,6 +405,7 @@ struct field_view {
 
 struct ast_db {
   node_id add(node_kind k, span where) {
+    lane_guard g(lock); // Stripes (step 12.3b): the base grows from the background
     ++revision;
     where.source = pinned_source != ~uint32_t{0} ? pinned_source : uint32_t(sources.empty() ? 0 : sources.size() - 1);
     node_id id = nodes.add(node{std::move(k), where, {}});
@@ -437,16 +438,31 @@ struct ast_db {
   enum sym_class : uint8_t { sc_known = 1, sc_index = 2, sc_field = 4, sc_member = 8, sc_require = 16, sc_hide = 32, sc_try = 64, sc_assign = 128 };
   uint8_t sym_kind(symbol s) const {
     if(!s) return sc_known;
-    if(s.value >= sym_kinds.size()) sym_kinds.resize(std::max<size_t>(strings.size(), s.value + 1), 0);
-    uint8_t & k = sym_kinds[s.value];
-    if(!k) {
+    if(s.value >= sym_kinds.size()) grow_cache(sym_kinds, s.value + 1);
+    std::atomic_ref<uint8_t> k(sym_kinds[s.value]); // Cache reads both bands: the value is one
+    uint8_t v = k.load(std::memory_order_relaxed);
+    if(!v) {
       auto t = strings.text(s);
-      k = sc_known | (t == "[]" ? sc_index : 0) | (t == ".[]" ? sc_field : 0) | (t.size() > 1 && t[0] == '.' && lexer::is_ident_start(t[1]) ? sc_member : 0) |
+      v = sc_known | (t == "[]" ? sc_index : 0) | (t == ".[]" ? sc_field : 0) | (t.size() > 1 && t[0] == '.' && lexer::is_ident_start(t[1]) ? sc_member : 0) |
           (t == "require" || t == "assume" ? sc_require : 0) | (t == "hide" ? sc_hide : 0) | (t == "try_compile" ? sc_try : 0) |
           (t == "=" || t == "+=" || t == "-=" || t == "*=" || t == "/=" ? sc_assign : 0);
+      k.store(v, std::memory_order_relaxed);
     }
-    return k;
+    return v;
   }
+  // The cache on the symbol number grows under the lock; the capacity sets prepare_lanes (does not
+  // move while another band reads it)
+  static constexpr std::size_t cache_capacity = std::size_t(1) << 22;
+  void grow_cache(auto & v, std::size_t n) const {
+    lane_guard g(lock);
+    if(v.size() < n) v.resize(std::max<std::size_t>(strings.size(), n));
+  }
+  void prepare_lanes() const {
+    lane_guard g(lock);
+    sym_kinds.reserve(cache_capacity);
+    member_names.reserve(cache_capacity);
+  }
+  mutable std::recursive_mutex lock;
   mutable std::vector<uint8_t> sym_kinds;
   // Call by name with character class (require, hide, try_compile)
   bool call_named_kind(n_call const & c, uint8_t k) const { return c.words.empty() && is<n_ident>(c.callee) && (sym_kind(as<n_ident>(c.callee).name) & k); }
@@ -492,10 +508,14 @@ struct ast_db {
   member_view member_of(node_id n) const { return {as<n_op>(n).args[0], member_name(as<n_op>(n).op)}; }
   // field name by operator symbol .x (parsing internees both)
   symbol member_name(symbol op) const {
-    if(op.value >= member_names.size()) member_names.resize(strings.size());
-    symbol & s = member_names[op.value];
-    if(!s) s = strings.index.at(std::string(strings.text(op).substr(1)));
-    return s;
+    if(op.value >= member_names.size()) grow_cache(member_names, op.value + 1);
+    std::atomic_ref<uint32_t> s(member_names[op.value].value);
+    uint32_t v = s.load(std::memory_order_relaxed);
+    if(v == symbol::none_value) {
+      v = const_cast<interner &>(strings).intern(strings.text(op).substr(1)).value; // parsing interns both
+      s.store(v, std::memory_order_relaxed);
+    }
+    return symbol(v);
   }
   mutable std::vector<symbol> member_names;
   // v.[f] is the operator .[] over the value and descriptor of the field
@@ -809,6 +829,7 @@ struct ast_db {
   // Derivative node: former free with the same view at birth and place, otherwise new. Holder is a
   // list of node that the interpreter holds (releases release).
   node_id derive(node_kind k, span where, std::vector<uint32_t> & holder) {
+    lane_guard g(lock);
     uint64_t key = kind_hash(k, where); // place - as at the source (not the last import: editing it does not change)
     auto & list = reusable[key];
     for(std::size_t i = list.cursor, steps = 0; i < list.ids.size() && steps < 64; ++i, ++steps) {
@@ -838,12 +859,14 @@ struct ast_db {
     return n;
   }
   void hold(uint32_t x, std::vector<uint32_t> & holder) {
+    lane_guard g(lock);
     if(held.size() <= x) held.resize(x + 1, 0);
     ++held[x];
     holder.push_back(x);
   }
   // The interpreter is over: his node is free (reconciliation of the ones he took anew - before that)
   void release(std::vector<uint32_t> & holder) {
+    lane_guard g(lock);
     flush_reborn(0, &holder);
     for(uint32_t x: holder) {
       --held[x];
@@ -1080,7 +1103,10 @@ struct ast_db {
 
   interner strings;
   mutable std::unordered_map<std::string, uint32_t> program_kinds; // ast.X → node announcement (program_kind)
-  void log(journal_op op) { oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}}); }
+  void log(journal_op op) {
+    lane_guard g(lock);
+    oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}});
+  }
 
   void link_rec(node_id root) {
     for_each_child(root, [&](node_id child) {
@@ -1269,6 +1295,7 @@ std::optional<std::vector<symbol>> program_kind(ast_db const & db, std::string_v
     return e.of && db.strings.text(e.of) == "struct" && e.name && db.strings.text(e.name) == name;
   };
   uint32_t at = 0;
+  lane_guard g(db.lock); // cache
   if(auto it = db.program_kinds.find(std::string(name)); it != db.program_kinds.end() && decl(it->second)) at = it->second;
   else {
     for(uint32_t i = 1; i < db.size(); ++i)

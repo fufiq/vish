@@ -1180,6 +1180,7 @@ struct printer {
       else if(auto s = std::get_if<std::string>(&a)) key += cat("|s", *s);
       else key += cat("|n", std::get<node_id>(a).value, "@", db.node_revision(std::get<node_id>(a)));
     }
+    lane_guard g(db.lock); // cache
     if(auto it = db.print_choices.find(key); it != db.print_choices.end()) return it->second;
     std::string why;
     int r = language_choice(db, vms, fn, args, why);
