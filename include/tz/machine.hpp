@@ -127,6 +127,7 @@ struct m_scope {
   uint32_t fn = m_none;
   bool layer = false; // layer of design rules over the domain of the caller (ruled_scope)
   m_list<m_step> steps; // steps of link-paths declared in the field
+  uint32_t site = 0; // parameter area: call node - transfer from parameter - alias solves and calling
 };
 
 struct m_frame {
@@ -247,7 +248,7 @@ struct m_state {
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "TZPROC08";
+  std::string magic = "TZPROC09";
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -900,14 +901,30 @@ struct process_machine {
     }
     for(std::size_t i = g.fields.size(); i-- > 0;) drop_value(g.fields[i].v, where);
   }
+  // Transfer from the name: no further read; parameter - alias - and the caller on the chain (call
+  // node: used_after looks the entire instruction) as an interpreter. alias field or element is part
+  // of someone else’s meaning: copy.
+  bool movable(node_id src, symbol name, place p) {
+    if(helper.used_after(src, name)) return false;
+    for(m_var * v = &st.scopes[p.scope].vars[p.slot]; v->v.is<m_alias>();) {
+      m_alias const & al = v->v.as<m_alias>();
+      if(al.index != m_none || al.field != m_none || al.path_scope != m_none) return false;
+      uint32_t site = st.scopes[p.scope].site;
+      m_var & to = st.scopes[al.scope].vars[al.slot];
+      if(!site || helper.used_after(node_id(site), to.name)) return false;
+      p = {al.scope, al.slot};
+      v = &to;
+    }
+    return true;
+  }
   // the value of the name src goes to a new place: the name is no longer read - transfer (name
   // hidden), reads - copy(T) of the program (shared - inc), no it - error
   void take_from(node_id src, mval & v, uint32_t scope) {
     if(!st.res_on || !db.is<n_ident>(src) || !has_res(v)) return;
     symbol name = db.as<n_ident>(src).name;
     span where = db[src].where;
-    if(!helper.used_after(src, name)) {
-      if(place p = find(scope, name); p.scope != m_none) var_of(p).hidden = src.value + 1;
+    if(place p = find(scope, name); p.scope != m_none && movable(src, name, p)) {
+      var_of(p).hidden = src.value + 1;
       return;
     }
     if(is_shared_v(v)) {
@@ -1294,6 +1311,7 @@ struct process_machine {
     uint32_t sc = new_scope(parent == m_none ? st.globals : parent); // Local - on top of the surroundings of your block
     st.scopes[sc].caller = f.tasks.empty() ? m_none : f.tasks.back().scope; // call environment (O4)
     st.scopes[sc].fn = chosen.value;
+    st.scopes[sc].site = site_node.value;
     for(uint32_t i = 0; i < fn.params.size(); ++i) {
       auto const & p = db.as<n_param>(fn.params[i]);
       if(p.pack && p.mode == param_mode::let && i + 1 == fn.params.size()) { // ...xs is the remainder of the argument
@@ -2395,7 +2413,9 @@ struct process_machine {
       if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
       auto & items = xs.as<m_arr>().items;
       void const * was = items.empty() ? nullptr : items.data();
-      items.push_back(a[1]);
+      mval x = a[1];
+      if(st.res_on) take_from(call_args(n)[1], x, t.scope); // resource in an array - transfer or copy, as in the assignment
+      items.push_back(std::move(x));
       if(was && items.data() != was && !xs.as<m_arr>().pinned) xs.as<m_arr>().gen = ++st.array_gen; // Data moved - links broken
       return finish(mval{m_unit{}});
     }
@@ -2913,6 +2933,7 @@ struct process_machine {
     for(uint32_t i = 0; i < c.items.size(); ++i) {
       mval v = deref(fib().vals[t.base + i]);
       if(!db.is<n_spread>(c.items[i])) {
+        if(st.res_on) take_from(c.items[i], v, t.scope); // name element - transfer or copy
         a.items.push_back(std::move(v));
         continue;
       }
@@ -3109,7 +3130,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(std::string_view(h.magic) != "TZPROC08") throw diagnostic("не дамп процесса tz", {});
+    if(std::string_view(h.magic) != "TZPROC09") throw diagnostic("не дамп процесса tz", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);
   }

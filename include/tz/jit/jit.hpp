@@ -74,6 +74,7 @@ interpreter * jit_vm = nullptr;
 //
 struct jit_call_mem {
   std::deque<value> own;
+  std::vector<scope::borrow> borrows; // parameter-resources - cells of the caller: transfer decides and its use
   std::vector<value> print_args; // Print: Arguments of the line to the last
   value * add(value v) {
     own.push_back(std::move(v));
@@ -529,8 +530,12 @@ uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t wa
   for(uint64_t i = 0; i < n; ++i) {
     uint64_t * e = buf + 2 + 3 * i;
     symbol name = vm.db.as<n_ident>(node_id{uint32_t(e[0])}).name;
-    if(e[1] == 9) s->alias(name, reinterpret_cast<value *>(e[2])); // The value of VM is at the cell address
-    else s->declare(name, jit_bits_value(e[1], e[2]));
+    if(e[1] == 9) { // The value of VM is at the cell address
+      value * cell = reinterpret_cast<value *>(e[2]);
+      s->alias(name, cell);
+      for(auto const & b: mem.borrows)
+        if(b.cell == cell) s->borrows.push_back(b);
+    } else s->declare(name, jit_bits_value(e[1], e[2]));
   }
   interpreter::flow r = vm.eval(at, s, 0);
   if(take && r.normal()) r = vm.take(at, std::move(r.v), s, 0);
@@ -811,6 +816,9 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   auto entry =reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
   uint64_t bits;
   jit_call_mem mem;
+  if(res_any()) // parameter-resource - cell of the caller (alias): transfer from it solves and calls, as in the interpreter
+    for(uint32_t i = 0; i < vals.size() && i < args.size(); ++i)
+      if(param_types[i] == jt::handle && cells[i] != &vals[i] && has_resource(*cells[i])) mem.borrows.push_back({cells[i], args[i], env});
   if(code->by_lang) { // Compiler code in language: array - cell address (data and size code reads from it), behind the arguments - error slots
     std::vector<uint64_t> area;
     for(uint32_t i = 0; i < vals.size(); ++i) {

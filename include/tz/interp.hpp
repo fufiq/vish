@@ -95,6 +95,15 @@ struct scope {
   std::deque<value> storage;
   bool captured = false;
   cell_book * book = nullptr;
+  // Resource alias (§12.2): Caller cell and its argument.
+// Transfer from the parameter decides the use
+  // and the caller (transfer by use across the call border)
+  struct borrow {
+    value * cell;
+    node_id src;
+    scope * env;
+  };
+  std::vector<borrow> borrows;
 
   value * declare(symbol name, value v) {
     storage.push_back(std::move(v));
@@ -1592,6 +1601,7 @@ struct interpreter {
     if(s->captured) return;
     s->vars.clear();
     s->storage.clear();
+    s->borrows.clear();
     s->parent = nullptr;
     free_scopes.push_back(s);
   }
@@ -2022,16 +2032,26 @@ struct interpreter {
 // 
 // 
 // My name is shared.
-  // A link to the code), a VM storage slot, each copy has its own resource number.
+  // A link to the code), a VM storage slot, each copy has its own resource number. Count - cell-value
+  // (tail of step 10): - parsing leads it like any cell (merging branches, cycles): known - folded
+  // (shared_count - constant instance), depends on the path - run-time
+  //
   struct shared_slot {
     value v;
-    uint32_t count = 0;
+    value count;
   };
   std::deque<shared_slot> shared_store;
   bool is_shared(value const & v) const { return v.is<agg_v>() && v.as<agg_v>().rid && types.name(v.as<agg_v>().type) == "shared"; } // No type registration: registry does not change in parsing
   shared_slot & slot_of(value const & r) { return shared_store[std::size_t(r.as<agg_v>().fields.begin()->second.as<int64_t>())]; }
+  // run-time at parsing - last reference, parsing does not know
+  bool count_known(shared_slot const & sl) const { return sl.count.is<int64_t>(); }
+  void count_add(shared_slot & sl, int64_t d) {
+    if(checking()) book.written(&sl.count, true);
+    if(count_known(sl)) sl.count.as<int64_t>() += d;
+  }
   value make_shared(value v) {
-    shared_store.push_back({std::move(v), 1});
+    shared_store.push_back({std::move(v), value(int64_t(1))});
+    if(checking()) book.born(&shared_store.back().count);
     agg_v g{types.named("shared"), {{sym("slot"), value(int64_t(shared_store.size() - 1))}}};
     g.rid = ++res_counter;
     res_live[g.rid] = 1;
@@ -2102,6 +2122,14 @@ struct interpreter {
     }
     return false;
   }
+  // Description type (as in parsing: array<file>)
+  bool resource_type(std::string_view n) {
+    if(n.starts_with("array<") && n.ends_with(">")) return resource_type(n.substr(6, n.size() - 7));
+    if(n == "shared") return true;
+    if(!structs.contains(sym(n))) return false;
+    type_id t = types.named(n);
+    return bool(member_fn_of("destroy", t)) || has_resource_fields(t);
+  }
   bool has_resource(value const & v) const {
     if(v.is<agg_v>()) {
       if(v.as<agg_v>().rid) return true;
@@ -2143,7 +2171,9 @@ struct interpreter {
       if(it == res_live.end()) fail("разделяемый объект уже освобождён: копия прошла мимо правила", where);
       res_live.erase(it);
       shared_slot & sl = slot_of(v);
-      if(sl.count > 0 && --sl.count == 0) {
+      bool had = count_known(sl) && sl.count.as<int64_t>() > 0;
+      count_add(sl, -1);
+      if(had && sl.count.as<int64_t>() == 0) {
         value held = std::move(sl.v);
         sl.v = value();
         drop_value(held, where);
@@ -2211,13 +2241,22 @@ struct interpreter {
   // the value of the name goes to a new place (announcement, assignment, return, literal
   // field): resource - transfer or copy(T)
   bool needs_take(node_id src, value const & v) const { return res_any() && db.is<n_ident>(src) && has_resource(v); }
+  // Transfer from the name: no further read; name - parameter - alias - and the caller, along the
+  // chain of calls (argument - not name, but field or element: part of someone else's value - copy)
+  bool movable(node_id src, symbol name, value const * cell, scope * env) const {
+    if(used_after(src, name)) return false;
+    for(scope * s = env; s; s = s->parent)
+      for(auto const & b: s->borrows)
+        if(b.cell == cell) return db.is<n_ident>(b.src) && movable(b.src, db.as<n_ident>(b.src).name, cell, b.env);
+    return true;
+  }
   flow take(node_id src, value v, scope * env, uint32_t frame) {
     if(!needs_take(src, v)) return ok(std::move(v));
     symbol name = db.as<n_ident>(src).name;
     value * cell = find(env, name);
     if(!cell || cell->is<thunk_v>()) return ok(std::move(v));
-    if(!used_after(src, name)) {
-      hide_cell(cell, src); // Translation: name no longer readable
+    if(movable(src, name, cell, env)) {
+      hide_cell(cell, src); // Transfer: the name is no longer readable (and the caller has alias)
       return ok(std::move(v));
     }
     if(is_region(v) && v.as<agg_v>().rid) { // level-copy - still the holder
@@ -2227,7 +2266,7 @@ struct interpreter {
       return ok(std::move(v));
     }
     if(is_shared(v)) { // copy of the shared - inc, your number
-      ++slot_of(v).count;
+      count_add(slot_of(v), 1);
       v.as<agg_v>().rid = ++res_counter;
       res_live[v.as<agg_v>().rid] = 1;
       return ok(std::move(v));
@@ -5208,7 +5247,8 @@ struct interpreter {
     value * cell = find(env, db.as<n_ident>(args[0]).name);
     if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("append: первый аргумент — переменная-массив", where);
     not_hidden(*cell, db.as<n_ident>(args[0]).name, where);
-    TZ_TRY(x, eval(args[1], env, frame));
+    TZ_TRY(x0, eval(args[1], env, frame));
+    TZ_TAKE(x, args[1], x0, env, frame); // resource in an array - transfer or copy, as in the assignment
     if(!checking()) {
       if(!cell->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
       array_v & a = cell->as<array_v>();
@@ -6726,6 +6766,7 @@ struct interpreter {
       }
       if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr) {
         inner->alias(p.name, cell);
+        if(res_any() && has_resource(*cell)) inner->borrows.push_back({cell, args[i], env});
         continue;
       }
       TZ_TRY(v, eval(args[i], env, frame));
@@ -6780,7 +6821,7 @@ struct interpreter {
     if(args.size() == 1 && str(name) == "shared_count") { // Number of references to stored (observation)
       TZ_TRY(v, eval(args[0], env, frame));
       if(!is_shared(v)) fail("shared_count: ожидался shared", where);
-      return ok(value(int64_t(slot_of(v).count)));
+      return ok(slot_of(v).count);
     }
     std::vector<value> vals;
     for(node_id a: args) {
@@ -7505,6 +7546,7 @@ struct interpreter {
         // value: not alias of the caller’s location.
         if(value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr; cell && !cell->is<split_v>() && (cell->is<ref_v>() || types.of(*cell) == types.of(vals[i]))) {
           inner->alias(p.name, cell);
+          if(res_any() && has_resource(*cell)) inner->borrows.push_back({cell, args[i], env});
           continue;
         }
       }
@@ -8105,10 +8147,9 @@ struct interpreter {
         if(str(db.as<n_var>(fs[k]).name) == a[1].as<str_v>().view()) return value(int64_t(k));
       return value(int64_t(-1));
     }
-    if(n == "jit_resource" && a.size() == 1) { // Destroy, shared: machine code releases it with VM
+    if(n == "jit_resource" && a.size() == 1) { // Type-resource (destroy, shared, array of resources): machine code releases it with VM
       if(!a[0].is<type_v>() || !res_any()) return value(false);
-      type_id t = a[0].as<type_v>().type;
-      return value(types.name(t) == "shared" || bool(member_fn_of("destroy", t)) || has_resource_fields(t));
+      return value(resource_type(types.name(a[0].as<type_v>().type)));
     }
     if(n == "jit_literal_place" && a.size() == 1) { // type-aggregate place anonymous literature (or ')
       std::string t = literal_place(code_node(a[0], where));

@@ -2664,6 +2664,9 @@ jit_compile(cg, f, types, type result) {
         binds.push(jc_var{pname, jc_ref, w.slot, false, w.th, 0, w.th_top, 0, 0}); // ссылка — тот же элемент
       } else if((s >= 0) && ((mode != 2) && !env[s].thunk)) {
         w = env[s];
+        // ресурс-алиас: перенос из параметра решает и использование у вызывающего (по
+        // цепочке встраивания) — это знает интерпретатор
+        if(jit_resource(w.kind)) bad(fmt"ресурс-алиас аргументом {pname} — интерпретатор");
         binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
       } else {
         t = if(is_call_of(a, "range")) jc_range else ty(a);
