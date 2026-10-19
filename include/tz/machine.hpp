@@ -197,6 +197,19 @@ struct m_fiber {
   uint8_t state = f_ready;
   bool direct = false; // In the queue first: awakened by exchange (direct transmission)
   m_error error;
+  // VM process (§9.2, step 12.1): 0 is the program itself, otherwise the number in m_state::procs + 1; the
+  // root of the process is its args on top of the general globals; input fiber is the end of the process
+  uint32_t proc = 0;
+  uint32_t globals = m_none;
+  bool proc_entry = false;
+};
+// The VM process within the machine process:
+// Its error is the outcome, not the error of the program.
+struct m_proc {
+  bool done = false;
+  bool failed = false;
+  m_str error;
+  m_list<uint32_t> waiters;
 };
 
 // Write/read between fiber (§8.3): A buffer waiting to be read and written.
@@ -205,6 +218,7 @@ struct m_stream {
   m_list<mval> buf;
   bool closed = false;
   m_list<uint32_t> readers, writers;
+  uint8_t host = 0; // host resource (§9.5 step 12.1): 1 file to read, 2 file to write, 3 network; resource itself outside the dump
 };
 
 // Body area entity functions: its local functions declared (entity .f(…)).
@@ -244,6 +258,7 @@ struct m_state {
   m_list<uint32_t> res_live;
   m_list<m_shared> shared;
   m_list<mval> ct_states; // ct-state of values (mval::ct - number + 1)
+  m_list<m_proc> procs; // VM processes (process(f, …))
 };
 
 // Process dump header: everything except level pages.
@@ -275,6 +290,33 @@ struct process_machine {
   std::string * captured = nullptr; // output - in line (tests), otherwise stdout
   std::string elab_out; // withdrawal of assistant elaboration (ct modules) to start
 
+  // host resources (§9.5 step 12.1): Descriptors and kernel applications are not part of the process.
+// 
+// They do not enter the stream, but
+  // After resume, the host stream is closed externally (author's decision 2026-10-19): read - end of
+  // stream, write - exception, send - false. The device is like an interpreter (M3b): the network is one
+  // event stream, files are streams of pieces, applications are io_uring.
+  struct host_peer {
+    int fd = -1;
+    bool open = true;
+    bool sending = false;
+    std::deque<std::string> out;
+    std::size_t sent = 0;
+  };
+  struct host_rec {
+    int listen_fd = -1;
+    int file_fd = -1;
+    bool connected = false;
+    bool io_busy = false;
+    uint64_t offset = 0;
+    std::string io_buf;
+    sockaddr_in addr{};
+    std::deque<host_peer> peers;
+  };
+  std::deque<host_rec> host; // by flow number (order addresses are stable)
+  std::optional<os::uring> ring;
+  uint32_t io_pending = 0; // nucleus
+
   process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {}, int dump_fd = -1)
       : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump, dump_fd)) {
     try { // The strip is already open: there will be no destructor - close it here
@@ -283,6 +325,7 @@ struct process_machine {
       helper.elaborate(); // [[state]] - the assistant opens the state of the program (cell - it)
       helper.capture_output(nullptr);
       if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
+      if(!dump.empty()) host_lost();
     } catch(...) {
       st.~m_state();
       close_band(band);
@@ -294,6 +337,12 @@ struct process_machine {
     try {
       save_state_vars(true);
     } catch(...) {
+    }
+    for(auto & h: host) { // host descriptors - no further than the machine (the application will be removed by the ring)
+      for(int fd: {h.listen_fd, h.file_fd})
+        if(fd >= 0) ::close(fd);
+      for(auto & pr: h.peers)
+        if(pr.fd >= 0) ::close(pr.fd);
     }
     st.~m_state();
     close_band(band);
@@ -580,6 +629,305 @@ struct process_machine {
     }
   }
 
+  // --- host resources (step 12.1) ---
+
+  enum : uint64_t { op_accept = 1, op_recv, op_send, op_connect, op_fread, op_fwrite };
+  static uint64_t io_tag(uint64_t op, uint64_t sid, uint64_t peer) { return (op << 56) | (sid << 24) | peer; }
+  [[noreturn]] static void rt_fail(std::string_view type, std::string what, span where) {
+    diagnostic d(std::move(what), where, diag_kind::runtime);
+    d.type = std::string(type);
+    throw d;
+  }
+  os::uring & io(span where) {
+    if(!ring) ring.emplace();
+    if(!ring->ok) rt_fail("io_error", "io_uring недоступен в этой системе", where);
+    return *ring;
+  }
+  // host recording of the stream; no - the resource did not survive the process transfer (closed by the external side)
+  host_rec * host_of(uint64_t sid) { return sid < host.size() && st.streams[sid].host ? &host[sid] : nullptr; }
+  uint64_t host_stream(uint8_t kind) {
+    st.streams.emplace_back();
+    st.streams.back().host = kind;
+    st.streams.back().cap = ~uint64_t{0} >> 1; // host events do not wait for the reader.
+    if(host.size() < st.streams.size()) host.resize(st.streams.size());
+    return st.streams.size() - 1;
+  }
+  // The process is restored in another VM: it has no host resources - the external side has closed the process.
+  void host_lost() {
+    for(auto & s: st.streams)
+      if(s.host && !s.closed) {
+        s.closed = true;
+        for(uint32_t r: std::exchange(s.readers, {})) wake(r);
+        for(uint32_t w: std::exchange(s.writers, {})) wake(w);
+      }
+  }
+  mval event(int64_t peer, std::string_view kind, std::string_view data) {
+    m_agg g{helper.types.named("event"), {}};
+    g.fields.push_back({helper.sym("peer"), mval{peer}});
+    g.fields.push_back({helper.sym("kind"), mval{kind}});
+    g.fields.push_back({helper.sym("data"), mval{data}});
+    return mval{std::move(g)};
+  }
+  void deliver(uint64_t sid, mval v) {
+    m_stream & s = st.streams[sid];
+    s.buf.push_back(std::move(v));
+    if(!s.readers.empty()) {
+      uint32_t r = s.readers.front();
+      s.readers.erase(s.readers.begin());
+      wake(r);
+    }
+  }
+  void peer_closed(uint64_t sid, std::size_t p, std::string_view why = {}) {
+    host_peer & pr = host[sid].peers[p];
+    if(!pr.open) return;
+    pr.open = false;
+    if(pr.fd >= 0) {
+      ::close(pr.fd);
+      pr.fd = -1;
+    }
+    if(!st.streams[sid].closed) deliver(sid, event(int64_t(p), "close", why));
+  }
+  void send_next(uint64_t sid, std::size_t p) {
+    host_peer & pr = host[sid].peers[p];
+    if(pr.sending || pr.out.empty() || pr.fd < 0) return;
+    pr.sending = true;
+    ++io_pending;
+    io({}).send(pr.fd, pr.out.front().data() + pr.sent, pr.out.front().size() - pr.sent, io_tag(op_send, sid, p));
+  }
+  void arm_recv(uint64_t sid, std::size_t p) {
+    host_peer & pr = host[sid].peers[p];
+    if(pr.fd < 0) return;
+    ++io_pending;
+    io({}).recv_all(pr.fd, io_tag(op_recv, sid, p));
+  }
+  void file_write_next(uint64_t sid) {
+    host_rec & h = host[sid];
+    host_peer & q = h.peers[0];
+    if(h.io_busy || q.out.empty()) {
+      if(q.out.empty())
+        for(uint32_t w: std::exchange(st.streams[sid].writers, {})) wake(w);
+      return;
+    }
+    h.io_busy = true;
+    ++io_pending;
+    io({}).write(h.file_fd, q.out.front().data() + q.sent, q.out.front().size() - q.sent, h.offset, io_tag(op_fwrite, sid, 0));
+  }
+  // The completion of the kernel application is an event in the stream, the awakening of those waiting.
+  void io_complete(os::uring::completion const & c) {
+    if(!c.tag) return; // cancellation
+    uint64_t op = c.tag >> 56, sid = (c.tag >> 24) & 0xFFFFFFFF;
+    std::size_t p = c.tag & 0xFFFFFF;
+    bool more = c.flags & IORING_CQE_F_MORE;
+    if(!more) --io_pending;
+    host_rec & h = host[sid];
+    m_stream & s = st.streams[sid];
+    switch(op) {
+      case op_accept:
+        if(c.res >= 0 && !s.closed) {
+          h.peers.push_back({c.res});
+          deliver(sid, event(int64_t(h.peers.size() - 1), "open", {}));
+          arm_recv(sid, h.peers.size() - 1);
+        } else if(c.res >= 0) ::close(c.res);
+        if(!more && !s.closed && h.listen_fd >= 0) {
+          ++io_pending;
+          io({}).accept_all(h.listen_fd, io_tag(op_accept, sid, 0));
+        }
+        break;
+      case op_recv: {
+        host_peer & pr = h.peers[p];
+        if(c.res > 0) {
+          unsigned bid = c.flags >> IORING_CQE_BUFFER_SHIFT;
+          std::string data(ring->buffer(bid), std::size_t(c.res));
+          ring->give_back(bid);
+          if(pr.open && !s.closed) deliver(sid, event(int64_t(p), "data", data));
+          if(!more && pr.open) arm_recv(sid, p);
+        } else if(c.res == -ENOBUFS) {
+          if(!more && pr.open) arm_recv(sid, p);
+        } else if(!more) peer_closed(sid, p, c.res < 0 ? std::string_view(std::strerror(-c.res)) : std::string_view());
+        break;
+      }
+      case op_send: {
+        host_peer & pr = h.peers[p];
+        pr.sending = false;
+        if(c.res < 0) {
+          peer_closed(sid, p, std::strerror(-c.res));
+          break;
+        }
+        pr.sent += std::size_t(c.res);
+        if(pr.sent >= pr.out.front().size()) {
+          pr.out.pop_front();
+          pr.sent = 0;
+        }
+        send_next(sid, p);
+        break;
+      }
+      case op_connect:
+        if(c.res < 0) {
+          h.peers[0].open = false;
+          ::close(h.peers[0].fd);
+          h.peers[0].fd = -1;
+          deliver(sid, event(0, "close", std::strerror(-c.res)));
+          break;
+        }
+        h.connected = true;
+        deliver(sid, event(0, "open", {}));
+        arm_recv(sid, 0);
+        send_next(sid, 0);
+        break;
+      case op_fread:
+        h.io_busy = false;
+        if(c.res > 0) {
+          h.offset += uint64_t(c.res);
+          deliver(sid, mval{std::string_view(h.io_buf.data(), std::size_t(c.res))});
+        } else {
+          s.closed = true; // end of file (or reading error)
+          for(uint32_t r: std::exchange(s.readers, {})) wake(r);
+        }
+        break;
+      case op_fwrite: {
+        h.io_busy = false;
+        host_peer & q = h.peers[0];
+        if(c.res > 0) {
+          h.offset += uint64_t(c.res);
+          q.sent += std::size_t(c.res);
+          if(q.sent >= q.out.front().size()) {
+            q.out.pop_front();
+            q.sent = 0;
+          }
+        } else if(!q.out.empty()) q.out.clear(); // record
+        file_write_next(sid);
+        break;
+      }
+    }
+  }
+  // host stream: Closing cancels orders and closes descriptors.
+  void close_host(uint64_t sid) {
+    host_rec * h = host_of(sid);
+    if(!h) return;
+    if(h->listen_fd >= 0) {
+      io({}).cancel_fd(h->listen_fd);
+      ::close(h->listen_fd);
+      h->listen_fd = -1;
+    }
+    for(auto & pr: h->peers)
+      if(pr.fd >= 0) {
+        io({}).cancel_fd(pr.fd);
+        ::close(pr.fd);
+        pr.fd = -1;
+        pr.open = false;
+      }
+    if(h->file_fd >= 0) {
+      ::close(h->file_fd);
+      h->file_fd = -1;
+    }
+  }
+  // net *, file * - like an interpreter (io_op_call): creating and operating a host stream
+  mval host_op(std::string_view n, std::vector<mval> const & a, span where) {
+    auto str_arg = [&](std::size_t i) { return std::string(a[i].as<m_str>()); };
+    if(n == "net_listen") {
+      if(a.size() != 1 || !a[0].is<int64_t>()) throw diagnostic("listen(порт)", where);
+      int fd = os::listen_tcp(int(a[0].as<int64_t>()));
+      if(fd < 0) rt_fail("io_error", cat("listen: ", std::strerror(errno)), where);
+      uint64_t sid = host_stream(3);
+      host[sid].listen_fd = fd;
+      ++io_pending;
+      io(where).accept_all(fd, io_tag(op_accept, sid, 0));
+      return stream_value(sid);
+    }
+    if(n == "net_connect") {
+      if(a.size() != 2 || !a[0].is<m_str>() || !a[1].is<int64_t>()) throw diagnostic("connect(адрес, порт)", where);
+      uint64_t sid = host_stream(3);
+      host_rec & h = host[sid];
+      if(!os::ipv4(str_arg(0), int(a[1].as<int64_t>()), h.addr)) rt_fail("io_error", "connect: неверный адрес", where);
+      int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+      if(fd < 0) rt_fail("io_error", cat("connect: ", std::strerror(errno)), where);
+      h.peers.push_back({fd});
+      ++io_pending;
+      io(where).connect(fd, &h.addr, io_tag(op_connect, sid, 0));
+      return stream_value(sid);
+    }
+    if(n == "file_open" || n == "file_create") {
+      if(a.size() != 1 || !a[0].is<m_str>()) throw diagnostic(cat(n == "file_open" ? "open" : "create", "(путь)"), where);
+      std::string path = str_arg(0);
+      int fd = n == "file_open" ? ::open(path.c_str(), O_RDONLY | O_CLOEXEC) : ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+      if(fd < 0) rt_fail("io_error", cat(path, ": ", std::strerror(errno)), where);
+      uint64_t sid = host_stream(n == "file_open" ? 1 : 2);
+      st.streams[sid].cap = 16;
+      host[sid].file_fd = fd;
+      host[sid].peers.push_back({});
+      return stream_value(sid);
+    }
+    uint64_t sid = stream_id(a[0], where);
+    host_rec * h = host_of(sid);
+    if(n == "net_port") return mval{int64_t(h && h->listen_fd >= 0 ? os::bound_port(h->listen_fd) : 0)};
+    if(n == "net_send") { // In the outgoing stream: does not wait (the core will send)
+      if(a.size() != 3 || !a[1].is<int64_t>() || !a[2].is<m_str>()) throw diagnostic("send(сеть, peer, байты)", where);
+      if(!h) return mval{false}; // The connection did not survive the transfer of the process
+      auto p = std::size_t(a[1].as<int64_t>());
+      if(st.streams[sid].host != 3 || p >= h->peers.size()) rt_fail("io_error", cat("send: нет соединения ", p), where);
+      if(!h->peers[p].open) return mval{false};
+      h->peers[p].out.push_back(str_arg(2));
+      if(h->connected || h->listen_fd >= 0) send_next(sid, p);
+      return mval{true};
+    }
+    if(n == "net_drop") {
+      auto p = std::size_t(a[1].as<int64_t>());
+      if(h && p < h->peers.size() && h->peers[p].fd >= 0) {
+        io(where).cancel_fd(h->peers[p].fd);
+        h->peers[p].open = false;
+        ::close(h->peers[p].fd);
+        h->peers[p].fd = -1;
+      }
+      return mval{m_unit{}};
+    }
+    throw diagnostic(cat("неизвестная операция ", n), where);
+  }
+
+  // --- VM processes (§9.2, M3c; step 12.1) ---
+
+  // root of the current process name domain: process args on top of general globals
+  uint32_t proc_globals() { return fib().globals != m_none ? fib().globals : st.globals; }
+  // process(f, аргументы…): process input fiber is f; arguments are data only
+  mval start_proc(node_list const & args, std::vector<mval> & a, span where) {
+    if(args.empty() || !db.is<n_ident>(args[0])) throw diagnostic("process(функция, аргументы…)", where);
+    auto it = helper.functions.find(db.as<n_ident>(args[0]).name);
+    if(it == helper.functions.end()) throw diagnostic(cat("process: нет функции ", helper.str(db.as<n_ident>(args[0]).name)), where);
+    for(std::size_t i = 1; i < a.size(); ++i)
+      if(!transferable(a[i])) throw diagnostic(cat("process: аргумент типа ", describe(a[i]), " не передаётся между процессами (только данные)"), db[args[i]].where);
+    st.procs.emplace_back();
+    uint32_t pid = uint32_t(st.procs.size());
+    uint32_t root_scope = new_scope(st.globals);
+    m_arr av;
+    av.items.push_back(mval{std::string_view("process")});
+    declare(root_scope, helper.sym("args"), mval{std::move(av)});
+    uint32_t id = uint32_t(st.fibers.size());
+    st.fibers.emplace_back();
+    st.fibers[id].proc = pid;
+    st.fibers[id].globals = root_scope;
+    st.fibers[id].proc_entry = true;
+    uint32_t me = std::exchange(st.current, id);
+    for(std::size_t i = 1; i < a.size(); ++i) fib().vals.push_back(std::move(a[i]));
+    invoke(it->second, uint32_t(a.size() - 1), 0, where);
+    st.current = me;
+    st.ready.push_back(id);
+    m_agg g{helper.types.named("process"), {}};
+    g.fields.push_back({helper.sym("id"), mval{int64_t(pid - 1)}});
+    return mval{std::move(g)};
+  }
+  m_proc & proc_of(mval const & v, span where) {
+    mval x = deref(v);
+    if(x.is<m_agg>())
+      for(auto const & f: x.as<m_agg>().fields)
+        if(helper.str(f.name) == "id" && f.v.is<int64_t>() && uint64_t(f.v.as<int64_t>()) < st.procs.size()) return st.procs[std::size_t(f.v.as<int64_t>())];
+    throw diagnostic("ожидался процесс", where);
+  }
+  // end of the process (input fiber finished or fell): waiters
+  void proc_finished(uint32_t pid) {
+    m_proc & m = st.procs[pid - 1];
+    m.done = true;
+    for(uint32_t w: std::exchange(m.waiters, {})) wake(w);
+  }
+
   // --- task-stack ---
 
   m_fiber & fib() { return st.fibers[st.current]; }
@@ -607,6 +955,10 @@ struct process_machine {
   // The next one is ready; no - everyone is waiting: mutual lock, error - in the main.
   void schedule() {
     while(!st.ready.empty() && st.fibers[st.ready.front()].state != f_ready) st.ready.erase(st.ready.begin());
+    while(st.ready.empty() && io_pending > 0 && fib().state != f_ready) { // We are all waiting for host: sleep in io_uring
+      for(auto const & c: ring->wait()) io_complete(c);
+      while(!st.ready.empty() && st.fibers[st.ready.front()].state != f_ready) st.ready.erase(st.ready.begin());
+    }
     if(!st.ready.empty()) {
       st.current = st.ready.front();
       st.ready.erase(st.ready.begin());
@@ -639,6 +991,7 @@ struct process_machine {
       return;
     }
     fib().state = f_done;
+    if(fib().proc_entry) proc_finished(fib().proc);
     for(uint32_t j: std::exchange(st.joiners, {})) wake(j);
     schedule();
   }
@@ -651,8 +1004,15 @@ struct process_machine {
   // The uncaught error fiber (not main) is its outcome; the program lives to wait in the main.
   void fiber_error(diagnostic const & d) {
     auto & f = fib();
-    f.error = {true, m_str(d.what()), d.where, m_str(d.type), {}};
-    for(auto const & t: d.trace) f.error.trace.push_back({m_str(t.what), t.where});
+    if(f.proc) { // Error of the VM process - its outcome, the program lives
+      m_proc & m = st.procs[f.proc - 1];
+      if(!m.failed) m.error = m_str(d.what());
+      m.failed = true;
+      if(f.proc_entry) proc_finished(f.proc);
+    } else {
+      f.error = {true, m_str(d.what()), d.where, m_str(d.type), {}};
+      for(auto const & t: d.trace) f.error.trace.push_back({m_str(t.what), t.where});
+    }
     f.tasks.clear();
     f.vals.clear();
     f.state = f_done;
@@ -961,7 +1321,7 @@ struct process_machine {
     uint32_t me = st.current;
     m_fiber & f = fib();
     m_task const * t = f.tasks.empty() ? nullptr : &f.tasks.back();
-    uint32_t scope = t && t->scope != m_none ? t->scope : st.globals;
+    uint32_t scope = t && t->scope != m_none ? t->scope : proc_globals();
     uint32_t frame = t ? t->frame : 0;
     std::size_t depth = f.tasks.size();
     std::string out;
@@ -1202,7 +1562,7 @@ struct process_machine {
           break;
         }
         if(p.type && db.is<n_pat>(p.type)) { // Applicant’s condition (as required)
-          uint32_t probe = new_scope(parent == m_none ? st.globals : parent);
+          uint32_t probe = new_scope(parent == m_none ? proc_globals() : parent);
           bool ok = unpack_into(p.type, args[i], probe, where);
           release_scope(probe);
           if(!ok) {
@@ -1308,7 +1668,7 @@ struct process_machine {
     }
     uint32_t id = ++st.frame_counter;
     f.frames.push_back({id, fn.name, fn.outline, caller_frame, plain});
-    uint32_t sc = new_scope(parent == m_none ? st.globals : parent); // Local - on top of the surroundings of your block
+    uint32_t sc = new_scope(parent == m_none ? proc_globals() : parent); // Local - on top of the surroundings of your block
     st.scopes[sc].caller = f.tasks.empty() ? m_none : f.tasks.back().scope; // call environment (O4)
     st.scopes[sc].fn = chosen.value;
     st.scopes[sc].site = site_node.value;
@@ -1347,7 +1707,7 @@ struct process_machine {
       if(!db.require_cond(s)) break;
       conds.push_back(db.require_cond(s));
     }
-    scope * outer = helper_probe(conds, parent == m_none ? st.globals : parent);
+    scope * outer = helper_probe(conds, parent == m_none ? proc_globals() : parent);
     struct drop {
       interpreter & h;
       scope * s;
@@ -2240,7 +2600,7 @@ struct process_machine {
   uint32_t entity_scope(symbol owner) {
     for(auto const & e: st.entities)
       if(e.owner == owner) return e.scope;
-    uint32_t sc = new_scope(st.globals);
+    uint32_t sc = new_scope(proc_globals());
     for(node_id f: helper.functions.at(owner))
       if(db.is<n_block>(db.as<n_fn>(f).body))
         for(node_id item: db.as<n_block>(db.as<n_fn>(f).body).items)
@@ -2424,8 +2784,16 @@ struct process_machine {
       if(!stream_op(helper.str(name), a, db[n].where, out)) return park();
       return finish(std::move(out));
     }
-    if(helper.str(name).starts_with("net_") || helper.str(name).starts_with("file_") || helper.str(name) == "process")
-      unsupported("сеть, файлы и процессы ОС (ресурсы хоста в дамп не входят)", n);
+    if(helper.str(name).starts_with("net_") || helper.str(name).starts_with("file_")) return finish(host_op(helper.str(name), a, db[n].where));
+    if(helper.str(name) == "process" && !helper.functions.contains(name)) return finish(start_proc(call_args(n), a, db[n].where));
+    if((helper.str(name) == "process_wait" || helper.str(name) == "process_error") && t.a == 1) { // waiting for the end of the process
+      m_proc & m = proc_of(a[0], db[n].where);
+      if(!m.done) {
+        m.waiters.push_back(st.current);
+        return park();
+      }
+      return finish(helper.str(name) == "process_wait" ? mval{!m.failed} : mval{std::string_view(m.error)});
+    }
     finish(primitive(helper.str(name), a, db[n].where));
   }
 
@@ -2556,8 +2924,10 @@ struct process_machine {
     m_thunk th = thunk_named(args[0], top().scope);
     uint32_t env = ruled_scope(th); // Rule layer lives with fiber
     capture(env);
-    uint32_t id = uint32_t(st.fibers.size());
+    uint32_t id = uint32_t(st.fibers.size()), pid = fib().proc, groot = fib().globals;
     st.fibers.emplace_back();
+    st.fibers.back().proc = pid; // fiber - the same process
+    st.fibers.back().globals = groot;
     st.fibers.back().tasks.push_back(m_task{m_lambda_body, th.expr, 0, env, th.frame, 0, m_none, 0, 0, th.expr, th.ctx});
     st.ready.push_back(id);
     finish(mval{m_unit{}});
@@ -2595,6 +2965,16 @@ struct process_machine {
     m_stream & s = st.streams[sid];
     uint32_t me = st.current;
     out = mval{m_unit{}};
+    if(n == "stream_write" && s.host) { // stream host : file to write - request
+      if(s.host == 3) throw diagnostic("в сеть — send(сеть, peer, байты)", where);
+      if(s.host == 1) throw diagnostic("файл открыт на чтение", where);
+      host_rec * h = host_of(sid);
+      if(!h || s.closed) rt_fail("closed_stream", "запись в закрытый поток", where);
+      if(!a[1].is<m_str>()) throw diagnostic(cat("в файл — байты (str), получено ", describe(a[1])), where);
+      h->peers[0].out.push_back(std::string(a[1].as<m_str>()));
+      file_write_next(sid);
+      return true;
+    }
     if(n == "stream_write") {
       if(!transferable(a[1])) throw diagnostic(cat("в поток — только данные: ", describe(a[1])), where);
       if(s.buf.size() >= s.cap && !s.closed) {
@@ -2616,6 +2996,12 @@ struct process_machine {
     }
     if(n == "stream_read" || n == "stream_more") {
       if(s.buf.empty() && !s.closed) {
+        if(host_rec * h = s.host == 1 ? host_of(sid) : nullptr; h && !h->io_busy) { // File: The next piece is the application
+          h->io_busy = true;
+          h->io_buf.resize(65536);
+          ++io_pending;
+          io(where).read(h->file_fd, h->io_buf.data(), h->io_buf.size(), h->offset, io_tag(op_fread, sid, 0));
+        }
         s.readers.push_back(me);
         return false;
       }
@@ -2638,6 +3024,11 @@ struct process_machine {
       return true;
     }
     if(n == "stream_close") {
+      if(host_rec * h = s.host == 2 ? host_of(sid) : nullptr; h && !h->peers[0].out.empty()) { // queue
+        s.writers.push_back(me);
+        return false;
+      }
+      close_host(sid);
       s.closed = true;
       for(uint32_t r: std::exchange(s.readers, {})) wake(r);
       for(uint32_t w: std::exchange(s.writers, {})) wake(w);
