@@ -358,6 +358,13 @@ struct uring {
     io_uring_sqe_set_data64(s, tag);
     io_uring_submit(&ring);
   }
+  // Readiness of the descriptor (PSI: POLLPRI - pressure trigger triggered), one operation
+  void poll(int fd, unsigned mask, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_poll_add(s, fd, mask);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
   void cancel_fd(int fd) {
     io_uring_sqe * s = sqe();
     io_uring_prep_cancel_fd(s, fd, IORING_ASYNC_CANCEL_ALL);
@@ -387,6 +394,18 @@ struct uring {
     return out;
   }
 };
+// Memory pressure host (Linux PSI): trigger-descriptor triggered by POLLPRI. The window is
+// a multiple of 2 s: this is possible without root rights. No PSI-1.
+int memory_pressure_fd() {
+  int fd = ::open("/proc/pressure/memory", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+  if(fd < 0) return -1;
+  char const trig[] = "some 150000 2000000"; // with zero at the end, that's what the kernel requires.
+  if(::write(fd, trig, sizeof trig) < 0) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
 // The work of VM is on its stack: the depth of parsing and executions by AST (compiler in the
 // language compiles itself, TZ_JIT_SELF) does not depend on the limit of the host stack (ulimit
 // -s, under asan frames three times more). Reserve - virtual, pages - as you touch.

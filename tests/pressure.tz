@@ -1,0 +1,17 @@
+// out: шаг 0 кеш 5
+// out: шаг 1 кеш 5
+// out: шаг 2 кеш 5
+// out: шаг 3 кеш 5
+// machine
+// Программа сессии 309 (давление памяти): без давления обработчик не нужен.
+main() {
+  cache = array{1, 2, 3, 4, 5};
+  on_pressure {
+    print("давление: кеш", cache.size, "→ 0");
+    cache = array{};
+  }
+  for(i : range(4)) {
+    print("шаг", i, "кеш", cache.size);
+    yield();
+  }
+}

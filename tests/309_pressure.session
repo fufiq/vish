@@ -1,0 +1,16 @@
+// External management (step 12.3): The process registers the on_pressure { … } handler, a normal
+// block of its code, sees its names (cache); VM runs its fiber process at host memory pressure
+// (PSI) or an external command - not a signal: Background processes are asked for first (*my*:
+// order).
+//
+//
+// program: pressure.tz
+proc start
+// expect: процесс запущен
+proc step 60
+proc pressure
+// expect: давление: обработчиков 1
+proc run
+// expect: давление: кеш 5 → 0
+// expect: шаг 3 кеш 0
+// expect: завершён

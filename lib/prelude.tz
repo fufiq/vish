@@ -702,6 +702,12 @@ arm64(expr body) {
 // write/read: 
 // Значение уходит в поток перемещением (own).
 spawn(expr body) => fiber_start(body);
+// on_pressure { … } — обработчик давления памяти процесса (§9.5, шаг 12.3): 
+// Блок —
+// обычный код процесса (видит его имена — его кеш); VM запускает его файбером этого процесса,
+// когда хосту не хватает памяти (PSI) или по внешней команде (proc pressure). Не сигнал:
+//.
+on_pressure(expr body) => pressure_handler(body);
 stream() => stream_new(16);
 stream(i64 cap) => stream_new(cap);
 stream(type t) => stream_type(t); // тип потока — функция над типами: stream(i64)

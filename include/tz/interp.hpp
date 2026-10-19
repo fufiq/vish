@@ -248,6 +248,7 @@ struct interpreter {
     sym_pin_storage = sym("pin_storage");
     sym_set_ct_state = sym("set_ct_state");
     sym_spawn = sym("fiber_start");
+    sym_pressure = sym("pressure_handler");
     sym_process = sym("process");
     sym_yield = sym("yield");
     sym_is_index = sym("is_index");
@@ -5538,6 +5539,57 @@ struct interpreter {
     return ok();
   }
 
+  // on_pressure { … } (step 12.3): The unit is the process pressure handler; the VM triggers the
+  // process fiber (pressure). parsing is a body in place like a spawn.
+  struct pressure_rec {
+    node_id body;
+    scope * env;
+    uint32_t frame;
+    uint64_t ctx;
+  };
+  std::vector<pressure_rec> pressure_handlers;
+  int psi_fd = -1; // at the root: memory pressure trigger host
+  flow pressure_handler(node_list const & args, scope * env, uint32_t frame, span where) {
+    if(checking()) return spawn(args, env, frame, where);
+    if(args.size() != 1) fail("on_pressure { … }", where);
+    thunk_v t = thunk_arg(args[0], env, where);
+    scope * body_env = ruled_env(t);
+    capture(body_env);
+    pressure_handlers.push_back({t.expr, body_env, t.frame, t.ctx});
+    arm_pressure();
+    return ok();
+  }
+  // PSI trigger - with the first handler; trigger - completion in the ring (op_psi)
+  void arm_pressure() {
+    interpreter & r = *root;
+    if(r.psi_fd == -1) {
+      if(!r.ring) r.ring.emplace();
+      r.psi_fd = r.ring->ok ? os::memory_pressure_fd() : -1;
+      if(r.psi_fd < 0) r.psi_fd = -2; // There is no PSI (or ring) in host - only an external command
+    }
+    if(r.psi_fd >= 0 && !r.psi_armed) {
+      r.psi_armed = true;
+      io().poll(r.psi_fd, POLLPRI, io_tag(op_psi, 0, 0)); // No application: io_pending is not growing
+    }
+  }
+  bool psi_armed = false;
+  // Pressure: Background handlers first ("the rest of the trash"), then programs (*my*: order)
+  void pressure() {
+    interpreter & r = *root;
+    auto run = [&](interpreter & vm) {
+      for(auto const & h: vm.pressure_handlers) {
+        fiber_rec & f = vm.new_fiber();
+        f.body = h.body;
+        f.env = h.env;
+        f.frame = h.frame;
+        f.body_ctx = h.ctx;
+      }
+    };
+    for(auto & p: r.procs)
+      if(p.background) run(p);
+    run(r);
+  }
+
   static void fiber_main(void * arg) {
     auto & f = *static_cast<fiber_rec *>(arg);
     interpreter & vm = *f.vm;
@@ -5826,7 +5878,8 @@ struct interpreter {
     op_send,
     op_connect,
     op_fread,
-    op_fwrite };
+    op_fwrite,
+    op_psi };
   static uint64_t io_tag(io_op op, std::size_t stream, std::size_t peer) { return (uint64_t(op) << 56) | (uint64_t(stream) << 24) | uint64_t(peer); }
 
   os::uring & io() {
@@ -5878,6 +5931,14 @@ struct interpreter {
   void io_complete(os::uring::completion const & c) {
     if(!c.tag) return; // cancellation
     auto op = io_op(c.tag >> 56);
+    if(op == op_psi) { // host lacks memory:
+      root->psi_armed = false;
+      if(c.res >= 0) {
+        pressure();
+        arm_pressure();
+      }
+      return;
+    }
     std::size_t sid = (c.tag >> 24) & 0xFFFFFFFF, p = c.tag & 0xFFFFFF;
     bool more = c.flags & IORING_CQE_F_MORE;
     if(!more) --root->io_pending;
@@ -6757,6 +6818,7 @@ struct interpreter {
       if(name == sym_pin_storage && !functions.contains(name)) return pin_storage(c.args, env, n);
       if(name == sym_set_ct_state && !functions.contains(name)) return set_ct_state(c.args, env, frame, where);
       if(name == sym_spawn && !functions.contains(name)) return spawn(c.args, env, frame, where);
+      if(name == sym_pressure && !functions.contains(name)) return pressure_handler(c.args, env, frame, where);
       if(name == sym_process && !functions.contains(name)) return start_process(c.args, env, frame, where);
       if(name == sym_yield && !functions.contains(name) && c.args.empty()) {
         if(!checking()) yield();
@@ -8649,7 +8711,7 @@ struct interpreter {
   std::set<value const *> state_cells;
   std::deque<address_space> regions; // region() memory levels (at VM root); released with last holder
   bool regions_alive = false;
-  symbol sym_intercept, sym_is_index, sym_append, sym_pin_storage, sym_spawn, sym_yield, sym_process; // kernel forms analyzed prior to the calculation of arguments
+  symbol sym_intercept, sym_is_index, sym_append, sym_pin_storage, sym_spawn, sym_yield, sym_process, sym_pressure; // kernel forms analyzed prior to the calculation of arguments
   symbol sym_set_ct_state; // ct-state of place (disassembled in place as append)
   // Symbol on the text without internment (journal lines of the base does not change): while the
   // line is not, there is no name with it; it is searched again only when the lines become more.

@@ -223,6 +223,10 @@ struct vm_session {
       return out + proc->where_now();
     }
     if(sub == "where") return proc->where_now();
+    if(sub == "pressure") { // external management:
+      proc->pressure();
+      return cat("давление: обработчиков ", proc->st.pressure.size(), "\n");
+    }
     if(sub == "stop") {
       proc.reset();
       return "процесс завершён\n";
@@ -231,7 +235,7 @@ struct vm_session {
       std::size_t at = line.find("call");
       return probe(line.substr(at + 4));
     }
-    return cat("proc: start, step N, run, where, call <выражение>, stop\n");
+    return cat("proc: start, step N, run, where, call <выражение>, pressure, stop\n");
   }
 
   // Sample - in a clone: fork host copies the VM as a whole (pages - a copy when writing), the clone disassembles

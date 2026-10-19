@@ -203,6 +203,13 @@ struct m_fiber {
   uint32_t globals = m_none;
   bool proc_entry = false;
 };
+// on_pressure { … } (step 12.3): The block and its environment, the process owner.
+struct m_pressure {
+  m_thunk body;
+  uint32_t env = m_none;
+  uint32_t proc = 0;
+  uint32_t globals = m_none;
+};
 // The VM process within the machine process:
 // Its error is the outcome, not the error of the program.
 struct m_proc {
@@ -259,6 +266,7 @@ struct m_state {
   m_list<m_shared> shared;
   m_list<mval> ct_states; // ct-state of values (mval::ct - number + 1)
   m_list<m_proc> procs; // VM processes (process(f, …))
+  m_list<m_pressure> pressure; // Pressure handlers (on_pressure { … })
 };
 
 // Process dump header: everything except level pages.
@@ -341,6 +349,7 @@ struct process_machine {
       helper.capture_output(nullptr);
       if(!dump.empty()) helper.types.names.assign(st.type_names.begin(), st.type_names.end()); // type numbers - as in a dump
       if(!dump.empty()) host_lost();
+      if(!dump.empty() && !st.pressure.empty()) arm_pressure(); // Pressure handlers - and in the new VM
     } catch(...) {
       st.~m_state();
       close_band(band);
@@ -353,6 +362,7 @@ struct process_machine {
       save_state_vars(true);
     } catch(...) {
     }
+    if(psi_fd >= 0) ::close(psi_fd);
     for(auto & h: host) { // host descriptors - no further than the machine (the application will be removed by the ring)
       for(int fd: {h.listen_fd, h.file_fd})
         if(fd >= 0) ::close(fd);
@@ -649,7 +659,7 @@ struct process_machine {
 
   // --- host resources (step 12.1) ---
 
-  enum : uint64_t { op_accept = 1, op_recv, op_send, op_connect, op_fread, op_fwrite };
+  enum : uint64_t { op_accept = 1, op_recv, op_send, op_connect, op_fread, op_fwrite, op_psi };
   static uint64_t io_tag(uint64_t op, uint64_t sid, uint64_t peer) { return (op << 56) | (sid << 24) | peer; }
   [[noreturn]] static void rt_fail(std::string_view type, std::string what, span where) {
     diagnostic d(std::move(what), where, diag_kind::runtime);
@@ -734,6 +744,14 @@ struct process_machine {
   void io_complete(os::uring::completion const & c) {
     if(!c.tag) return; // cancellation
     uint64_t op = c.tag >> 56, sid = (c.tag >> 24) & 0xFFFFFFFF;
+    if(op == op_psi) { // host lacks memory
+      psi_armed = false;
+      if(c.res >= 0) {
+        pressure();
+        arm_pressure();
+      }
+      return;
+    }
     std::size_t p = c.tag & 0xFFFFFF;
     bool more = c.flags & IORING_CQE_F_MORE;
     if(!more) --io_pending;
@@ -2565,6 +2583,7 @@ struct process_machine {
       }
       if(it == helper.functions.end() && helper.str(name) == "intercept") return begin_intercept(n, c.args);
       if(it == helper.functions.end() && helper.str(name) == "fiber_start") return begin_spawn(n, c.args);
+      if(it == helper.functions.end() && helper.str(name) == "pressure_handler") return begin_pressure(n, c.args);
       if(it == helper.functions.end() && helper.str(name) == "yield" && c.args.empty()) {
         finish(mval{m_unit{}});
         yield();
@@ -2955,6 +2974,45 @@ struct process_machine {
       return true;
     }
     return false;
+  }
+
+  // on_pressure { … } → pressure_handler(тело): process pressure handler (like an
+  // interpreter); runs it pressure() - external command or PSI host
+  void begin_pressure(node_id n, node_list const & args) {
+    if(args.size() != 1) throw diagnostic("on_pressure { … }", db[n].where);
+    m_thunk th = thunk_named(args[0], top().scope);
+    uint32_t env = ruled_scope(th);
+    capture(env);
+    st.pressure.push_back({th, env, fib().proc, fib().globals});
+    arm_pressure();
+    finish(mval{m_unit{}});
+  }
+  int psi_fd = -1;
+  bool psi_armed = false;
+  void arm_pressure() {
+    if(psi_fd == -1) {
+      if(!ring) ring.emplace();
+      psi_fd = ring->ok ? os::memory_pressure_fd() : -1;
+      if(psi_fd < 0) psi_fd = -2; // host does not have a PSI - only an external command (proc pressure)
+    }
+    if(psi_fd >= 0 && !psi_armed) {
+      psi_armed = true;
+      ring->poll(psi_fd, POLLPRI, io_tag(op_psi, 0, 0)); // No application: io_pending is not growing
+    }
+  }
+  // Pressure: - Background handlers first
+  void pressure() {
+    for(int pass = 0; pass < 2; ++pass)
+      for(std::size_t i = 0; i < st.pressure.size(); ++i) {
+        m_pressure h = st.pressure[i];
+        if((h.proc != 0) != (pass == 0)) continue;
+        uint32_t id = uint32_t(st.fibers.size());
+        st.fibers.emplace_back();
+        st.fibers.back().proc = h.proc;
+        st.fibers.back().globals = h.globals;
+        st.fibers.back().tasks.push_back(m_task{m_lambda_body, h.body.expr, 0, h.env, h.body.frame, 0, m_none, 0, 0, h.body.expr, h.body.ctx});
+        st.ready.push_back(id);
+      }
   }
 
   // spawn { … } prelude → fiber_start(тело): the new fiber at the end of the queue;
