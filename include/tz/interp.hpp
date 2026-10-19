@@ -252,6 +252,8 @@ struct interpreter {
     sym_yield = sym("yield");
     sym_is_index = sym("is_index");
     globals = new_scope(nullptr);
+    if(!parent)
+      if(char const * q = std::getenv("TZ_SLICE")) slice_points = uint32_t(std::strtoul(q, nullptr, 10)); // Quantum - at safe points (tests)
     if(!args.empty()) prog_path = args[0];
     array_v a;
     for(auto & s: args) a.push(value(s));
@@ -3260,6 +3262,7 @@ struct interpreter {
   flow eval_node(node_id n, n_loop const & l, scope * env, uint32_t frame) {
     if(!checking()) {
       for(;;) {
+        safe_point(true); // rib-back
         flow f = eval(l.body, env, frame);
         if(f.kind == flow_kind::brk) return ok();
         if(f.kind == flow_kind::ret || f.kind == flow_kind::thr) return f;
@@ -5619,6 +5622,10 @@ struct interpreter {
     me.vm->swap_exec(me.exec);
     next.vm->swap_exec(next.exec);
     r.running_fiber = &next;
+    if(next.vm->background) { // quantum - from obtaining the nucleus
+      next.vm->preempt_left = r.slice_points ? r.slice_points : 1024;
+      if(!r.slice_points) r.slice_start = os::uring::now_ms();
+    }
     void const * bottom = next.stack ? next.stack->base : r.host_bottom;
     std::size_t size = next.stack ? next.stack->size : r.host_size;
     switch_to(&me.rsp, next.rsp, bottom, size);
@@ -5641,6 +5648,34 @@ struct interpreter {
   void yield() {
     root->ready.push_back(&running());
     schedule();
+  }
+
+  // Expulsion (§9.5, step 12.2):
+// 
+// Not a signal, but a departure from
+  // safe point (reverse edge of the cycle, call): fiber, which held the nucleus longer than a
+  // quantum, goes to the end of the queue if there are ready-made ones. Only background processes:
+  // monopoly is never superseded (author's decision 2026-10-19), background - without JIT:
+// *Mine: * Quantum 10 ms, time
+  // is seen once in 1024 safe points; TZ_SLICE = N is a quantum at N points (deterministically).
+  static constexpr uint64_t slice_ms = 10;
+  bool background = false; // background VM process: being displaced
+  uint32_t slice_points = 0; // at the root: quantum at safe points (0 in time)
+  uint64_t slice_start = 0; // at the root: when the current fiber received the kernel
+  uint64_t preemptions = 0; // at the root: how many times the background is displaced
+  uint32_t preempt_left = 1; // The first safe point puts the quantum
+  // edge - reverse edge; call - point only for the quantum in time (TZ_SLICE considers iterations
+  // of cycles: the same for the interpreter and the machine)
+  [[gnu::always_inline]] void safe_point(bool edge) {
+    if(background && (edge || !root->slice_points) && --preempt_left == 0) preempt_point();
+  }
+  [[gnu::noinline]] void preempt_point() {
+    interpreter & r = *root;
+    preempt_left = r.slice_points ? r.slice_points : 1024;
+    if(r.ready.empty()) return;
+    if(!r.slice_points && os::uring::now_ms() - r.slice_start < slice_ms) return;
+    ++r.preemptions;
+    yield();
   }
 
   void each_fiber(auto && f) {
@@ -5722,7 +5757,8 @@ struct interpreter {
       vals.push_back(std::move(v));
     }
     interpreter & child = root->procs.emplace_back(db, mod, std::vector<std::string>{"process"}, mode::run, std::nullopt, nullptr, root);
-    child.jit = jit;
+    child.jit = nullptr; // background: without machine code - it is replaced at secure points of the interpreter
+    child.background = true;
     child.captured = captured;
     auto & meta = root->proc_meta.emplace_back();
     meta.vm = &child;
@@ -7253,6 +7289,7 @@ struct interpreter {
   }
 
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
+    if(!checking()) safe_point(false); // challenge
     auto const & fn = db.as<n_fn>(f);
     scope * parent = std::exchange(invoke_parent, nullptr);
     bool open = std::exchange(invoke_open, false);

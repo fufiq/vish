@@ -317,6 +317,21 @@ struct process_machine {
   std::optional<os::uring> ring;
   uint32_t io_pending = 0; // nucleus
 
+  // Repression of backgrounds (step 12.2, as in the interpreter, interpreter::preempt_point): the safe point
+  // is the reverse edge of the cycle and the call of the VM process; departure is after the step (in the
+  // middle of the step, the fiber tasks are still changing). Monopoly (the program itself) is not replaced.
+  uint32_t preempt_left = 1; // The first safe point puts the quantum
+  uint32_t preempt_fiber = m_none; // fiber, which is time to leave
+  uint64_t slice_start = 0;
+  uint64_t preemptions = 0;
+  void safe_point(bool edge) { // edge - reverse edge; call - only for time quanta
+    if(!fib().proc || (!edge && helper.slice_points) || --preempt_left != 0) return;
+    preempt_left = helper.slice_points ? helper.slice_points : 1024;
+    if(st.ready.empty()) return;
+    if(!helper.slice_points && os::uring::now_ms() - slice_start < interpreter::slice_ms) return;
+    preempt_fiber = st.current;
+  }
+
   process_machine(ast_db & db, node_id root, std::string name, std::string_view dump = {}, int dump_fd = -1)
       : db(db), root(root), name(name), helper(db, root, std::vector<std::string>{name}, mode::run), st(place_state(dump, dump_fd)) {
     try { // The strip is already open: there will be no destructor - close it here
@@ -510,6 +525,9 @@ struct process_machine {
     if(x.is<m_alias>()) return follow(x.as<m_alias>());
     return x;
   }
+  // Reading without copy (index, size, field): alias is the cell itself. A copy of the array on
+  // each xs[k] and is_index(k, xs) made the cycle quadratic (found in step 12.2).
+  mval const & ref_of(mval const & x) { return x.is<m_alias>() ? follow(x.as<m_alias>()) : x; }
   void declare(uint32_t scope, symbol name, mval v) { st.scopes[scope].vars.push_back({name, std::move(v), 0}); }
 
   // The place through alias is the variable itself (for “hidden”).
@@ -962,6 +980,10 @@ struct process_machine {
     if(!st.ready.empty()) {
       st.current = st.ready.front();
       st.ready.erase(st.ready.begin());
+      if(fib().proc) { // quantum - from obtaining the nucleus
+        preempt_left = helper.slice_points ? helper.slice_points : 1024;
+        if(!helper.slice_points) slice_start = os::uring::now_ms();
+      }
       st.handoff_run = st.fibers[st.current].direct ? st.handoff_run + 1 : 0;
       st.fibers[st.current].direct = false;
       return;
@@ -1162,6 +1184,14 @@ struct process_machine {
       e.fields.push_back({helper.sym("message"), mval{std::string(d.what())}});
       raise({sig_throw, mval{std::move(e)}, 0});
       pending_error = d;
+    }
+    if(preempt_fiber != m_none) { // Displacement - between steps, if fiber is still its own and ready
+      bool mine = preempt_fiber == st.current && fib().state == f_ready && !st.ready.empty();
+      preempt_fiber = m_none;
+      if(mine) {
+        ++preemptions;
+        yield();
+      }
     }
     return true;
   }
@@ -1523,6 +1553,7 @@ struct process_machine {
   uint32_t invoke_parent = m_none; // calling a local set of overloads: its environment (takes invoke)
   uint32_t access_scope = m_none; // unpacking area - for expressions in sample appeals
   void invoke(std::vector<node_id> const & fns, uint32_t nargs, uint32_t caller_frame, span where, bool repacked = false) {
+    safe_point(false); // challenge
     auto & f = fib();
     std::vector<mval> args(f.vals.end() - nargs, f.vals.end());
     node_id chosen = override_for(fns, args); // Operation in context (checked) - its redefinition
@@ -2181,6 +2212,7 @@ struct process_machine {
     fib().vals.resize(t.base);
     t.phase = 1;
     push_eval(l.body, t.scope, t.frame);
+    safe_point(true); // rib-back
   }
 
   void eval_node(node_id, n_break const &) { raise({sig_break, {}, 0}); }
@@ -2204,8 +2236,10 @@ struct process_machine {
       t.phase = 1;
       return push_eval(m.object, t.scope, t.frame);
     }
-    mval o = deref(pop_val());
-    if(is_shared_v(o)) o = slot_of(o).v; // shared - transparently
+    mval ov = pop_val();
+    mval const * op = &ref_of(ov);
+    if(is_shared_v(*op)) op = &slot_of(*op).v; // shared - transparently
+    mval const & o = *op;
     if(is_code(o)) { // c.cond - node field of code: reads the assistant
       auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
       if(!v) throw diagnostic(cat("у узла кода нет поля ", helper.str(m.name)), db[n].where);
@@ -2219,7 +2253,7 @@ struct process_machine {
       for(auto const & f: o.as<m_agg>().fields)
         if(f.name == m.name) return finish(f.v);
     // Tag above representation: value is the machine value itself (like an interpreter)
-    if(helper.str(m.name) == "value" && (o.is<int64_t>() || o.is<double>() || o.is<bool>())) return finish(std::move(o));
+    if(helper.str(m.name) == "value" && (o.is<int64_t>() || o.is<double>() || o.is<bool>())) return finish(o);
     throw diagnostic(cat("у значения типа ", describe(o), " нет поля ", helper.str(m.name)), db[n].where);
   }
 
@@ -2257,8 +2291,9 @@ struct process_machine {
       ++t.phase;
       return push_eval(next, t.scope, t.frame);
     }
-    mval i = deref(pop_val());
-    mval o = deref(pop_val());
+    mval iv = pop_val(), ov = pop_val();
+    mval const & i = ref_of(iv);
+    mval const & o = ref_of(ov);
     if(!i.is<int64_t>()) throw diagnostic("индекс должен быть i64", db[n].where);
     if(o.is<m_str>()) { // bytes: s[k] - i64
       auto const & str = o.as<m_str>();
@@ -2735,6 +2770,11 @@ struct process_machine {
     node_list args = call_args(n);
     if(have < t.a) return push_eval(args[have], t.scope, t.frame);
     symbol name(t.b);
+    if(helper.str(name) == "is_index" && t.a == 2) { // massifless
+      mval const & i = ref_of(fib().vals[t.base]);
+      mval const & xs = ref_of(fib().vals[t.base + 1]);
+      if(i.is<int64_t>() && xs.is<m_arr>()) return finish(mval{i.as<int64_t>() >= 0 && uint64_t(i.as<int64_t>()) < xs.as<m_arr>().items.size()});
+    }
     std::vector<mval> a;
     for(uint32_t i = 0; i < t.a; ++i) a.push_back(deref(fib().vals[t.base + i]));
     if(helper.str(name) == "shared" && t.a == 1 && !helper.functions.contains(name)) { // vault

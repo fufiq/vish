@@ -169,6 +169,7 @@ struct test_runner {
     bool machine = false; // The same program is a process machine: the same output
     std::vector<std::string> machine_dump; // dump step: dump, restore to new base, count
     std::vector<std::string> dump_out; // output of the run with the dump, if it is different (host resources do not survive the transfer)
+    std::vector<std::string> quantum; // background displacement quantum at safe points (TZ_SLICE): deterministic order
     bool store_roundtrip = false;
   };
 
@@ -191,7 +192,7 @@ struct test_runner {
       std::vector<std::string> args_line;
       if(take("args:", args_line)) {
         for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
-      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("dump-out:", e.dump_out) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has) || take("fmt-projection-has:", e.fmt_projection_has) || take("fmt-projection:", e.fmt_projection) || take("fmt-ct-has:", e.fmt_ct_has) || take("fmt-ct-lacks:", e.fmt_ct_lacks)) {
+      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("dump-out:", e.dump_out) || take("quantum:", e.quantum) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has) || take("fmt-projection-has:", e.fmt_projection_has) || take("fmt-projection:", e.fmt_projection) || take("fmt-ct-has:", e.fmt_ct_has) || take("fmt-ct-lacks:", e.fmt_ct_lacks)) {
       } else if(take("machine-dump:", e.machine_dump)) {
         e.machine = true;
       } else if(body == "machine") {
@@ -607,6 +608,8 @@ struct test_runner {
     os::mapped_file file(path.string());
     std::string src(file.text());
     expect e = read_header(src);
+    if(e.quantum.empty()) ::unsetenv("TZ_SLICE");
+    else ::setenv("TZ_SLICE", e.quantum[0].c_str(), 1);
 
     ast_db db;
     std::vector<diagnostic> parse_errors;
