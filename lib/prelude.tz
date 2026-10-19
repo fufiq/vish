@@ -1239,6 +1239,8 @@ parse(code r, p) {
 // причина-строка — не умеет (исполнит интерпретатор).
 struct jc_range {} // тег: значение range(n) — в слоте граница n
 struct jc_ref {} // тег: ссылка &e = xs[k] — в слоте индекс k, th — узел xs[k], th_top — массив-переменная
+// ресурс области (destroy, shared — хвост шага 10): слот значения, глубина блока, имя
+struct jc_res { i64 slot; i64 depth; str name; }
 
 // имя в окружении: слот (kind — тип; массив — два слота: данные, размер; jc_range —
 // граница) или expr-параметр (код, контекст, окружение и функция вызывающего)
@@ -1360,6 +1362,14 @@ jit_compile(cg, f, types, type result) {
   // бывшей склейки C++ (*моё*): наблюдаемое не меняется.
   gens = array{}; // jc_gen, ждущие for
   lfns = array{}; // jc_lfn: локальные функции блоков (семантический инлайн, захват — места объемлющей)
+  // ресурсы (§12.2, хвост шага 10): 
+  //  — свои ресурсы блока освобождаются в его конце службой VM (destroy —
+  // у VM, *моё*: одна семантика с интерпретатором), перенос и copy решает VM (take по месту);
+  // выход через живой ресурс (break, return, throw) — интерпретатор
+  res_live = array{}; // jc_res
+  blk_depth = 0;
+  loop_blk = array{}; // глубина блока у входа в цикл
+  vm_take = false; // следующая служба 8 — с переносом имени (take), как у присваивания
   lres = array{}; // [код функции, тип результата] — от внешнего вызова (у рекурсивного разбор не знает)
   SUB = 1048576; // номера слотов подпрограммы — от этой базы
   gen_sub = false; // генерируется подпрограмма
@@ -1711,10 +1721,17 @@ jit_compile(cg, f, types, type result) {
       else gen(t[0]);
     } else if(k == ast.call) gen_call(e);
     else if(k == ast.block) {
-      ast.block{items, _, _} = e;
+      ast.block{items, hv, _} = e;
       saved_top = top;
       saved_lf = lfns.size;
-      for(x : items) if(ok) gen(x);
+      blk_depth += 1;
+      for(i : range(items.size)) if(ok) {
+        x = items[i];
+        gen(x);
+        if(ok && (((i + 1) < items.size) || !hv) && temporary_resource(x)) drop_reg(acc, x); // отброшенное временное
+      }
+      if(ok) drop_block(e, items, hv);
+      blk_depth -= 1;
       top = saved_top;
       lfns = take_first(lfns, saved_lf);
     } else if(k == ast.if) {
@@ -1748,12 +1765,14 @@ jit_compile(cg, f, types, type result) {
       bind(t);
       loops.push(t);
       loops.push(done);
+      loop_blk.push(blk_depth);
       loop_nodes.push(e);
       loop_slot0.push(nslots);
       in_region(() => gen(body));
       jump(t);
       bind(done);
       loops = drop_last(drop_last(loops));
+      loop_blk = drop_last(loop_blk);
       depth_l = loop_nodes.size - 1;
       loop_nodes = drop_last(loop_nodes);
       loop_slot0 = drop_last(loop_slot0);
@@ -1775,12 +1794,15 @@ jit_compile(cg, f, types, type result) {
       }
     } else if(k == ast.break) {
       if(loops.size == 0) bad("break вне цикла");
+      else if(live_since(loop_blk[loop_blk.size - 1])) bad("break через живой ресурс — интерпретатор");
       else jump(loops[loops.size - 1]);
     } else if(k == ast.continue) {
       if(loops.size == 0) bad("continue вне цикла");
+      else if(live_since(loop_blk[loop_blk.size - 1])) bad("continue через живой ресурс — интерпретатор");
       else jump(loops[loops.size - 2]);
     } else if(k == ast.return) {
       ast.return{v, tg} = e;
+      if(res_live.size > 0) bad("return при живом ресурсе — интерпретатор");
       to = cur;
       if(given(tg)) { // return(f) — из внешней функции f, return(caller) — из вызывающей (§6.1)
         tn = callee_name(tg);
@@ -2645,7 +2667,8 @@ jit_compile(cg, f, types, type result) {
         binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // алиас места
       } else {
         t = if(is_call_of(a, "range")) jc_range else ty(a);
-        if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");
+        if(jit_resource(t)) bad(fmt"ресурс аргументом {pname} (own или временное) — интерпретатор");
+        else if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");
         gen(a);
         sl = alloc(1);
         store_slot(t, sl);
@@ -2876,6 +2899,9 @@ jit_compile(cg, f, types, type result) {
       is_outline = g_outline;
     }
     if((g.size == 0) || (rec || is_outline)) vm_or_bad(e, fmt"вызов {name}: нет встраиваемой перегрузки");
+    // вызов без рт-входов разбор свернул — тело в этом месте не разобрано (типов нет):
+    // значение VM считает VM целиком, как интерпретатор при исполнении
+    else if(is_handle(ty(e)) && jit_known(e, ctx)) vm_or_bad(e, fmt"вызов {name}: свёрнут разбором");
     else if(leading_require(body)) vm_or_bad(e, fmt"вызов {name}: ведущий require — выбор перегрузки по значениям");
     else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор");
     else {
@@ -2960,7 +2986,8 @@ jit_compile(cg, f, types, type result) {
   gen_throw(e) => {
     ast.throw{v} = e;
     t = ty(v);
-    if(!scalar(t)) bad(fmt"throw значения {t}");
+    if(res_live.size > 0) bad("throw при живом ресурсе — интерпретатор");
+    else if(!scalar(t)) bad(fmt"throw значения {t}");
     else {
       gen(v);
       to = catch_for(t);
@@ -3367,6 +3394,7 @@ jit_compile(cg, f, types, type result) {
     else if(fusing && !in_b) bad(fmt"генератор: {why}");
     else if(tries.size > 0) bad(fmt"{why} (внутри try)");
     else if((t == jc_range) || is_stream(t)) bad(why);
+    else if(jit_diverts(e)) bad(fmt"{why}: через узел VM — выход return(caller) — интерпретатор");
     else vm_eval(e, t);
   };
   vm_kind(type t) => if(is_handle(t)) 9 else jt_code(t);
@@ -3427,7 +3455,7 @@ jit_compile(cg, f, types, type result) {
       put_bytes(slot_st(bsl(4 + (3 * i)), acc));
     }
     put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
-    put_bytes(cg.load_const(ca2, vm_kind(t)));
+    put_bytes(cg.load_const(ca2, if(vm_take) (vm_kind(t) | 256) else vm_kind(t)));
     vm_service(8, unit, e);
     keep = alloc(1); // результат — в стороне, пока скаляры и массивы перечитываются
     put_bytes(slot_st(keep, acc));
@@ -3444,10 +3472,14 @@ jit_compile(cg, f, types, type result) {
   };
   // x = e, где e — значение VM: адрес его ячейки в слот
   assign_handle(str name, e, type t, bool fresh) => {
+    res = jit_resource(t);
+    vm_take = res; // ресурс: имя справа — перенос (скрыть) или copy — решает VM по месту
     vm_or_bad(e, fmt"значение {t}");
+    vm_take = false;
     s = if(fresh) -1 else find(name);
     if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру");
     else if(ok) {
+      fresh_here = s < 0;
       if(s < 0) {
         declare(name, t);
         s = top - 1;
@@ -3456,9 +3488,54 @@ jit_compile(cg, f, types, type result) {
       else {
         sl = env[s].slot;
         wrote(sl);
+        if(res && !fresh_here) { // перезапись: новое — вычислено, прежнее — освободить (как у интерпретатора)
+          nv = alloc(1);
+          put_bytes(slot_st(nv, acc));
+          put_bytes(slot_ld(ca2, sl));
+          vm_service(16, unit, e);
+          put_bytes(slot_ld(acc, nv));
+        }
         put_bytes(slot_st(sl, acc));
+        if(res && fresh_here) res_live.push(jc_res{sl, blk_depth, name});
       }
     }
+  };
+  // временное-ресурс инструкции (mk("x");) — освобождается сразу
+  temporary_resource(x) => {
+    k = code_kind(x);
+    ((k == ast.call) || (k == ast.construct)) && jit_resource(ty(x))
+  };
+  drop_reg(i64 r, at) => {
+    put_bytes(cg.move(ca2, r));
+    vm_service(16, unit, at);
+  };
+  live_since(i64 d) => {
+    any = false;
+    for(x : res_live) if(x.depth > d) any = true;
+    any
+  };
+  // конец блока: свои ресурсы — в обратном порядке объявления; имя — значение блока — уходит
+  // им (перенос наружу); значение блока — в стороне, пока служба VM освобождает
+  drop_block(e, items, bool hv) => {
+    mine = array{};
+    rest = array{};
+    for(x : res_live) if(x.depth == blk_depth) mine.push(x) else rest.push(x);
+    if(mine.size > 0) {
+      last = if(items.size > 0) items[items.size - 1] else code();
+      out_name = if(hv && (code_kind(last) == ast.name)) code_name(last) else "";
+      vt = if(hv) ty(last) else unit;
+      keep = alloc(1);
+      if(hv) put_bytes(if(vt == f64) slot_stf(keep, acc_f) else slot_st(keep, acc));
+      for(j : range(mine.size)) {
+        x = mine[(mine.size - 1) - j];
+        if(x.name != out_name) {
+          put_bytes(slot_ld(ca2, x.slot));
+          vm_service(16, unit, e);
+        }
+      }
+      if(hv) put_bytes(if(vt == f64) slot_ldf(acc_f, keep) else slot_ld(acc, keep));
+    }
+    res_live = rest;
   };
   entry = label();
   bind(entry); // начало кода — цель call_self

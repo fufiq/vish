@@ -1,0 +1,86 @@
+// Ресурсы с destroy в машинном коде (хвост шага 10): та же семантика, что у интерпретатора
+// (§12.2) — 
+// Свои ресурсы блока освобождаются в его конце (обратный
+// порядок), перезаписанное — сразу, отброшенное временное — после инструкции, перенос и copy
+// решает VM по месту (take). destroy исполняет VM своей службой (*моё*). Выход из блока через
+// живой ресурс (break, return, throw) остаётся интерпретатору — boom.
+// jit-compiled: t1
+// jit-compiled: t2
+// jit-compiled: t3
+// jit-compiled: t4
+// machine
+// out: закрыт врем
+// out: t1 a 1
+// out: закрыт a
+// out: 1
+// out: закрыт x
+// out: в блоке xb
+// out: закрыт xb
+// out: закрыт c
+// out: t2 c2 c2'
+// out: закрыт c2'
+// out: закрыт c2
+// out: 2
+// out: закрыт f
+// out: закрыт f
+// out: закрыт f
+// out: 3
+// out: закрыт лит
+// out: внутри
+// out: закрыт b
+// out: закрыт a
+// out: снаружи
+// out: 1
+// out: закрыт до ошибки
+// out: поймал 2
+struct file { str name; }
+destroy(file f) { print("закрыт", f.name); }
+copy(file f) => file{f.name + "'"};
+mk(str n) => file{n};
+t1(i64 k) {
+  a = mk("a");
+  mk("врем"); // входы известны — разбор свернул вызов, значение считает VM
+  print("t1", a.name, k);
+  k
+}
+t2(str s, i64 k) {
+  mk(s);
+  { b = mk(s + "b"); print("в блоке", b.name); }
+  c = mk("c");
+  c = mk("c2"); // прежнее c — освободить
+  d = c; // c дальше не читается — перенос
+  e = d; // d читается — copy
+  print("t2", d.name, e.name);
+  k + 1
+}
+t3(i64 n) {
+  s = 0;
+  for(i : range(n)) {
+    f = mk("f");
+    s += i;
+  }
+  s
+}
+t4(i64 k) {
+  file{"лит"};
+  {
+    a = mk("a");
+    b = mk("b");
+    print("внутри");
+  }
+  print("снаружи");
+  k
+}
+boom(i64 k) {
+  a = mk("до ошибки");
+  if(k > 0) throw k;
+  k
+}
+main() {
+  n = args.size;
+  print(t1(n));
+  print(t2("x", n));
+  print(t3(n + 2));
+  print(t4(n));
+  try { print(boom(n + 1)); } catch(i64 e) { print("поймал", e); }
+}

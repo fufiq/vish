@@ -2082,12 +2082,25 @@ struct interpreter {
     return {};
   }
   uint64_t resources_made = 0;
+  uint64_t regions_made = 0; // parsing: instance creates region() - JIT leaves it to the interpreter
   void mark_resource(agg_v & g) {
     if(res_any() && member_fn_of("destroy", g.type)) {
       ++resources_made;
       g.rid = ++res_counter;
       res_live[g.rid] = 1;
     }
+  }
+  // Struct with resource fields (pair {file a; file b;}) is also a resource: its fields are released
+  bool has_resource_fields(type_id t) {
+    auto it = structs.find(sym(types.name(t)));
+    if(it == structs.end()) return false;
+    for(node_id f: fields_of_struct(it->first)) {
+      node_id ft = db.as<n_var>(f).type;
+      if(!ft || !db.is<n_ident>(ft)) continue;
+      std::string_view fn = str(db.as<n_ident>(ft).name);
+      if(fn == "shared" || (structs.contains(sym(fn)) && (member_fn_of("destroy", types.named(fn)) || has_resource_fields(types.named(fn))))) return true;
+    }
+    return false;
   }
   bool has_resource(value const & v) const {
     if(v.is<agg_v>()) {
@@ -7681,6 +7694,41 @@ struct interpreter {
     return false;
   }
 
+  // Through the node that counts VM (service 8), the output return(f) / return(caller) of the called
+  // function can pass: the target is in machine code, in the VM chain it is not. Calls and subtree
+  // operators are by name (all overload); the operator's frame is transparent (x? - try(x)), and the
+  // output of his calls also passes.
+  bool exits_through(node_id c, int depth = 0) const {
+    bool r = false;
+    auto see = [&](auto & self, node_id x) -> void {
+      if(r || db.is<n_fn>(x)) return; // The attached function - its return
+      symbol callee{};
+      if(db.is<n_call>(x) && db.is<n_ident>(db.as<n_call>(x).callee)) callee = db.as<n_ident>(db.as<n_call>(x).callee).name;
+      else if(db.is<n_op>(x)) callee = entity_of(db.as<n_op>(x));
+      if(callee)
+        if(auto it = functions.find(callee); it != functions.end())
+          for(node_id f: it->second)
+            if(returns_out(f, depth)) {
+              r = true;
+              return;
+            }
+      db.for_each_child(x, [&](node_id y) { self(self, y); });
+    };
+    see(see, c);
+    return r;
+  }
+  bool returns_out(node_id f, int depth) const {
+    auto const & fn = db.as<n_fn>(f);
+    bool r = false;
+    auto see = [&](auto & self, node_id x) -> void {
+      if(r || db.is<n_fn>(x)) return;
+      if(db.is<n_return>(x) && db.as<n_return>(x).target) r = true;
+      else db.for_each_child(x, [&](node_id y) { self(self, y); });
+    };
+    if(fn.body) see(see, fn.body);
+    return r || (depth < 4 && operator_name(str(fn.name)) && fn.body && exits_through(fn.body, depth + 1));
+  }
+
   bool writes_args(node_id n) const {
     if(!n) return false;
     if(db.is<n_call>(n) && !db.is<n_ident>(db.as<n_call>(n).callee)) return true; // Significance Challenge - Not Knowing What Changes
@@ -7743,7 +7791,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
@@ -7752,7 +7800,7 @@ struct interpreter {
 //.
   std::vector<jit_query> * jit_trace = nullptr;
   static bool jit_question(std::string_view n) {
-    return n == "jit_type" || n == "jit_const" || n == "jit_proven" || n == "jit_loop_keeps" || n == "jit_chain" || n == "jit_ref_keeps";
+    return n == "jit_type" || n == "jit_const" || n == "jit_known" || n == "jit_proven" || n == "jit_loop_keeps" || n == "jit_chain" || n == "jit_ref_keeps";
   }
   std::string jit_answer(value const & v) {
     if(code_agg(v)) return v.as<agg_v>().fields[0].second.is<int64_t>() ? cat("c", v.as<agg_v>().fields[0].second.as<int64_t>()) : std::string("c");
@@ -8037,6 +8085,7 @@ struct interpreter {
     // them from memory
     if(n == "region" && a.empty()) { // New Memory Level: Your Range of Addresses
       if(checking()) { // level - resource: its release is conducted by the interpreter (JIT does not take such instance)
+        ++regions_made;
         ++resources_made;
         return erase(value(agg_v{types.named("region"), {{sym("id"), value(int64_t(0))}}}));
       }
@@ -8055,6 +8104,11 @@ struct interpreter {
       for(uint32_t k = 0; k < fs.size(); ++k)
         if(str(db.as<n_var>(fs[k]).name) == a[1].as<str_v>().view()) return value(int64_t(k));
       return value(int64_t(-1));
+    }
+    if(n == "jit_resource" && a.size() == 1) { // Destroy, shared: machine code releases it with VM
+      if(!a[0].is<type_v>() || !res_any()) return value(false);
+      type_id t = a[0].as<type_v>().type;
+      return value(types.name(t) == "shared" || bool(member_fn_of("destroy", t)) || has_resource_fields(t));
     }
     if(n == "jit_literal_place" && a.size() == 1) { // type-aggregate place anonymous literature (or ')
       std::string t = literal_place(code_node(a[0], where));
@@ -8076,6 +8130,18 @@ struct interpreter {
       if(!o || !o->seen || o->effect || o->throws || o->diverted || !o->v.known() || !(o->v.is<int64_t>() || o->v.is<double>() || o->v.is<bool>())) return value(array_v::of({}));
       if(writes_args(code_node(a[0], where))) return value(array_v::of({})); // recording in the place of the caller is not a constant
       return value(array_v::of({o->v}));
+    }
+    // the value of node parsing knows completely, without effects (call without run-time - inputs are folded -
+    // the body is not disassembled in this place): the value of VM is not a scalar, it is considered by VM node
+    if(n == "jit_known" && a.size() == 2 && a[1].is<int64_t>()) {
+      observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
+      return value(o && o->seen && !o->effect && !o->throws && !o->diverted && o->v.known() && !writes_args(code_node(a[0], where)));
+    }
+    // return/break output passes through the node (return(caller) in the operator ?): VM node will not
+    // count it - there is no function from which the node exits in its chain
+    if(n == "jit_diverts" && a.size() == 1) {
+      node_id c = code_node(a[0], where);
+      return value(exits_through(c));
     }
     // Operator chain tree selected by parsing (empty - path dependent)
     if(n == "jit_chain" && a.size() == 2 && a[1].is<int64_t>()) {

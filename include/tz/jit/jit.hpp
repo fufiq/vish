@@ -445,8 +445,8 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
       out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
       return;
     }
-    if(an.resources_made || an.drops_called) { // Resources (drop) - their lifetime is guided by the interpreter
-      out.reason = "ресурсы с destroy — интерпретатор";
+    if(an.regions_made) { // Memory level: release with “nothing lives” check - the interpreter (code call memory lives until the end of the function)
+      out.reason = "экземпляр создаёт region() — интерпретатор";
       return;
     }
     an_for_lang = &an;
@@ -521,6 +521,8 @@ value jit_bits_value(uint64_t kind, uint64_t b) {
   return kind == 2 ? value(std::bit_cast<double>(b)) : kind == 3 ? value(b != 0) : value(int64_t(b));
 }
 uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t want) {
+  bool take = want & 0x100; // resource: the value of the name - transfer or copy, as in the assignment (take)
+  want &= 0xFF;
   auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
   uint64_t n = buf[1];
   scope * s = vm.new_scope(vm.globals);
@@ -531,6 +533,7 @@ uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t wa
     else s->declare(name, jit_bits_value(e[1], e[2]));
   }
   interpreter::flow r = vm.eval(at, s, 0);
+  if(take && r.normal()) r = vm.take(at, std::move(r.v), s, 0);
   for(uint64_t i = 0; i < n; ++i) { // modified scalars -- back
     uint64_t * e = buf + 2 + 3 * i;
     if(e[1] != 9) e[2] = jit_value_bits(*s->find(vm.db.as<n_ident>(node_id{uint32_t(e[0])}).name), e[1]);
@@ -637,6 +640,17 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
       }
       vm.drop_scope(s);
       return op == 12;
+    }
+    // 16 - Free the resource in the bits cell (end of the region, discarded temporal, overwriting; tail
+    // of step 10): transferred (hidden) is no longer your own; destroy executes VM
+    if(op == 16) {
+      value * c = reinterpret_cast<value *>(bits);
+      if(c && !c->hidden && vm.res_any() && vm.has_resource(*c)) {
+        value v = std::move(*c);
+        *c = value();
+        vm.drop_value(v, vm.db[at].where);
+      }
+      return 0;
     }
     if(op == 10) { // array {…} : an empty array of layout t with space under bits of elements - in id call memory
       array_v a;
@@ -821,6 +835,13 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     jit_thrown_type = area[fault_at + 3];
   } else bits = entry(raw.data());
   auto fault = jit_fault_kind(jit_fault);
+  if(fault != jit_fault_kind::none && res_any()) // Error: Free your call memory resources (like the bootstrapping interpreter) in reverse order
+    for(auto it = mem.own.rbegin(); it != mem.own.rend(); ++it)
+      if(!it->hidden && has_resource(*it)) {
+        value v = std::move(*it);
+        *it = value();
+        drop_value(v, db[f].where);
+      }
   if(shadow) a64->compare(*shadow, sargs, raw, code->result, bits, cat(db.strings.text(db.as<n_fn>(f).name), "(", jit_engine::types_str(param_types), ")"));
   if(fault == jit_fault_kind::vm_error && jit_pending_flow) { // Excluding the language from node computed by VM
     jit_fault = 0;
