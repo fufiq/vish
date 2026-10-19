@@ -9445,5 +9445,3 @@ int language_choice(ast_db const & cdb, choice_vms & pool, node_id fn, std::vect
 }
 
 } // namespace tz
-
-#include "native.hpp" // out/native.hpp: tz native (build.sh)

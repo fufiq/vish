@@ -9,6 +9,7 @@
 
 #include "proto.hpp"
 #include "complete.hpp"
+#include "editor_lib.hpp"
 #include "merge.hpp"
 #include "modules.hpp"
 #include "parser.hpp"
@@ -156,6 +157,10 @@ uint32_t code_points(std::string_view s) {
   return n;
 }
 
+struct editor_server;
+// server whose message is served: the primitives of the editor module (native "cpp")
+thread_local editor_server * editor_host = nullptr;
+
 struct editor_server {
   enum op : uint64_t { op_accept = 1, op_recv, op_send, op_timer };
 
@@ -173,8 +178,68 @@ struct editor_server {
     std::deque<editor_view> views;
   };
 
-  explicit editor_server(vm_session & session) : session(session) {
+  explicit editor_server(vm_session & session) : session(session), editor_module(load_editor(session.db)) {
     if(!ring.ok) throw diagnostic("io_uring недоступен", {});
+    intern_operator_entities(session.db);
+  }
+
+  // --- solutions - in language (editor module, lib/editor.tz) ---
+  //
+  //  
+// What makes the client signal solves the function in the language; its function with [[editor]] in
+  // projection presentation or in the program is the first (closest announcement as operand_parens).
+  // Presentation state - here (author's decision 2026-10-19): the language sees it as the primitives of
+  // the native "cpp" editor module - via editor_host and now_peer.
+  static bool marked_editor(ast_db const & db, node_id f) {
+    for(node_id a: db.as<n_fn>(f).attrs)
+      if(db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "editor") return true;
+    return false;
+  }
+  node_id editor_fn(editor_view const & v, std::string_view name) const {
+    auto const & db = session.db;
+    for(node_id m: {v.projection, session.root, editor_module}) {
+      if(!m || !db.is<n_module>(m)) continue;
+      for(node_id x: db.as<n_module>(m).items)
+        if(db.is<n_fn>(x) && db.strings.text(db.as<n_fn>(x).name) == name && (m == editor_module || marked_editor(db, x))) return x;
+    }
+    return {};
+  }
+  // Module function interpreter: Editor module - one per server, programs and projection - to edit the base
+  interpreter & lang_of(node_id m) {
+    for(auto & l: lang_vms)
+      if(l.module == m && (m == editor_module || l.revision == session.db.revision)) return *l.vm;
+    std::erase_if(lang_vms, [&](lang_vm const & l) { return l.module == m; });
+    // elaboration of the program - to its own: when operating, its own does not roll back the mutations of the ct program
+    recheck(false);
+    lang_vms.push_back({m, session.db.revision, std::make_unique<interpreter>(session.db, m, std::vector<std::string>{}, mode::run)});
+    return *lang_vms.back().vm;
+  }
+  // Editor's solution: name function in language over representation v
+  void decide(peer & p, editor_view & v, std::string_view name, std::vector<value> args) {
+    node_id f = editor_fn(v, name);
+    if(!f) return send(p, proto::s_error{cat("нет функции редактора ", name)});
+    node_id m = f;
+    while(m && !session.db.is<n_module>(m)) m = session.db[m].parent;
+    struct host_hold {
+      editor_server * host;
+      peer * was_peer;
+      editor_server * was_host = std::exchange(editor_host, host);
+      ~host_hold() {
+        editor_host = was_host;
+        host->now_peer = was_peer;
+      }
+    } hold{this, std::exchange(now_peer, &p)};
+    try {
+      lang_of(m).analyze_instance(f, std::move(args));
+    } catch(diagnostic const & d) {
+      send(p, proto::s_error{cat("редактор: ", d.what())});
+    }
+  }
+  // representation of the customer whose message is served
+  editor_view & view_now(int64_t id) {
+    if(now_peer)
+      if(editor_view * w = find(*now_peer, uint32_t(id))) return *w;
+    throw diagnostic(cat("нет представления ", id), {});
   }
 
   void listen(std::string const & path) {
@@ -304,6 +369,7 @@ struct editor_server {
     v.id = uint32_t(p.views.size());
     v.root = session.root;
     show_view(p, v);
+    lang_of(editor_module).elaborate(); // Editor’s decisions - ready for the first signal (after parsing)
   }
 
   void show_view(peer & p, editor_view & v, bool relayout = true) {
@@ -324,79 +390,12 @@ struct editor_server {
     }
   }
 
-  // The keys interpret the view: with an open addition - a list (arrows, Enter -
-  // accept, Escape - close), otherwise the movement of the cursor and input.
+  // The key is the solution in language (on_key of the editor module); the steps of the track are still here.
   void handle(peer & p, proto::c_key const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
     if(p.debugging && debug_key(p, *v, m)) return;
-    if(v->completing && !v->items.empty()) {
-      if(m.key == "ArrowDown" || m.key == "ArrowUp") {
-        uint32_t n = uint32_t(v->items.size());
-        v->selected = (v->selected + (m.key == "ArrowDown" ? 1 : n - 1)) % n;
-        return send_completion(p, *v);
-      }
-      if(m.key == "Enter" && !v->targets.empty()) { // Transition list: Open or add
-        auto t = v->targets[v->selected];
-        close_completion(p, *v);
-        return t.fn ? open_fn(p, t.fn) : add_overload(p, t.add);
-      }
-      if(m.key == "Enter") { // Accept: the typed word is replaced by the selected name
-        std::string name = v->items[v->selected].name;
-        close_completion(p, *v);
-        return replace(p, *v, v->word_begin, v->cursor, name);
-      }
-      if(m.key == "Escape") return close_completion(p, *v);
-    }
-    finalize_peer(p, v); // the key to another representation - drafts of others to the canon
-    bool shift = m.mods & 1, ctrl = m.mods & mod_ctrl;
-    if(m.key == " " && ctrl) return complete(p, *v, true);
-    if(m.key == "F12") {
-      finalize(p, *v);
-      return goto_call(p, *v);
-    }
-    bool vert = false;
-    if(auto t = motion(*v, m, vert)) return move_to(p, *v, *t, shift, vert);
-    auto [s, e] = selection(*v);
-    if(m.key == "Escape") { // release; draft - to the canon
-      close_completion(p, *v);
-      v->anchor = none;
-      if(v->draft.open) finalize(p, *v);
-      else send_cursor(p, *v);
-      if(v->hint_shown) { // tip-off
-        v->hint_shown = false;
-        send(p, proto::s_hint{v->id, {}, 0, 0, {}});
-      }
-      return;
-    }
-    if(ctrl && (m.key == "a" || m.key == "A" || m.key == "ф")) {
-      v->anchor = 0;
-      return move_to(p, *v, uint32_t(v->places.size() - 1), true);
-    }
-    if(ctrl && (m.key == "c" || m.key == "C" || m.key == "с")) return copy(p, *v, false);
-    if(ctrl && (m.key == "x" || m.key == "X" || m.key == "ч")) return copy(p, *v, true);
-    if(ctrl && (m.key == "z" || m.key == "Z" || m.key == "я")) return undo(p, *v, shift);
-    if(ctrl && (m.key == "y" || m.key == "Y" || m.key == "н")) return undo(p, *v, true);
-    close_completion(p, *v);
-    if(m.key == "Backspace" || m.key == "Delete") {
-      if(s != e) return replace(p, *v, s, e, "");
-      bool back = m.key == "Backspace";
-      if(back && s == 0) return send_cursor(p, *v);
-      if(!back && s + 1 >= v->places.size()) return send_cursor(p, *v);
-      uint32_t a = back ? s - 1 : s, b = back ? s : s + 1;
-      if(back && !ctrl) { // indent, up to the previous indentation column
-        uint32_t ls = line_start(*v, s);
-        if(s > ls && std::ranges::all_of(std::string_view(v->lead).substr(ls, s - ls), [](char c) { return c == ' '; })) a = s - ((s - ls) % 2 ? 1 : 2);
-      }
-      if(ctrl) back ? a = word_left(*v, s) : b = word_right(*v, s);
-      replace(p, *v, a, b, "");
-      if(back) complete(p, *v, false);
-      return send_hint(p, *v);
-    }
-    if(m.key == "Enter") return newline(p, *v);
-    if(m.key == "Tab") return indent(p, *v, shift);
-    if(code_points(m.key) == 1 && !(m.mods & (mod_ctrl | mod_alt | mod_meta))) return type_text(p, *v, m.key);
-    send(p, proto::s_error{cat("клавиша не обработана: ", m.key)});
+    decide(p, *v, "on_key", {value(int64_t(v->id)), value(m.key), value(int64_t(m.mods))});
   }
 
   // --- draft: set as in a regular editor ---
@@ -933,141 +932,37 @@ struct editor_server {
     return k;
   }
   static int char_class(char c) { return c == ' ' || c == '\n' || c == '\t' ? 0 : ident_char(c) || (static_cast<unsigned char>(c) & 0x80) ? 1 : 2; }
-  uint32_t word_left(editor_view const & v, uint32_t k) const {
-    while(k > 0 && char_class(v.lead[k - 1]) == 0) --k;
-    if(k == 0) return 0;
-    int c = char_class(v.lead[k - 1]);
-    while(k > 0 && char_class(v.lead[k - 1]) == c) --k;
-    return k;
-  }
-  uint32_t word_right(editor_view const & v, uint32_t k) const {
-    uint32_t end = uint32_t(v.places.size() - 1);
-    while(k < end && char_class(v.lead[k]) == 0) ++k;
-    if(k == end) return end;
-    int c = char_class(v.lead[k]);
-    while(k < end && char_class(v.lead[k]) == c) ++k;
-    return k;
-  }
-  // Line up (dir < 0) or down on lines - in the goal column.
-  uint32_t vertical(editor_view & v, int dir, uint32_t lines) const {
-    uint32_t ls = line_start(v, v.cursor);
-    uint32_t col = v.goal != none ? v.goal : v.cursor - ls;
-    v.goal = col;
-    for(uint32_t n = 0; n < lines; ++n) {
-      if(dir < 0) {
-        if(ls == 0) return n == 0 ? 0 : std::min(ls + col, line_end(v, ls));
-        ls = line_start(v, ls - 1);
-      } else {
-        uint32_t le = line_end(v, ls);
-        if(le + 1 >= v.places.size()) return n == 0 ? le : std::min(ls + col, le);
-        ls = le + 1;
-      }
-    }
-    return std::min(ls + col, line_end(v, ls));
-  }
   std::pair<uint32_t, uint32_t> selection(editor_view const & v) const {
     if(v.anchor == none) return {v.cursor, v.cursor};
     return {std::min(v.anchor, v.cursor), std::max(v.anchor, v.cursor)};
   }
 
-  // The cursor to place t (shift - allocation stretches); outside the draft - the canon.
-  void move_to(peer & p, editor_view & v, uint32_t t, bool shift, bool keep_goal = false) {
-    if(shift) {
-      if(v.anchor == none) v.anchor = v.cursor;
-    } else v.anchor = none;
-    v.cursor = std::min<uint32_t>(t, uint32_t(v.places.size() - 1));
-    if(!keep_goal) v.goal = none;
+  // The cursor is moved (the solution is in the language, move_to of the editor module): the word set is
+  // over, the addition is closed; outside the draft - the canon; the cursor and the hint - to the client.
+  void cursor_moved(peer & p, editor_view & v) {
     v.typing = false;
     close_completion(p, v);
     if(auto r = draft_region(v); r && !(r->contains(v.cursor) && (v.anchor == none || r->contains(v.anchor)))) finalize(p, v);
     else send_cursor(p, v);
     send_hint(p, v);
   }
-
-  // Motion key: new cursor location; vertical - column remembered
-  std::optional<uint32_t> motion(editor_view & v, proto::c_key const & m, bool & vert) const {
-    bool ctrl = m.mods & mod_ctrl;
-    uint32_t end = uint32_t(v.places.size() - 1);
-    auto [s, e] = selection(v);
-    bool collapse = v.anchor != none && !(m.mods & 1);
-    vert = false;
-    if(m.key == "ArrowLeft") return collapse && !ctrl ? s : ctrl ? word_left(v, v.cursor) : v.cursor > 0 ? v.cursor - 1 : 0;
-    if(m.key == "ArrowRight") return collapse && !ctrl ? e : ctrl ? word_right(v, v.cursor) : std::min(v.cursor + 1, end);
-    if(m.key == "Home") {
-      if(ctrl) return 0u;
-      uint32_t ls = line_start(v, v.cursor), fs = ls;
-      while(fs < end && v.lead[fs] == ' ') ++fs;
-      return v.cursor == fs ? ls : fs;
-    }
-    if(m.key == "End") return ctrl ? end : line_end(v, v.cursor);
-    vert = true;
-    if(m.key == "ArrowUp") return vertical(v, -1, 1);
-    if(m.key == "ArrowDown") return vertical(v, 1, 1);
-    if(m.key == "PageUp") return vertical(v, -1, 30);
-    if(m.key == "PageDown") return vertical(v, 1, 30);
-    return std::nullopt;
+  // cursor to place t (transition, opening node)
+  void move_to(peer & p, editor_view & v, uint32_t t) {
+    v.anchor = none;
+    v.cursor = std::min<uint32_t>(t, uint32_t(v.places.size() - 1));
+    v.goal = none;
+    cursor_moved(p, v);
   }
-
-  // Type of text (letter, insert): replaces the selection; `}` in indentation - a level less.
-  void type_text(peer & p, editor_view & v, std::string const & t) {
-    auto [s, e] = selection(v);
-    if(t == "}" && s == e) {
-      uint32_t ls = line_start(v, s);
-      bool indent = s > ls && std::ranges::all_of(std::string_view(v.lead).substr(ls, s - ls), [](char c) { return c == ' '; });
-      if(indent) return replace(p, v, ls, s, cat(std::string((s - ls) >= 2 ? s - ls - 2 : 0, ' '), "}"));
-    }
-    replace(p, v, s, e, t);
-    if(code_points(t) == 1) complete(p, v, false);
-    send_hint(p, v);
+  void hide_hint(peer & p, editor_view & v) {
+    if(!v.hint_shown) return;
+    v.hint_shown = false;
+    send(p, proto::s_hint{v.id, {}, 0, 0, {}});
   }
-
-  // Enter: line translation with line indentation; after `{` - deeper, between `{` and `}` -
-  // two lines, cursor - on the middle.
-  void newline(peer & p, editor_view & v) {
-    auto [s, e] = selection(v);
-    uint32_t ls = line_start(v, s), ind = 0;
-    while(ls + ind < s && v.lead[ls + ind] == ' ') ++ind;
-    uint32_t b = s;
-    while(b > ls && v.lead[b - 1] == ' ') --b;
-    bool open = b > ls && v.lead[b - 1] == '{';
-    uint32_t f = e;
-    while(f + 1 < v.places.size() && v.lead[f] == ' ') ++f;
-    bool close = open && v.lead[f] == '}';
-    std::string pad(ind + (open ? 2 : 0), ' ');
-    if(close) return replace(p, v, s, f, cat("\n", pad, "\n", std::string(ind, ' ')), 1 + uint32_t(pad.size()));
-    replace(p, v, s, e, cat("\n", pad));
-  }
-
-  // Tab / Shift + Tab: indentation of the selection lines by 2 (without highlighting Tab -
-  // spaces to the next column of indentation).
-  void indent(peer & p, editor_view & v, bool out) {
-    auto [s, e] = selection(v);
-    if(!out && s == e) {
-      uint32_t col = s - line_start(v, s);
-      return replace(p, v, s, s, std::string(2 - col % 2, ' '));
-    }
-    uint32_t a = line_start(v, s), b = line_end(v, e > s && v.lead[e - 1] == '\n' ? e - 1 : e);
-    std::string text = v.text.substr(v.byte_at[a], v.byte_at[b] - v.byte_at[a]), done;
-    for(auto l: std::views::split(std::string_view(text), '\n')) {
-      std::string_view line(l.begin(), l.end());
-      if(!done.empty() || &*l.begin() != text.data()) done += '\n';
-      if(out) {
-        uint32_t n = 0;
-        while(n < 2 && n < line.size() && line[n] == ' ') ++n;
-        done += line.substr(n);
-      } else done += line.empty() ? std::string(line) : cat("  ", line);
-    }
-    replace(p, v, a, b, done);
-  }
-
-  void copy(peer & p, editor_view & v, bool cut) {
-    auto [s, e] = selection(v);
-    if(s == e) { // single-line
-      s = line_start(v, s);
-      e = std::min<uint32_t>(line_end(v, e) + 1, uint32_t(v.places.size() - 1));
-    }
-    send(p, proto::s_clipboard{v.text.substr(v.byte_at[s], v.byte_at[e] - v.byte_at[s])});
-    if(cut) replace(p, v, s, e, "");
+  // Item on the transition list: open a function or add a signature
+  void nav_accept(peer & p, editor_view & v) {
+    auto t = v.targets[v.selected];
+    close_completion(p, v);
+    t.fn ? open_fn(p, t.fn) : add_overload(p, t.add);
   }
 
   // Recoil and repeat - inside the draft (rollback of the adopted - on the journal base, later).
@@ -1143,35 +1038,22 @@ struct editor_server {
     return std::nullopt;
   }
 
+  // Text input, click, pointer - solutions in language (on_input, on_select, on_pointer)
   void handle(peer & p, proto::c_input const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
-    finalize_peer(p, v);
-    close_completion(p, *v);
-    v->typing = false;
-    type_text(p, *v, m.text);
+    decide(p, *v, "on_input", {value(int64_t(v->id)), value(m.text)});
   }
 
   void handle(peer & p, proto::c_select const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
-    finalize_peer(p, v);
     auto t = place_of(*v, m.node, m.piece, m.offset);
-    if(!t) return send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
-    if(m.clicks == 2) { // word
-      uint32_t a = *t, b = *t;
-      int c = char_class(v->lead[a]);
-      while(a > 0 && char_class(v->lead[a - 1]) == c) --a;
-      while(b + 1 < v->places.size() && char_class(v->lead[b]) == c) ++b;
-      v->cursor = a;
-      return move_to(p, *v, b, true);
+    if(!t) {
+      finalize_peer(p, v);
+      return send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
     }
-    if(m.clicks >= 3) { // line
-      v->cursor = line_start(*v, *t);
-      v->anchor = none;
-      return move_to(p, *v, std::min<uint32_t>(line_end(*v, *t) + 1, uint32_t(v->places.size() - 1)), true);
-    }
-    move_to(p, *v, *t, true);
+    decide(p, *v, "on_select", {value(int64_t(v->id)), value(int64_t(*t)), value(int64_t(m.clicks))});
   }
 
   // --- hints: guidance, design shape, signature ---
@@ -1293,7 +1175,7 @@ struct editor_server {
     if(db.is<n_fn>(m.node)) return open_fn(p, m.node);
     uint32_t k = v->layout_of(m.node);
     if(k == ~uint32_t{0}) return send(p, proto::s_error{"узла нет в этом представлении"});
-    move_to(p, *v, v->range[k].first, false);
+    move_to(p, *v, v->range[k].first);
   }
 
   // Hint set: cursor inside the brackets of the call - the signature with the current parameter;
@@ -1548,39 +1430,8 @@ struct editor_server {
 
   static bool ident_char(char c) { return lexer::is_ident(c); }
 
-  // Live addition to the word in front of the cursor; forced (Ctrl + Space) - and without a word.
-  void complete(peer & p, editor_view & v, bool forced) {
-    uint32_t b = v.cursor;
-    while(b > 0 && ident_char(v.lead[b - 1])) --b;
-    std::string word;
-    for(uint32_t k = b; k < v.cursor; ++k) word += v.lead[k];
-    bool number = !word.empty() && word[0] >= '0' && word[0] <= '9';
-    uint32_t place = b < v.cursor ? b : (v.cursor > 0 ? v.cursor - 1 : v.cursor);
-    node_id at = v.places.empty() ? node_id{} : v.places[place].node;
-    if(number || session.db.is<n_str>(at)) return close_completion(p, v);
-    // after `.` - members of the value on the left (by its types in all instance);
-    // the list opens immediately at the point
-    bool dot = b > 0 && v.lead[b - 1] == '.';
-    if(!dot && !forced && word.empty()) return close_completion(p, v);
-    std::vector<completion_item> all;
-    if(dot) {
-      auto types = object_types(v, b - 1);
-      if(types.empty()) return close_completion(p, v);
-      all = member_completions(session.db, session.root, types);
-      add_dot_functions(session.db, session.root, types, all, [&](node_id f) {
-        auto const & fn = session.db.as<n_fn>(f);
-        return types_of_name(f, session.db.as<n_param>(fn.params[0]).name);
-      });
-    } else all = context_identifiers(session.db, at);
-    auto items = filter_completions(std::move(all), word);
-    // The only option that matches the typed one is to show nothing.
-    if(items.empty() || (items.size() == 1 && items[0].name == word)) return close_completion(p, v);
-    v.items = std::move(items);
-    v.selected = 0;
-    v.word_begin = b;
-    v.completing = true;
-    send_completion(p, v);
-  }
+  // Supplement - in language (complete editor module)
+  void complete(peer & p, editor_view & v, bool forced) { decide(p, v, "complete", {value(int64_t(v.id)), value(forced)}); }
 
   // Types of value to the left of the point at the place `dot`: node `a.b` is its object;
   // otherwise (text still hole: `xs.`) is the name before the point, its types in the region.
@@ -2116,10 +1967,12 @@ struct editor_server {
   void handle(peer & p, proto::c_pointer const & m) {
     editor_view * v = find(p, m.view);
     if(!v) return send(p, proto::s_error{cat("нет представления ", m.view)});
-    finalize_peer(p, v);
     auto t = place_of(*v, m.node, m.piece, m.offset);
-    if(!t) return send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
-    move_to(p, *v, *t, false);
+    if(!t) {
+      finalize_peer(p, v);
+      return send(p, proto::s_error{cat("нет места #", m.node.value, "/", m.piece, "/", m.offset)});
+    }
+    decide(p, *v, "on_pointer", {value(int64_t(v->id)), value(int64_t(*t))});
   }
 
   // --- Checking tags: Types and errors in place ---
@@ -2917,6 +2770,15 @@ struct editor_server {
   }
 
   vm_session & session;
+  node_id editor_module; // Editor's decisions - in the language (lib/editor.tz)
+  struct lang_vm {
+    node_id module;
+    uint64_t revision;
+    std::unique_ptr<interpreter> vm;
+  };
+  std::vector<lang_vm> lang_vms; // Interpreters of Editor Functions - Module by Module
+  peer * now_peer = nullptr; // Customer whose message is being served
+  std::map<std::string, value> memo; // Memorized by the Editor's Decisions (remember)
   uint32_t edits = 0;
   os::uring ring;
   int listen_fd = -1;
@@ -2924,3 +2786,7 @@ struct editor_server {
 };
 
 } // namespace tz
+
+// out/native.hpp (tz native, build.sh): the native “cpp” prelude body and the editor module after
+// the server, its primitives to editor_host
+#include "native.hpp"

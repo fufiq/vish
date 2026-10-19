@@ -1,0 +1,876 @@
+// Редактор на языке (M5 → язык, 2026-10-19, решение автора: 
+//). 
+// 
+// 
+// Клавиша, указатель,
+// ввод — функции этого модуля: что сделать, решает код на языке. Своя функция с тем же именем в
+// проекции представления или в программе — первой (как operand_parens).
+//
+// *Моё (решение автора 2026-10-19):* модуль отдельный — его грузит только сервер
+// редактора, программы его не разбирают. Состояние представления (курсор, выделение, черновик,
+// раскладка) пока у VM: язык видит его примитивами native "cpp" ниже — представление v — номер
+// представления того клиента, чьё сообщение обслуживается. Механизмы базового языка (разбор
+// правки, печать, база) — тоже примитивы: 
+//.
+module editor;
+
+// --- примитивы: состояние представления (у VM) ------------------------------------------
+// Неизвестный при разборе аргумент — стёртое значение (как у прелюдии), без эффектов.
+places(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now(int64_t((a[0]).as<int64_t>())).places.size()));
+};
+// первый байт символа места k ('\n' — конец строки)
+lead(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  int64_t k = (a[1]).as<int64_t>();
+  return value(int64_t(k >= 0 && k < int64_t(w.lead.size()) ? uint8_t(w.lead[k]) : 0));
+};
+cursor(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now((a[0]).as<int64_t>()).cursor));
+};
+set_cursor(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  w.cursor = uint32_t(std::clamp<int64_t>((a[1]).as<int64_t>(), 0, int64_t(w.places.size()) - 1));
+  return value(int64_t(w.cursor));
+};
+// второй конец выделения; -1 — нет
+anchor(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  return value(w.anchor == editor_view::none ? int64_t(-1) : int64_t(w.anchor));
+};
+set_anchor(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  w.anchor = (a[1]).as<int64_t>() < 0 ? editor_view::none : uint32_t((a[1]).as<int64_t>());
+  return value(int64_t(0));
+};
+// колонка для ↑/↓; -1 — нет
+goal(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  return value(w.goal == editor_view::none ? int64_t(-1) : int64_t(w.goal));
+};
+set_goal(i64 v, i64 g) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  w.goal = (a[1]).as<int64_t>() < 0 ? editor_view::none : uint32_t((a[1]).as<int64_t>());
+  return value(int64_t(0));
+};
+// текст мест [from, to)
+text_of(i64 v, i64 from, i64 to) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  return value(std::string(w.text_of({uint32_t((a[1]).as<int64_t>()), uint32_t((a[2]).as<int64_t>())})));
+};
+draft_open(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->view_now((a[0]).as<int64_t>()).draft.open);
+};
+// открыт список дополнения (или перехода) и в нём есть варианты
+completing(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  return value(w.completing && !w.items.empty());
+};
+completion_count(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now((a[0]).as<int64_t>()).items.size()));
+};
+selected(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now((a[0]).as<int64_t>()).selected));
+};
+select_item(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  w.selected = uint32_t((a[1]).as<int64_t>());
+  editor_host->send_completion(*editor_host->now_peer, w);
+  return value(int64_t(0));
+};
+completion_name(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  return value(editor_host->view_now((a[0]).as<int64_t>()).items[uint32_t((a[1]).as<int64_t>())].name);
+};
+// начало набираемого слова дополнения
+word_begin(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->view_now((a[0]).as<int64_t>()).word_begin));
+};
+// список — переход (F12, Ctrl+P), а не дополнение
+nav_list(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(!editor_host->view_now((a[0]).as<int64_t>()).targets.empty());
+};
+// идёт набор слова (откат — словом)
+set_typing(i64 v, bool on) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  editor_host->view_now((a[0]).as<int64_t>()).typing = (a[1]).as<bool>();
+  return value(int64_t(0));
+};
+
+// --- примитивы: механизмы VM ---------------------------------------------------------
+// правка: места [from, to) заменить текстом, переразбор наименьшей единицы; caret — байт
+// курсора во вставке (-1 — после неё)
+replace(i64 v, i64 from, i64 to, str s, i64 caret) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known() || !(a[4]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  int64_t c = (a[4]).as<int64_t>();
+  editor_host->replace(*editor_host->now_peer, w, uint32_t((a[1]).as<int64_t>()), uint32_t((a[2]).as<int64_t>()), std::string((a[3]).as<str_v>().view()), c < 0 ? ~uint32_t{0} : uint32_t(c));
+  return value(int64_t(0));
+};
+// курсор передвинут: набор слова кончился, дополнение закрыто, черновик — к канону, если курсор
+// из него ушёл; курсор и подсказка — клиенту
+cursor_moved(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->cursor_moved(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+send_cursor(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->send_cursor(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+send_hint(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->send_hint(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+hide_hint(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->hide_hint(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+close_completion(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->close_completion(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+// пункт списка перехода: открыть функцию или добавить сигнатуру
+nav_accept(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->nav_accept(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+// черновик представления — к канону
+finalize(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->finalize(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+// черновики прочих представлений клиента — к канону
+finalize_others(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->finalize_peer(*editor_host->now_peer, &editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+goto_call(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->goto_call(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()));
+  return value(int64_t(0));
+};
+undo(i64 v, bool again) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  editor_host->undo(*editor_host->now_peer, editor_host->view_now((a[0]).as<int64_t>()), (a[1]).as<bool>());
+  return value(int64_t(0));
+};
+clipboard(str s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->send(*editor_host->now_peer, proto::s_clipboard{std::string((a[0]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+// сообщение клиенту об ошибке
+report(str s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->send(*editor_host->now_peer, proto::s_error{std::string((a[0]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+
+// --- примитивы: факты разбора и базы (у VM) ---------------------------------------------
+// узел места k
+place_node(i64 v, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  uint32_t k = uint32_t((a[1]).as<int64_t>());
+  return k < w.places.size() && w.places[k].node ? vm.code_value(w.places[k].node) : vm.code_value(node_id{});
+};
+// модуль программы и прелюдия
+program() => native "cpp" {
+  return vm.code_value(editor_host->session.root);
+};
+prelude() => native "cpp" {
+  return vm.code_value(editor_host->session.db.prelude);
+};
+// функции VM, видимые программе: array{имя, параметры}
+vm_builtins() => native "cpp" {
+  std::vector<value> xs;
+  for(auto const & [name, sig]: interpreter::visible_builtins) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(sig))})));
+  return value(array_v::of(std::move(xs)));
+};
+// запись syntax (if, return…) — разбора, а не сущность
+is_record(c) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(bool(record_of(editor_host->session.db, vm.code_node(a[0], where))));
+};
+// конструкция: запись или параметр-блок, клауза (for, while, try) — синтаксис, не вызов через точку
+construction(c) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  node_id f = vm.code_node(a[0], where);
+  return value(editor_host->session.db.is<n_fn>(f) && editor_host->construction(f));
+};
+// вид узла ядра (ast.if…): в дополнении — только по набранному префиксу
+core_node_kind(str name) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(is_node_kind((a[0]).as<str_v>().view()));
+};
+// имя типа машины: 2 — целое, 4 — байты (строка)
+type_tag(i64 m) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(std::string(type_registry::tag(uint32_t((a[0]).as<int64_t>()))));
+};
+// типы значения слева от точки на месте dot (по всем экземплярам)
+object_types(i64 v, i64 dot) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  for(auto & t: editor_host->object_types(editor_host->view_now((a[0]).as<int64_t>()), uint32_t((a[1]).as<int64_t>()))) xs.push_back(value(t));
+  return value(array_v::of(std::move(xs)));
+};
+// типы параметра k функции по всем её экземплярам
+param_types(f, i64 k) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto const & db = editor_host->session.db;
+  node_id fn = vm.code_node(a[0], where);
+  std::vector<value> xs;
+  if(db.is<n_fn>(fn) && uint32_t((a[1]).as<int64_t>()) < db.as<n_fn>(fn).params.size())
+    for(auto & t: editor_host->types_of_name(fn, db.as<n_param>(db.as<n_fn>(fn).params[uint32_t((a[1]).as<int64_t>())]).name)) xs.push_back(value(t));
+  return value(array_v::of(std::move(xs)));
+};
+// поля записи типа {x: …}: array{имя, тип}
+record_parts(str t) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  for(auto const & [name, tn]: type_registry::record_parts((a[0]).as<str_v>().view())) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(tn))})));
+  return value(array_v::of(std::move(xs)));
+};
+// Запомненное решениями между сигналами:  
+//  — что не меняется, не считается заново. Хранит VM (состояние — у неё, решение
+// пользователя 2026-10-19); нет — unit.
+remembered(str key) => native "cpp" {
+  if(!(a[0]).known()) return erase(value());
+  auto it = editor_host->memo.find(std::string((a[0]).as<str_v>().view()));
+  return it == editor_host->memo.end() ? value() : it->second;
+};
+remember(str key, x) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return a[1];
+  editor_host->memo[std::string((a[0]).as<str_v>().view())] = a[1];
+  return a[1];
+};
+// строки — байты (§4.0): поиск и регистр ASCII — примитивы базы
+find_text(str s, str part) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto at = (a[0]).as<str_v>().view().find((a[1]).as<str_v>().view());
+  return value(at == std::string_view::npos ? int64_t(-1) : int64_t(at));
+};
+// w — подпоследовательность s (байты по порядку, не подряд)
+subsequence(str s, str w) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  auto x = (a[0]).as<str_v>().view(), y = (a[1]).as<str_v>().view();
+  std::size_t k = 0;
+  for(char c: x)
+    if(k < y.size() && c == y[k]) ++k;
+  return value(k == y.size());
+};
+lower(str s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  std::string r((a[0]).as<str_v>().view());
+  for(char & c: r)
+    if(c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+  return value(std::move(r));
+};
+// порядок строк: номера по возрастанию ключей (сравнение байтов, устойчиво)
+sorted_indices(keys) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto const & ks = (a[0]).as<array_v>();
+  std::vector<uint32_t> order(ks.size());
+  for(uint32_t k = 0; k < ks.size(); ++k) order[k] = k;
+  std::ranges::stable_sort(order, [&](uint32_t x, uint32_t y) { return ks.get(x).as<str_v>().view() < ks.get(y).as<str_v>().view(); });
+  std::vector<value> xs;
+  for(uint32_t k: order) xs.push_back(value(int64_t(k)));
+  return value(array_v::of(std::move(xs)));
+};
+// список дополнения: варианты (completion), начало набираемого слова
+show_completion(i64 v, items, i64 from) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(int64_t(0)));
+  auto & w = editor_host->view_now((a[0]).as<int64_t>());
+  auto const & db = editor_host->session.db;
+  auto field = [&](value const & x, std::string_view f) -> value const & {
+    for(auto const & [k, fv]: x.as<agg_v>().fields)
+      if(db.strings.text(k) == f) return fv;
+    throw diagnostic(cat("completion: нет поля ", f), where);
+  };
+  w.items.clear();
+  auto const & xs = (a[1]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value x = xs.get(k);
+    w.items.push_back({std::string(field(x, "name").as<str_v>().view()), std::string(field(x, "kind").as<str_v>().view()), std::string(field(x, "detail").as<str_v>().view()), uint32_t(field(x, "depth").as<int64_t>())});
+  }
+  w.selected = 0;
+  w.word_begin = uint32_t((a[2]).as<int64_t>());
+  w.completing = true;
+  editor_host->send_completion(*editor_host->now_peer, w);
+  return value(int64_t(0));
+};
+
+// --- текст представления ---------------------------------------------------------------
+end_of(i64 v) => places(v) - 1;
+// класс символа для слов: пробел 0, имя (и не-ASCII) 1, прочее 2
+char_class(i64 c) {
+  if((c == ' ') || ((c == '\n') || (c == '\t'))) return 0;
+  if(((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || (((c >= '0') && (c <= '9')) || ((c == '_') || (c >= 128))))) return 1;
+  2
+}
+// параметр — алиас места вызывающего (§6.2): идём своей переменной
+line_start(i64 v, i64 at) {
+  k = at;
+  while((k > 0) && (lead(v, k - 1) != '\n')) k -= 1;
+  k
+}
+line_end(i64 v, i64 at) {
+  k = at;
+  while(((k + 1) < places(v)) && (lead(v, k) != '\n')) k += 1;
+  k
+}
+word_left(i64 v, i64 at) {
+  k = at;
+  while((k > 0) && (char_class(lead(v, k - 1)) == 0)) k -= 1;
+  if(k == 0) return 0;
+  c = char_class(lead(v, k - 1));
+  while((k > 0) && (char_class(lead(v, k - 1)) == c)) k -= 1;
+  k
+}
+word_right(i64 v, i64 at) {
+  k = at;
+  end = end_of(v);
+  while((k < end) && (char_class(lead(v, k)) == 0)) k += 1;
+  if(k == end) return end;
+  c = char_class(lead(v, k));
+  while((k < end) && (char_class(lead(v, k)) == c)) k += 1;
+  k
+}
+// места [from, to) — одни пробелы
+blank(i64 v, i64 from, i64 to) {
+  r = true;
+  for(k : range(to - from)) if(lead(v, from + k) != ' ') r = false;
+  r
+}
+spaces(i64 n) {
+  s = "";
+  for(k : range(n)) s = s + " ";
+  s
+}
+lesser(i64 x, i64 y) => if(x < y) x else y;
+// строка вверх (dir < 0) или вниз на lines — в колонку goal
+vertical(i64 v, i64 dir, i64 lines) {
+  c = cursor(v);
+  ls = line_start(v, c);
+  col = if(goal(v) >= 0) goal(v) else (c - ls);
+  set_goal(v, col);
+  for(n : range(lines)) {
+    if(dir < 0) {
+      if(ls == 0) return if(n == 0) 0 else lesser(ls + col, line_end(v, ls));
+      ls = line_start(v, ls - 1);
+    } else {
+      le = line_end(v, ls);
+      if((le + 1) >= places(v)) return if(n == 0) le else lesser(ls + col, le);
+      ls = le + 1;
+    }
+  }
+  lesser(ls + col, line_end(v, ls))
+}
+// выделение: array{начало, конец}
+selection(i64 v) {
+  c = cursor(v);
+  an = anchor(v);
+  if(an < 0) array{c, c} else if(an < c) array{an, c} else array{c, an}
+}
+// число кодовых точек (байты-продолжения UTF-8 — не символы)
+code_points(str s) {
+  n = 0;
+  k = 0;
+  while(k < s.size) {
+    if((s[k] & 192) != 128) n += 1;
+    k += 1;
+  }
+  n
+}
+
+// --- строки ------------------------------------------------------------------------------
+starts_with(str s, str p) => (p.size <= s.size) && (find_text(s, p) == 0);
+contains(str s, str p) => find_text(s, p) >= 0;
+// до первого байта ch (без него)
+before(str s, i64 ch) {
+  r = "";
+  k = 0;
+  while((k < s.size) && (s[k] != ch)) {
+    r = r + text_byte(s[k]);
+    k += 1;
+  }
+  r
+}
+ident_byte(i64 c) => ((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || (((c >= '0') && (c <= '9')) || ((c == '_') || (c >= 128))));
+digits3(i64 n) => if(n < 10) "00" + text(n) else if(n < 100) "0" + text(n) else text(n);
+
+// --- дополнение ----------------------------------------------------------------------------
+// 
+// 
+// 
+// Контекст — путь от
+// места вверх по АСТ: блок даёт объявленное до места, функция и блок конструкции — параметры,
+// модуль и прелюдия — свои сущности. Список живой: 
+// ничего не вставляется само —
+//.
+struct completion { str name; str kind; str detail; i64 depth; }
+
+operator_name(str n) => starts_with(n, "infix") || (starts_with(n, "prefix") || starts_with(n, "postfix"));
+// имя в список (повторы — после, uniq)
+add_name(found, str name, str kind, str detail, i64 depth) {
+  if((name == "") || operator_name(name)) return false;
+  found.push(completion{name, kind, detail, depth});
+  true
+}
+// ближнее объявление скрывает дальнее (найдено раньше — ближе); функция того же уровня —
+// «перегрузки». Порядок — по имени, затем по порядку находки: один проход
+uniq(found) {
+  keys = array{};
+  for(k : range(found.size)) keys.push(found[k].name + "\n" + digits3(k / 1000) + digits3(k % 1000));
+  kept = array{};
+  for(k : sorted_indices(keys)) {
+    x = found[k];
+    n = kept.size;
+    if((n > 0) && (kept[n - 1].name == x.name)) {
+      y = kept[n - 1];
+      if((y.kind == "функция") && ((x.kind == "функция") && (y.depth == x.depth))) kept[n - 1] = completion{y.name, y.kind, "перегрузки", y.depth};
+    } else kept.push(x);
+  }
+  kept
+}
+param_list(ps, i64 from) {
+  r = "(";
+  for(k : range(ps.size)) if(k >= from) {
+    ast.parameter{pname, _, _, _, _, _, _} = ps[k];
+    r = r + (if(k > from) ", " else "") + pname;
+  }
+  r + ")"
+}
+entities(found, m, i64 depth) {
+  if(!given(m) || (code_kind(m) != ast.module)) return false;
+  for(item : code_items(m)) if(!is_record(item)) {
+    kind = code_kind(item);
+    if(kind == ast.function) {
+      ast.function{name, ps, _, _, _, _, _, _, _} = item;
+      add_name(found, name, "функция", param_list(ps, 0), depth);
+    } else if(kind == ast.extension) {
+      ast.extension{name, _, _, _, of, _} = item;
+      if(of == "struct") add_name(found, name, "тип", "struct", depth);
+    } else if(kind == ast.variable) {
+      ast.variable{name, _, _, _, _, _, _, _} = item;
+      add_name(found, name, "переменная", "модуль", depth);
+    }
+  }
+  true
+}
+// x = e объявляет, если имени ещё нет (решение автора: без auto); имя — или ""
+assigned_name(s) {
+  r = "";
+  if(code_kind(s) == ast.operation) {
+    ast.operation{op, xs, _} = s;
+    if((op == "=") && ((xs.size > 0) && (code_kind(xs[0]) == ast.name))) {
+      ast.name{nm} = xs[0];
+      r = nm;
+    }
+  }
+  r
+}
+// идентификаторы, видимые в месте at
+context_names(at) {
+  found = array{};
+  depth = 0;
+  child = at;
+  n = at;
+  while(given(n)) {
+    kind = code_kind(n);
+    if(kind == ast.block) {
+      stop = false;
+      for(s : code_items(n)) if(!stop) {
+        if(code_id(s) == code_id(child)) stop = true; // объявленное после места не видно
+        else {
+          if(code_kind(s) == ast.variable) {
+            ast.variable{vn, _, _, _, _, _, _, _} = s;
+            add_name(found, vn, "переменная", "", depth);
+          }
+          add_name(found, assigned_name(s), "переменная", "", depth);
+        }
+      }
+    } else if(kind == ast.function) {
+      ast.function{_, ps, _, _, _, _, _, _, _} = n;
+      for(p : ps) {
+        ast.parameter{pn, _, _, _, _, _, _} = p;
+        add_name(found, pn, "параметр", "", depth);
+      }
+    } else if(kind == ast.lambda) {
+      ast.lambda{ps, _, _} = n;
+      for(p : ps) {
+        ast.parameter{pn, _, _, _, _, _, _} = p;
+        add_name(found, pn, "параметр", "блок конструкции", depth);
+      }
+    } else if(kind == ast.module) entities(found, n, depth);
+    child = n;
+    n = code_parent(n);
+    depth += 1;
+  }
+  uniq(found)
+}
+// прелюдия и функции VM — дальше любого места программы (глубина 900): не меняются — без
+// повторов и в нижнем регистре один раз
+outer_names() {
+  done = remembered("outer_names");
+  if(typeof(done) != unit) return done;
+  found = array{};
+  entities(found, prelude(), 900);
+  for(b : vm_builtins()) add_name(found, b[0], "функция", b[1] + " — VM", 901);
+  remember("outer_names", uniq(found))
+}
+outer_lower() {
+  done = remembered("outer_lower");
+  if(typeof(done) != unit) return done;
+  low = array{};
+  for(x : outer_names()) low.push(lower(x.name));
+  remember("outer_lower", low)
+}
+// имя в список членов: без повторов
+add_member(found, str name, str kind, str detail, i64 depth) {
+  for(x : found) if(x.name == name) return false;
+  found.push(completion{name, kind, detail, depth});
+  true
+}
+type_text(t) => if(given(t) && (code_kind(t) == ast.name)) {
+  ast.name{nm} = t;
+  nm
+} else "";
+// Члены значения после `.` для его типов 
+// поля агрегата, размер массива и строки, функции из всех
+// расширений сущности — 
+// функции через точку — a.f(b) ≡ f(a, b) (§4.5).
+member_names(types) {
+  found = array{};
+  for(t : types) {
+    base = before(t, '<');
+    if((base == "array") || (base == type_tag(4))) add_member(found, "size", "поле", type_tag(2) + " — " + t, 0);
+    for(part : record_parts(t)) add_member(found, part[0], "поле", part[1] + " — " + t, 0);
+    for(m : array{program(), prelude()}) if(given(m)) for(n : code_items(m)) if(code_kind(n) == ast.extension) {
+      ast.extension{en, xs, _, _, _, _} = n;
+      if(en == base) for(x : xs) {
+        if(code_kind(x) == ast.variable) {
+          ast.variable{fname, ft, _, _, _, _, _, _} = x;
+          add_member(found, fname, "поле", type_text(ft) + " — " + t, 0);
+        }
+        if(code_kind(x) == ast.function) {
+          ast.function{fname, ps, _, _, _, _, _, _, _} = x;
+          if(ps.size > 0) add_member(found, fname, "функция", param_list(ps, 1), 0);
+        }
+      }
+    }
+  }
+  dot_functions(found, types);
+  found
+}
+// Функции, вызываемые через точку: первый параметр в каком-то экземпляре получал этот тип или
+// явно им типизирован; не инстанцированная с этим типом — не предлагается.
+dot_functions(found, types) {
+  prog = program();
+  for(m : array{prog, prelude()}) if(given(m)) for(item : code_items(m)) if((code_kind(item) == ast.function) && !is_record(item)) {
+    ast.function{name, ps, _, _, _, _, _, _, _} = item;
+    if((ps.size > 0) && (!operator_name(name) && !construction(item))) {
+      ast.parameter{_, pt, _, _, _, _, _} = ps[0];
+      fits = false;
+      if(given(pt) && (code_kind(pt) == ast.name)) {
+        want = type_text(pt);
+        for(t : types) if(before(t, '<') == want) fits = true;
+      } else {
+        seen = param_types(item, 0);
+        for(t : types) for(x : seen) if(x == t) fits = true;
+      }
+      if(fits) {
+        fresh = true;
+        for(x : found) if(x.name == name) fresh = false;
+        if(fresh) found.push(completion{name, "функция", param_list(ps, 1), if(code_id(m) == code_id(prog)) 1 else 2});
+      }
+    }
+  }
+  true
+}
+// Живой фильтр: префикс, затем подстрока, затем подпоследовательность (без учёта регистра); при
+// равенстве — ближнее, затем по имени. Пустое слово — всё (до 400: «всё видимое» доходит до
+// встроенных VM).
+rank(str n, str w) {
+  at = find_text(n, w);
+  if(at == 0) 0 else if(at > 0) 1 else if(subsequence(n, w)) 2 else -1
+}
+// узлы АСТ (struct программы, порождены из VM) — только по набранному префиксу: они нужны
+// коду, который работает с кодом, остальным — шум (*моё*)
+shown(x, str n, str w) => !((x.kind == "тип") && (core_node_kind(x.name) && ((w.size == 0) || (find_text(n, w) != 0))));
+// подходящие: kept — варианты, keys — порядок (ранг, глубина, имя)
+take(kept, keys, x, str n, str w) {
+  r = rank(n, w);
+  if((r >= 0) && shown(x, n, w)) {
+    kept.push(x);
+    keys.push(text(r) + digits3(x.depth) + x.name);
+  }
+  true
+}
+// near — имена места (ближе); far — и прелюдия с VM; одноимённое дальнее скрыто ближним
+filtered(near, bool far, str word) {
+  w = lower(word);
+  kept = array{};
+  keys = array{};
+  for(x : near) take(kept, keys, x, lower(x.name), w);
+  if(far) {
+    names = outer_names();
+    low = outer_lower();
+    for(k : range(names.size)) take(kept, keys, names[k], low[k], w);
+  }
+  // повторы имён среди подошедших: остаётся ближний (по имени, затем по глубине)
+  by_name = array{};
+  for(k : range(kept.size)) by_name.push(kept[k].name + "\n" + digits3(kept[k].depth) + digits3(k / 1000) + digits3(k % 1000));
+  hidden = array{};
+  for(k : range(kept.size)) hidden.push(false);
+  last = "";
+  first = true;
+  for(k : sorted_indices(by_name)) {
+    if(!first && (kept[k].name == last)) hidden[k] = true;
+    last = kept[k].name;
+    first = false;
+  }
+  found = array{};
+  for(k : sorted_indices(keys)) if(!hidden[k] && (found.size < 400)) found.push(kept[k]);
+  found
+}
+// Живое дополнение по слову перед курсором; forced (Ctrl+Space) — и без слова.
+complete(i64 v, bool forced) {
+  c = cursor(v);
+  b = c;
+  while((b > 0) && ident_byte(lead(v, b - 1))) b -= 1;
+  word = text_of(v, b, c);
+  number = (word.size > 0) && ((word[0] >= '0') && (word[0] <= '9'));
+  at = place_node(v, if(b < c) b else if(c > 0) c - 1 else c);
+  if(number || (given(at) && (code_kind(at) == ast.string))) return close_completion(v);
+  // после `.` — члены значения слева (по его типам во всех экземплярах); список — сразу на точке
+  dot = (b > 0) && (lead(v, b - 1) == '.');
+  if(!dot && (!forced && (word.size == 0))) return close_completion(v);
+  types = if(dot) object_types(v, b - 1) else array{};
+  if(dot && (types.size == 0)) return close_completion(v);
+  items = filtered(if(dot) member_names(types) else context_names(at), !dot, word);
+  // единственный вариант, совпадающий с набранным, — показывать нечего
+  if((items.size == 0) || ((items.size == 1) && (items[0].name == word))) return close_completion(v);
+  show_completion(v, items, b);
+}
+
+// --- курсор -----------------------------------------------------------------------------
+// курсор на место t (shift — выделение тянется)
+move_to(i64 v, i64 t, bool shift, bool keep_goal) {
+  if(shift) {
+    if(anchor(v) < 0) set_anchor(v, cursor(v));
+  } else set_anchor(v, -1);
+  set_cursor(v, lesser(t, end_of(v)));
+  if(!keep_goal) set_goal(v, -1);
+  cursor_moved(v);
+}
+// клавиша движения: новое место курсора (-1 — не движение); у ↑/↓ колонка запоминается
+motion(i64 v, str key, i64 mods) {
+  ctrl = (mods & 2) != 0;
+  end = end_of(v);
+  array{s, e} = selection(v);
+  collapse = (anchor(v) >= 0) && ((mods & 1) == 0);
+  c = cursor(v);
+  if(key == "ArrowLeft") return if(collapse && !ctrl) s else if(ctrl) word_left(v, c) else if(c > 0) c - 1 else 0;
+  if(key == "ArrowRight") return if(collapse && !ctrl) e else if(ctrl) word_right(v, c) else lesser(c + 1, end);
+  if(key == "Home") {
+    if(ctrl) return 0;
+    ls = line_start(v, c);
+    fs = ls;
+    while((fs < end) && (lead(v, fs) == ' ')) fs += 1;
+    return if(c == fs) ls else fs;
+  }
+  if(key == "End") return if(ctrl) end else line_end(v, c);
+  if(key == "ArrowUp") return vertical(v, -1, 1);
+  if(key == "ArrowDown") return vertical(v, 1, 1);
+  if(key == "PageUp") return vertical(v, -1, 30);
+  if(key == "PageDown") return vertical(v, 1, 30);
+  -1
+}
+vertical_key(str key) => (key == "ArrowUp") || ((key == "ArrowDown") || ((key == "PageUp") || (key == "PageDown")));
+
+// --- правка -----------------------------------------------------------------------------
+// набор текста (буква, вставка): заменяет выделение; `}` в отступе — на уровень меньше
+type_text(i64 v, str t) {
+  array{s, e} = selection(v);
+  if((t == "}") && (s == e)) {
+    ls = line_start(v, s);
+    if((s > ls) && blank(v, ls, s)) return replace(v, ls, s, spaces(if((s - ls) >= 2) (s - ls) - 2 else 0) + "}", -1);
+  }
+  replace(v, s, e, t, -1);
+  if(code_points(t) == 1) complete(v, false);
+  send_hint(v);
+}
+// Enter: перевод строки с отступом строки; после `{` — глубже, между `{` и `}` — две строки,
+// курсор — на средней
+newline(i64 v) {
+  array{s, e} = selection(v);
+  ls = line_start(v, s);
+  ind = 0;
+  while(((ls + ind) < s) && (lead(v, ls + ind) == ' ')) ind += 1;
+  b = s;
+  while((b > ls) && (lead(v, b - 1) == ' ')) b -= 1;
+  open = (b > ls) && (lead(v, b - 1) == '{');
+  f = e;
+  while(((f + 1) < places(v)) && (lead(v, f) == ' ')) f += 1;
+  close = open && (lead(v, f) == '}');
+  pad = spaces(ind + (if(open) 2 else 0));
+  if(close) return replace(v, s, f, "\n" + pad + "\n" + spaces(ind), 1 + pad.size);
+  replace(v, s, e, "\n" + pad, -1);
+}
+// Tab / Shift+Tab: отступ строк выделения на 2 (без выделения Tab — пробелы до следующей
+// колонки отступа)
+indent(i64 v, bool out) {
+  array{s, e} = selection(v);
+  if(!out && (s == e)) return replace(v, s, s, spaces(2 - ((s - line_start(v, s)) % 2)), -1);
+  from = line_start(v, s);
+  to = line_end(v, if((e > s) && (lead(v, e - 1) == '\n')) e - 1 else e);
+  done = "";
+  k = from;
+  while(k <= to) { // строка за строкой: [k, конец строки)
+    le = line_end(v, k);
+    stop = if(le < to) le else to;
+    n = 0;
+    if(out) while((n < 2) && (((k + n) < stop) && (lead(v, k + n) == ' '))) n += 1;
+    pre = if(!out && (stop > k)) "  " else "";
+    done = done + pre + text_of(v, k + n, stop);
+    if(stop < to) done = done + "\n";
+    k = stop + 1;
+  }
+  replace(v, from, to, done, -1);
+}
+copy(i64 v, bool cut) {
+  array{s, e} = selection(v);
+  if(s == e) { // без выделения — строка целиком
+    s = line_start(v, s);
+    e = lesser(line_end(v, e) + 1, end_of(v));
+  }
+  clipboard(text_of(v, s, e));
+  if(cut) replace(v, s, e, "", -1) else 0
+}
+// Backspace / Delete: выделение — удалить; в отступе — до предыдущей колонки отступа;
+// с Ctrl — слово
+delete_at(i64 v, bool back, bool ctrl) {
+  array{s, e} = selection(v);
+  if(s != e) return replace(v, s, e, "", -1);
+  if(back && (s == 0)) return send_cursor(v);
+  if(!back && ((s + 1) >= places(v))) return send_cursor(v);
+  from = if(back) s - 1 else s;
+  to = if(back) s else s + 1;
+  if(back && !ctrl) {
+    ls = line_start(v, s);
+    if((s > ls) && blank(v, ls, s)) from = s - (if(((s - ls) % 2) == 1) 1 else 2);
+  }
+  if(ctrl) {
+    if(back) from = word_left(v, s) else to = word_right(v, s);
+  }
+  replace(v, from, to, "", -1);
+  if(back) complete(v, false);
+  send_hint(v);
+}
+
+// --- сигналы клиента ----------------------------------------------------------------------
+letter(str key, str lo, str up, str ru) => (key == lo) || ((key == up) || (key == ru));
+// клавиша; mods: 1 Shift, 2 Ctrl, 4 Alt, 8 Meta
+on_key(i64 v, str key, i64 mods) {
+  if(completing(v)) {
+    if((key == "ArrowDown") || (key == "ArrowUp")) {
+      n = completion_count(v);
+      return select_item(v, (selected(v) + (if(key == "ArrowDown") 1 else n - 1)) % n);
+    }
+    if((key == "Enter") && nav_list(v)) return nav_accept(v); // список перехода: открыть или добавить
+    if(key == "Enter") { // принять: набранное слово заменяется выбранным именем
+      name = completion_name(v, selected(v));
+      b = word_begin(v);
+      close_completion(v);
+      return replace(v, b, cursor(v), name, -1);
+    }
+    if(key == "Escape") return close_completion(v);
+  }
+  finalize_others(v); // клавиша другому представлению — черновики прочих к канону
+  shift = (mods & 1) != 0;
+  ctrl = (mods & 2) != 0;
+  if((key == " ") && ctrl) return complete(v, true);
+  if(key == "F12") {
+    finalize(v);
+    return goto_call(v);
+  }
+  t = motion(v, key, mods);
+  if(t >= 0) return move_to(v, t, shift, vertical_key(key));
+  if(key == "Escape") { // выделение снять; черновик — к канону; подсказку — скрыть
+    close_completion(v);
+    set_anchor(v, -1);
+    if(draft_open(v)) finalize(v) else send_cursor(v);
+    return hide_hint(v);
+  }
+  if(ctrl && letter(key, "a", "A", "ф")) {
+    set_anchor(v, 0);
+    return move_to(v, end_of(v), true, false);
+  }
+  if(ctrl && letter(key, "c", "C", "с")) return copy(v, false);
+  if(ctrl && letter(key, "x", "X", "ч")) return copy(v, true);
+  if(ctrl && letter(key, "z", "Z", "я")) return undo(v, shift);
+  if(ctrl && letter(key, "y", "Y", "н")) return undo(v, true);
+  close_completion(v);
+  if((key == "Backspace") || (key == "Delete")) return delete_at(v, key == "Backspace", ctrl);
+  if(key == "Enter") return newline(v);
+  if(key == "Tab") return indent(v, shift);
+  if((code_points(key) == 1) && ((mods & 14) == 0)) return type_text(v, key);
+  report("клавиша не обработана: " + key);
+}
+// ввод текста (вставка, IME): набор слова кончился
+on_input(i64 v, str text) {
+  finalize_others(v);
+  close_completion(v);
+  set_typing(v, false);
+  type_text(v, text);
+}
+// щелчок: место t; clicks — 2 слово, 3 строка
+on_select(i64 v, i64 t, i64 clicks) {
+  finalize_others(v);
+  if(clicks == 2) {
+    from = t;
+    to = t;
+    c = char_class(lead(v, t));
+    while((from > 0) && (char_class(lead(v, from - 1)) == c)) from -= 1;
+    while(((to + 1) < places(v)) && (char_class(lead(v, to)) == c)) to += 1;
+    set_cursor(v, from);
+    return move_to(v, to, true, false);
+  }
+  if(clicks >= 3) {
+    set_cursor(v, line_start(v, t));
+    set_anchor(v, -1);
+    return move_to(v, lesser(line_end(v, t) + 1, end_of(v)), true, false);
+  }
+  move_to(v, t, true, false);
+}
+// указатель (перенос курсора без выделения)
+on_pointer(i64 v, i64 t) {
+  finalize_others(v);
+  move_to(v, t, false, false);
+}

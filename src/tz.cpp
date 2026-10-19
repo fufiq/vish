@@ -16,6 +16,7 @@
 #include "tz/store.hpp"
 #include "tz/session.hpp"
 #include "tz/server.hpp"
+#include "tz/editor_lib.hpp"
 #include "tz/merge.hpp"
 #include "tz/machine.hpp"
 #include "tz/modules.hpp"
@@ -204,6 +205,10 @@ int run(int argc, char ** argv) {
     if(at >= argc) return usage();
 
     program p;
+    if(cmd == "serve" && !std::string_view(argv[at]).ends_with(".tzdb")) { // Editor module - before the program: its journal - as without the editor
+      tz::load_prelude(p.db);
+      tz::load_editor(p.db);
+    }
     load(p, argv[at++]);
     for(auto const & e: p.parse_errors) put(stderr, tz::render(e, p.path, p.db));
     bool parsed = p.parse_errors.empty();

@@ -39,7 +39,7 @@ build "$mode"
 rc=0
 tmp=out/native.hpp.$$ # замена переименованием — соседняя сборка не прочтёт половину
 cp out/native.hpp "$tmp"
-"$OUT" native "$tmp" || rc=$?
+"$OUT" native "$tmp" lib/editor.tz || rc=$?
 if [ $rc = 3 ]; then
     mv "$tmp" out/native.hpp
 else

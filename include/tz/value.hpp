@@ -73,6 +73,7 @@ struct array_v {
     items = src.items;
     dense = src.dense;
     gen = src.gen;
+    shape_known = src.shape_known;
     borrowed = nullptr;
     return *this;
   }
@@ -105,6 +106,7 @@ struct array_v {
   value * generic_cell(uint32_t i) {
     if(kind() != layout::generic) return nullptr;
     own();
+    shape_known = 0; // The place of the element - its shape can change
     return &items[i];
   }
   array_v const & r() const { return borrowed ? *borrowed : *this; }
@@ -120,6 +122,10 @@ struct array_v {
   array_v const * borrowed = nullptr;
   uint64_t gen = 0; // Buffer generation: changes when moving and replacing (element references, §12.1)
   bool pinned = false; // pin(xs): Data in its range of addresses, their growth does not move
+  // form of elements of the general layout: 0 - not counted, 1 - one (array), 2 - different (tuple).
+  // Array type - for each call (choice overload, instance): without it - bypassing all elements, and
+  // the growth of the array through the function (push) - square (*my*)
+  mutable uint8_t shape_known = 0;
   // address of the first element: moved - references to elements of this implementation are broken
   void const * base() const { return repr == layout::generic ? static_cast<void const *>(items.raw.data) : dense.data; }
   void pin() {
@@ -403,8 +409,11 @@ void array_v::to_generic() {
   dense.home = home;
   items = std::move(all);
   repr = layout::generic;
+  shape_known = 0;
   if(pinned) items.raw.pin();
 }
+
+bool same_shape(value const & a, value const & b);
 
 void array_v::push(value v) {
   own();
@@ -422,6 +431,8 @@ void array_v::push(value v) {
     return;
   }
   to_generic();
+  if(items.size() == 0) shape_known = 1;
+  else if(shape_known == 1 && !same_shape(items[0], v)) shape_known = 2;
   items.push_back(std::move(v));
 }
 
@@ -436,6 +447,7 @@ void array_v::set(uint32_t i, value v) {
     return;
   }
   to_generic();
+  shape_known = 0;
   items[i] = adopt_into(std::move(v), items.raw.home);
 }
 
@@ -618,10 +630,14 @@ bool same_shape(value const & a, value const & b);
 // The array, whose elements are of different types, is tuple
 // tuple with one type - it is an array.
 bool is_tuple(array_v const & a) {
-  if(a.kind() != array_v::layout::generic) return false;
-  for(uint32_t i = 1; i < a.size(); ++i)
-    if(!same_shape(a.get(0), a.get(i))) return true;
-  return false;
+  array_v const & s = a.r();
+  if(s.kind() != array_v::layout::generic) return false;
+  if(s.shape_known) return s.shape_known == 2;
+  bool mixed = false;
+  for(uint32_t i = 1; i < s.size() && !mixed; ++i)
+    if(!same_shape(s.items[0], s.items[i])) mixed = true;
+  s.shape_known = mixed ? 2 : 1;
+  return mixed;
 }
 
 value erase(value const & x);

@@ -236,6 +236,10 @@ struct test_runner {
         auto file = path.parent_path() / std::string_view(l).substr(11 + (l.size() > 11 && l[11] == ' '));
         os::mapped_file f(file.string());
         std::vector<diagnostic> ignored;
+        if(wire) { // Editor module - before the program, like tz serve
+          load_prelude(db);
+          load_editor(db);
+        }
         root = parse_program(db, f.text(), file.parent_path(), ignored); // use k; modules next to the program
         session.emplace(db, root, file.filename().string());
         session->dir = file.parent_path().string();
