@@ -28,7 +28,7 @@ using node_list = std::vector<node_id>;
 
 // Parameter mode (§6.2 steak)
 // clang-format off
-enum class param_mode : uint8_t { let, mut, own, out, expr, ct };
+enum class param_mode : uint8_t { let, mut, own, out, expr, ct, implicit };
 // clang-format on
 
 // --- node ---

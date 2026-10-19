@@ -2518,7 +2518,9 @@ jit_compile(cg, f, types, type result) {
     post && ((ys.size == 1) && (code_name(callee) != ""))
   };
   gen_call(e) => {
-    ast.call{callee, xs0, _, _, _, _, _} = e;
+    ast.call{callee, xs1, _, _, _, _, _} = e;
+    xs0 = xs1;
+    for(x : jit_implicit_args(e)) xs0.push(x); // неявные параметры (O9): имена у места вызова
     if(dotted(callee)) {
       ast.operation{_, ys, _} = callee;
       if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");

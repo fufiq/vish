@@ -843,7 +843,7 @@ struct printer {
   }
 
   void print_node(node_id, n_param const & p) {
-    static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct "};
+    static constexpr std::array modes{"", "mut ", "own ", "out ", "expr ", "ct ", "implicit "};
     if(p.type && db.is<n_pat>(p.type)) return item(p.type); // parameter-sample: names give unpacking
     out += modes[uint32_t(p.mode)];
     if(p.strict) out += "explicit ";

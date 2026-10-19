@@ -687,8 +687,56 @@ struct interpreter {
     return block || (k.tail && !k.args.empty() && k.args.back() == e);
   }
 
-  // Announcement in current elaboration: from a module or generated emit.
+  // Announcement in current elaboration: from a module or generated emit. Implicit parameters (O9, step
+  // 13) ---
+  //
+  // 
+// 
+// 
+// implicit [T]x - last parameters of the function: in call
+  // They are not written, the argument is the name x at the call site (lexically, then in the caller -
+  // the call environment, O4); written explicitly - the usual argument. The base (array) is implicit,
+  // the index is explicit and narrow. My word, "last," a clear argument in their place. node-names are
+  // outputs, at the call, once: so the augmented call is seen by both parsing and the machine, and JIT.
+  std::unordered_set<uint32_t> implicit_fns; // function
+  std::map<std::pair<uint32_t, uint32_t>, node_list> implicit_args; // (challenge, function) → arguments
+  static uint32_t implicit_count(ast_db const & db, node_id f) {
+    uint32_t k = 0;
+    for(node_id p: db.as<n_fn>(f).params) k = db.as<n_param>(p).mode == param_mode::implicit ? k + 1 : 0;
+    return k;
+  }
+  void note_implicit(node_id f) {
+    auto const & ps = db.as<n_fn>(f).params;
+    uint32_t k = implicit_count(db, f), all = 0;
+    for(node_id p: ps) all += db.as<n_param>(p).mode == param_mode::implicit;
+    if(all != k) fail("неявные параметры (implicit) — последними: дальше — только неявные", db[f].where);
+    if(k) implicit_fns.insert(f.value);
+  }
+  // Call arguments with implicit ones: there is overload, which lacks the written ones exactly for
+  // its implicit ones, and there is no one that takes them as is.
+  node_list const & with_implicit(std::vector<node_id> const & fns, node_list const & args, uint32_t call) {
+    if(implicit_fns.empty() || !call) return args;
+    node_id pick;
+    for(node_id f: fns) {
+      std::size_t n = db.as<n_fn>(f).params.size();
+      if(n == args.size() || rest_param(f)) return args;
+      if(implicit_fns.contains(f.value) && n - implicit_count(db, f) == args.size() && !pick) pick = f;
+    }
+    if(!pick) return args;
+    auto key = std::pair{call, pick.value};
+    if(auto it = implicit_args.find(key); it != implicit_args.end()) return it->second;
+    node_list full = args;
+    auto const & ps = db.as<n_fn>(pick).params;
+    for(std::size_t i = args.size(); i < ps.size(); ++i) {
+      node_id x = db.derive(n_ident{db.as<n_param>(ps[i]).name}, db[node_id(call)].where, derived_nodes);
+      db[x].parent = node_id(call); // place at the call: module, visibility
+      full.push_back(x);
+    }
+    return implicit_args[key] = std::move(full);
+  }
+
   void register_item(node_id item) {
+    if(db.is<n_fn>(item)) note_implicit(item);
     if(record_of(db, item)) { // Syntax (if, loop, return...) - projection node
       note_extension(db.as<n_fn>(item).name, item); // rule parsing - entity module
       return;
@@ -7330,7 +7378,7 @@ struct interpreter {
           ", а use его здесь нет: модули изолированы, use не транзитивен — use ", home ? str(db.as<n_module>(home).name) : "?",
           "; или квалифицированно: ", home ? str(db.as<n_module>(home).name) : "?", ".", str(name), "(…)"), where);
       }
-      return call_overloaded(it->second, args, env, frame, {where, std::string(str(name)), node, frame});
+      return call_overloaded(it->second, with_implicit(it->second, args, node), env, frame, {where, std::string(str(name)), node, frame});
     }
     if(args.size() == 1 && str(name) == "shared") { // shared(x) - the value goes to the storage (transfer, like an assignment)
       TZ_TRY(v0, eval(args[0], env, frame));
@@ -8356,7 +8404,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"process_class", "()"}, {"granted", "(вид)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
@@ -8706,8 +8754,20 @@ struct interpreter {
       if(writes_args(code_node(a[0], where))) return value(array_v::of({})); // recording in the place of the caller is not a constant
       return value(array_v::of({o->v}));
     }
-    // the value of node parsing knows completely, without effects (call without run-time - inputs are folded -
-    // the body is not disassembled in this place): the value of VM is not a scalar, it is considered by VM node
+    // the value of node parsing knows completely, without effects (call without run-time - inputs are
+    // folded - the body is not disassembled in this place): the value of VM is not a scalar, it is
+    // considered by VM node implicit call arguments (O9) - the same node that parsing instance saw.
+    if(n == "jit_implicit_args" && a.size() == 1) {
+      std::vector<value> xs;
+      node_id c = code_node(a[0], where);
+      interpreter * an = jit_analysis ? const_cast<interpreter *>(jit_analysis) : this;
+      if(db.is<n_call>(c) && db.is<n_ident>(db.as<n_call>(c).callee))
+        if(auto it = an->functions.find(db.as<n_ident>(db.as<n_call>(c).callee).name); it != an->functions.end()) {
+          node_list const & full = an->with_implicit(it->second, db.as<n_call>(c).args, c.value);
+          for(std::size_t i = db.as<n_call>(c).args.size(); i < full.size(); ++i) xs.push_back(code_value(full[i]));
+        }
+      return value(array_v::of(std::move(xs)));
+    }
     if(n == "jit_known" && a.size() == 2 && a[1].is<int64_t>()) {
       observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
       return value(o && o->seen && !o->effect && !o->throws && !o->diverted && o->v.known() && !writes_args(code_node(a[0], where)));

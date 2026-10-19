@@ -2662,7 +2662,7 @@ struct process_machine {
     m_task & t = top();
     (void)op;
     t.extra = fns.front();
-    t.a = uint32_t(args.size());
+    t.a = uint32_t(db.is<n_call>(n) ? call_args(n).size() : args.size()); // with implicit (O9) - call_args
     t.b = 0; // How many arguments are computed
     t.phase = 1;
     call_args_step(n);
@@ -2718,6 +2718,8 @@ struct process_machine {
     if(db.is<n_op>(n)) return db.as<n_op>(n).args;
     if(db.is<n_node>(n)) return db.as<n_node>(n).items; // Type of program: fields - arguments eval
     auto const & c = db.as<n_call>(n);
+    if(db.is<n_ident>(c.callee) && !helper.implicit_fns.empty()) // Implicit parameters (O9) - like the interpreter
+      if(auto it = helper.functions.find(db.as<n_ident>(c.callee).name); it != helper.functions.end()) return helper.with_implicit(it->second, c.args, n.value);
     if(db.is_member(c.callee) && !entity_members(n, top().scope).empty()) return c.args; // entity .f(…) without an object
     if(db.is_member(c.callee)) {
       node_list args{db.member_of(c.callee).object};

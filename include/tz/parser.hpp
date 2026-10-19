@@ -1212,6 +1212,9 @@ struct parser {
     } else if(is_word("ct")) {
       p.mode = param_mode::ct;
       advance();
+    } else if(is_word("implicit") && ahead(1).kind == tok::ident) { // implicit [T]x is implicit (O9): name at call location
+      p.mode = param_mode::implicit;
+      advance();
     }
     if(is_word("explicit") && ahead(1).kind == tok::ident && ahead(2).kind == tok::ident) { // explicit T x - strictly
       advance();
