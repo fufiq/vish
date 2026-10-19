@@ -831,7 +831,7 @@ struct interpreter {
     elaborated = true;
     if(setup_error) throw *setup_error;
     // VM errors are one hierarchy: catch(vm_error e) catches any
-    for(std::string_view e: {"out_of_bounds", "div_by_zero", "require_failed", "unpack_failed", "closed_stream", "deadlock", "invalidated_alias", "io_error", "overflow"})
+    for(std::string_view e: {"out_of_bounds", "div_by_zero", "require_failed", "unpack_failed", "closed_stream", "deadlock", "invalidated_alias", "io_error", "overflow", "stack_overflow"})
       types.set_parent(types.named(e), types.named("vm_error"));
     check_extensions(); // [[extension(g)]] to ct modules: Extensions are already known
     // Mutations of the previous elaboration code are rolled back: the ct module is executed
@@ -1639,7 +1639,7 @@ struct interpreter {
   // --- flow ---
 
   // clang-format off
-  enum class flow_kind : uint8_t { normal, ret, brk, cont, thr }; // thr - second exit path (exception)
+  enum class flow_kind : uint8_t { normal, ret, brk, cont, thr, tail }; // thr - second exit path (exception); tail - tail call yourself
   // clang-format on
 
   struct flow {
@@ -3561,11 +3561,17 @@ struct interpreter {
     for(;;) {
       auto before = trues();
       writes_guess_used = false;
-      std::erase_if(writes, [](auto const & e) { return !e.second; });
+      // anew - only unfinished "does not change" (completed - the result of past requests: the machine
+      // asks on each call, without this - bypassing the body every time)
+      std::erase_if(writes, [&](auto const & e) { return !e.second && !writes_final.contains(e.first); });
       compute();
-      if(!writes_guess_used || trues() == before) return writes[key];
+      if(!writes_guess_used || trues() == before) {
+        for(auto const & [k, w]: writes) writes_final.insert(k);
+        return writes[key];
+      }
     }
   }
+  mutable std::unordered_set<uint64_t> writes_final; // writes_param results that are independent of guesswork
 
   // Does the code change the place with that name: assigning (including to an element/field)
   // or transferring to a parameter that changes the function being called? Shadow, stop.
@@ -6060,7 +6066,10 @@ struct interpreter {
     }
     void const * bottom = next.stack ? next.stack->base : r.host_bottom;
     std::size_t size = next.stack ? next.stack->size : r.host_size;
+    char const * floor_saved = os::stack_floor;
+    os::stack_floor = next.stack ? static_cast<char const *>(next.stack->base) + 4096 : os::thread_floor(); // The bottom of the stack is from the one who fulfills
     switch_to(&me.rsp, next.rsp, bottom, size);
+    os::stack_floor = floor_saved; // returned to me
     // They come back here when someone switched to me.
   }
 
@@ -7820,8 +7829,68 @@ struct interpreter {
     return {true, n, "", unsure};
   }
 
+  // --- tail call yourself (O5, step 13) ---
+  //
+  // 
+// 
+// 
+//.
+  // Calling yourself in the tail position (the value of the block, the branch if, return - not in the cycle,
+  // not in the call argument: there is a try / construction) - not a challenge, but a transition: a working
+  // call of the same function binds the parameters with values and repeats the body; the stack does not grow.
+  // *My:* parameters - values (without mut/out/own/expr, pack); call environment (O4) - original.
+  std::unordered_map<uint32_t, std::unordered_set<uint32_t>> tail_calls_of; // function of its tail calls itself
+  std::vector<value> tail_vals;
+  // cell - in areas of the working call f (from the place of the call to the root of its body)
+  static bool in_frame(array_v const * a, scope * env, node_id f) {
+    for(scope * s = env; s; s = s->parent) {
+      for(auto const & x: s->storage)
+        if(x.is<array_v>() && &x.as<array_v>() == a) return true;
+      if(s->fn == f) break;
+    }
+    return false;
+  }
+  bool tail_self(node_id f, uint32_t call) {
+    auto [it, fresh] = tail_calls_of.try_emplace(f.value);
+    if(fresh) {
+      auto const & fn = db.as<n_fn>(f);
+      bool plain = true;
+      for(uint32_t k = 0; k < fn.params.size(); ++k) {
+        auto const & pr = db.as<n_param>(fn.params[k]);
+        if(pr.pack || (pr.mode != param_mode::let && pr.mode != param_mode::implicit) || (pr.type && db.is<n_pat>(pr.type))) plain = false;
+        if(writes_param(f, k)) plain = false; // parameter changes - alias of the caller's location, not the value
+      }
+      auto & out = it->second;
+      auto visit = [&](auto && self, node_id x, bool tail) -> void {
+        if(!x) return;
+        if(db.is<n_block>(x)) {
+          auto const & b = db.as<n_block>(x);
+          for(std::size_t i = 0; i < b.items.size(); ++i) self(self, b.items[i], tail && b.has_value && i + 1 == b.items.size());
+        } else if(db.is<n_if>(x)) {
+          self(self, db.as<n_if>(x).then_, tail);
+          self(self, db.as<n_if>(x).else_, tail);
+        } else if(db.is<n_return>(x) && !db.as<n_return>(x).target) self(self, db.as<n_return>(x).value, true);
+        else if(db.is<n_call>(x) && tail && db.is<n_ident>(db.as<n_call>(x).callee) && db.as<n_ident>(db.as<n_call>(x).callee).name == fn.name && db.as<n_call>(x).words.empty())
+          out.insert(x.value);
+      };
+      if(plain && !rest_param(f)) visit(visit, fn.body, true);
+    }
+    return it->second.contains(call);
+  }
+
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
-    if(!checking()) safe_point(false); // challenge
+    if(!checking() && site.node && tail_self(f, site.node)) { // tail challenge itself - transition: values - working call
+      for(value & v: vals) // The loan of the outgoing frame cell would hang - its value; the owner's loan above - lives.
+        if(v.is<array_v>() && v.as<array_v>().borrowed && in_frame(v.as<array_v>().borrowed, env, f)) v.as<array_v>().own();
+      tail_vals = std::move(vals);
+      return flow{flow_kind::tail, {}, 0};
+    }
+    if(!checking()) {
+      safe_point(false); // challenge
+      if(!os::stack_floor) os::stack_floor = os::thread_floor();
+      if(os::stack_floor && static_cast<char const *>(__builtin_frame_address(0)) < os::stack_floor + (std::size_t(2) << 20))
+        fail_rt("stack_overflow", "рекурсия слишком глубокая: стек исполнения исчерпан (хвостовой вызов себя — переход, стек не растёт)", site.where);
+    }
     std::unique_lock<std::recursive_mutex> svc(service_lock, std::defer_lock); // call service - under its lock (strips)
     if(lanes_on.load(std::memory_order_relaxed) && vm_root->service_fns.contains(f.value)) svc.lock();
     auto const & fn = db.as<n_fn>(f);
@@ -7947,11 +8016,14 @@ struct interpreter {
     std::size_t journal_mark = journal.size();
     frame_floors.push_back({frame_counter, false});
     flow r;
+    node_list const no_args;
+    node_list const * argp = &args; // after the transition (tail call yourself) - parameters
     for(uint32_t pass = 0;; ++pass) {
       scope * inner = new_scope(parent ? parent : globals); // Local function - on top of the surroundings of its block
       inner->caller = env; // call environment (O4)
       inner->fn = f;
       scope_hold hold{*this, inner};
+      node_list const & args = *argp;
       bind_values(fn.params, vals, args, env, inner, f, open);
       if(checking()) {
         active.insert(active_key);
@@ -7962,8 +8034,8 @@ struct interpreter {
         throw_sinks.push_back(&escaped);
         try {
           r = run_frame(fn.body, inner, fn.name, fn.outline, site.frame);
-          if(r.kind != flow_kind::thr) write_back_fields(f, fn.params, args, env, inner, site);
-          if(r.kind != flow_kind::thr) out_written(fn.params, inner, site);
+          if(r.kind != flow_kind::thr && r.kind != flow_kind::tail) write_back_fields(f, fn.params, args, env, inner, site);
+          if(r.kind != flow_kind::thr && r.kind != flow_kind::tail) out_written(fn.params, inner, site);
           if(res_any()) { // parameter-values (temporary caller, own) - their own: released here
             for(uint32_t k = 0; k < fn.params.size(); ++k) // a copy of the place (field to parameter) and a value without node (call from VM: drop, copy, text)
               if(k >= args.size() || db.is_member(args[k]) || db.is_index(args[k]))
@@ -8005,6 +8077,12 @@ struct interpreter {
       if(checking()) {
         active.erase(active_key);
         --active_depth[types_key];
+      }
+      if(r.kind == flow_kind::tail) { // Transition: Body again, with new parameter values
+        vals = std::move(tail_vals);
+        argp = &no_args;
+        safe_point(true); // rib-back
+        continue;
       }
       if(!checking() || !recursed.contains(active_key) || !r.normal()) break;
       value prev = approx.contains(active_key) ? approx[active_key] : value(rt_v{});
@@ -8121,7 +8199,7 @@ struct interpreter {
           continue;
         }
       }
-      inner->declare(p.name, vals[i]);
+      inner->declare(p.name, args.empty() && vals[i].is<array_v>() ? std::move(vals[i]) : vals[i]); // after the transfer - a loan from the owner, without a copy
     }
   }
 
@@ -8404,7 +8482,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"process_class", "()"}, {"granted", "(вид)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_tail_self", "(f, вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
@@ -8754,9 +8832,11 @@ struct interpreter {
       if(writes_args(code_node(a[0], where))) return value(array_v::of({})); // recording in the place of the caller is not a constant
       return value(array_v::of({o->v}));
     }
-    // the value of node parsing knows completely, without effects (call without run-time - inputs are
-    // folded - the body is not disassembled in this place): the value of VM is not a scalar, it is
-    // considered by VM node implicit call arguments (O9) - the same node that parsing instance saw.
+    // the value of node parsing knows completely, without effects (call without run-time - inputs
+    // folded - the body in this place is not disassembled): the value of VM is not a scalar, it is
+    // considered VM node call c - tail call itself function f (O5): transition, not call
+    if(n == "jit_tail_self" && a.size() == 2) return value(tail_self(code_node(a[0], where), code_node(a[1], where).value));
+    // Implicit call arguments (O9) are the same node as parsing instance
     if(n == "jit_implicit_args" && a.size() == 1) {
       std::vector<value> xs;
       node_id c = code_node(a[0], where);

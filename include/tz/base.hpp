@@ -229,9 +229,13 @@ line_col locate(std::string_view text, uint32_t offset) {
 std::string render(diagnostic const & d, std::string_view file, std::string_view text) {
   auto lc = locate(text, d.where.begin);
   auto out = cat(file, ":", lc.line, ":", lc.col, ": ошибка: ", d.what(), "\n");
-  for(auto const & f: d.trace) {
+  for(std::size_t i = 0; i < d.trace.size();) { // same frames in a row - one line
+    auto const & f = d.trace[i];
+    std::size_t n = 1;
+    while(i + n < d.trace.size() && d.trace[i + n].what == f.what && d.trace[i + n].where.begin == f.where.begin) ++n;
     auto l = locate(text, f.where.begin);
-    out += cat("  ", file, ":", l.line, ":", l.col, ": ", f.what, "\n");
+    out += cat("  ", file, ":", l.line, ":", l.col, ": ", f.what, n > 1 ? cat(" ×", n) : std::string(), "\n");
+    i += n;
   }
   return out;
 }

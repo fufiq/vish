@@ -1,0 +1,33 @@
+// Хвостовой вызов себя — переход, а не call/ret 
+// 
+// 
+// умная реализация 
+// Вызов себя в
+// хвосте (значение блока, ветка if, return) — работающий вызов той же функции берёт новые
+// значения параметров и повторяет тело: стек не растёт ни у интерпретатора, ни у машины (кадр
+// вместо кадра), ни в машинном коде (переход на начало тела). Не в хвосте (n + f(…), внутри
+// try или цикла) — обычный вызов.
+// jit-compiled: count
+// jit-compiled: gcd
+// machine
+// out: 100000
+// out: 6
+// out: 5 111
+// out: 4950
+count(i64 n, i64 acc) => if(n == 0) acc else count(n - 1, acc + 1);
+gcd(i64 a, i64 b) {
+  if(b == 0) return a;
+  gcd(b, a % b)
+}
+collatz(i64 n, i64 steps) {
+  if(n == 1) return steps;
+  if((n % 2) == 0) return collatz(n / 2, steps + 1);
+  collatz((3 * n) + 1, steps + 1)
+}
+sum(i64 n) => if(n == 0) 0 else n + sum(n - 1); // не хвост: обычный вызов
+main() {
+  print(count(args.size * 100000, 0));
+  print(gcd(48, 18));
+  print(collatz(args.size + 4, 0), collatz(args.size + 26, 0));
+  print(sum(args.size * 99));
+}

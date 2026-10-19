@@ -167,6 +167,7 @@ struct test_runner {
     std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, fmt_has, fmt_ct_has, fmt_ct_lacks, fmt_projection, fmt_projection_has, unknown;
     bool fmt_stable = false;
     bool machine = false; // The same program is a process machine: the same output
+    bool no_jit = false; // JIT-free: the outcome depends on the engine (host stack depth)
     std::vector<std::string> machine_dump; // dump step: dump, restore to new base, count
     std::vector<std::string> dump_out; // output of the run with the dump, if it is different (host resources do not survive the transfer)
     std::vector<std::string> quantum; // background displacement quantum at safe points (TZ_SLICE): deterministic order
@@ -196,6 +197,8 @@ struct test_runner {
       } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("dump-out:", e.dump_out) || take("quantum:", e.quantum) || take("grant:", e.grant) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has) || take("fmt-projection-has:", e.fmt_projection_has) || take("fmt-projection:", e.fmt_projection) || take("fmt-ct-has:", e.fmt_ct_has) || take("fmt-ct-lacks:", e.fmt_ct_lacks)) {
       } else if(take("machine-dump:", e.machine_dump)) {
         e.machine = true;
+      } else if(body == "no-jit") {
+        e.no_jit = true;
       } else if(body == "machine") {
         e.machine = true;
       } else if(body.starts_with("fmt-stable")) {
@@ -707,7 +710,7 @@ struct test_runner {
     std::string why;
     for(auto & d: e.unknown) why += cat("    неизвестная директива теста: ", d, "\n");
     // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
-    if(parse_errors.empty()) {
+    if(parse_errors.empty() && !e.no_jit) {
       std::string out3, err3;
       std::vector<std::string> args{path.filename().string()};
       args.insert(args.end(), e.args.begin(), e.args.end());

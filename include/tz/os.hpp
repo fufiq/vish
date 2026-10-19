@@ -496,6 +496,26 @@ int memory_pressure_fd() {
   }
   return fd;
 }
+// The bottom of the execution stack (Flow or fiber): from this VM knows that the stack is running out, and gives
+// a stack_overflow error instead of a drop ("no UB", R20). The stream has pthread, and fiber has its stack.
+thread_local char const * stack_floor = nullptr;
+thread_local char const * thread_floor_cache = nullptr;
+char const * thread_floor() {
+  if(thread_floor_cache) return thread_floor_cache;
+  pthread_attr_t a;
+  void * addr = nullptr;
+  size_t size = 0;
+  if(pthread_getattr_np(pthread_self(), &a) == 0) {
+    pthread_attr_getstack(&a, &addr, &size);
+    pthread_attr_destroy(&a);
+  }
+#if defined(__SANITIZE_ADDRESS__)
+  // ASan, when throwing, cleans the shadow of the stack no deeper than 64 MB (google/sanitizers #189), deeper - false
+  // errors after the throw: under it, the bottom of the stream is 64 MB from the top (fiber stack - 64 MB and so on).
+  if(size > (size_t(64) << 20)) addr = static_cast<char *>(addr) + size - (size_t(64) << 20);
+#endif
+  return thread_floor_cache = static_cast<char const *>(addr);
+}
 // The work of VM is on its stack: the depth of parsing and executions by AST (compiler in the
 // language compiles itself, TZ_JIT_SELF) does not depend on the limit of the host stack (ulimit
 // -s, under asan frames three times more). Reserve - virtual, pages - as you touch.

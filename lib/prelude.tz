@@ -2889,7 +2889,10 @@ jit_compile(cg, f, types, type result) {
     gen_inline_of(e, fmt"{code_kind(e)}.eval", xs, choose_from(kind_functions(e, "eval"), xs));
   };
   gen_inline_of(e, str name, xs, g) => {
-    if((g.size == 1) && (code_id(g[0]) == code_id(f))) return call_self_with(xs); // рекурсия — настоящий вызов себя
+    if((g.size == 1) && (code_id(g[0]) == code_id(f))) { // рекурсия — вызов себя; в хвосте — переход (O5)
+      if((cur == 0) && (!gen_sub && jit_tail_self(f, e))) return tail_self_with(xs);
+      return call_self_with(xs);
+    }
     rec = false;
     if(g.size == 1) {
       // рекурсия — по цепочке «кто встроил» от текущего кода: блок вызывающего
@@ -2942,6 +2945,33 @@ jit_compile(cg, f, types, type result) {
         cur = old_cur;
       }
     }
+  };
+  // Хвостовой вызов себя (O5, шаг 13): 
+//   — не call, а переход: новые значения — в слоты
+  // параметров (сначала во временные: аргументы читают прежние), на начало тела; стек не растёт.
+  tail_self_with(xs) => {
+    plain = res_live.size == 0;
+    for(t : types) if(t == unit) plain = false; // кт-параметр — экземпляр; через вызов
+    if(!plain) return call_self_with(xs);
+    k0 = alloc(xs.size);
+    for(i : range(xs.size)) {
+      if(is_arr(types[i])) {
+        s = var_of(xs[i]);
+        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в хвостовой вызов себя");
+        else put_bytes(slot_ld(acc, env[s].slot));
+      } else {
+        t = ty(xs[i]);
+        if(t != types[i]) bad(fmt"аргумент {t} вместо {types[i]}");
+        gen(xs[i]);
+        if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
+      }
+      put_bytes(slot_st(k0 + i, acc));
+    }
+    for(i : range(xs.size)) {
+      put_bytes(slot_ld(acc, k0 + i));
+      put_bytes(slot_st(pslots[i], acc));
+    }
+    jump(body_start);
   };
   // Вызов себя: область аргументов вызываемого — в своём кадре (область[j] — слот
   // k0 + w - 1 - j: кадр растёт вниз), её адрес — в базу аргументов, call на своё
@@ -3582,6 +3612,8 @@ jit_compile(cg, f, types, type result) {
     ast.parameter{_, pt, _, _, _, _, _} = fps[i];
     if(given(pt) && (code_kind(pt) == ast.pattern)) unpack_with(pt, false, fps[i], types[i], pt, pslots[i]);
   }
+  body_start = label(); // начало тела — цель хвостового вызова себя (переход, O5)
+  bind(body_start);
   if(ok) gen(fbody);
   if(gens.size > 0) bad("spawn (файбер) — интерпретатор");
   bind(ret);

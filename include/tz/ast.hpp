@@ -1235,9 +1235,13 @@ std::string render(diagnostic const & d, std::string_view file, ast_db const & d
   };
   auto lc = locate(db.source(d.where.source), d.where.begin);
   auto out = cat(name(d.where), ":", lc.line, ":", lc.col, ": ошибка: ", d.what(), "\n");
-  for(auto const & f: d.trace) {
+  for(std::size_t i = 0; i < d.trace.size();) { // the same frames in a row (deep recursion) - one line
+    auto const & f = d.trace[i];
+    std::size_t n = 1;
+    while(i + n < d.trace.size() && d.trace[i + n].what == f.what && d.trace[i + n].where.begin == f.where.begin && d.trace[i + n].where.source == f.where.source) ++n;
     auto l = locate(db.source(f.where.source), f.where.begin);
-    out += cat("  ", name(f.where), ":", l.line, ":", l.col, ": ", f.what, "\n");
+    out += cat("  ", name(f.where), ":", l.line, ":", l.col, ": ", f.what, n > 1 ? cat(" ×", n) : std::string(), "\n");
+    i += n;
   }
   return out;
 }

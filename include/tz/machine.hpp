@@ -283,7 +283,7 @@ struct dump_head {
 };
 
 enum : uint8_t { m_eval, m_call_body, m_lambda_body, m_thunk_eval, m_intercept, m_elem_ref, m_path_ref };
-enum : uint8_t { sig_none, sig_break, sig_continue, sig_return, sig_throw };
+enum : uint8_t { sig_none, sig_break, sig_continue, sig_return, sig_throw, sig_tail };
 
 struct process_machine {
   ast_db & db;
@@ -1535,6 +1535,20 @@ struct process_machine {
       if(t.kind == m_intercept && t.phase == 1 && s.kind == sig_throw) {
         if(catch_into(t)) return; // caught: next - catch block
       }
+      if(t.kind == m_call_body && s.kind == sig_tail && s.target == t.a) { // transition: a new frame instead
+        node_id fn = t.node;
+        uint32_t caller = !f.frames.empty() && f.frames.back().id == t.a ? f.frames.back().caller : 0;
+        mval packed = std::move(s.v);
+        s.kind = sig_none;
+        end_frame(t);
+        release_scope(t.owned);
+        f.vals.resize(t.base);
+        f.tasks.pop_back();
+        uint32_t n = uint32_t(packed.as<m_arr>().items.size());
+        for(auto & v: packed.as<m_arr>().items) fib().vals.push_back(std::move(v));
+        safe_point(true); // rib-back
+        return invoke(std::vector<node_id>{fn}, n, caller, db[fn].where);
+      }
       if(t.kind == m_call_body && s.kind == sig_return && s.target == t.a) {
         mval v = result_in_type(t.node, std::move(s.v));
         s.kind = sig_none;
@@ -1756,6 +1770,19 @@ struct process_machine {
       f.vals.push_back(std::move(r));
       return;
     }
+    // tail call itself (O5, like the interpreter): transition - the body of the same call again, the
+    // frame does not grow (parameter values - copies: the caller frame leaves)
+    if(site_node && helper.tail_self(chosen, site_node.value))
+      for(auto it = f.tasks.rbegin(); it != f.tasks.rend(); ++it) {
+        if(it->kind == m_lambda_body || it->kind == m_thunk_eval || it->kind == m_intercept) break; // Structure block, try not tail
+        if(it->kind != m_call_body) continue;
+        if(it->node != chosen) break;
+        m_arr vs;
+        for(auto & a: args) vs.items.push_back(deref(a));
+        f.vals.resize(f.vals.size() - nargs);
+        raise({sig_tail, mval{std::move(vs)}, it->a});
+        return;
+      }
     uint32_t id = ++st.frame_counter;
     f.frames.push_back({id, fn.name, fn.outline, caller_frame, plain});
     uint32_t sc = new_scope(parent == m_none ? proc_globals() : parent); // Local - on top of the surroundings of your block
