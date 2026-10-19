@@ -249,6 +249,7 @@ std::shared_mutex code_lock;
 std::atomic<uint32_t> code_writers{0};
 std::recursive_mutex vm_lock; // Flows between processes, VM processes, incoming bands
 std::recursive_mutex out_lock; // output
+std::recursive_mutex service_lock; // status of VM services (step 12.4)
 thread_local bool on_bg_lane = false;
 thread_local uint32_t code_write_depth = 0; // Writer Inside Writer (compilation from compilation)
 // Code Writer (process elaboration, JIT compilation): background bar standing while he writes
@@ -376,6 +377,8 @@ struct interpreter {
   }
   std::string not_visible(std::string_view what, symbol name, node_id home) const {
     std::string_view k = home && db.as<n_module>(home).name ? str(db.as<n_module>(home).name) : std::string_view("?");
+    if(home && vm_root->service_modules.contains(home.value))
+      return cat(what, " ", str(name), " — состояние сервиса ", k, ": снаружи не видна («секреты остаются в сервисе»), только через его функции");
     return cat(what, " ", str(name), what == "переменная" ? " объявлена" : " объявлен", " в модуле ", k, ", а use его здесь нет: модули изолированы, use не транзитивен — use ", k, ";");
   }
   // A variable module with this name that the place does not see (for the "unknown name" error).
@@ -623,6 +626,7 @@ struct interpreter {
     auto it = global_home.find(c);
     if(it == global_home.end()) return false;
     node_id m = module_of(at);
+    if(m && m != it->second && vm_root->service_modules.contains(it->second.value)) return true; // Service status - only its code
     return m && !sees_directly(m, it->second, name); // use is non-transitive - and for variable modules (tail of step 10)
   }
 
@@ -790,6 +794,7 @@ struct interpreter {
           ct_names.push_back(v.name);
         }
         if(db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty()) declare_state(item); // [[state]] x = e
+        if(is_service(m)) note_service(m, item);
       }
     }
     transform_pass(); // Transformers - after ct modules: generated is also rewritten
@@ -976,6 +981,63 @@ struct interpreter {
         fix_state(f, lv, tmap, smap);
       }
     }
+  }
+
+  // --- VM services (§9.5, step 12.4) ---
+  //
+  //
+//  
+// [[service]] module k; - service: its variables are one state per VM (all
+  // processes and bands see only cells, functions are called ordinary call (inline, caller types); in
+  // bands, the call is under the service lock (*my*: the service is not waiting inside). Its struct on
+  // the outside is descriptors: you can hold and transmit, you can create and read fields - only the
+  // service itself; the names of its variables are not visible on the outside. The state of the
+  // service is not part of the process (the dump does not carry it).
+  std::set<uint32_t> service_modules;
+  std::unordered_set<uint32_t> service_fns;
+  std::map<std::string, uint32_t, std::less<>> service_types; // name struct → module service
+  std::deque<value> service_cells; // VM Root: Service Status Cells
+  std::map<uint32_t, value *> service_cell_of; // module element
+  bool is_service(node_id m) const {
+    for(node_id a: db.as<n_module>(m).attrs)
+      if(db.is<n_ident>(a) && str(db.as<n_ident>(a).name) == "service") return true;
+    return false;
+  }
+  void note_service(node_id m, node_id item) {
+    interpreter & v = *vm_root;
+    if(&v == this) {
+      v.service_modules.insert(m.value);
+      if(db.is<n_fn>(item)) v.service_fns.insert(item.value);
+      if(db.is_struct(item)) v.service_types.emplace(std::string(str(db.as<n_extend>(item).name)), m.value);
+    }
+    bool var = db.is<n_var>(item) && !db.as<n_var>(item).ct && db.as<n_var>(item).attrs.empty();
+    bool assign = db.is<n_op>(item) && str(db.as<n_op>(item).op) == "=" && db.is<n_ident>(db.as<n_op>(item).args[0]);
+    if(!var && !assign) return;
+    symbol name = var ? db.as<n_var>(item).name : db.as<n_ident>(db.as<n_op>(item).args[0]).name;
+    node_id init = var ? db.as<n_var>(item).init : db.as<n_op>(item).args[1];
+    value * cell = nullptr;
+    if(auto it = v.service_cell_of.find(item.value); it != v.service_cell_of.end() && !checking()) cell = it->second; // process
+    else {
+      flow f = init ? eval(init, globals, 0) : ok();
+      if(f.kind == flow_kind::thr) uncaught(f);
+      if(checking()) cell = globals->declare(name, erase(f.v)); // parsing - run-time: State changes challenges
+      else {
+        cell = &v.service_cells.emplace_back(std::move(f.v));
+        v.service_cell_of[item.value] = cell;
+      }
+    }
+    if(!checking()) globals->alias(name, cell);
+    global_home[cell] = m;
+  }
+  // Service Descriptor: Create or read fields - only the code of the service itself (and prelude VM)
+  void service_guard(std::string_view type, node_id at, std::string_view what) {
+    auto const & h = vm_root->service_types;
+    if(h.empty()) return;
+    auto it = h.find(type);
+    if(it == h.end()) return;
+    node_id m = module_of(at);
+    if(m && m != node_id(it->second) && m != db.prelude)
+      fail(cat("дескриптор ", type, " сервиса ", str(db.as<n_module>(node_id(it->second)).name), ": ", what, " — только в сервисе («секреты остаются в сервисе»)"), db[at].where);
   }
 
   void declare_state(node_id item) {
@@ -4403,6 +4465,7 @@ struct interpreter {
       }
       return ok(record_value(std::move(fs)));
     }
+    if(db.is<n_ident>(c.type)) service_guard(str(db.as<n_ident>(c.type).name), n, "создать");
     std::vector<value> items;
     bool open = false; // the run-time-length array is disclosed: the result is the run-time-length array
     for(node_id item: c.items) {
@@ -4462,6 +4525,8 @@ struct interpreter {
     if(value const * o = peek(m.object, env); o && o->is<array_v>()) r = member(*o, m.name, db[n].where);
     else {
       TZ_TRY(obj, eval(m.object, env, frame));
+      if(!vm_root->service_types.empty())
+        if(value const * x = obj.is<agg_v>() ? &obj : shape_of(obj); x && x->is<agg_v>()) service_guard(types.name(x->as<agg_v>().type), n, "читать поля");
       r = lift(obj, [&](value const & o) { return member(o, m.name, db[n].where); });
     }
     // xs.size - the size of this array (fact: range gives its indexes from it)
@@ -4506,6 +4571,7 @@ struct interpreter {
   value const * peek(node_id n, scope * env) {
     if(!db.is<n_ident>(n)) return nullptr;
     value const * c = find(env, db.as<n_ident>(n).name);
+    if(c && foreign_global(c, n, env, db.as<n_ident>(n).name)) return nullptr; // other variable module - the error will give eval
     if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
@@ -6355,6 +6421,21 @@ struct interpreter {
       if(n == "net_port") return erase(value(int64_t(1)));
       return value();
     }
+    // host resources are only given (step 12.4)
+// 
+// Not given - not dump, but "0 devices".
+    // Gives a program: transmits an open stream; takes away - closes it (the process sees the end).
+    if(background && (n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create")) {
+      if(n.starts_with("file_")) fail_rt("io_error", cat(a.empty() || !a[0].is<str_v>() ? std::string("?") : a[0].as<str_v>().str(), ": нет файла — файловая система процессу не дана (ресурс даёт программа: передаёт поток)"), where);
+      ss.emplace_back();
+      ss.back().net = true; // Network without devices: no one to listen to, nowhere to connect
+      if(n == "net_connect") {
+        ss.back().peers.push_back({-1});
+        ss.back().peers[0].open = false;
+        deliver(ss.back(), make_event(0, "close", "сеть процессу не дана"));
+      }
+      return stream_value(ss.size() - 1);
+    }
     if(n == "net_listen") {
       if(a.size() != 1 || !a[0].is<int64_t>()) fail("listen(порт)", where);
       int fd = os::listen_tcp(int(a[0].as<int64_t>()));
@@ -7644,6 +7725,8 @@ struct interpreter {
 
   flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
     if(!checking()) safe_point(false); // challenge
+    std::unique_lock<std::recursive_mutex> svc(service_lock, std::defer_lock); // call service - under its lock (strips)
+    if(lanes_on.load(std::memory_order_relaxed) && vm_root->service_fns.contains(f.value)) svc.lock();
     auto const & fn = db.as<n_fn>(f);
     scope * parent = std::exchange(invoke_parent, nullptr);
     bool open = std::exchange(invoke_open, false);

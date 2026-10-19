@@ -1,0 +1,13 @@
+[[service]] module svc.keys;
+// Сервис VM для тестов 312–314 (шаг 12.4): хранилище секретов — одно на VM; программа и её
+// процессы держат дескрипторы key, а не байты. Дескриптор из другой VM (процесс перенесли) здесь
+// неизвестен: состояние сервиса — этой VM, не процесса.
+
+struct key { i64 id; }
+secrets = array{"-"};
+make_key(str secret) {
+  secrets.push(secret);
+  key{secrets.size - 1}
+}
+seal(key k, str msg) => if(is_index(k.id, secrets) && (k.id > 0)) msg + "/" + text(secrets[k.id].size) else msg + "/неизвестный ключ";
+keys_count() => secrets.size - 1;

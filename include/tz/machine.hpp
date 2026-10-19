@@ -267,6 +267,7 @@ struct m_state {
   m_list<mval> ct_states; // ct-state of values (mval::ct - number + 1)
   m_list<m_proc> procs; // VM processes (process(f, …))
   m_list<m_pressure> pressure; // Pressure handlers (on_pressure { … })
+  m_list<symbol> service_names; // VM service variables (step 12.4): in the new VM - again
 };
 
 // Process dump header: everything except level pages.
@@ -350,6 +351,7 @@ struct process_machine {
       if(!dump.empty()) helper.types.assign_names(st.type_names); // type numbers - as in a dump
       if(!dump.empty()) host_lost();
       if(!dump.empty() && !st.pressure.empty()) arm_pressure(); // Pressure handlers - and in the new VM
+      if(!dump.empty()) services_fresh();
     } catch(...) {
       st.~m_state();
       close_band(band);
@@ -860,6 +862,14 @@ struct process_machine {
   // net *, file * - like an interpreter (io_op_call): creating and operating a host stream
   mval host_op(std::string_view n, std::vector<mval> const & a, span where) {
     auto str_arg = [&](std::size_t i) { return std::string(a[i].as<m_str>()); };
+    // Background process: host resources are only given (step 12.4, like the interpreter) - "0 devices"
+    if(fib().proc && (n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create")) {
+      if(n.starts_with("file_")) rt_fail("io_error", cat(a.empty() || !a[0].is<m_str>() ? std::string("?") : str_arg(0), ": нет файла — файловая система процессу не дана (ресурс даёт программа: передаёт поток)"), where);
+      st.streams.emplace_back(); // Network without devices: no one to listen to, nowhere to connect
+      uint64_t sid = st.streams.size() - 1;
+      if(n == "net_connect") deliver(sid, event(0, "close", "сеть процессу не дана"));
+      return stream_value(sid);
+    }
     if(n == "net_listen") {
       if(a.size() != 1 || !a[0].is<int64_t>()) throw diagnostic("listen(порт)", where);
       int fd = os::listen_tcp(int(a[0].as<int64_t>()));
@@ -1146,6 +1156,14 @@ struct process_machine {
         value * x = helper.globals->find(db.as<n_var>(item).name);
         if(x) declare(st.globals, db.as<n_var>(item).name, from_value(*x, db[item].where));
       }
+    for(node_id m: modules) // VM services (step 12.4): their state is common to machine processes
+      if(helper.is_service(m))
+        for(node_id item: db.as<n_module>(m).items)
+          if(symbol nm = service_var(item)) {
+            value * x = helper.globals->find(nm);
+            if(x) declare(st.globals, nm, from_value(*x, db[item].where));
+            st.service_names.push_back(nm);
+          }
     auto it = helper.functions.find(helper.sym("main"));
     if(it == helper.functions.end()) throw diagnostic("нет функции main", {});
     invoke(it->second, 0, 0, db[it->second.front()].where);
@@ -2258,6 +2276,7 @@ struct process_machine {
     mval const * op = &ref_of(ov);
     if(is_shared_v(*op)) op = &slot_of(*op).v; // shared - transparently
     mval const & o = *op;
+    if(o.is<m_agg>() && !helper.service_types.empty()) helper.service_guard(helper.types.name(o.as<m_agg>().type), n, "читать поля");
     if(is_code(o)) { // c.cond - node field of code: reads the assistant
       auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
       if(!v) throw diagnostic(cat("у узла кода нет поля ", helper.str(m.name)), db[n].where);
@@ -3300,6 +3319,7 @@ struct process_machine {
     if(p.scope != st.globals) return false;
     node_id home = module_var_home(name);
     node_id m = helper.module_of(at);
+    if(home && m && m != home && helper.service_modules.contains(home.value)) return true; // Service status - only its code
     return home && m && !helper.sees_directly(m, home, name); // use is non-transitive (tail of step 10)
   }
   // The program module that declared the variable name (the last in the order of modules).
@@ -3307,8 +3327,21 @@ struct process_machine {
     std::vector<node_id> modules = helper.module_order;
     if(modules.empty() && db.is<n_module>(root)) modules.push_back(root);
     for(auto it = modules.rbegin(); it != modules.rend(); ++it)
-      if(std::ranges::any_of(db.as<n_module>(*it).items, [&](node_id i) { return db.is<n_var>(i) && db.as<n_var>(i).name == name; })) return *it;
+      if(std::ranges::any_of(db.as<n_module>(*it).items, [&](node_id i) { return (db.is<n_var>(i) && db.as<n_var>(i).name == name) || service_var(i) == name; })) return *it;
     return {};
+  }
+  // service variable: x = e at the service module level (other modules do not).
+  symbol service_var(node_id item) const {
+    if(db.is<n_var>(item) && !db.as<n_var>(item).ct && db.as<n_var>(item).attrs.empty()) return db.as<n_var>(item).name;
+    if(db.is<n_op>(item) && helper.str(db.as<n_op>(item).op) == "=" && db.is<n_ident>(db.as<n_op>(item).args[0])) return db.as<n_ident>(db.as<n_op>(item).args[0]).name;
+    return {};
+  }
+  // The process is restored to another VM: the state of services is its (renewed), not the process
+// 
+  void services_fresh() {
+    for(symbol nm: st.service_names)
+      if(place p = find(st.globals, nm); p.scope != m_none)
+        if(value * x = helper.globals->find(nm)) cell(p) = from_value(*x, {});
   }
   static bool elem_place(ast_db const & db, node_id x) { return db.is_index(x) && db.is<n_ident>(db.index_of(x).object); }
 
@@ -3366,6 +3399,7 @@ struct process_machine {
       }
       return finish(from_value(helper.record_value(std::move(fs)), db[n].where));
     }
+    if(db.is<n_ident>(c.type) && t.phase == 0) helper.service_guard(helper.str(db.as<n_ident>(c.type).name), n, "создать"); // serviceman
     if(!db.is<n_ident>(c.type) || helper.node_kind_named(helper.str(db.as<n_ident>(c.type).name))) { // ast.call {…} - node type of program: builds an assistant
       auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
       if(!v) throw diagnostic("узел кода: не удалось построить", db[n].where);

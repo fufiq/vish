@@ -430,6 +430,8 @@ struct parser {
       advance();
     }
     if(module_attrs_ahead()) m.attrs = attributes(); // [[extension]] module k;
+    // [[service]] module k; - VM service (§9.5, step 12.4): module variables - its state, one on VM
+    bool was_service = std::exchange(in_service, std::ranges::any_of(m.attrs, [&](node_id a) { return db.is<n_ident>(a) && db.strings.text(db.as<n_ident>(a).name) == "service"; }));
     if(is_word("module")) {
       advance();
       m.name = db.strings.intern(dotted_name());
@@ -443,12 +445,14 @@ struct parser {
     scope.insert(scope.end(), outer_items.begin(), outer_items.end());
     resolve_refs(scope);
     trim_blank(m.blank);
+    in_service = was_service;
     auto id = db.add(std::move(m), {start, here().where.end});
     db.link_parents(id);
     attach_root(id);
     return id;
   }
 
+  bool in_service = false; // module-service
   // [[…]] Before Module: Module Attributes, Not First Element
   bool module_attrs_ahead() const {
     uint32_t k = pos;
@@ -896,10 +900,11 @@ struct parser {
       return db.add(std::move(u), {start, toks[pos - 1].where.end});
     }
     node_id s = statement();
-    // There are no global process variables outside the functions - only ct (author's decision 2026-09-30)
+    // There are no global process variables outside the functions - only ct (author's decision
+    // 2026-09-30); VM has its state (step 12.4)
     bool var = db.is<n_var>(s) && !db.as<n_var>(s).ct;
     bool assign = db.is<n_op>(s) && db.strings.text(db.as<n_op>(s).op) == "=" && db.is<n_ident>(db.as<n_op>(s).args[0]);
-    if(var || assign) {
+    if((var || assign) && !in_service) {
       symbol name = var ? db.as<n_var>(s).name : db.as<n_ident>(db.as<n_op>(s).args[0]).name;
       throw diagnostic(cat("вне функций — только ct-переменные: ct ", db.strings.text(name), " = …"), db[s].where);
     }
