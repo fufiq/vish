@@ -27,7 +27,7 @@ using tz::cat;
 using tz::put;
 
 int usage() {
-  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz fmt --ct <программа>   проекция после элаборации: мутации ct-кода и порождённое emit\n  tz fmt --projection <ключ> <программа>   проекция — модуль записей syntax (по ключу, как use)\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] [--a64] <программа> [аргументы...]   исполнить main(); --a64 — код AArch64 параллельно, в qemu-aarch64\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz apply <программа> <функция> [база.tzdb]   применить функцию правки (code_rename…): новый текст, база\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог> [--a64 | --projection <ключ>]   прогнать эталонные тесты; --projection — каждая программа в проекции разбирается в то же дерево\n"));
+  put(stderr, std::string("использование (<программа> — файл .tz или база .tzdb):\n  tz fmt <программа>        каноническая текстовая проекция\n  tz fmt --ct <программа>   проекция после элаборации: мутации ct-кода и порождённое emit\n  tz fmt --projection <ключ> <программа>   проекция — модуль записей syntax (по ключу, как use)\n  tz ast <программа>        дерево AST\n  tz run [--instances] [--jit] [--jit-stats] [--a64] [--grant fs,net] <программа> [аргументы...]   исполнить main(); --a64 — код AArch64 параллельно, в qemu-aarch64; --grant — ресурсы программе (без него — «0 устройств»)\n  tz run --machine [--dump-after N файл.tzproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  tz resume [--grant fs,net] <файл.tzproc>   возобновить процесс из дампа (в другой VM)\n  tz check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  tz residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  tz slice <программа> <функция> <переменная>   только то, что связано с переменной\n  tz save <файл.tz> <база.tzdb>   импортировать текст в базу (журнал на диск)\n  tz log <база.tzdb>         журнал операций базы в тексте\n  tz apply <программа> <функция> [база.tzdb]   применить функцию правки (code_rename…): новый текст, база\n  tz vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  tz serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  tz schema                  схема протокола редактора (JSON)\n  tz diff <a.tzdb> <b.tzdb>  семантический дифф баз (по элементам модуля)\n  tz merge <мой.tzdb> <их.tzdb> [итог.tzdb]   трёхстороннее слияние; конфликты — слить руками\n  tz test <каталог> [--a64 | --projection <ключ>]   прогнать эталонные тесты; --projection — каждая программа в проекции разбирается в то же дерево\n"));
   return 2;
 }
 
@@ -165,8 +165,13 @@ int run(int argc, char ** argv) {
     }
     // Renew the process from the dump - "to another VM" (M5): another tz process.
     if(cmd == "resume") {
-      tz::os::mapped_file f(argv[2]);
-      int fd = ::open(argv[2], O_RDONLY | O_CLOEXEC); // Dump pages - displaying the file
+      int k = 2;
+      if(std::string_view(argv[2]) == "--grant" && argc > 4) { // The new VM resources are provided by the user.
+        ::setenv("TZ_GRANT", argv[3], 1);
+        k = 4;
+      }
+      tz::os::mapped_file f(argv[k]);
+      int fd = ::open(argv[k], O_RDONLY | O_CLOEXEC); // Dump pages - displaying the file
       tz::restored_process r(f.text(), fd);
       r.m->run();
       return int(r.m->st.exit_code);
@@ -188,6 +193,7 @@ int run(int argc, char ** argv) {
       else if(f == "--jit-stats") use_jit = jit_stats = true;
       else if(f == "--a64") use_jit = check_a64 = true; // code AArch64 - parallel to host, in qemu
       else if(f == "--machine") machine = true;
+      else if(f == "--grant" && at < argc) ::setenv("TZ_GRANT", argv[at++], 1); // Resources are provided by the user: fs,net
       else if(f == "--dump-after" && at + 1 < argc) { // -dump-after N file.tzproc
         machine = true;
         std::string_view n = argv[at++];

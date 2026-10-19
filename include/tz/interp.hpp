@@ -302,6 +302,7 @@ struct interpreter {
     globals = new_scope(nullptr);
     if(!parent)
       if(char const * q = std::getenv("TZ_SLICE")) slice_points = uint32_t(std::strtoul(q, nullptr, 10)); // Quantum - at safe points (tests)
+    if(!parent && !lane_of) grants = granted_by_user();
     if(!args.empty()) prog_path = args[0];
     array_v a;
     for(auto & s: args) a.push(value(s));
@@ -744,9 +745,39 @@ struct interpreter {
     }
   }
 
-  // Elaboration: Modular ct { } is executed once, in module order, before main and
-  // before parsing (order instantiation, D14). They can generate ads (emit) - those
-  // are registered in this elaboration.
+  // Elaboration: modular ct { } are executed once, in module order, before main and before parsing
+  // (instantation order, D14). They can generate ads (emit) - those are registered in this
+  // elaboration. The process takes the elaboration of the VM root (step 12.3b): the code is the same -
+  // the results are the same (ct values, ct instances, generated, state cells and services); the base
+  // does not touch, so the process can be started from the background band (the code writes only the
+  // main one - its elaboration has already passed)
+  void adopt_elaboration(interpreter & from) {
+    if(elaborated) return;
+    elaborated = true;
+    if(setup_error) throw *setup_error;
+    for(auto const & [k, v]: from.ct_memo) ct_memo.emplace(k, v);
+    for(symbol nm: from.ct_names)
+      if(value * c = from.globals->find(nm)) {
+        value * cell = globals->declare(nm, *c);
+        ct_cells.insert(cell);
+        if(auto it = from.global_home.find(c); it != from.global_home.end()) global_home[cell] = it->second;
+        ct_names.push_back(nm);
+      }
+    for(node_id m: module_order)
+      for(node_id item: db.as<n_module>(m).items) {
+        bool state = db.is<n_var>(item) && !db.as<n_var>(item).attrs.empty();
+        if(state) // [[state]] is a program cell
+          if(value * c = from.globals->find(db.as<n_var>(item).name)) {
+            globals->alias(db.as<n_var>(item).name, c);
+            global_home[c] = m;
+          }
+        if(is_service(m)) note_service(m, item); // service cell at the root of VM
+      }
+    for(uint32_t x: from.inst_registered)
+      if(inst_registered.insert(x).second) register_item(node_id(x));
+    pass_ran = from.pass_ran;
+  }
+
   void elaborate() {
     if(elaborated) return;
     elaborated = true;
@@ -992,7 +1023,22 @@ struct interpreter {
   // bands, the call is under the service lock (*my*: the service is not waiting inside). Its struct on
   // the outside is descriptors: you can hold and transmit, you can create and read fields - only the
   // service itself; the names of its variables are not visible on the outside. The state of the
-  // service is not part of the process (the dump does not carry it).
+  // service is not part of the process (the dump does not carry it). Resources are provided by the
+  // author (step 12.4):
+// TZ_GRANT=fs,net (tz run
+  // -grant fs,net); not given - "0 devices", as in the background process.
+  std::set<std::string, std::less<>> grants;
+  static std::set<std::string, std::less<>> granted_by_user() {
+    std::set<std::string, std::less<>> out;
+    if(char const * g = std::getenv("TZ_GRANT"))
+      for(std::string_view t = g; !t.empty();) {
+        std::size_t c = t.find(',');
+        if(std::string_view k = t.substr(0, c); !k.empty()) out.emplace(k);
+        t = c == std::string_view::npos ? std::string_view() : t.substr(c + 1);
+      }
+    return out;
+  }
+  bool granted(std::string_view kind) const { return !background && vm_root->grants.contains(kind); }
   std::set<uint32_t> service_modules;
   std::unordered_set<uint32_t> service_fns;
   std::map<std::string, uint32_t, std::less<>> service_types; // name struct → module service
@@ -6109,25 +6155,26 @@ struct interpreter {
       if(!transferable(v)) fail(cat("process: аргумент типа ", types.describe(v), " не передаётся между процессами (только данные)"), db[a].where);
       vals.push_back(std::move(v));
     }
-    // background process - in the background band (step 12.3b); TZ_LANES = 0 - in the same (without streams)
-    if(on_bg_lane) fail("process(…) из фонового процесса — пока нельзя: процессы запускает программа (полосы, шаг 12.3b)", where);
+    // background process - in the background band (step 12.3b); TZ_LANES = 0 - in the same (without
+    // threads). Elaboration is the root of VM (adopt_elaboration): the process does not change the
+    // base, it can be started from the background process.
     static bool const lanes_wanted = !std::getenv("TZ_LANES") || std::string_view(std::getenv("TZ_LANES")) != "0";
-    interpreter * lane = lanes_wanted ? &bg_lane() : root;
+    interpreter * lane = lanes_wanted ? (on_bg_lane ? root : &bg_lane()) : root;
     interpreter * childp;
     uint32_t pid;
     {
-      code_write cw; // background: the process starts and elaborates (base changes)
+      lane_guard g(vm_lock); // process list - common to bands
       childp = &vm_root->procs.emplace_back(db, mod, std::vector<std::string>{"process"}, mode::run, std::nullopt, nullptr, lane);
       childp->jit = nullptr; // background: without machine code - it is replaced at secure points of the interpreter
       childp->background = true;
       childp->captured = captured;
-      if(lane != root) childp->elaborate(); // Here, not in its lane: elaboration changes the base
+      childp->adopt_elaboration(*vm_root);
       auto & meta = vm_root->proc_meta.emplace_back();
       meta.vm = childp;
       pid = uint32_t(vm_root->proc_meta.size() - 1);
     }
     interpreter & child = *childp;
-    if(lane == root) {
+    if(lane == root || on_bg_lane) { // fiber is in her turn.
       fiber_rec & f = child.new_fiber();
       f.entry = fname;
       f.entry_args = std::move(vals);
@@ -6152,7 +6199,7 @@ struct interpreter {
   }
 
   void process_main(fiber_rec & f) {
-    elaborate();
+    adopt_elaboration(*vm_root);
     auto it = functions.find(f.entry);
     call_site site{{}, std::string(str(f.entry)), 0, 0};
     flow r = dispatch_split(it->second, f.entry_args, 0, {}, globals, 0, site);
@@ -6425,14 +6472,16 @@ struct interpreter {
 // 
 // Not given - not dump, but "0 devices".
     // Gives a program: transmits an open stream; takes away - closes it (the process sees the end).
-    if(background && (n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create")) {
-      if(n.starts_with("file_")) fail_rt("io_error", cat(a.empty() || !a[0].is<str_v>() ? std::string("?") : a[0].as<str_v>().str(), ": нет файла — файловая система процессу не дана (ресурс даёт программа: передаёт поток)"), where);
+    // Program - what the author gave (TZ_GRANT); background process - nothing (program gives).
+    if((n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create") && !granted(n.starts_with("file_") ? "fs" : "net")) {
+      std::string_view who = background ? "процессу не дана (ресурс даёт программа: передаёт поток)" : "программе не дана (даёт пользователь: tz run --grant fs)";
+      if(n.starts_with("file_")) fail_rt("io_error", cat(a.empty() || !a[0].is<str_v>() ? std::string("?") : a[0].as<str_v>().str(), ": нет файла — файловая система ", who), where);
       ss.emplace_back();
       ss.back().net = true; // Network without devices: no one to listen to, nowhere to connect
       if(n == "net_connect") {
         ss.back().peers.push_back({-1});
         ss.back().peers[0].open = false;
-        deliver(ss.back(), make_event(0, "close", "сеть процессу не дана"));
+        deliver(ss.back(), make_event(0, "close", background ? "сеть процессу не дана" : "сеть программе не дана"));
       }
       return stream_value(ss.size() - 1);
     }
@@ -8306,7 +8355,7 @@ struct interpreter {
   // the editor. The internal ones (stream *, net *, * checked, file *) wrap prelude -
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
-      {"print", "(x)"}, {"process_class", "()"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
+      {"print", "(x)"}, {"process_class", "()"}, {"granted", "(вид)"}, {"read_floats", "(stdin)"}, {"range", "(n)"},
       {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
@@ -8370,6 +8419,10 @@ struct interpreter {
     }
     // process class (§9.5): monopoly - program (main band), background - process(…); parsing - run-time
     // (one parsing for both classes)
+    if(n == "granted" && a.size() == 1 && a[0].is<str_v>()) { // Whether the resource (fs, net) is available
+      bool g = granted(a[0].as<str_v>().view());
+      return checking() ? erase(value(g)) : value(g);
+    }
     if(n == "process_class" && a.empty()) {
       std::string k = background ? "фоновый" : "монопольный";
       return checking() ? erase(value(k)) : value(k);

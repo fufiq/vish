@@ -1,0 +1,18 @@
+// Resources are given and taken by the author on the go (debt step 12):
+// 
+// proc grant fs - granted("fs") is true, files are opened; proc revoke fs - open files are closed by the
+// external side, the program sees the end.
+// program: grants.tz
+proc start
+// expect: процесс запущен
+proc step 300
+// expect: жду файловую систему
+proc grant fs
+// expect: дано: fs
+proc step 4000
+// expect: кусок true
+proc revoke fs
+// expect: забрано: fs
+proc run
+// expect: поток закрыт: забрали
+// expect: завершён

@@ -425,9 +425,42 @@ bool cpu_list(char const * path, cpu_set_t & set) {
   }
   return any;
 }
+// ARM (big.LITTLE): the core has cpu_capacity; the most capacious are productive, the rest are
+// energy efficient. Everything is the same (or there is no information) - false.
+bool cpu_capacity_split(cpu_set_t & perf, cpu_set_t & eff) {
+  CPU_ZERO(&perf);
+  CPU_ZERO(&eff);
+  std::vector<std::pair<unsigned, unsigned>> caps; // (core, container)
+  for(unsigned c = 0; c < CPU_SETSIZE; ++c) {
+    int fd = ::open(cat("/sys/devices/system/cpu/cpu", c, "/cpu_capacity").c_str(), O_RDONLY | O_CLOEXEC);
+    if(fd < 0) {
+      if(c > 0 && caps.empty()) return false;
+      if(::access(cat("/sys/devices/system/cpu/cpu", c).c_str(), F_OK) != 0) break;
+      continue;
+    }
+    char buf[32];
+    ssize_t n = ::read(fd, buf, sizeof buf);
+    ::close(fd);
+    unsigned v = 0;
+    if(n > 0) std::from_chars(buf, buf + n, v);
+    caps.push_back({c, v});
+  }
+  unsigned top = 0;
+  for(auto [c, v]: caps) top = std::max(top, v);
+  bool any_eff = false;
+  for(auto [c, v]: caps) {
+    if(v == top) CPU_SET(c, &perf);
+    else {
+      CPU_SET(c, &eff);
+      any_eff = true;
+    }
+  }
+  return any_eff;
+}
 void pin_to(core_kind k) {
   cpu_set_t perf, eff;
-  if(!cpu_list("/sys/devices/cpu_core/cpus", perf) || !cpu_list("/sys/devices/cpu_atom/cpus", eff)) return;
+  bool intel = cpu_list("/sys/devices/cpu_core/cpus", perf) && cpu_list("/sys/devices/cpu_atom/cpus", eff);
+  if(!intel && !cpu_capacity_split(perf, eff)) return; // kernel of one kind - without binding
   ::sched_setaffinity(0, sizeof(cpu_set_t), k == core_kind::performance ? &perf : &eff); // flow
 }
 // host stream with its own stack (VM band): starts fn(arg); waits for it pthread_join

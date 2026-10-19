@@ -1,0 +1,32 @@
+// Процесс из фонового процесса (долг шага 12): 
+// Процесс берёт элаборацию корня VM — тот же код, те же итоги (ct-значения,
+// ct экземпляров), база не меняется, — поэтому его заводит и фоновая полоса; он идёт в ней же.
+// Ошибка вложенного — его исход, как у любого процесса.
+// machine
+// out: внутренний: фоновый 7
+// out: внутренний упал: индекс 3 вне границ массива размера 1
+// out: внешний готов
+// out: конец
+ct limit = 7;
+inner(to) => write(to, "внутренний: " + process_class() + " " + text(limit));
+broken(i64 k) {
+  xs = array{};
+  for(i : range(k)) xs.push(i);
+  print(xs[3]);
+}
+outer(to) {
+  p = process(inner, to);
+  wait(p);
+  q = process(broken, args.size);
+  if(!wait(q)) write(to, "внутренний упал: " + error(q));
+  write(to, "внешний готов");
+}
+main() {
+  s = stream();
+  p = process(outer, s);
+  print(read(s));
+  print(read(s));
+  print(read(s));
+  wait(p);
+  print("конец");
+}

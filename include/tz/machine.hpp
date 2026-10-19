@@ -323,6 +323,27 @@ struct process_machine {
     std::deque<host_peer> peers;
   };
   std::deque<host_rec> host; // by flow number (order addresses are stable)
+  // What the author gave (as in the interpreter, TZ_GRANT at launch): not part of the process - in the new VM gives
+  // it to the user; proc grant/revoke - on the go: took - streams of this kind are closed by the external side
+  std::set<std::string, std::less<>> grants = interpreter::granted_by_user();
+  bool machine_granted(std::string_view kind) const { return !st.fibers[st.current].proc && grants.contains(kind); }
+  void grant(std::string_view kind, bool give) {
+    if(give) {
+      grants.emplace(kind);
+      return;
+    }
+    grants.erase(std::string(kind));
+    uint8_t want = kind == "net" ? 3 : 0;
+    for(uint64_t sid = 0; sid < st.streams.size(); ++sid) {
+      m_stream & s = st.streams[sid];
+      bool hit = want ? s.host == want : (s.host == 1 || s.host == 2);
+      if(!hit || s.closed) continue;
+      close_host(sid);
+      s.closed = true; //  
+      for(uint32_t r: std::exchange(s.readers, {})) wake(r);
+      for(uint32_t w: std::exchange(s.writers, {})) wake(w);
+    }
+  }
   std::optional<os::uring> ring;
   uint32_t io_pending = 0; // nucleus
 
@@ -862,12 +883,14 @@ struct process_machine {
   // net *, file * - like an interpreter (io_op_call): creating and operating a host stream
   mval host_op(std::string_view n, std::vector<mval> const & a, span where) {
     auto str_arg = [&](std::size_t i) { return std::string(a[i].as<m_str>()); };
-    // Background process: host resources are only given (step 12.4, like the interpreter) - "0 devices"
-    if(fib().proc && (n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create")) {
-      if(n.starts_with("file_")) rt_fail("io_error", cat(a.empty() || !a[0].is<m_str>() ? std::string("?") : str_arg(0), ": нет файла — файловая система процессу не дана (ресурс даёт программа: передаёт поток)"), where);
+    // host resources are only given (step 12.4, like the interpreter): the background - nothing, the program
+    // - what the author gave (grants; proc grant / revoke - on the go); not given - "0 devices"
+    if((n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create") && !machine_granted(n.starts_with("file_") ? "fs" : "net")) {
+      std::string_view who = fib().proc ? "процессу не дана (ресурс даёт программа: передаёт поток)" : "программе не дана (даёт пользователь: tz run --grant fs)";
+      if(n.starts_with("file_")) rt_fail("io_error", cat(a.empty() || !a[0].is<m_str>() ? std::string("?") : str_arg(0), ": нет файла — файловая система ", who), where);
       st.streams.emplace_back(); // Network without devices: no one to listen to, nowhere to connect
       uint64_t sid = st.streams.size() - 1;
-      if(n == "net_connect") deliver(sid, event(0, "close", "сеть процессу не дана"));
+      if(n == "net_connect") deliver(sid, event(0, "close", fib().proc ? "сеть процессу не дана" : "сеть программе не дана"));
       return stream_value(sid);
     }
     if(n == "net_listen") {
@@ -2809,6 +2832,8 @@ struct process_machine {
     if(have < t.a) return push_eval(args[have], t.scope, t.frame);
     symbol name(t.b);
     if(helper.str(name) == "process_class" && t.a == 0) return finish(mval{std::string_view(fib().proc ? "фоновый" : "монопольный")});
+    if(helper.str(name) == "granted" && t.a == 1)
+      if(mval const & k = ref_of(fib().vals[t.base]); k.is<m_str>()) return finish(mval{machine_granted(std::string_view(k.as<m_str>()))});
     if(helper.str(name) == "is_index" && t.a == 2) { // massifless
       mval const & i = ref_of(fib().vals[t.base]);
       mval const & xs = ref_of(fib().vals[t.base + 1]);

@@ -223,6 +223,10 @@ struct vm_session {
       return out + proc->where_now();
     }
     if(sub == "where") return proc->where_now();
+    if((sub == "grant" || sub == "revoke") && args.size() == 2) { // "You give": resource on the move
+      proc->grant(args[1], sub == "grant");
+      return cat(sub == "grant" ? "дано: " : "забрано: ", args[1], "\n");
+    }
     if(sub == "pressure") { // external management:
       proc->pressure();
       return cat("давление: обработчиков ", proc->st.pressure.size(), "\n");
@@ -235,7 +239,7 @@ struct vm_session {
       std::size_t at = line.find("call");
       return probe(line.substr(at + 4));
     }
-    return cat("proc: start, step N, run, where, call <выражение>, pressure, stop\n");
+    return cat("proc: start, step N, run, where, call <выражение>, pressure, grant/revoke fs|net, stop\n");
   }
 
   // Sample - in a clone: fork host copies the VM as a whole (pages - a copy when writing), the clone disassembles
