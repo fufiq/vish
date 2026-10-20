@@ -697,6 +697,13 @@ program() => native "cpp" {
 prelude() => native "cpp" {
   return vm.code_value(editor_host->session.db.prelude);
 };
+// модуль базы по ключу (geo.vec); нет — пустой код
+module_of_key(str key) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  auto & db = editor_host->session.db;
+  auto it = db.strings.index.find(std::string((a[0]).as<str_v>().view()));
+  return vm.code_value(it == db.strings.index.end() ? node_id{} : find_module(db, it->second));
+};
 // функции VM, видимые программе: array{имя, параметры}
 vm_builtins() => native "cpp" {
   std::vector<value> xs;
@@ -2199,6 +2206,30 @@ entities(found, m, i64 depth) {
   }
   true
 }
+// сущности модулей прямых use модуля m (выборочный use k.{a, b} — только названные, §9.1)
+use_entities(found, m, i64 depth) {
+  for(u : code_items(m)) if(code_kind(u) == ast.use) {
+    ast.use{key, names} = u;
+    um = module_of_key(key);
+    if(given(um)) {
+      xs = array{};
+      entities(xs, um, depth);
+      for(x : xs) {
+        ok = names.size == 0;
+        for(nm : names) if(nm == x.name) ok = true;
+        if(ok) found.push(completion{x.name, x.kind, with_note(x.detail, "модуль " + key), x.depth});
+      }
+    }
+  }
+  0
+}
+// модуль по пути перед точкой (geo.vec. — его сущности); нет — пустой код
+module_before(i64 v, i64 dot) {
+  k = dot;
+  while((k > 0) && (ident_byte(lead(v, k - 1)) || (lead(v, k - 1) == '.'))) k -= 1;
+  path = text_of(v, k, dot);
+  if(path == "") code() else module_of_key(path)
+}
 // x = e объявляет, если имени ещё нет (решение автора: без auto); имя — или ""
 assigned_name(s) {
   r = "";
@@ -2243,7 +2274,10 @@ context_names(at) {
         ast.parameter{pn, _, _, _, _, _, _} = p;
         add_name(found, pn, "параметр", "блок конструкции", depth);
       }
-    } else if(kind == ast.module) entities(found, n, depth);
+    } else if(kind == ast.module) {
+      entities(found, n, depth);
+      use_entities(found, n, depth + 1);
+    }
     child = n;
     n = code_parent(n);
     depth += 1;
@@ -2402,9 +2436,12 @@ complete(i64 v, bool forced) {
   // после `.` — члены значения слева (по его типам во всех экземплярах); список — сразу на точке
   dot = (b > 0) && (lead(v, b - 1) == '.');
   if(!dot && (!forced && (word.size == 0))) return close_completion(v);
-  types = if(dot) object_types(v, b - 1) else array{};
-  if(dot && (types.size == 0)) return close_completion(v);
-  items = filtered(if(dot) member_names(types) else context_names(at), !dot, word);
+  pm = if(dot) module_before(v, b - 1) else code(); // geo.vec. — сущности модуля (имя названо путём)
+  types = if(dot && !given(pm)) object_types(v, b - 1) else array{};
+  if(dot && (!given(pm) && (types.size == 0))) return close_completion(v);
+  near = array{};
+  if(given(pm)) entities(near, pm, 0) else near = if(dot) member_names(types) else context_names(at);
+  items = filtered(near, !dot, word);
   // единственный вариант, совпадающий с набранным, — показывать нечего
   if((items.size == 0) || ((items.size == 1) && (items[0].name == word))) return close_completion(v);
   show_completion(v, items, b);
@@ -2445,15 +2482,65 @@ prelude_declarations(str name) {
   }
   found
 }
-// объявления имени: функции модуля программы (с внутренними) и прелюдии
-declarations(str name) {
+// Объявления имени, видимые в месте at: функции его модуля (с внутренними), модулей его прямых use
+// (use не транзитивен, выборочный use k.{a, b} — только названные; §9.1) и прелюдии; имя названо
+// путём (geo.vec.norm) — только того модуля. 
+//;.
+declarations(str name, at) {
   found = array{};
-  for(f : code_items(program())) if(code_kind(f) == ast.function) {
+  qm = qualified_module(at);
+  if(given(qm)) {
+    functions_in(found, qm, name);
+    return found;
+  }
+  m = place_module(at);
+  functions_in(found, m, name);
+  for(u : used_modules(m, name)) functions_in(found, u, name);
+  for(f : prelude_declarations(name)) found.push(f);
+  found
+}
+place_module(at) => if(given(at)) code_module(at) else program();
+functions_in(found, m, str name) {
+  if(!given(m)) return 0;
+  for(f : code_items(m)) if(code_kind(f) == ast.function) {
     ast.function{fname, _, _, _, _, _, _, _, _} = f;
     if(fname == name) found.push(f);
   }
-  for(f : prelude_declarations(name)) found.push(f);
-  found
+  0
+}
+// модули прямых use модуля m, которые дают имя name ("" — любое)
+used_modules(m, str name) {
+  r = array{};
+  if(!given(m) || (code_kind(m) != ast.module)) return r;
+  for(u : code_items(m)) if(code_kind(u) == ast.use) {
+    ast.use{key, names} = u;
+    gives = (name == "") || (names.size == 0);
+    for(x : names) if(x == name) gives = true;
+    if(gives) {
+      um = module_of_key(key);
+      if(given(um)) r.push(um);
+    }
+  }
+  r
+}
+// путь из имён (geo.vec) — модуль; иначе пустой код
+module_path(c) {
+  if(!given(c)) return "";
+  if(code_kind(c) == ast.name) return name_of(c);
+  inner = if(member_name(c) != "") module_path(member_object(c)) else "";
+  if(inner == "") "" else (inner + ".") + member_name(c)
+}
+// a.f, где a — путь модуля (geo.vec.norm): модуль; иначе пустой код
+qualified_module(c) {
+  if(!given(c) || (member_name(c) == "")) return code();
+  path = module_path(member_object(c));
+  if(path == "") code() else module_of_key(path)
+}
+// модуль, где объявлено (не модуль программы — подпись в списках)
+module_note(f) {
+  m = code_module(f);
+  if(!given(m) || in_prelude(f) || (code_id(m) == code_id(program()))) return "";
+  "модуль " + code_name(m)
 }
 // выбранные разбором — первыми (порядок прочих — как был)
 chosen_first(fns, chosen) {
@@ -2462,12 +2549,13 @@ chosen_first(fns, chosen) {
   for(f : fns) if(!has_code(chosen, f)) r.push(f);
   r
 }
-declaration_lines(lines, str name, chosen) {
+declaration_lines(lines, str name, chosen, place) {
   n = 0;
-  for(f : chosen_first(declarations(name), chosen)) if(n < 8) {
+  for(f : chosen_first(declarations(name, place), chosen)) if(n < 8) {
     n += 1;
     here = has_code(chosen, f);
     at = if(here) "выбрана здесь" else if(in_prelude(f)) "прелюдия" else if(is_inner(f)) "внутренняя" else "";
+    if(module_note(f) != "") at = with_note(at, module_note(f));
     lines.push(line{if(construction(f)) "форма" else "объявление", head_text(f) + (if(at == "") "" else "  — " + at), f, 0, 0});
     for(l : note_lead(f)) if(l != "") lines.push(line{"комментарий", l, code(), 0, 0});
   }
@@ -2520,7 +2608,7 @@ hover_at(i64 v, n) {
     else if(k == ast.call) name = name_of(callee_of(n));
     if(name != "") {
       call = if(k == ast.call) n else if(called) up else code();
-      declaration_lines(lines, name, if(given(call)) call_targets(call) else array{});
+      declaration_lines(lines, name, if(given(call)) call_targets(call) else array{}, if((k == ast.call) && given(callee_of(n))) callee_of(n) else n);
     }
   }
   show_hover(v, n, lines);
@@ -2562,7 +2650,7 @@ send_hint(i64 v) {
   while((b > 0) && ident_byte(ld[b - 1])) b -= 1;
   word = text_of(v, b, c);
   if((word.size > 0) && !((c < ld.size) && ident_byte(ld[c]))) {
-    for(f : declarations(word)) if(construction(f) && (lines.size < 6)) lines.push(line{"форма", head_text(f), f, 0, 0});
+    for(f : declarations(word, place_node(v, b))) if(construction(f) && (lines.size < 6)) lines.push(line{"форма", head_text(f), f, 0, 0});
     if(lines.size > 0) anchor = b;
   }
   // вызов вокруг курсора: скобки его аргументов
@@ -2590,8 +2678,8 @@ send_hint(i64 v) {
               }
             }
           }
-          name = name_of(callee);
-          for(f : chosen_first(declarations(name), call_targets(n))) if(lines.size < 6) lines.push(signature_line(f, name, arg));
+          name = if(member_name(callee) != "") member_name(callee) else name_of(callee);
+          for(f : chosen_first(declarations(name, callee), call_targets(n))) if(lines.size < 6) lines.push(signature_line(f, name, arg));
           if(lines.size > 0) anchor = range_from(v, ck);
           done = true;
         }
@@ -2638,7 +2726,7 @@ rule_for(n) {
   callee = callee_of(n);
   if(!given(callee) || (code_kind(callee) != ast.name)) return rule{code(), "", array{}};
   ast.call{_, args, words, _, _, _, _} = n;
-  for(f : chosen_first(declarations(name_of(callee)), call_targets(n))) if(construction(f)) {
+  for(f : chosen_first(declarations(name_of(callee), callee), call_targets(n))) if(construction(f)) {
     ast.function{_, ps, _, _, _, _, _, _, _} = f;
     // аргументы — параметрам по порядку внутри головы и каждой клаузы
     clauses = array{};
@@ -2857,10 +2945,10 @@ send_marks(i64 v) {
 // Ctrl+P — то же по набранной сигнатуре. Добавленная — внутренний элемент модуля, открывается во
 // второй панели.
 
-// перегрузки имени: модуль программы (с внутренними) и прелюдия, без записей syntax
-overloads(str name) {
+// перегрузки имени, видимые в месте at (модуль, его use, прелюдия), без записей syntax
+overloads(str name, at) {
   found = array{};
-  for(f : declarations(name)) if(!is_record(f)) found.push(f);
+  for(f : declarations(name, at)) if(!is_record(f)) found.push(f);
   found
 }
 signature(f) {
@@ -2927,19 +3015,20 @@ goto_call(i64 v) {
   ast.call{callee, given_args, _, _, _, _, _} = call;
   args = array{};
   name = name_of(callee);
-  if(code_kind(callee) != ast.name) { // a.f(b) ≡ f(a, b) (§4.5)
+  if(code_kind(callee) != ast.name) { // a.f(b) ≡ f(a, b) (§4.5); geo.vec.norm(b) — имя модуля
     name = member_name(callee);
-    args.push(member_object(callee));
+    if(!given(qualified_module(callee))) args.push(member_object(callee));
   }
   for(x : given_args) args.push(x);
   chosen = call_targets(call);
   items = array{};
   targets = array{};
-  fns = chosen_first(overloads(name), chosen);
+  fns = chosen_first(overloads(name, callee), chosen);
   for(f : fns) {
     detail = if(has_code(chosen, f)) "выбрана здесь" else "";
     if(is_inner(f)) detail = with_note(detail, "внутренняя");
     if(in_prelude(f)) detail = with_note(detail, "прелюдия");
+    if(module_note(f) != "") detail = with_note(detail, module_note(f));
     items.push(completion{signature(f), "перегрузка", detail, 0});
     targets.push(array{f, ""});
   }
@@ -2999,7 +3088,7 @@ goto_sig(i64 v, str sig) {
       from = to + 1;
     }
   }
-  fns = overloads(name);
+  fns = overloads(name, views[v].root);
   if(typed) { // точные, потом подходящие, потом прочие — порядок внутри — как был
     sorted = array{};
     for(f : fns) if(exact(f, types)) sorted.push(f);
@@ -3012,6 +3101,7 @@ goto_sig(i64 v, str sig) {
   for(f : fns) {
     detail = if(typed && exact(f, types)) "точно" else if(typed && accepts(f, types)) "подходит" else "";
     if(is_inner(f)) detail = with_note(detail, "внутренняя");
+    if(module_note(f) != "") detail = with_note(detail, module_note(f));
     items.push(completion{signature(f), "перегрузка", detail, 0});
     targets.push(array{f, ""});
   }
@@ -3039,7 +3129,7 @@ add_overload(str sig) {
     from = to + 1;
   }
   names = array{};
-  for(f : overloads(name)) if(names.size == 0) {
+  for(f : overloads(name, program())) if(names.size == 0) {
     ast.function{_, ps, _, _, _, _, _, _, _} = f;
     if(ps.size == types.size) for(p : ps) {
       ast.parameter{pn, _, _, _, _, _, _} = p;

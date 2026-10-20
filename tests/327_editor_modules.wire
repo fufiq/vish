@@ -1,0 +1,25 @@
+// Modules in the editor (§9.1);
+// 
+// Visible in place - its module, modules of its direct use (non-transitive) and prelude: guidance,
+// transition and addition know the functions of use geo.vec.
+// program: 95_modules.tz
+open_view module
+// guidance: selected in instance - module function
+hover 1 @norm2:2
+// expect: kind="объявление" text="norm2(v2 a)  — выбрана здесь, модуль geo.vec"
+// expect: kind="объявление" text="norm2(i64 n)"
+// F12: overload from the module is - "Add norm2(v2)" is not necessary
+pointer 1 @norm2:2 0 1
+key 1 F12
+// expect: items=⏎  name="norm2(v2 a)" kind="перегрузка" detail="выбрана здесь, модуль geo.vec"⏎  name="norm2(i64 n)" kind="перегрузка" detail=""
+// expect-not: добавить
+// Enter - Module function in the second panel
+key 1 Enter
+// expect: kind="fn"
+// expect: текст:⏎norm2(v2 a) => dot(a, a);
+key 2 Escape
+// Module names are closer to prelude
+pointer 1 @print:1 0 0
+key 1 s
+key 1 c
+// expect: items=⏎  name="scale" kind="функция" detail="(a, k), модуль geo.vec"

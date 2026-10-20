@@ -1,0 +1,24 @@
+// Qualified names in the editor (§9.1): geo.inner.sq(…) is a function of the module named by the path, without
+// use; transition and hover take the ads only of this module, after `geo.inner.` the addition is its entity.
+//
+// program: 292_module_qualified.tz
+open_view module
+hover 1 @sq:1
+// expect: kind="объявление" text="sq(i64 x)  — выбрана здесь, модуль geo.inner"
+pointer 1 @sq:1 1 2
+key 1 F12
+// expect: items=⏎  name="sq(i64 x)" kind="перегрузка" detail="выбрана здесь, модуль geo.inner"
+key 1 Escape
+pointer 1 @print:2 0 0
+key 1 g
+key 1 e
+key 1 o
+key 1 .
+key 1 i
+key 1 n
+key 1 n
+key 1 e
+key 1 r
+key 1 .
+// expect: курсор:   geo.inner.‸print(geo.inner.sq(3));
+// expect: items=⏎  name="sq" kind="функция" detail="(x)"
