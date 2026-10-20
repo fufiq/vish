@@ -380,20 +380,170 @@ struct editor_server {
   }
   std::string_view note_of_hole(node_id n) const { return session.db.is<n_hole>(n) ? std::string_view(session.db.as<n_hole>(n).reason) : std::string_view(); }
 
+  // Printed: node in order of printing (root first) with chunks and places of module elements; with which
+  // module draft printed (elements [group_at, group_at + group_count]; -1 - without).
+  struct printed {
+    std::vector<node_layout> ls;
+    std::vector<uint32_t> chunk_at, content_at;
+    uint32_t items_end = 0, draft_begin = 0, draft_end = 0;
+    int64_t group_at = 0, group_count = -1;
+  };
+
   // The layout (struct layout of the editor module): the root, the module (otherwise one function),
   // projection, the draft module - elements [g_at, g_at + g_count ) text as typed (g_count -1 - no), the
   // draft function - its text as typed (fn_source -1 - no).
   value print_view(interpreter & vm, node_id root, bool module, node_id projection, int64_t g_at, int64_t g_count, int64_t g_source, int64_t fn_source) {
     auto const & db = session.db;
-    std::vector<node_layout> ls;
+    printed p;
     // The presentation of the module does not show the internal elements - "not littering"
     printer pr(db, module ? printer::filter([&](node_id n) { return !is_inner(n); }) : printer::filter{});
-    pr.layouts = &ls;
+    pr.layouts = &p.ls;
     pr.projection = projection;
     printer::verbatim_group group{uint32_t(g_at), uint32_t(std::max<int64_t>(g_count, 0)), uint32_t(g_source)};
     if(module && g_count >= 0) pr.draft = &group;
     if(!module && fn_source >= 0 && db[root].where.source == uint32_t(fn_source)) pr.verbatim(root, db.source(uint32_t(fn_source)), true);
     else pr.print(root);
+    p.chunk_at = std::move(pr.chunk_at);
+    p.content_at = std::move(pr.content_at);
+    p.items_end = pr.items_end;
+    p.draft_begin = pr.draft_begin;
+    p.draft_end = pr.draft_end;
+    if(module && g_count >= 0) {
+      p.group_at = g_at;
+      p.group_count = g_count;
+    }
+    return layout_value(vm, p);
+  }
+
+  // Draft module after editing - print only its area and paste in the former layout lay (printed with a
+  // draft [at, at + old_count ), its elements - old):
+// 
+// The rest of the module is not printed: its pieces are the same, places
+  // They're moving. Pieces of the root are glued together like a printer (the text between children is one piece).
+  value print_splice(interpreter & vm, value const & lay, node_id root, int64_t at, node_list const & old, int64_t count, int64_t source, span where) {
+    auto const & db = session.db;
+    auto ints = [&](std::string_view f) -> array_v const & { return field(lay, f, where).as<array_v>(); };
+    auto const & nodes = ints("nodes");
+    auto const & first = ints("first");
+    auto const & pcount = ints("count");
+    auto const & pchild = ints("pchild");
+    auto const & pbyte = ints("pbyte");
+    auto const & from = ints("from");
+    auto const & to = ints("to");
+    auto const & byte = ints("byte");
+    std::string_view ptext = field(lay, "ptext", where).as<str_v>().view();
+    uint32_t m = nodes.size();
+    std::vector<node_layout> was(m);
+    std::unordered_map<uint32_t, uint32_t> idx;
+    idx.reserve(m * 2);
+    for(uint32_t k = 0; k < m; ++k) {
+      was[k].node = node_id(uint32_t(nodes.get(k).as<int64_t>()));
+      idx[was[k].node.value] = k;
+      int64_t f = first.get(k).as<int64_t>(), c = pcount.get(k).as<int64_t>();
+      for(int64_t j = f; j < f + c; ++j) {
+        int64_t ch = pchild.get(uint32_t(j)).as<int64_t>();
+        if(ch >= 0) was[k].pieces.push_back(node_id(uint32_t(ch)));
+        else {
+          int64_t b = pbyte.get(uint32_t(j)).as<int64_t>(), e = pbyte.get(uint32_t(j + 1)).as<int64_t>();
+          was[k].pieces.push_back(std::string(ptext.substr(std::size_t(b), std::size_t(e - b))));
+        }
+      }
+    }
+    // the draft area again: only the text of the set
+    printed p;
+    std::vector<node_layout> part;
+    printer pr(db);
+    pr.layouts = &part;
+    printer::verbatim_group group{uint32_t(at), uint32_t(count), uint32_t(source)};
+    pr.draft = &group;
+    std::string region = pr.print_draft_group(root);
+    uint32_t ob = uint32_t(field(lay, "draft_begin", where).as<int64_t>()), oe = uint32_t(field(lay, "draft_end", where).as<int64_t>());
+    // snippets of the root: to the area, (area), after - bytes of the former text; children - places of their text
+    std::vector<piece> pieces;
+    auto add = [&](piece pc) {
+      if(auto const * t = std::get_if<std::string>(&pc)) {
+        if(t->empty()) return;
+        if(!pieces.empty())
+          if(auto * prev = std::get_if<std::string>(&pieces.back())) {
+            *prev += *t;
+            return;
+          }
+      }
+      pieces.push_back(std::move(pc));
+    };
+    std::vector<piece> after;
+    uint32_t pos = 0, b0 = 0, b1 = 0;
+    bool mid_seen = false, post_seen = false;
+    for(auto const & pc: was.empty() ? std::vector<piece>{} : was[0].pieces) {
+      if(auto const * t = std::get_if<std::string>(&pc)) {
+        uint32_t b = pos, e = pos + uint32_t(t->size());
+        if(b < ob) add(t->substr(0, std::min(e, ob) - b));
+        if(e > oe) after.push_back(t->substr(std::max(b, oe) - b));
+        pos = e;
+        continue;
+      }
+      node_id c = std::get<node_id>(pc);
+      uint32_t k = idx.at(c.value);
+      uint32_t len = uint32_t(byte.get(uint32_t(to.get(k).as<int64_t>())).as<int64_t>() - byte.get(uint32_t(from.get(k).as<int64_t>())).as<int64_t>());
+      if(std::ranges::contains(old, c)) {
+        if(!mid_seen) b0 = k;
+        mid_seen = true;
+      } else if(pos < ob || (pos == ob && !mid_seen && len == 0)) add(c);
+      else {
+        if(!post_seen) b1 = k;
+        post_seen = true;
+        after.push_back(c);
+      }
+      pos += len;
+    }
+    if(!post_seen) b1 = m;
+    if(!mid_seen) b0 = b1;
+    for(auto const & pc: part.empty() ? std::vector<piece>{} : part[0].pieces) add(pc);
+    for(auto & pc: after) add(std::move(pc));
+    // node: root, before the region, after
+    p.ls.reserve(m + part.size());
+    p.ls.push_back({root, std::move(pieces)});
+    for(uint32_t k = 1; k < b0; ++k) p.ls.push_back(std::move(was[k]));
+    for(std::size_t k = 1; k < part.size(); ++k) p.ls.push_back(std::move(part[k]));
+    for(uint32_t k = b1; k < m; ++k) p.ls.push_back(std::move(was[k]));
+    // places of module elements: draft elements - without their place, after the area - with a shift
+    int64_t shift = int64_t(region.size()) - int64_t(oe - ob);
+    auto moved = [&](array_v const & xs) {
+      std::vector<uint32_t> out;
+      for(uint32_t k = 0; k < xs.size(); ++k) {
+        if(k == uint32_t(at)) out.insert(out.end(), std::size_t(count), ~uint32_t{0});
+        if(k >= uint32_t(at) && k < uint32_t(at) + uint32_t(old.size())) continue;
+        int64_t x = xs.get(k).as<int64_t>();
+        out.push_back(x < 0 ? ~uint32_t{0} : uint32_t(x >= int64_t(oe) ? x + shift : x));
+      }
+      if(xs.size() <= uint32_t(at)) out.insert(out.end(), std::size_t(count), ~uint32_t{0});
+      return out;
+    };
+    p.chunk_at = moved(ints("chunk_at"));
+    p.content_at = moved(ints("content_at"));
+    int64_t items_end = field(lay, "items_end", where).as<int64_t>();
+    p.items_end = uint32_t(items_end >= int64_t(oe) ? items_end + shift : items_end);
+    p.draft_begin = ob;
+    p.draft_end = uint32_t(ob + region.size());
+    p.group_at = at;
+    p.group_count = count;
+    return layout_value(vm, p);
+  }
+  // Reconciliation of the paste with full seal (TZ_SPLICE_CHECK = 1): discrepancy - field and output.
+  void splice_check(interpreter & vm, value const & spliced, value const & full) {
+    auto const & a = spliced.as<agg_v>().fields;
+    auto const & b = full.as<agg_v>().fields;
+    for(uint32_t k = 0; k < a.size() && k < b.size(); ++k)
+      if(vm.show_v(a[k].second) != vm.show_v(b[k].second)) {
+        put(stderr, cat("вклейка черновика расходится с печатью: поле ", session.db.strings.text(a[k].first), "\n  вклейка: ", vm.show_v(a[k].second).substr(0, 400), "\n  печать:  ", vm.show_v(b[k].second).substr(0, 400), "\n"));
+        std::abort();
+      }
+  }
+
+  // Structure layout of the editor module (fields - in order of announcement).
+  value layout_value(interpreter & vm, printed const & p) {
+    auto const & db = session.db;
+    auto const & ls = p.ls;
     uint32_t m = uint32_t(ls.size());
     std::unordered_map<uint32_t, uint32_t> at;
     at.reserve(m * 2);
@@ -479,8 +629,8 @@ struct editor_server {
       order.push(value(int64_t(k)));
     }
     auto place = [](uint32_t x) { return value(x == ~uint32_t{0} ? int64_t(-1) : int64_t(x)); };
-    for(uint32_t x: pr.chunk_at) chunk_at.push(place(x));
-    for(uint32_t x: pr.content_at) content_at.push(place(x));
+    for(uint32_t x: p.chunk_at) chunk_at.push(place(x));
+    for(uint32_t x: p.content_at) content_at.push(place(x));
     // fields - in order of struct layout announcement (lib/editor.tz)
     agg_v out{vm.types.named("layout"), {}};
     auto put = [&](std::string_view name, value x) { out.fields.push_back({vm.sym(name), std::move(x)}); };
@@ -507,9 +657,11 @@ struct editor_server {
     put("order", value(std::move(order)));
     put("chunk_at", value(std::move(chunk_at)));
     put("content_at", value(std::move(content_at)));
-    put("items_end", value(int64_t(pr.items_end)));
-    put("draft_begin", value(int64_t(pr.draft_begin)));
-    put("draft_end", value(int64_t(pr.draft_end)));
+    put("items_end", value(int64_t(p.items_end)));
+    put("draft_begin", value(int64_t(p.draft_begin)));
+    put("draft_end", value(int64_t(p.draft_end)));
+    put("group_at", value(p.group_at));
+    put("group_count", value(p.group_count));
     return value(std::move(out));
   }
 

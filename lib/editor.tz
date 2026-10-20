@@ -51,6 +51,8 @@ struct layout {
   i64 items_end;    // конец элементов (до комментариев конца модуля)
   i64 draft_begin;  // текст черновика [draft_begin, draft_end)
   i64 draft_end;
+  i64 group_at;     // напечатано с черновиком модуля: элементы [group_at, group_at + group_count); -1 — без
+  i64 group_count;
 }
 // Черновик (решение автора 2026-10-12): элементы модуля, которые правят, — текстом ровно как
 // набран; в представлении функции — она сама.
@@ -132,6 +134,22 @@ print_view(root, bool as_module, projection, i64 at, i64 count, i64 source, i64 
   for(auto & x: a)
     if(!x.known()) return erase(value(array_v::of({})));
   return editor_host->print_view(vm, vm.code_node(a[0], where), (a[1]).as<bool>(), editor_host->node_or_none(vm, a[2], where), (a[3]).as<int64_t>(), (a[4]).as<int64_t>(), (a[5]).as<int64_t>(), (a[6]).as<int64_t>());
+};
+// Черновик модуля правлен на месте: печать только его области (элементы [at, at + count) текстом
+// как набран, source) и вклейка в прежнюю раскладку lay, напечатанную с черновиком из элементов old.
+// TZ_SPLICE_CHECK=1 — сверка с полной печатью.
+print_splice(layout lay, root, projection, i64 at, old, i64 count, i64 source) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  node_list old;
+  for(uint32_t k = 0; k < (a[4]).as<array_v>().size(); ++k) old.push_back(vm.code_node((a[4]).as<array_v>().get(k), where));
+  node_id root = vm.code_node(a[1], where);
+  int64_t at = (a[3]).as<int64_t>(), count = (a[5]).as<int64_t>(), source = (a[6]).as<int64_t>();
+  value r = s.print_splice(vm, a[0], root, at, old, count, source, where);
+  static bool const check = std::getenv("TZ_SPLICE_CHECK");
+  if(check) s.splice_check(vm, r, s.print_view(vm, root, true, s.node_or_none(vm, a[2], where), at, count, source, -1));
+  return r;
 };
 // черновик: текст элементов модуля [at, at + old.size) (или функции root) разобрать и поставить в
 // базу; итог — array{элементы, импорт текста, пустые строки, комментарии конца, переразобранные}
@@ -711,7 +729,20 @@ record_parts(str t) => native "cpp" {
   for(auto const & [name, tn]: type_registry::record_parts((a[0]).as<str_v>().view())) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(tn))})));
   return value(array_v::of(std::move(xs)));
 };
-// место в упорядоченном массиве целых: первое, не меньшее x (двоичный поиск — примитив базы)
+// место в упорядоченном массиве: первое, не меньшее x (двоичный поиск — примитив базы); строки —
+// по байтам
+lower_bound(xs, str x) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto const & xs = (a[0]).as<array_v>();
+  auto x = (a[1]).as<str_v>().view();
+  uint32_t lo = 0, hi = xs.size();
+  while(lo < hi) {
+    uint32_t mid = (lo + hi) / 2;
+    if(xs.get(mid).as<str_v>().view() < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return value(int64_t(lo));
+};
 lower_bound(xs, i64 x) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
   auto const & xs = (a[0]).as<array_v>();
@@ -767,7 +798,7 @@ sorted_indices(keys) => native "cpp" {
 };
 
 // --- представления: найти, открыть, закрыть -------------------------------------------------
-empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0};
+empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0, 0, -1};
 empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}};
 new_view(i64 peer, i64 id, root, str kind) => view{peer, id, root, kind, "", code(), empty_layout(), 0, -1, -1, false, false, false, false, array{}, 0, 0, array{}, empty_draft(), array{}, array{}, array{}, array{}};
 // представление клиента, чьё сообщение обслуживается, по его номеру; -1 — нет (или закрыто);
@@ -888,7 +919,19 @@ group_at(i64 v) {
   k
 }
 // Напечатать представление заново (курсор — в начало: место ставит тот, кто печатает).
-relayout(i64 v) {
+relayout(i64 v) => relayout_from(v, array{}, false);
+// Черновик правлен на месте (old — его элементы до правки): если прежняя раскладка напечатана с
+// ним же, печатается только его область —  
+// иначе — представление целиком.
+relayout_from(i64 v, old, bool in_place) {
+  if(in_place && ((views[v].kind == "module") && (views[v].d.open && (views[v].lay.group_count == old.size)))) {
+    at = group_at(v);
+    if(views[v].lay.group_at == at) {
+      views[v].lay = print_splice(views[v].lay, views[v].root, views[v].projection, at, old, views[v].d.items.size, views[v].d.source);
+      views[v].cursor = 0;
+      return 0;
+    }
+  }
   as_module = views[v].kind == "module";
   count = if(views[v].d.open && as_module) views[v].d.items.size else -1;
   at = if(count >= 0) group_at(v) else 0;
@@ -1337,6 +1380,7 @@ draft_edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
 // сохраняются); разослать раскладку. from, to — места черновика до правки.
 commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) {
   at = if(views[v].kind == "module") group_at(v) else 0;
+  old = views[v].d.items;
   array{ids, source, blank, rest, reparsed} = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
   views[v].d.items = ids;
   views[v].d.source = source;
@@ -1344,7 +1388,7 @@ commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) {
   views[v].d.blank = blank;
   views[v].d.rest = rest;
   close_traces();
-  broadcast(v, from, to, caret_at, reparsed);
+  broadcast(v, from, to, caret_at, reparsed, old);
   hint.valid = false;
   schedule_check();
 }
@@ -1383,7 +1427,18 @@ narrowest(i64 w, nodes, order, sig, sub, x) {
 // Новая раскладка всем представлениям. Автору (av, черновик) — курсор на caret_at байт от начала
 // черновика; изменилось только внутри черновика — обновления его элементов, иначе — модуль
 // целиком. Остальным — курсор на том же месте узла.
-broadcast(i64 av, i64 old_from, i64 old_to, i64 caret_at, reparsed) {
+// Правка изменила только текст черновика v: ничего вне его не переразобрано и не изменено
+// элаборацией (откат мутаций ct-кода, §7.4), расширений по ссылке на его функции нет (расширение
+// печатает имя и сигнатуру цели).
+draft_only(i64 v, reparsed) {
+  if((reparsed.size > 0) || (changed_nodes(false).size > 0)) return false;
+  for(e : fn_extensions()) for(x : views[v].d.items) if(within(e[1], x)) return false;
+  true
+}
+// old — элементы черновика автора до правки (его раскладка — вклейкой, если правка не вышла за
+// черновик)
+broadcast(i64 av, i64 old_from, i64 old_to, i64 caret_at, reparsed, old) {
+  in_place = draft_only(av, reparsed);
   tops = views[av].d.items; // правленые элементы и переразобранные — их раскладки до правки
   for(x : reparsed) {
     inside = false;
@@ -1403,7 +1458,7 @@ broadcast(i64 av, i64 old_from, i64 old_to, i64 caret_at, reparsed) {
     oe = if(mine && (nb > 0)) views[w].lay.byte[lesser(old_to, nb - 1)] else 0;
     array{kn, kp, ko} = caret_of(w, views[w].cursor);
     keep_byte = byte_of(w, views[w].cursor);
-    relayout(w);
+    relayout_from(w, old, mine && in_place);
     if(mine) {
       start = if(views[w].kind == "module") views[w].lay.draft_begin else 0;
       views[w].cursor = lesser(place_of_byte(w, start + caret_at), end_of(w));
@@ -2082,10 +2137,10 @@ add_name(found, str name, str kind, str detail, i64 depth) {
   true
 }
 // ближнее объявление скрывает дальнее (найдено раньше — ближе); функция того же уровня —
-// «перегрузки». Порядок — по имени, затем по порядку находки: один проход
+// «перегрузки». Порядок — по имени, затем по порядку находки (сортировка устойчивая): один проход
 uniq(found) {
   keys = array{};
-  for(k : range(found.size)) keys.push(((found[k].name + "\n") + digits3(k / 1000)) + digits3(k % 1000));
+  for(x : found) keys.push(x.name);
   kept = array{};
   for(k : sorted_indices(keys)) {
     x = found[k];
@@ -2175,24 +2230,30 @@ context_names(at) {
 }
 // Прелюдия и функции VM — дальше любого места программы (глубина 900): не меняются — без повторов и
 // в нижнем регистре один раз.: что не
-// меняется, не считается заново — запомнено в состоянии сервиса.
+// меняется, не считается заново — запомнено в состоянии сервиса: имена, нижний регистр, хвост ключа
+// порядка (глубина, имя).
 outer_known = false;
 outer_found = array{};
 outer_low = array{};
-outer_names() {
-  if(outer_known) return outer_found;
+outer_tail = array{};
+outer_ready() {
+  if(outer_known) return 0;
   found = array{};
   entities(found, prelude(), 900);
   for(b : vm_builtins()) add_name(found, b[0], "функция", b[1] + " — VM", 901);
   outer_found = uniq(found);
-  for(x : outer_found) outer_low.push(lower(x.name));
+  for(x : outer_found) {
+    outer_low.push(lower(x.name));
+    outer_tail.push(digits3(x.depth) + x.name);
+  }
   outer_known = true;
-  outer_found
+  0
 }
-outer_lower() {
-  outer_names();
-  outer_low
-}
+// Подошедшие к слову (нижний регистр) имена прелюдии и VM — их номера. Слово выросло из прежнего —
+// подходящие к нему среди подходивших к прежнему (префикс, подстрока и подпоследовательность
+// сохраняются у начала слова).
+outer_word = "";
+outer_hits = array{};
 // имя в список членов: без повторов
 add_member(found, str name, str kind, str detail, i64 depth) {
   for(x : found) if(x.name == name) return false;
@@ -2265,29 +2326,34 @@ rank(str n, str w) {
 // узлы АСТ (struct программы, порождены из VM) — только по набранному префиксу: они нужны
 // коду, который работает с кодом, остальным — шум (*моё*)
 shown(x, str n, str w) => !((x.kind == "тип") && (core_node_kind(x.name) && ((w.size == 0) || (find_text(n, w) != 0))));
-// подходящие: kept — варианты, keys — порядок (ранг, глубина, имя)
-take(kept, keys, x, str n, str w) {
+// подходящие: kept — варианты, keys — порядок (ранг, глубина, имя: tail — глубина и имя)
+take(kept, keys, x, str n, str w, str tail) {
   r = rank(n, w);
   if((r >= 0) && shown(x, n, w)) {
     kept.push(x);
-    keys.push((text(r) + digits3(x.depth)) + x.name);
+    keys.push(text(r) + tail);
   }
-  true
+  r >= 0
 }
 // near — имена места (ближе); far — и прелюдия с VM; одноимённое дальнее скрыто ближним
 filtered(near, bool far, str word) {
   w = lower(word);
   kept = array{};
   keys = array{};
-  for(x : near) take(kept, keys, x, lower(x.name), w);
+  for(x : near) take(kept, keys, x, lower(x.name), w, digits3(x.depth) + x.name);
   if(far) {
-    names = outer_names();
-    low = outer_lower();
-    for(k : range(names.size)) take(kept, keys, names[k], low[k], w);
+    outer_ready();
+    hits = array{};
+    if((outer_word != "") && starts_with(w, outer_word)) {
+      for(k : outer_hits) if(take(kept, keys, outer_found[k], outer_low[k], w, outer_tail[k])) hits.push(k);
+    } else for(k : range(outer_found.size)) if(take(kept, keys, outer_found[k], outer_low[k], w, outer_tail[k])) hits.push(k);
+    outer_word = w;
+    outer_hits = hits;
   }
-  // повторы имён среди подошедших: остаётся ближний (по имени, затем по глубине)
+  // повторы имён среди подошедших: остаётся ближний (по имени, затем по глубине; сортировка
+  // устойчивая — при равных по порядку находки)
   by_name = array{};
-  for(k : range(kept.size)) by_name.push((((kept[k].name + "\n") + digits3(kept[k].depth)) + digits3(k / 1000)) + digits3(k % 1000));
+  for(x : kept) by_name.push((x.name + "\n") + digits3(x.depth));
   hidden = array{};
   for(k : range(kept.size)) hidden.push(false);
   last = "";
@@ -2329,18 +2395,32 @@ complete(i64 v, bool forced) {
 // текст. *Моё:* состав строк.
 struct line { str kind; str text; code node; i64 from; i64 to; }
 
-// объявления имени в прелюдии: не меняются — один раз на имя (запомнено в состоянии сервиса)
-decl_names = array{};
-decl_found = array{};
+// Функции прелюдии по имени: не меняются — указатель строится один раз (имена по возрастанию,
+// сортировка устойчивая — одноимённые в порядке объявления), имя — двоичным поиском
+prelude_fns = array{};
+prelude_fn_names = array{};
+prelude_fn_order = array{};
+prelude_indexed = false;
 prelude_declarations(str name) {
-  for(k : range(decl_names.size)) if(decl_names[k] == name) return decl_found[k];
-  found = array{};
-  for(f : code_items(prelude())) if(code_kind(f) == ast.function) {
-    ast.function{fname, _, _, _, _, _, _, _, _} = f;
-    if(fname == name) found.push(f);
+  if(!prelude_indexed) {
+    names = array{};
+    for(f : code_items(prelude())) if(code_kind(f) == ast.function) {
+      ast.function{fname, _, _, _, _, _, _, _, _} = f;
+      prelude_fns.push(f);
+      names.push(fname);
+    }
+    for(k : sorted_indices(names)) {
+      prelude_fn_names.push(names[k]);
+      prelude_fn_order.push(k);
+    }
+    prelude_indexed = true;
   }
-  decl_names.push(name);
-  decl_found.push(found);
+  found = array{};
+  k = lower_bound(prelude_fn_names, name);
+  while((k < prelude_fn_names.size) && (prelude_fn_names[k] == name)) {
+    found.push(prelude_fns[prelude_fn_order[k]]);
+    k += 1;
+  }
   found
 }
 // объявления имени: функции модуля программы (с внутренними) и прелюдии

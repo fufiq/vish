@@ -1,7 +1,7 @@
 #!/bin/sh
 # Complete check before the committ: three assemblies - simultaneously (code generation each -
 # on the cores, -flto=auto), tests of the mode - immediately upon the readiness of its assembly.
-#   ./check.sh          — release, debug, asan + --a64, TZ_JIT_SELF, проекция, редактор
+#   ./check.sh          — release, debug (со сверкой вклейки TZ_SPLICE_CHECK), asan + --a64, TZ_JIT_SELF, проекция, редактор
 # ./check.sh Quick - Release only and its tests
 # ./check.sh full - as without a key, plus TZ_JIT_SELF under asan (≈7.5 min) Exit code
 # 0 - all green. Logs - out/check/. Working out/tz - release.
@@ -28,7 +28,11 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
   if [ "$m" = asan ] && [ "$FULL" = 1 ]; then # full: самокомпиляция и под asan (≈5 мин) — стек VM, не хоста
     TZ_JIT_SELF=1 suite self_asan $L/t_self_asan.log $b test tests &
   fi
-  suite "$m" $L/t_$m.log $b test tests
+  if [ "$m" = debug ]; then # вклейка черновика редактора сверяется с полной печатью на каждой клавише
+    TZ_SPLICE_CHECK=1 suite "$m" $L/t_$m.log $b test tests
+  else
+    suite "$m" $L/t_$m.log $b test tests
+  fi
   wait
   if [ "$m" = release ]; then
     cp $b out/tz

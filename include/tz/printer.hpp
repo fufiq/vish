@@ -1378,6 +1378,16 @@ struct printer {
     out += src.substr(pos);
   }
 
+  // Only the text of the module draft (paste in the previous layout): the root is the module, its
+  // pieces are the typed text and draft elements.
+  std::string print_draft_group(node_id module) {
+    out.clear();
+    enter(module);
+    verbatim_group_text(db.as<n_module>(module).items);
+    leave();
+    return out;
+  }
+
   // The knot is typed: a piece of it between children is as written; children without their
   // place in this text (born parsing) are not shown separately. whole - your node text - all
   // typed text (root of the function representation).
