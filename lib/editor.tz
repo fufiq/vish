@@ -404,33 +404,10 @@ call_targets(c) => native "cpp" {
     for(uint32_t f: it->second) xs.push_back(vm.code_value(node_id(f)));
   return value(array_v::of(std::move(xs)));
 };
-// голова объявления — проекция без тела: when(c, expr yes) otherwise(expr no)
-head_text(f) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  return value(editor_host->head_text(vm.code_node(a[0], where)));
-};
-// типы (и значения) узла и имени в его области — по всем экземплярам; пусто — неизвестно
+// у узла есть типы (наблюдения разбора хоть в одном экземпляре)
 has_types(n) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
   return value(editor_host->session.node_types.contains(vm.code_node(a[0], where).value));
-};
-shown_node(n) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  return value(editor_host->shown_node(vm.code_node(a[0], where)));
-};
-shown_name(n, str name) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  auto & s = *editor_host;
-  return value(s.shown_name(s.scope_of(vm.code_node(a[0], where)), s.session.db.strings.intern((a[1]).as<str_v>().view())));
-};
-// типы имени в области узла (все его упоминания); имени нет в базе — пусто
-name_types(n, str name) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto & s = *editor_host;
-  std::vector<value> xs;
-  if(auto it = s.session.db.strings.index.find(std::string((a[1]).as<str_v>().view())); it != s.session.db.strings.index.end())
-    for(auto & t: s.types_of_name(s.scope_of(vm.code_node(a[0], where)), it->second)) xs.push_back(value(t));
-  return value(array_v::of(std::move(xs)));
 };
 // a.f — имя члена ("" — не член)
 member_name(n) => native "cpp" {
@@ -500,27 +477,68 @@ fn_layers(fn) => native "cpp" {
     for(auto const & [key, l]: fl->second) xs.push_back(value(array_v::of({value(key), value(std::string(l.ct ? "кт" : "рт"))})));
   return value(array_v::of(std::move(xs)));
 };
-// ошибки разбора на узлах ns (номера раскладки представления; место в прелюдии — первое место
-// программы из трейса): array{узел, текст, from, to}
-errors_on(ns) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  std::vector<node_id> nodes;
+// Значения узлов ns при компиляции по экземплярам — по типам (типы по возрастанию): array{тип,
+// литералы}; литералы различные, не больше limit + 1 на тип (сколько показать, решает язык), пустой —
+// значение рантайма. *Моё:* группировка — запросом к фактам (их тысячи у узла в цикле, известном при
+// компиляции); что показать — язык.
+node_values(ns, i64 limit) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
   auto const & xs = (a[0]).as<array_v>();
-  for(uint32_t k = 0; k < xs.size(); ++k) nodes.push_back(node_id(uint32_t(xs.get(k).as<int64_t>())));
+  std::size_t limit = std::size_t(std::max<int64_t>(0, (a[1]).as<int64_t>()));
+  std::map<std::string_view, std::vector<std::string_view>> by;
+  auto const & facts = editor_host->session.node_values;
+  for(uint32_t k = 0; k < xs.size(); ++k)
+    if(auto it = facts.find(vm.code_node(xs.get(k), where).value); it != facts.end())
+      for(std::string_view x: it->second) {
+        auto tab = x.find('\t');
+        auto & lits = by[x.substr(0, tab)];
+        std::string_view lit = tab == std::string_view::npos ? std::string_view() : x.substr(tab + 1);
+        if(lits.size() <= limit && !std::ranges::contains(lits, lit)) lits.push_back(lit);
+      }
   std::vector<value> out;
-  for(auto const & m: editor_host->marks_errors(nodes))
-    out.push_back(value(array_v::of({vm.code_value(m.node), value(m.text), value(int64_t(m.from)), value(int64_t(m.to))})));
+  for(auto const & [t, lits]: by) {
+    std::vector<value> ls;
+    for(auto l: lits) ls.push_back(value(std::string(l)));
+    out.push_back(value(array_v::of({value(std::string(t)), value(array_v::of(std::move(ls)))})));
+  }
   return value(array_v::of(std::move(out)));
+};
+// места узлов ns (номера) в тексте: array{импорты, начала, концы} (байты)
+node_spans(ns) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto const & db = editor_host->session.db;
+  auto const & xs = (a[0]).as<array_v>();
+  array_v src, from, to;
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    span const & w = db[node_id(uint32_t(xs.get(k).as<int64_t>()))].where;
+    src.push(value(int64_t(w.source)));
+    from.push(value(int64_t(w.begin)));
+    to.push(value(int64_t(w.end)));
+  }
+  return value(array_v::of({value(std::move(src)), value(std::move(from)), value(std::move(to))}));
+};
+// ошибки последней проверки: сколько; у ошибки k — шагов трейса, текст и место (j -1 — сама
+// ошибка, иначе шаг трейса j); место — array{импорт, начало, конец}
+check_errors() => native "cpp" { return value(int64_t(editor_host->session.errors.size())); };
+check_error_frames(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->session.errors[std::size_t((a[0]).as<int64_t>())].trace.size()));
+};
+check_error_text(i64 k, i64 j) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto const & d = editor_host->session.errors[std::size_t((a[0]).as<int64_t>())];
+  int64_t j = (a[1]).as<int64_t>();
+  return value(j < 0 ? std::string(d.what()) : d.trace[std::size_t(j)].what);
+};
+check_error_place(i64 k, i64 j) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto const & d = editor_host->session.errors[std::size_t((a[0]).as<int64_t>())];
+  int64_t j = (a[1]).as<int64_t>();
+  span w = j < 0 ? d.where : d.trace[std::size_t(j)].where;
+  return value(array_v::of({value(int64_t(w.source)), value(int64_t(w.begin)), value(int64_t(w.end))}));
 };
 
 // --- примитивы: инспектор (поля узлов, записи, печать) ------------------------------------
-// дети узла с именами полей (рефлексия вида узла): array{узел, "cond" | "args[1]"}
-child_roles(n) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  std::vector<value> xs;
-  for(auto const & [c, name]: editor_host->child_roles(vm.code_node(a[0], where))) xs.push_back(value(array_v::of({vm.code_value(c), value(name)})));
-  return value(array_v::of(std::move(xs)));
-};
 // запись syntax узла (печать и разбор по ней): array{объявление, array{array{ребёнок, параметр}…}}; нет — array{}
 record_rule(n) => native "cpp" {
   if(!(a[0]).known()) return erase(value(array_v::of({})));
@@ -715,12 +733,6 @@ is_record(c) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
   return value(bool(record_of(editor_host->session.db, vm.code_node(a[0], where))));
 };
-// конструкция: запись или параметр-блок, клауза (for, while, try) — синтаксис, не вызов через точку
-construction(c) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(false));
-  node_id f = vm.code_node(a[0], where);
-  return value(editor_host->session.db.is<n_fn>(f) && editor_host->construction(f));
-};
 // вид узла ядра (ast.if…): в дополнении — только по набранному префиксу
 core_node_kind(str name) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
@@ -730,16 +742,6 @@ core_node_kind(str name) => native "cpp" {
 type_tag(i64 m) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
   return value(std::string(type_registry::tag(uint32_t((a[0]).as<int64_t>()))));
-};
-// типы параметра k функции по всем её экземплярам
-param_types(f, i64 k) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto const & db = editor_host->session.db;
-  node_id fn = vm.code_node(a[0], where);
-  std::vector<value> xs;
-  if(db.is<n_fn>(fn) && uint32_t((a[1]).as<int64_t>()) < db.as<n_fn>(fn).params.size())
-    for(auto & t: editor_host->types_of_name(fn, db.as<n_param>(db.as<n_fn>(fn).params[uint32_t((a[1]).as<int64_t>())]).name)) xs.push_back(value(t));
-  return value(array_v::of(std::move(xs)));
 };
 // поля записи типа {x: …}: array{имя, тип}
 record_parts(str t) => native "cpp" {
@@ -2353,7 +2355,7 @@ dot_functions(found, types) {
   prog = program();
   for(m : array{prog, prelude()}) if(given(m)) for(item : code_items(m)) if((code_kind(item) == ast.function) && !is_record(item)) {
     ast.function{name, ps, _, _, _, _, _, _, _} = item;
-    if((ps.size > 0) && (!operator_name(name) && !construction(item))) {
+    if((ps.size > 0) && !operator_name(name)) {
       ast.parameter{_, pt, _, _, _, _, _} = ps[0];
       fits = false;
       if(given(pt) && (code_kind(pt) == ast.name)) {
@@ -2363,7 +2365,7 @@ dot_functions(found, types) {
         seen = param_types(item, 0);
         for(t : types) for(x : seen) if(x == t) fits = true;
       }
-      if(fits) {
+      if(fits && !construction(item)) { // конструкция — синтаксис, не вызов через точку
         fresh = true;
         for(x : found) if(x.name == name) fresh = false;
         if(fresh) found.push(completion{name, "функция", param_list(ps, 1), if(code_id(m) == code_id(prog)) 1 else 2});
@@ -2827,9 +2829,9 @@ inspect_at(i64 v, focus) {
         }
       }
       if(r.what == "запись") { // итог — узел с полями
-        fields = "";
-        for(cr : child_roles(n)) fields = (((fields + (if(fields == "") "" else ", ")) + cr[1]) + ": ") + print_node(cr[0]);
-        expand.push(line{"итог", ((text(code_kind(n)) + "{") + fields) + "}", code(), 0, 0});
+        parts = ""; // не fields: свободное имя тела вызванной — у вызывающего (O4), child_roles зовёт fields(…)
+        for(cr : child_roles(n)) parts = (((parts + (if(parts == "") "" else ", ")) + cr[1]) + ": ") + print_node(cr[0]);
+        expand.push(line{"итог", ((text(code_kind(n)) + "{") + parts) + "}", code(), 0, 0});
       } else {
         ast.function{_, _, _, body, _, _, _, _, _} = r.decl;
         if(given(body)) expand.push(line{"раскрытие", print_with_args(body, names, args), code(), 0, 0}); // тело с подставленными аргументами
@@ -2839,6 +2841,215 @@ inspect_at(i64 v, focus) {
     else n = code_parent(n);
   }
   show_inspect(v, root, focus, found, expand);
+}
+
+// --- факты разбора — показ: тип, голова объявления, роли детей, ошибки на узлах -------------
+// 
+// У VM — факты (типы и значения узла по экземплярам,
+// раскладка печати, поля узла, ошибки проверки и места узлов); что и как показать — здесь: 
+//.
+
+// Тип — две части: рантайм и компилтайм: «i64 = 3», «f64 = 1.5 | i64 = 2»,
+// «i64 = 1 | 4». Значение рантайма хоть в одном экземпляре этого типа (или значений больше четырёх)
+// — только тип. Значений нет — типы узлов по имени.
+shown_facts(ns) {
+  groups = node_values(ns, 4);
+  if(groups.size == 0) return join_types(types_of_nodes(ns));
+  r = "";
+  for(g : groups) {
+    array{t, lits} = g;
+    one = t;
+    if(!has_text(lits, "") && (lits.size <= 4)) {
+      v = "";
+      for(j : sorted_indices(lits)) v = (v + (if(v == "") "" else " | ")) + lits[j];
+      one = (one + " = ") + v;
+    }
+    r = (r + (if(r == "") "" else " | ")) + one;
+  }
+  r
+}
+has_text(xs, str x) {
+  r = false;
+  for(y : xs) if(y == x) r = true;
+  r
+}
+// типы узлов ns (по всем экземплярам), без повторов
+types_of_nodes(ns) {
+  ts = array{};
+  for(n : ns) for(t : node_types(n)) if(!has_text(ts, t)) ts.push(t);
+  ts
+}
+// Узлы фактов имени в области: все его упоминания в поддереве (без вложенных функций) и
+// инициализаторы `name = e`, `T name = e`.
+name_nodes(n, str name, found) {
+  k = code_kind(n);
+  if(k == ast.name) {
+    ast.name{nm} = n;
+    if(nm == name) found.push(n);
+  } else if(k == ast.operation) {
+    ast.operation{op, xs, _} = n;
+    if((op == "=") && ((xs.size == 2) && (name_of(xs[0]) == name))) found.push(xs[1]);
+  } else if(k == ast.variable) {
+    ast.variable{vn, _, init, _, _, _, _, _} = n;
+    if((vn == name) && given(init)) found.push(init);
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) name_nodes(c, name, found);
+  true
+}
+// область имени: ближайшая функция или блок конструкции (лямбда) вверх; нет — программа
+scope_of(n) {
+  x = code_parent(n);
+  while(given(x) && ((code_kind(x) != ast.function) && (code_kind(x) != ast.lambda))) x = code_parent(x);
+  if(given(x)) x else program()
+}
+// узлы имени name в области узла n
+name_nodes_at(n, str name) {
+  ns = array{};
+  name_nodes(scope_of(n), name, ns);
+  ns
+}
+// типы (и значения) узла и имени в области узла n — по всем экземплярам; пусто — неизвестно
+shown_node(n) => shown_facts(array{n});
+shown_name(n, str name) => shown_facts(name_nodes_at(n, name));
+// типы имени в области узла n (все его упоминания)
+name_types(n, str name) => types_of_nodes(name_nodes_at(n, name));
+// типы параметра k функции f по всем её экземплярам (его упоминания в теле); наблюдения в теле есть
+// только у исполнявшейся при проверке — у неё есть слои (экземпляры), прочие тело не обходят
+param_types(f, i64 k) {
+  ns = array{};
+  if(given(f) && ((code_kind(f) == ast.function) && (fn_layers(f).size > 0))) {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    if(k < ps.size) name_nodes(f, code_name(ps[k]), ns);
+  }
+  types_of_nodes(ns)
+}
+
+// Голова объявления — проекция без тела: `when(c, expr yes) otherwise(expr no)`,
+// `syntax if (c) {then_} else {else_}`. Раскладка печати — у VM; голова — куски до тела.
+head_text(f) {
+  lay = print_view(f, false, code(), -1, -1, -1, -1);
+  ast.function{_, _, _, body, _, _, _, _, _} = f;
+  b = code_id(body);
+  out = "";
+  ks = array{0}; // стек обхода: номер раскладки и его следующий кусок; top — вершина
+  ps = array{0};
+  top = 0;
+  stop = (lay.nodes.size == 0);
+  while(!stop && (top >= 0)) {
+    k = ks[top];
+    p = ps[top];
+    if(p >= lay.count[k]) top -= 1;
+    else {
+      ps[top] = p + 1;
+      j = lay.first[k] + p;
+      c = lay.pchild[j];
+      if(c < 0) out = out + slice_text(lay.ptext, lay.pbyte[j], lay.pbyte[j + 1]);
+      else if(c == b) stop = true;
+      else {
+        kc = index_in(lay.sorted, lay.order, c);
+        if(kc >= 0) {
+          top += 1;
+          if(top < ks.size) {
+            ks[top] = kc;
+            ps[top] = 0;
+          } else {
+            ks.push(kc);
+            ps.push(0);
+          }
+        }
+      }
+    }
+  }
+  while((out.size > 0) && ((out[out.size - 1] == ' ') || ((out[out.size - 1] == '=') || (out[out.size - 1] == '>')))) out = slice_text(out, 0, out.size - 1);
+  out
+}
+
+// конструкция: запись syntax или параметр-блок, выражение, клауза (for, while, try) — синтаксис,
+// не вызов через точку
+construction(c) {
+  if(!given(c) || (code_kind(c) != ast.function)) return false;
+  ast.function{_, ps, _, _, _, _, _, _, form} = c;
+  r = (form.size > 0);
+  for(p : ps) {
+    ast.parameter{_, _, _, _, clause, _, _} = p;
+    if((clause != "") || (param_mode(p) == "expr")) r = true;
+  }
+  r
+}
+
+// Дети узла с именами полей — вид узла struct программы (`fields`), поля — `code_fields`:
+// array{узел, "cond" | "args[1]"}
+child_roles(n) {
+  out = array{};
+  fs = fields(code_kind(n));
+  k = 0;
+  for(x : code_fields(n)) {
+    if(typeof(x) == code) {
+      if(given(x)) out.push(array{x, fs[k].name});
+    } else {
+      xs = codes_of(x);
+      for(j : range(xs.size)) if(given(xs[j])) out.push(array{xs[j], ((fs[k].name + "[") + text(j)) + "]"});
+    }
+    k += 1;
+  }
+  out
+}
+// поле-список узлов (иначе — пусто)
+codes_of(array xs) {
+  out = array{};
+  for(e : xs) if(typeof(e) == code) out.push(e);
+  out
+}
+codes_of(x) => array{};
+
+// Ошибки проверки на узлах ns (номера раскладки представления; место в прелюдии — первое место
+// программы из трейса): array{узел, текст, from, to}
+errors_on(ns) {
+  out = array{};
+  if(check_errors() == 0) return out;
+  array{srcs, froms, tos} = node_spans(ns);
+  for(k : range(check_errors())) {
+    w = check_error_place(k, -1);
+    n = node_at(ns, srcs, froms, tos, w);
+    t = check_error_text(k, -1);
+    for(j : range(check_error_frames(k))) {
+      if(n < 0) n = node_at(ns, srcs, froms, tos, check_error_place(k, j));
+      t = (t + "\n  ") + check_error_text(k, j);
+    }
+    if(n >= 0) {
+      c = node_code(n);
+      r = raw_range(c, w);
+      out.push(array{c, t, r[0], r[1]});
+    }
+  }
+  out
+}
+// узел из ns, в тексте которого лежит место w (наименьший); -1 — нет
+node_at(ns, srcs, froms, tos, w) {
+  array{ws, wb, we} = w;
+  best = -1;
+  size = 0;
+  for(k : range(ns.size)) if((srcs[k] == ws) && ((froms[k] <= wb) && (we <= tos[k]))) if((best < 0) || ((tos[k] - froms[k]) < size)) {
+    best = ns[k];
+    size = tos[k] - froms[k];
+  }
+  best
+}
+// Место ошибки внутри сырого блока (§4.4): его проекция — текст как написан, позиции атомов — в
+// этом тексте, поэтому метка указывает кусок блока — атом и смещение в нём 
+// *Моё:* узел метки — блок (единица проекции и правки),
+// место — кодовые точки [from, to) его текста; {0, 0} — весь узел.
+raw_range(c, w) {
+  if(code_kind(c) != ast.raw) return array{0, 0};
+  ast.raw{_, _, t, _, _} = c;
+  array{ss, sb, se} = node_spans(array{code_id(c)});
+  array{ws, wb, we} = w;
+  b = sb[0];
+  if((ws != ss[0]) || ((wb < b) || ((we < wb) || ((we - b) > t.size)))) return array{0, 0};
+  if((wb == b) && ((we - b) == t.size)) return array{0, 0};
+  from = code_points(slice_text(t, 0, wb - b));
+  to = code_points(slice_text(t, 0, we - b));
+  array{from, if(to > from) to else from + 1}
 }
 
 // --- метки проверки: типы и ошибки на месте ---------------------------------------------
