@@ -43,7 +43,7 @@ describe('живая VM', () => {
     expect(fields('c_goto')).toEqual(['view', 'text']);
     expect(fields('c_layer')).toEqual(['view', 'key']);
     expect(fields('c_run')).toEqual(['stdin_text', 'args']);
-    expect(fields('s_output')).toEqual(['text', 'ok']);
+    expect(fields('s_output')).toEqual(['text', 'ok', 'more', 'state']);
     expect(fields('s_saved')).toEqual(['path']);
     expect(fields('c_trace')).toEqual(['stdin_text', 'args']);
     expect(fields('s_trace')).toEqual([

@@ -50,11 +50,15 @@ export interface LayerPick {
   view: number;
   key: string;
 }
-// Launch (F5): main() of the current base state in the same VM.
+// Launch (F5): main() of the current base state is a process in the same VM, output is in progress.
 export interface Run {
   type: 'c_run';
   stdin_text: string;
   args: string;
+}
+// Stop launch (Shift+F5).
+export interface Stop {
+  type: 'c_stop';
 }
 // Save (Ctrl+S): journal base in .tzdb next to the program.
 export interface Save {
@@ -140,7 +144,8 @@ export type ClientMsg =
   | HoverAsk
   | Open
   | InspectAsk
-  | Apply;
+  | Apply
+  | Stop;
 
 export interface ServerHello {
   type: 's_hello';
@@ -232,10 +237,13 @@ export interface Layers {
   layers: Layer[];
   selected: string;
 }
+// Launch output: more is a continuation of the former, state - 'running', 'stopped' or '' (finished).
 export interface Output {
   type: 's_output';
   text: string;
   ok: boolean;
+  more: boolean;
+  state: string;
 }
 export interface Saved {
   type: 's_saved';

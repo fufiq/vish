@@ -1,0 +1,17 @@
+// Run that waits for host (network on io_uring, §8.3): the machine process does not sleep in its ring - it
+// is waiting for the server ring, and the editor responds while the program waits.
+// — Shift+F5.
+// grant: net
+// run: live
+// program: editor_wait_net.tz
+open_view module
+run
+// expect: output text="слушаю\n" ok=true more=false state="running"
+wait 3
+// The program waits for connections - the editor responds
+pointer 1 @print:1 0 0
+// expect: cursor view=1
+key 1 End
+// expect: курсор:   print("слушаю");‸
+stop
+// expect: output text="" ok=true more=true state="stopped"

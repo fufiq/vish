@@ -1,0 +1,17 @@
+// Struct editing during startup (§9.3): live values of the old layout carry migrate(T old) programs; it is
+// not - the process stops, rather than executing values on the new layout. (§9.3 steak).
+//
+//.
+// run: live
+// quantum: 5000
+// program: editor_live_struct.tz
+open_view module
+run
+wait 2
+pointer 1 @i64:1 0 0
+input 1 i64\sy;\s
+// expect: struct pt { i64 y; i64 x; }
+// expect-not: error
+key 1 Escape
+// expect: error text="struct pt изменён, а живой процесс держит значений старой раскладки: 1 — нужна migrate(pt old) => pt{…}; процесс остановлен"
+// expect: output text="" ok=true more=true state="stopped"

@@ -1,0 +1,16 @@
+// Программа для 324_editor_live_struct.wire: живой процесс держит значение struct pt.
+// out: 1
+// out: 9
+// out: 17
+// out: 25
+// out: 33
+struct pt { i64 x; }
+
+main() {
+  p = pt{1};
+  for(i : range(40)) {
+    s = 0;
+    for(j : range(3000)) s += j % 7;
+    if(i % 8 == 0) print(p.x + i);
+  }
+}

@@ -3,10 +3,10 @@
 // Сообщения идут через настоящий сокет и
 // io_uring; текст представления сверяется с проекцией (tz fmt) автоматически.
 // program: editor_text.tz
-hello 5
-// expect: hello version=5 program="editor_text.tz"
+hello 6
+// expect: hello version=6 program="editor_text.tz"
 hello 7
-// expect: error text="версия протокола 7 не поддерживается (VM: 5)"
+// expect: error text="версия протокола 7 не поддерживается (VM: 6)"
 open_view grid
 // expect: неизвестный вид представления: grid
 open_view module

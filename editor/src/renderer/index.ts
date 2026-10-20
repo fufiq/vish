@@ -156,11 +156,21 @@ function receive(m: ServerMsg): void {
     case 's_complete':
       views.get(m.view)?.showCompletion(m);
       return;
-    case 's_output':
-      runOutput.textContent = m.text === '' ? '(вывода нет)' : m.text;
+    case 's_output': {
+      const text = (m.more ? (runOutput.dataset.text ?? '') : '') + m.text;
+      runOutput.dataset.text = text;
+      runOutput.textContent = text === '' ? '(вывода нет)' : text;
       runOutput.toggleAttribute('error', !m.ok);
-      statusLine.textContent = m.ok ? 'выполнено' : 'ошибка при исполнении';
+      statusLine.textContent =
+        m.state === 'running'
+          ? 'исполняется · Shift+F5 — остановить'
+          : m.state === 'stopped'
+            ? 'остановлено'
+            : m.ok
+              ? 'выполнено'
+              : 'ошибка при исполнении';
       return;
+    }
     case 's_trace':
       debugging = m.active;
       if (!m.active) {
@@ -255,13 +265,19 @@ function trace(): void {
 function run(): void {
   runPanel.hidden = false;
   runOutput.textContent = '…';
+  runOutput.dataset.text = '';
   send({ type: 'c_run', stdin_text: runStdin.value, args: runArgs.value });
+}
+// Shift+F5 - Stop Launch: Stop/Run
+function stop(): void {
+  send({ type: 'c_stop' });
 }
 for (const field of [runStdin, runArgs] as HTMLElement[]) {
   field.addEventListener('keydown', (e) => {
     if (e.key === 'F5') {
       e.preventDefault();
-      run();
+      if (e.shiftKey) stop();
+      else run();
     }
     if (e.key === 'Escape') activate(active);
   });
@@ -394,7 +410,8 @@ for (const pane of [app, side]) {
       return;
     }
     if (e.key === 'F5') {
-      run();
+      if (e.shiftKey) stop();
+      else run();
       return;
     }
     if (e.key === 'F6') {

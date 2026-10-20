@@ -19,7 +19,7 @@
 
 namespace tz::proto {
 
-constexpr uint32_t version = 5;
+constexpr uint32_t version = 6;
 
 // --- client ---
 
@@ -67,6 +67,9 @@ struct c_run {
   std::string stdin_text;
   std::string args;
 };
+// Stop Launch (Shift+F5):
+//
+struct c_stop {};
 // Save (Ctrl+S): journal base in .tzdb next to the program (author's decision).
 struct c_save {};
 // Merger with another copy of the database (§9.4): the path to .tzdb (relative to the program).
@@ -124,7 +127,7 @@ struct c_inspect {
 struct c_apply {
   std::string fn;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply>;
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop>;
 
 // --- VM customer ---
 
@@ -214,10 +217,14 @@ struct s_layers {
   std::vector<s_layer> layers;
   std::string selected;
 };
-// Startup output: Print the program and error with the track (ok - no error).
+// Startup output: Print the program and error with the track (ok - no error). Start-up is the process of
+// the machine, output as it is executed: more is a continuation of the former, state - "running" (goes),
+// "stopped" (stopped)," - is finished.
 struct s_output {
   std::string text;
   bool ok;
+  bool more;
+  std::string state;
 };
 struct s_saved {
   std::string path;

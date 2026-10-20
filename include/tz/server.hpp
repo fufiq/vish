@@ -44,7 +44,7 @@ struct editor_server;
 thread_local editor_server * editor_host = nullptr;
 
 struct editor_server {
-  enum op : uint64_t { op_accept = 1, op_recv, op_send, op_timer };
+  enum op : uint64_t { op_accept = 1, op_recv, op_send, op_timer, op_run };
 
   struct peer {
     int fd = -1;
@@ -117,6 +117,17 @@ struct editor_server {
   // Editor's solution: name function in language; view - representation of the client (protocol number; -1
   // - first) whose projection can override the solution
   void decide(peer * p, int64_t view, std::string_view name, std::vector<value> args) {
+    {
+      ++deciding;
+      struct depth {
+        uint32_t & d;
+        ~depth() { --d; }
+      } guard{deciding};
+      decide_now(p, view, name, std::move(args));
+    }
+    if(!deciding) flush_run_notes();
+  }
+  void decide_now(peer * p, int64_t view, std::string_view name, std::vector<value> args) {
     host_hold hold{this, std::exchange(now_peer, p)};
     node_id f = editor_fn(view, name);
     if(!f) {
@@ -172,8 +183,18 @@ struct editor_server {
     return peers.back();
   }
 
-  // Wait for the core events and process them.
+  // Wait for the core events and process them. It's running -- the quantum of the process, then the finished
+  // events without waiting; the process is waiting for host -- its ring is waiting for the server ring.
   void step() {
+    if(live && !live->m->host_waiting()) {
+      run_quantum();
+      for(auto const & c: ring.peek()) complete(c);
+      return;
+    }
+    if(live && !live->polling) {
+      ring.poll(live->m->host_fd(), POLLIN, tag(op_run, live->gen));
+      live->polling = true;
+    }
     for(auto const & c: ring.wait()) complete(c);
   }
 
@@ -195,6 +216,12 @@ struct editor_server {
     switch(o) {
       case op_timer:
         on_timer();
+        break;
+      case op_run: // the process ring is ready: the completion of the process, the steps - the next quantum
+        if(live && live->gen == i) {
+          live->polling = false;
+          live->m->pump();
+        }
         break;
       case op_accept:
         if(c.res >= 0) add_peer(c.res);
@@ -306,6 +333,7 @@ struct editor_server {
   void handle(peer & p, proto::c_layer const & m) { decide(&p, m.view, "on_layer", {value(int64_t(m.view)), value(m.key)}); }
   void handle(peer & p, proto::c_projection const & m) { decide(&p, m.view, "on_projection", {value(int64_t(m.view)), value(m.key)}); }
   void handle(peer & p, proto::c_run const & m) { decide(&p, -1, "on_run", {value(m.args), value(m.stdin_text)}); }
+  void handle(peer & p, proto::c_stop const &) { decide(&p, -1, "on_stop", {}); }
   void handle(peer & p, proto::c_save const &) { decide(&p, -1, "on_save", {}); }
   void handle(peer & p, proto::c_trace const & m) { decide(&p, -1, "on_trace_run", {value(int64_t(-1)), value(m.args), value(m.stdin_text)}); }
   void handle(peer & p, proto::c_apply const & m) { decide(&p, -1, "on_apply", {value(m.fn)}); }
@@ -1353,6 +1381,202 @@ struct editor_server {
   // --- launch, debugger, versions ---
 
   std::string trace_output, trace_error;
+
+  // Running (F5) is the process of the machine in the same VM:
+// 
+  // The server executes the process with quanta between socket events and does not stand up.
+  // 
+  // - Shift+F5. *My:* process executes the received code - its copy of the database (journal in whole: node numbers
+  // are the same); the editing falls into it when the drafts are closed (on_idle solution in the language): module
+  // elements changed from the last time - a key replacement, like proc/edit (§9.3), the started frames live in the
+  // old body. What the machine does not know is the interpreter, as before (with waiting).
+  struct live_run {
+    ast_db db;
+    node_id root;
+    std::unique_ptr<process_machine> m;
+    std::string out; // quantization
+    std::vector<std::string> args, input; // back-up
+    peer * who = nullptr; // client running the program
+    bool sent = false; // The conclusion has already been sent: the next - the continuation
+    bool ok = true;
+    uint64_t edits = 0; // base corrections included in the process
+    uint64_t gen = 0; // generation of waiting for the ring of the machine (obsolete completion - past)
+    bool polling = false;
+  };
+  std::unique_ptr<live_run> live;
+  uint64_t live_gen = 0;
+  uint64_t quantum_steps = 0; // Quantum - steps of the machine (without clocks); 0 - time
+  static constexpr uint64_t quantum_ms = 10;
+  bool running() const { return live != nullptr; }
+  bool run_waits_host() { return live && live->m && live->m->host_waiting(); } // waiting for host
+
+  void start_run(std::vector<std::string> args, std::vector<std::string> input) {
+    live.reset();
+    auto r = std::make_unique<live_run>();
+    r->db.replay(session.db.journal());
+    r->root = session.root;
+    r->args = args;
+    r->input = input;
+    r->who = now_peer;
+    r->edits = session.db.edits;
+    r->gen = ++live_gen;
+    live = std::move(r);
+    try {
+      live->m = std::make_unique<process_machine>(live->db, live->root, session.name);
+      live->m->captured = &live->out;
+      live->m->external_wait = true;
+      live->m->start(args, input);
+    } catch(diagnostic const & d) {
+      run_failed(d);
+      return;
+    }
+    run_quantum();
+  }
+  // process error: "not supported" by the machine - run by the interpreter, otherwise - program error
+  void run_failed(diagnostic const & d) {
+    live_run & r = *live;
+    if(r.m && r.m->unsupported_hit) {
+      session.stdin_lines = r.input;
+      bool ok = true;
+      std::string text = session.run(r.args, ok);
+      r.out = std::move(text);
+      r.sent = false;
+      r.ok = ok;
+    } else {
+      r.out += render(d, session.name, r.db);
+      r.ok = false;
+    }
+    finish_run("");
+  }
+  void run_quantum() {
+    live_run & r = *live;
+    uint64_t t0 = os::uring::now_ms();
+    try {
+      for(uint64_t k = 1;; ++k) {
+        if(!r.m->step()) break;
+        if(r.m->host_waiting()) break;
+        if(quantum_steps ? k >= quantum_steps : (k % 256 == 0 && os::uring::now_ms() - t0 >= quantum_ms)) break;
+      }
+    } catch(diagnostic const & d) {
+      return run_failed(d);
+    }
+    if(r.m->st.done) {
+      r.m->save_state_vars(true);
+      return finish_run("");
+    }
+    if(!r.out.empty()) run_output("running");
+  }
+  // output to the client - on_run_output solution in the language, after the current solution (start and
+  // stop the solution - no nested solution)
+  struct run_note {
+    peer * who;
+    std::string text;
+    bool ok, more;
+    std::string state;
+  };
+  std::vector<run_note> run_notes;
+  uint32_t deciding = 0;
+  void run_output(std::string_view state) {
+    live_run & r = *live;
+    bool more = std::exchange(r.sent, true);
+    run_notes.push_back({r.who, std::exchange(r.out, {}), r.ok, more, std::string(state)});
+    if(!deciding) flush_run_notes();
+  }
+  void flush_run_notes() {
+    while(!run_notes.empty()) {
+      run_note n = std::move(run_notes.front());
+      run_notes.erase(run_notes.begin());
+      decide(n.who, -1, "on_run_output", {value(std::move(n.text)), value(n.ok), value(n.more), value(std::move(n.state))});
+    }
+  }
+  void finish_run(std::string_view state) {
+    run_output(state);
+    live.reset();
+  }
+  void stop_run() {
+    if(!live) return;
+    finish_run("stopped");
+  }
+  // Editing - in a live process (drafts are closed): elements of the program modules, changed from the last time, are
+  // replaced by a key in its database. struct, which has the living values of the old layout - through the migrate(T
+  // old) program (§9.3), there is no one - the process stops. The bottom line is what to say to the person.
+  std::string sync_run() {
+    if(!live || !live->m || live->m->st.done || live->edits == session.db.edits) return "";
+    live_run & r = *live;
+    r.edits = session.db.edits;
+    process_machine & m = *r.m;
+    std::vector<node_id> modules = m.helper.module_order;
+    if(modules.empty()) modules.push_back(r.root);
+    std::vector<std::pair<node_id, std::string>> migrations; // struct with living old values
+    std::size_t changed = 0;
+    for(node_id mod: modules) {
+      if(mod.value >= session.db.size() || !session.db.is<n_module>(mod)) continue;
+      auto mine = module_items(session.db, mod), theirs = module_items(r.db, mod);
+      std::vector<std::string> keys;
+      for(auto const * xs: {&mine, &theirs})
+        for(auto const & x: *xs)
+          if(!std::ranges::contains(keys, x.key)) keys.push_back(x.key);
+      for(auto const & key: keys) {
+        auto now = find_item(mine, key), was = find_item(theirs, key);
+        if(now && was && now->text == was->text) continue;
+        ++changed;
+        if(now && session.db.is_struct(now->node) && was) {
+          std::vector<process_machine::field_decl> fields;
+          for(node_id x: session.db.as<n_extend>(now->node).items)
+            if(session.db.is<n_var>(x)) {
+              node_id ty = session.db.as<n_var>(x).type;
+              fields.push_back({session.db.as<n_var>(x).name, ty && session.db.is<n_ident>(ty) ? std::string(session.db.strings.text(session.db.as<n_ident>(ty).name)) : std::string()});
+            }
+          std::string tn(session.db.strings.text(session.db.as<n_extend>(now->node).name));
+          type_id t = m.helper.types.named(tn);
+          if(uint64_t stale = m.stale_values(t, fields)) {
+            if(!find_item(mine, cat("migrate(", tn, ")"))) {
+              stop_run();
+              return cat("struct ", tn, " изменён, а живой процесс держит значений старой раскладки: ", stale, " — нужна migrate(", tn, " old) => ", tn, "{…}; процесс остановлен");
+            }
+            migrations.push_back({node_id{}, tn});
+          }
+        }
+        if(was && !now && r.db.is<n_fn>(was->node)) // Removed: new challenges do not see it
+          std::erase(m.helper.functions[r.db.as<n_fn>(was->node).name], was->node);
+        take_theirs(r.db, mod, {}, key, now);
+        if(now && !was)
+          if(auto fresh = find_item(module_items(r.db, mod), key)) m.helper.register_item(fresh->node);
+      }
+    }
+    if(!changed) return "";
+    for(auto & [fn, tn]: migrations) { // migrate - overload in the assistant, as in the module
+      symbol mig = r.db.strings.intern("migrate");
+      m.helper.functions[mig].clear();
+      std::vector<process_machine::field_decl> fields;
+      node_id item;
+      for(node_id x: r.db.as<n_module>(r.root).items) {
+        if(r.db.is<n_fn>(x) && r.db.as<n_fn>(x).name == mig) {
+          m.helper.register_item(x);
+          auto const & ps = r.db.as<n_fn>(x).params;
+          node_id ty = ps.size() == 1 ? r.db.as<n_param>(ps[0]).type : node_id{};
+          if(ty && r.db.is<n_ident>(ty) && r.db.strings.text(r.db.as<n_ident>(ty).name) == tn) fn = x;
+        }
+        if(r.db.is_struct(x) && r.db.strings.text(r.db.as<n_extend>(x).name) == tn) item = x;
+      }
+      if(!item) continue;
+      for(node_id x: r.db.as<n_extend>(item).items)
+        if(r.db.is<n_var>(x)) {
+          node_id ty = r.db.as<n_var>(x).type;
+          fields.push_back({r.db.as<n_var>(x).name, ty && r.db.is<n_ident>(ty) ? std::string(r.db.strings.text(r.db.as<n_ident>(ty).name)) : std::string()});
+        }
+      try {
+        m.migrate_values(m.helper.types.named(tn), fields, fn);
+      } catch(diagnostic const & d) {
+        std::string why = d.what();
+        stop_run();
+        return cat("migrate ", tn, ": ", why, "; процесс остановлен");
+      }
+    }
+    m.refresh_ct(); // ct new code - in place in canonical order
+    return "";
+  }
+
   merge_result pending; // conflicts of the last merger before the decision of the person
 
   // merger:
@@ -1372,7 +1596,7 @@ struct editor_server {
   int take_version(std::string const & key, bool theirs) {
     auto it = std::ranges::find(pending.conflicts, key, &merge_conflict::key);
     if(it == pending.conflicts.end()) return 0;
-    if(theirs) take_theirs(session.db, session.root, pending.base_items, it->id, it->theirs_exists ? std::optional<std::string>(it->theirs) : std::nullopt);
+    if(theirs) take_theirs(session.db, session.root, pending.base_items, it->id, it->theirs_exists ? it->their : std::nullopt);
     pending.conflicts.erase(it);
     return theirs ? 2 : 1;
   }

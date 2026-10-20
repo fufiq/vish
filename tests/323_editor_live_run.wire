@@ -1,0 +1,31 @@
+// Running (F5) is the process of the machine in the same VM: the server executes it with quanta and does not stand up.
+// 
+// 
+//.
+// run: live
+// quantum: 5000
+// program: editor_live.tz
+open_view module
+run
+wait 3
+// conclusion
+// expect: output text="0 8994\n" ok=true more=false state="running"
+// editing during launch: the process executes the received code - a draft with editing is not visible to him
+pointer 1 @2:1 0 1
+key 1 Backspace
+key 1 3
+key 1 Escape
+// expect: output text="16 8994\n" ok=true more=true state="running"
+// Draft closed: editing is in the live process (hot replacement, §9.3) - step(i) is already 3·i
+wait
+// expect: output text="36 8994\n" ok=true more=true state="running"
+// expect: output text="108 8994\n" ok=true more=true state="running"
+// expect: output text="" ok=true more=true state=""
+// expect-not: output text="24 8994\n"
+// Shift+F5 - Stop, no program - tell
+run
+wait 2
+stop
+// expect: output text="" ok=true more=true state="stopped"
+stop
+// expect: error text="запуск: программа не исполняется"

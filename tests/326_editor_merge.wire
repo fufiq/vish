@@ -1,0 +1,41 @@
+// Версии базы (§9.4): 
+// — элемент из их копии
+// переносится со своей раскладкой: пометкой «внутренний», пустыми строками, комментарием, местом.
+// program: editor_merge.tz
+open_view module
+save_to out/merge_base.tzdb
+// их работа: внутренняя перегрузка («добавить по месту»), пустые строки и комментарий перед main
+goto 1 area(str)
+key 1 Enter
+key 2 0
+key 2 Escape
+pointer 1 @main:1 0 0
+key 1 Enter
+key 1 Enter
+key 1 ArrowUp
+input 1 //\sих\sкомментарий
+key 1 Escape
+// expect: area(i64 n) => n * n;⏎⏎⏎// их комментарий⏎main() {
+save_to out/merge_theirs.tzdb
+// моя копия — от общего начала: изменённое только у них берётся само, с раскладкой
+reopen out/merge_base.tzdb
+open_view module
+merge out/merge_theirs.tzdb
+// expect: merge taken=["main()" "area(str)"] conflicts=
+// expect: area(i64 n) => n * n;⏎⏎⏎// их комментарий⏎main() {
+// внутренняя — внутренней: не в представлении модуля, переход её находит
+// expect-not: area(str n)
+goto 1 area(str)
+// expect: name="area(str n)" kind="перегрузка" detail="точно, внутренняя"
+key 1 Escape
+// конфликт: у меня main изменён, у них — раскладка при нём; «взять их» — с их раскладкой
+reopen out/merge_base.tzdb
+open_view module
+pointer 1 @3:1 0 1
+key 1 Backspace
+key 1 4
+key 1 Escape
+merge out/merge_theirs.tzdb
+// expect: key="main()"
+take main() 1
+// expect: area(i64 n) => n * n;⏎⏎⏎// их комментарий⏎main() {⏎  print(area(3));

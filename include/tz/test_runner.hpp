@@ -218,17 +218,43 @@ struct test_runner {
   // the protocol of the editor (@ substring[:N] - node): the line is the message of the client in text form, the
   // output is the answers of VM, passed through this socket.
   std::string run_session(std::filesystem::path const & path) {
+    ::unsetenv("TZ_GRANT"); // Resources in the `// grant:` scenario only
     os::mapped_file text(path.string());
     std::vector<std::string> lines;
     for(auto l: lines_of(text.text())) lines.emplace_back(l);
-    ast_db db;
+    std::deque<ast_db> bases(1); // reopen - new base from .tzdb (the former live until the end of the script)
+    ast_db * dbp = &bases.back();
     node_id root;
     std::optional<vm_session> session;
     std::optional<editor_server> server;
     wire_client client, second; // [2] is the second client of the same VM.
     bool wire = path.extension() == ".wire";
+    std::string program_name;
+    std::filesystem::path program_dir;
+    // server and two clients per session (program or reopen)
+    auto attach = [&]() -> std::string {
+      int fds[2];
+      if(!os::socket_pair(fds)) return "socketpair не удался";
+      server.emplace(*session);
+      server->timers = false; // set pause - idle team
+      server->quantum_steps = 100'000; // квант запуска — шагами машины: вывод детерминирован
+      client = wire_client{};
+      client.peer = &server->add_peer(fds[0]);
+      client.server = &*server;
+      client.fd = fds[1];
+      client.db = dbp;
+      int more[2];
+      if(!os::socket_pair(more)) return "socketpair не удался";
+      second = wire_client{};
+      second.peer = &server->add_peer(more[0]);
+      second.server = &*server;
+      second.fd = more[1];
+      second.db = dbp;
+      return "";
+    };
     std::string last, why;
     std::map<std::string, std::string> names; // `// let:` - memorized node
+    bool live = false; // `// run: live` - Do not wait until the end
     std::pair<std::size_t, std::size_t> journal_seen{0, 0};
     for(std::size_t i = 0; i < lines.size(); ++i) {
       auto const & l = lines[i];
@@ -237,28 +263,36 @@ struct test_runner {
         os::mapped_file f(file.string());
         std::vector<diagnostic> ignored;
         if(wire) { // Editor module - before the program, like tz serve
-          load_prelude(db);
-          load_editor(db);
+          load_prelude(*dbp);
+          load_editor(*dbp);
         }
-        root = parse_program(db, f.text(), file.parent_path(), ignored); // use k; modules next to the program
-        session.emplace(db, root, file.filename().string());
-        session->dir = file.parent_path().string();
-        if(wire) {
-          int fds[2];
-          if(!os::socket_pair(fds)) return "socketpair не удался";
-          server.emplace(*session);
-          server->timers = false; // set pause - idle team
-          client.peer = &server->add_peer(fds[0]);
-          client.server = &*server;
-          client.fd = fds[1];
-          client.db = &db;
-          int more[2];
-          if(!os::socket_pair(more)) return "socketpair не удался";
-          second.peer = &server->add_peer(more[0]);
-          second.server = &*server;
-          second.fd = more[1];
-          second.db = &db;
-        }
+        root = parse_program(*dbp, f.text(), file.parent_path(), ignored); // use k; modules next to the program
+        program_name = file.filename().string();
+        program_dir = file.parent_path();
+        session.emplace(*dbp, root, program_name);
+        session->dir = program_dir.string();
+        if(wire)
+          if(std::string e = attach(); !e.empty()) return e;
+        continue;
+      }
+      // `save_to файл` - journal database to file (out/ directory); `reopen файл` - session again from it
+      // (copies of the database for merging, §9.4 :)
+      if(wire && l.starts_with("save_to ")) {
+        save_db(*dbp, root, l.substr(8));
+        last.clear();
+        continue;
+      }
+      if(wire && l.starts_with("reopen ")) {
+        if(client.fd >= 0) os::close_fd(client.fd);
+        if(second.fd >= 0) os::close_fd(second.fd);
+        server.reset();
+        session.reset();
+        dbp = &bases.emplace_back();
+        root = load_db(*dbp, l.substr(7));
+        session.emplace(*dbp, root, program_name);
+        session->dir = program_dir.string();
+        if(std::string e = attach(); !e.empty()) return e;
+        last.clear();
         continue;
       }
       // `// let: имя @подстрока` is the node number now; `$имя` in expectation is the same
@@ -266,6 +300,22 @@ struct test_runner {
       if(wire && l.starts_with("// let:")) {
         auto ws = words_of(std::string_view(l).substr(7));
         if(ws.size() == 2) names[std::string(ws[0])] = client.resolve(cat("x ", ws[1])).substr(2);
+        continue;
+      }
+      // `// run: live` - start not waiting (corrections on the move); `// quantum: N` - quantum in the steps
+      // of the machine; `// grant: fs net` - resources to launch ("You give": here they give the script)
+      if(wire && l.starts_with("// grant:")) {
+        std::string g;
+        for(auto w: words_of(std::string_view(l).substr(9))) g += (g.empty() ? "" : ",") + std::string(w);
+        ::setenv("TZ_GRANT", g.c_str(), 1);
+        continue;
+      }
+      if(wire && l == "// run: live") {
+        live = true;
+        continue;
+      }
+      if(wire && l.starts_with("// quantum:") && server) {
+        server->quantum_steps = std::stoull(l.substr(11));
         continue;
       }
       if(l.starts_with("// expect:")) {
@@ -284,7 +334,7 @@ struct test_runner {
       }
       if(l.empty() || l.starts_with("//") || !session) continue;
       if(wire && l == "journal") { // journal base growth since last time: records and bytes of import text
-        auto entries = db.journal();
+        auto entries = dbp->journal();
         std::size_t text = 0;
         for(auto const & e: entries)
           if(auto const * x = std::get_if<j_import>(&e.op)) text += x->text.size();
@@ -301,6 +351,14 @@ struct test_runner {
         last = session->roundtrip();
         continue;
       }
+      if(wire && (l == "wait" || l.starts_with("wait "))) { // launch: quanta to end (wait N - N quanta) or to wait for host
+        uint64_t n = l == "wait" ? ~uint64_t{0} : std::stoull(l.substr(5));
+        while(server->running() && !server->run_waits_host() && n-- > 0) server->step();
+        for(auto & p: server->peers)
+          while(!server->settled(p)) server->step();
+        last = client.collect();
+        continue;
+      }
       if(wire && l == "idle") { // Set pause: check and tags (without hours)
         server->idle();
         for(auto & p: server->peers)
@@ -314,6 +372,12 @@ struct test_runner {
         wire_client & who = two ? second : client;
         try {
           last = who.exchange(*server, two ? l.substr(4) : l);
+          if(!live && server->running()) { // launch - to the end (quantas), unless the script requested otherwise
+            while(server->running()) server->step();
+            for(auto & p: server->peers)
+              while(!server->settled(p)) server->step();
+            last += who.collect();
+          }
         } catch(diagnostic const & d) {
           why += cat("    строка ", i + 1, ": ", d.what(), "\n");
           continue;

@@ -1,6 +1,6 @@
 {
-  "version": 5,
-  "client": ["variant", "c_hello", "c_open_view", "c_close_view", "c_key", "c_pointer", "c_goto", "c_layer", "c_run", "c_save", "c_trace", "c_merge", "c_take", "c_projection", "c_input", "c_select", "c_hover", "c_open", "c_inspect", "c_apply"],
+  "version": 6,
+  "client": ["variant", "c_hello", "c_open_view", "c_close_view", "c_key", "c_pointer", "c_goto", "c_layer", "c_run", "c_save", "c_trace", "c_merge", "c_take", "c_projection", "c_input", "c_select", "c_hover", "c_open", "c_inspect", "c_apply", "c_stop"],
   "server": ["variant", "s_hello", "s_view", "s_cursor", "s_error", "s_update", "s_complete", "s_decor", "s_layers", "s_output", "s_saved", "s_trace", "s_merge", "s_select", "s_clipboard", "s_hover", "s_hint", "s_inspect"],
   "node_kinds": ["n_module", "n_fn", "n_param", "n_var", "n_block", "n_ident", "n_int", "n_float", "n_str", "n_call", "n_op", "n_if", "n_loop", "n_break", "n_continue", "n_return", "n_ct", "n_lambda", "n_construct", "n_hole", "n_throw", "n_chain", "n_extend", "n_quote", "n_splice", "n_pat", "n_unpack", "n_pat_field", "n_subject", "n_spread", "n_use", "n_native", "n_ref", "n_raw", "n_sym", "n_node"],
   "types": {
@@ -23,6 +23,7 @@
     "c_open": [["view", "u32"], ["node", "node"]],
     "c_inspect": [["view", "u32"], ["node", "node"]],
     "c_apply": [["fn", "string"]],
+    "c_stop": [],
     "s_hello": [["version", "u32"], ["program", "string"], ["revision", "u64"]],
     "s_node": [["id", "node"], ["kind", "string"], ["pieces", ["vector", ["variant", "string", "node"]]], ["note", "string"]],
     "s_view": [["view", "u32"], ["root", "node"], ["revision", "u64"], ["nodes", ["vector", "s_node"]], ["kind", "string"]],
@@ -35,7 +36,7 @@
     "s_decor": [["view", "u32"], ["revision", "u64"], ["marks", ["vector", "s_mark"]]],
     "s_layer": [["key", "string"], ["kind", "string"]],
     "s_layers": [["view", "u32"], ["layers", ["vector", "s_layer"]], ["selected", "string"]],
-    "s_output": [["text", "string"], ["ok", "bool"]],
+    "s_output": [["text", "string"], ["ok", "bool"], ["more", "bool"], ["state", "string"]],
     "s_saved": [["path", "string"]],
     "s_trace": [["active", "bool"], ["step", "u32"], ["total", "u32"], ["node", "node"], ["stack", ["vector", "string"]], ["output", "string"], ["error", "string"]],
     "s_conflict": [["key", "string"], ["base", "string"], ["mine", "string"], ["theirs", "string"]],

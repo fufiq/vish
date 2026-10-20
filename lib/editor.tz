@@ -617,17 +617,29 @@ trace_output(i64 k) => native "cpp" {
 };
 trace_error() => native "cpp" { return value(editor_host->trace_error); };
 // --- примитивы: команды VM (запуск, база, слияние) -------------------------------------------
-// main() текущего состояния базы в этой же VM: array{вывод, без ошибки}
-run_program(str args, str input) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto & s = editor_host->session;
-  s.stdin_lines.clear();
-  for(auto l: lines_of((a[1]).as<str_v>().view())) s.stdin_lines.emplace_back(l);
-  std::vector<std::string> args;
+// main() принятого кода — процесс машины в этой же VM (сервер исполняет его квантами, вывод —
+// решением on_run_output); прежний запуск — заменяется
+start_program(str args, str input) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  std::vector<std::string> args, input;
   for(auto w: words_of((a[0]).as<str_v>().view())) args.emplace_back(w);
-  bool ok = true;
-  std::string text = s.run(args, ok);
-  return value(array_v::of({value(std::move(text)), value(ok)}));
+  for(auto l: lines_of((a[1]).as<str_v>().view())) input.emplace_back(l);
+  editor_host->start_run(std::move(args), std::move(input));
+  return value(int64_t(0));
+};
+stop_program() => native "cpp" {
+  editor_host->stop_run();
+  return value(int64_t(0));
+};
+program_running() => native "cpp" { return value(editor_host->running()); };
+// принятые правки — в живой процесс; итог — что сказать (пусто — нечего)
+sync_program() => native "cpp" { return value(editor_host->sync_run()); };
+// вывод запуска клиенту: more — продолжение прежнего, state — "running", "stopped" или "" (закончен)
+run_output(str text, bool ok, bool more, str state) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known()) return erase(value(int64_t(0)));
+  if(editor_host->now_peer)
+    editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), (a[2]).as<bool>(), std::string((a[3]).as<str_v>().view())});
+  return value(int64_t(0));
 };
 // запуск с трассой (шаги — по ней)
 trace_program(str args, str input) => native "cpp" {
@@ -643,7 +655,7 @@ trace_program(str args, str input) => native "cpp" {
 };
 show_output(str text, bool ok) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>()});
+  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), false, ""});
   return value(int64_t(0));
 };
 // имя программы сессии (путь, как открыта)
@@ -1180,12 +1192,22 @@ refresh_all() {
   for(w : range(views.size)) if(given(views[w].root)) show_view_of(w, true);
   0
 }
-// Пауза набора: проверка (реактивный check) и метки всем представлениям.
+// Пауза набора: проверка (реактивный check) и метки всем представлениям; черновики закрыты —
+// принятые правки ложатся в живой процесс запуска (горячая замена, §9.3).
 idle() {
   clear_pending();
   recheck();
   for(w : range(views.size)) if(given(views[w].root)) send_marks(w);
+  if(program_running() && !any_draft_open()) {
+    said = sync_program();
+    if(said != "") report(said);
+  }
   0
+}
+any_draft_open() {
+  r = false;
+  for(w : range(views.size)) if(given(views[w].root) && draft_open(w)) r = true;
+  r
 }
 on_idle() => idle();
 // открыть функцию во второй панели (у клиента одно представление функции)
@@ -3169,12 +3191,16 @@ on_trace(i64 v) {
 
 // --- команды: запуск, сохранение, правка функцией, слияние, слой, проекция --------------------
 ends_with(str s, str tail) => (tail.size <= s.size) && (find_text(text_from(s, s.size - tail.size), tail) == 0);
-// запуск (F5) — принятого текста
+// запуск (F5) — принятого текста: процесс в этой же VM, редактор не встаёт 
+// 
 on_run(str args, str input) {
   finalize_views();
-  r = run_program(args, input);
-  show_output(r[0], r[1]);
+  start_program(args, input);
 }
+// вывод запуска — по мере исполнения
+on_run_output(str text, bool ok, bool more, str state) => run_output(text, ok, more, state);
+// Shift+F5: «Остановить/запустить» 
+on_stop() => if(program_running()) stop_program() else report("запуск: программа не исполняется");
 // запуск с трассой (F6)
 on_trace_run(i64 id, str args, str input) {
   v = view_of(id);

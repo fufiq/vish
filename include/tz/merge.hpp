@@ -20,15 +20,28 @@
 
 namespace tz {
 
-// Element of the module in the version: who is it (id - node number, if the element was
-// in the common database: the numbers of the general beginning of journal for copies
-// coincide, and the change of signature is an edit of the same element; otherwise - name
-// and signature), as it is called (key) and what it is (text projection).
+// Element of the module in the version: who is it (id - node number, if the element was in the
+// common database: the numbers of the general beginning of journal for copies coincide, and
+// the change of signature is an edit of the same element; otherwise - name and signature), as
+// it is called (key) and what it is (text projection). The layout of the element in the module
+// is also his: the mark "internal" (§13.3), empty lines in front of it, comments on it (the
+// module prints them, not the element) and the neighbor in front of it (after - its key) - the
+// element is transferred with everything that it has in the database.
 struct item_version {
   std::string id;
   std::string key;
   std::string text;
   node_id node;
+  bool inner = false;
+  uint32_t blank = 0;
+  node_note note;
+  std::string after;
+  // What compares the merger: text and layout
+  std::string state() const {
+    std::string s = cat(text, "\x01", inner ? "i" : "", "\x01", blank, "\x01", note.tail);
+    for(auto const & l: note.lead) s += cat("\x01", l);
+    return s;
+  }
 };
 
 std::string item_key(ast_db const & db, node_id n) {
@@ -57,11 +70,18 @@ std::string item_key(ast_db const & db, node_id n) {
 // base_items is the number of elements of the common base module (recognition by number).
 std::vector<item_version> module_items(ast_db const & db, node_id root, std::vector<uint32_t> const & base_items = {}) {
   std::vector<item_version> out;
-  for(node_id n: db.as<n_module>(root).items) {
+  auto const & m = db.as<n_module>(root);
+  for(std::size_t k = 0; k < m.items.size(); ++k) {
+    node_id n = m.items[k];
     std::string key = item_key(db, n);
-    for(uint32_t k = 2; std::ranges::any_of(out, [&](item_version const & x) { return x.key == key; }); ++k) key = cat(item_key(db, n), " #", k);
+    for(uint32_t j = 2; std::ranges::any_of(out, [&](item_version const & x) { return x.key == key; }); ++j) key = cat(item_key(db, n), " #", j);
     std::string id = std::ranges::contains(base_items, n.value) ? cat("#", n.value) : key;
-    out.push_back({id, key, printer(db).print(n), n});
+    item_version x{id, key, printer(db).print(n), n};
+    x.inner = std::ranges::contains(m.inner, n.value);
+    x.blank = k < m.blank.size() ? m.blank[k] : 0;
+    if(node_note const * nt = db.note_of(n)) x.note = {nt->lead, nt->tail, {}};
+    x.after = out.empty() ? std::string() : out.back().id;
+    out.push_back(std::move(x));
   }
   return out;
 }
@@ -98,6 +118,7 @@ std::size_t common_prefix(std::vector<journal_entry> const & a, std::vector<jour
 struct merge_conflict {
   std::string id, key, base, mine, theirs; // There is no element in this version.
   bool theirs_exists = true;
+  std::optional<item_version> their; // Their layout element - to "take them"
 };
 
 struct merge_result {
@@ -106,28 +127,47 @@ struct merge_result {
   std::vector<uint32_t> base_items; // for take_theirs on conflict
 };
 
-// Replace (or add or delete) the id element in db with text from their version.
+// Replace (or add or remove) the id element in the db database with their version: text - parsing in place of
+// the element (§4.4), layout - as they have; new - after the same neighbor that they have (no it - at the end).
 void take_theirs(ast_db & db, node_id root, std::vector<uint32_t> const & base_items, std::string const & key,
-    std::optional<std::string> const & text) {
-  auto mine = find_item(module_items(db, root, base_items), key);
+    std::optional<item_version> const & theirs) {
+  auto items = module_items(db, root, base_items);
+  auto mine = find_item(items, key);
   n_module m = db.as<n_module>(root);
-  if(!text) { // remotely
-    if(mine) std::erase(m.items, mine->node);
+  auto at_of = [&](node_id n) { return std::size_t(std::ranges::find(m.items, n) - m.items.begin()); };
+  if(m.blank.size() < m.items.size() + 1) m.blank.resize(m.items.size() + 1, 0);
+  if(!theirs) { // remotely
+    if(mine) {
+      std::size_t k = at_of(mine->node);
+      m.items.erase(m.items.begin() + std::ptrdiff_t(k));
+      m.blank.erase(m.blank.begin() + std::ptrdiff_t(k));
+      std::erase(m.inner, mine->node.value);
+    }
     db.replace(root, m);
     db.link_parents(root);
     return;
   }
-  parser pr(db, *text, cat("<слияние ", key, ">"));
+  parser pr(db, theirs->text, cat("<слияние ", key, ">"));
   pr.outer_items = m.items; // f(…) - on the function of this module
   pr.place(root, mine ? mine->node : node_id{}); // Rules parsing of the Item Place (§4.4)
   node_id snippet = pr.parse_module();
-  auto const & items = db.as<n_module>(snippet).items;
-  if(items.empty()) return;
-  if(mine) db.replace(mine->node, db[items[0]].kind);
-  else {
-    m.items.push_back(items[0]);
-    db.replace(root, m);
+  auto const & got = db.as<n_module>(snippet).items;
+  if(got.empty()) return;
+  node_id item = got[0];
+  if(mine) {
+    db.replace(mine->node, db[item].kind);
+    item = mine->node;
+  } else {
+    std::size_t k = m.items.size();
+    if(auto prev = find_item(items, theirs->after)) k = at_of(prev->node) + 1;
+    m.items.insert(m.items.begin() + std::ptrdiff_t(k), item);
+    m.blank.insert(m.blank.begin() + std::ptrdiff_t(k), 0);
   }
+  m.blank[at_of(item)] = theirs->blank;
+  std::erase(m.inner, item.value);
+  if(theirs->inner) m.inner.push_back(item.value);
+  db.replace(root, m);
+  db.set_note(item, theirs->note);
   db.link_parents(root);
 }
 
@@ -153,15 +193,15 @@ merge_result merge_into(ast_db & mine, node_id mine_root, std::vector<journal_en
   merge_result out;
   for(auto const & id: ids) {
     auto bi = find_item(b, id), mi = find_item(m, id), ti = find_item(t, id);
-    auto text = [](std::optional<item_version> const & x) { return x ? std::optional<std::string>(x->text) : std::nullopt; };
+    auto text = [](std::optional<item_version> const & x) { return x ? std::optional<std::string>(x->state()) : std::nullopt; };
     std::string name = mi ? mi->key : ti ? ti->key : bi->key;
     if(text(mi) == text(ti) || text(ti) == text(bi)) continue; // matched or unchanged.
     if(text(mi) == text(bi)) { // They are only changed by themselves.
-      take_theirs(mine, mine_root, base_items, id, text(ti));
+      take_theirs(mine, mine_root, base_items, id, ti);
       out.taken.push_back(name);
       continue;
     }
-    out.conflicts.push_back({id, name, bi ? bi->text : "", mi ? mi->text : "", ti ? ti->text : "", ti.has_value()});
+    out.conflicts.push_back({id, name, bi ? bi->text : "", mi ? mi->text : "", ti ? ti->text : "", ti.has_value(), ti});
   }
   out.base_items = base_items;
   return out;
@@ -174,6 +214,7 @@ std::string describe_diff(ast_db const & a, node_id ra, ast_db const & b, node_i
   for(auto const & x: xa)
     if(auto y = find_item(xb, x.key); !y) out += cat("- ", x.key, "\n");
     else if(y->text != x.text) out += cat("~ ", x.key, "\n  было:  ", x.text, "\n  стало: ", y->text, "\n");
+    else if(y->state() != x.state()) out += cat("~ ", x.key, " — раскладка (внутренний, пустые строки, комментарий)\n");
   for(auto const & y: xb)
     if(!find_item(xa, y.key)) out += cat("+ ", y.key, "\n  ", y.text, "\n");
   return out.empty() ? "без различий\n" : out;

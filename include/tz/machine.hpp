@@ -1021,10 +1021,22 @@ struct process_machine {
     fib().state = f_blocked;
     schedule();
   }
+  // host waiting outside (editor process, F5): everyone is waiting for host - the machine does not
+  // sleep in its io_uring, but gives control; the ring is waiting for the one who executes it (the
+  // server), and calls the pump. .
+  bool external_wait = false;
+  bool host_waiting() { return external_wait && !st.done && fib().state != f_ready && st.ready.empty() && io_pending > 0; }
+  int host_fd() const { return ring ? ring->ring.ring_fd : -1; }
+  void pump() {
+    if(!ring) return;
+    for(auto const & c: ring->peek()) io_complete(c);
+    if(fib().state != f_ready) schedule();
+  }
   // The next one is ready; no - everyone is waiting: mutual lock, error - in the main.
   void schedule() {
     while(!st.ready.empty() && st.fibers[st.ready.front()].state != f_ready) st.ready.erase(st.ready.begin());
     while(st.ready.empty() && io_pending > 0 && fib().state != f_ready) { // We are all waiting for host: sleep in io_uring
+      if(external_wait) return;
       for(auto const & c: ring->wait()) io_complete(c);
       while(!st.ready.empty() && st.fibers[st.ready.front()].state != f_ready) st.ready.erase(st.ready.begin());
     }
@@ -1195,6 +1207,10 @@ struct process_machine {
   // Step: One phase of the upper task; false, the process is complete.
   bool step() {
     if(st.done) return false;
+    if(external_wait && fib().state != f_ready) { // waiting for host: ready to take, otherwise there is no step
+      pump();
+      if(fib().state != f_ready) return true;
+    }
     auto & f = fib();
     try {
       if(st.deadlock && st.current == 0) { // Error of mutual blocking - in the main, at the waiting place

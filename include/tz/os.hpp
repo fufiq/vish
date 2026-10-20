@@ -395,6 +395,18 @@ struct uring {
     io_uring_cq_advance(&ring, n);
     return out;
   }
+  // Completed completions without waiting (server between process quanta).
+  std::vector<completion> peek() {
+    std::vector<completion> out;
+    io_uring_cqe * c = nullptr;
+    unsigned head, n = 0;
+    io_uring_for_each_cqe(&ring, head, c) {
+      out.push_back({io_uring_cqe_get_data64(c), c->res, c->flags});
+      ++n;
+    }
+    io_uring_cq_advance(&ring, n);
+    return out;
+  }
 };
 // Core Types (§9.5, step 12.3b): Intel’s hybrid processor has /sys/devices/cpu_core/cpus
 // (performance) and cpu_atom/cpus (energy efficient). Not both, untethered.
