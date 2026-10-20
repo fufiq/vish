@@ -1429,6 +1429,3 @@ struct editor_server {
 
 } // namespace tz
 
-// out/native.hpp (tz native, build.sh): the native “cpp” prelude body and the editor module after
-// the server, its primitives to editor_host
-#include "native.hpp"

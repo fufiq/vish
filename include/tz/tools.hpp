@@ -59,6 +59,8 @@ struct version {
 struct tools_context {
   std::deque<version> versions; // Deque: Links stable; language number
   std::string error; // opening error
+  ast_db * db = nullptr; // the base of the tool module (tz command): its functions - by name
+  node_id module;
 
   tools_context() { versions.emplace_back(); }
   tools_context(ast_db & db, node_id root) : tools_context() {
@@ -66,6 +68,12 @@ struct tools_context {
     versions[0].root = root;
   }
 
+  node_id fn(std::string_view name) const {
+    if(!db || !module) return {};
+    for(node_id x: db->as<n_module>(module).items)
+      if(db->is<n_fn>(x) && db->strings.text(db->as<n_fn>(x).name) == name) return x;
+    return {};
+  }
   version * at(int64_t v) {
     return v >= 0 && std::size_t(v) < versions.size() && versions[std::size_t(v)].db ? &versions[std::size_t(v)] : nullptr;
   }
@@ -138,6 +146,19 @@ struct tools_context {
 
 // the context of tuling, whose work goes on: primitives of the tool module (native "cpp") - to it
 thread_local tools_context * tools_host = nullptr;
+
+// language arrays; language arrays
+std::vector<std::string> strings_of(value const & a) {
+  std::vector<std::string> out;
+  auto const & xs = a.as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) out.emplace_back(xs.get(k).as<str_v>().view());
+  return out;
+}
+value strings_value(std::vector<std::string> const & xs) {
+  std::vector<value> out;
+  for(auto const & x: xs) out.push_back(value(x));
+  return value(array_v::of(std::move(out)));
+}
 
 // The element of the module m of the db base - data: number, text projection, internal (§13.3), empty lines
 // in front of it, comments with it (the module prints them, not the element): - the element is transferred
@@ -234,20 +255,19 @@ void remove_item(ast_db & db, node_id m, node_id n) {
 
 // tz command in language: function fn tool module in its database (prelude and module) - the result is the
 // output code. Module code error with space in tools.tz.
-int run_tools(std::string_view fn, std::vector<value> args) {
+int run_tools(std::string_view name, std::vector<value> args) {
   ast_db db;
   load_prelude(db);
-  node_id m = load_tools(db);
-  node_id f;
-  for(node_id x: db.as<n_module>(m).items)
-    if(!f && db.is<n_fn>(x) && db.strings.text(db.as<n_fn>(x).name) == fn) f = x;
-  if(!f) throw diagnostic(cat("нет функции tools.", fn), {});
   tools_context ctx;
+  ctx.db = &db;
+  ctx.module = load_tools(db);
+  node_id f = ctx.fn(name);
+  if(!f) throw diagnostic(cat("нет функции tools.", name), {});
   struct hold {
     tools_context * was;
     ~hold() { tools_host = was; }
   } h{std::exchange(tools_host, &ctx)};
-  interpreter vm(db, m, {}, mode::run);
+  interpreter vm(db, ctx.module, {}, mode::run);
   try {
     return int(vm.analyze_instance(f, std::move(args)).as<int64_t>());
   } catch(diagnostic const & d) {

@@ -21,6 +21,9 @@
 #include "tz/machine.hpp"
 #include "tz/modules.hpp"
 #include "tz/jit/jit.hpp"
+// out/native.hpp (tz native, build.sh): native "cpp" prelude bodies and tools modules, editor - after the
+// entire VM: their primitives are called server, test runner, versions
+#include "native.hpp"
 
 namespace {
 
@@ -134,11 +137,12 @@ int run(int argc, char ** argv) {
       tz::os::write_file(argv[2], out);
       return 3;
     }
-    if(cmd == "test") {
-      tz::test_runner r;
-      r.a64 = argc > 3 && std::string_view(argv[3]) == "--a64";
-      if(argc > 4 && std::string_view(argv[3]) == "--projection") r.projection = argv[4]; // Second language reversibility (§4.5)
-      return r.run(argv[2]);
+    if(cmd == "test") { // run - in language (lib/tools.tz), engines - test_host
+      tz::test_host host;
+      tz::tests_host = &host;
+      bool a64 = argc > 3 && std::string_view(argv[3]) == "--a64";
+      std::string projection = argc > 4 && std::string_view(argv[3]) == "--projection" ? argv[4] : ""; // Second language reversibility (§4.5)
+      return tz::run_tools("run_tests", {tz::value(std::string(argv[2])), tz::value(a64), tz::value(projection)});
     }
     // Versions (§9.4): semantic diff and triangular merging of .tzdb bases in the language (lib/tools.tz).
     if(cmd == "diff" && argc == 4) return tz::run_tools("diff_files", {tz::value(std::string(argv[2])), tz::value(std::string(argv[3]))});

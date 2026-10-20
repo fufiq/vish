@@ -391,13 +391,6 @@ member_object(n) => native "cpp" {
   if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
   return vm.code_value(editor_host->session.db.member_of(vm.code_node(a[0], where)).object);
 };
-// байты [from, to)
-slice_text(str s, i64 from, i64 to) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
-  auto v = (a[0]).as<str_v>().view();
-  std::size_t f = std::size_t(std::clamp<int64_t>((a[1]).as<int64_t>(), 0, int64_t(v.size()))), t = std::size_t(std::clamp<int64_t>((a[2]).as<int64_t>(), int64_t(f), int64_t(v.size())));
-  return value(std::string(v.substr(f, t - f)));
-};
 // перегрузки, выбранные разбором у вызова (по всем экземплярам)
 call_targets(c) => native "cpp" {
   if(!(a[0]).known()) return erase(value(array_v::of({})));
@@ -604,13 +597,6 @@ clip(str s, i64 n) => native "cpp" {
   }
   return value(std::move(t));
 };
-// хвост строки с байта k
-text_from(str s, i64 k) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  auto v = (a[0]).as<str_v>().view();
-  std::size_t k = std::size_t(std::max<int64_t>(0, (a[1]).as<int64_t>()));
-  return value(std::string(k < v.size() ? v.substr(k) : std::string_view()));
-};
 
 // --- примитивы: трасса запуска (отладчик) ---------------------------------------------
 // шаги трассы: узел, глубина вызова, сколько вывода к нему, значение
@@ -815,12 +801,7 @@ lower_bound(xs, i64 x) => native "cpp" {
     }
   return value(int64_t(lo));
 };
-// строки — байты (§4.0): поиск и регистр ASCII — примитивы базы
-find_text(str s, str part) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto at = (a[0]).as<str_v>().view().find((a[1]).as<str_v>().view());
-  return value(at == std::string_view::npos ? int64_t(-1) : int64_t(at));
-};
+// строки — байты (§4.0): подпоследовательность и регистр ASCII — примитивы базы (поиск, срез — модуль tools)
 // w — подпоследовательность s (байты по порядку, не подряд)
 subsequence(str s, str w) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
@@ -836,17 +817,6 @@ lower(str s) => native "cpp" {
   for(char & c: r)
     if(c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
   return value(std::move(r));
-};
-// порядок строк: номера по возрастанию ключей (сравнение байтов, устойчиво)
-sorted_indices(keys) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  auto const & ks = (a[0]).as<array_v>();
-  std::vector<uint32_t> order(ks.size());
-  for(uint32_t k = 0; k < ks.size(); ++k) order[k] = k;
-  std::ranges::stable_sort(order, [&](uint32_t x, uint32_t y) { return ks.get(x).as<str_v>().view() < ks.get(y).as<str_v>().view(); });
-  std::vector<value> xs;
-  for(uint32_t k: order) xs.push_back(value(int64_t(k)));
-  return value(array_v::of(std::move(xs)));
 };
 
 // --- представления: найти, открыть, закрыть -------------------------------------------------
@@ -2217,8 +2187,6 @@ code_points(str s) {
 }
 
 // --- строки ------------------------------------------------------------------------------
-starts_with(str s, str p) => (p.size <= s.size) && (find_text(s, p) == 0);
-contains(str s, str p) => find_text(s, p) >= 0;
 // до первого байта ch (без него)
 before(str s, i64 ch) {
   r = "";
@@ -3569,7 +3537,6 @@ on_trace(i64 v) {
 }
 
 // --- команды: запуск, сохранение, правка функцией, слияние, слой, проекция --------------------
-ends_with(str s, str tail) => (tail.size <= s.size) && (find_text(text_from(s, s.size - tail.size), tail) == 0);
 // запуск (F5) — принятого текста: процесс в этой же VM, редактор не встаёт 
 // 
 on_run(str args, str input) {

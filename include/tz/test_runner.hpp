@@ -1,25 +1,9 @@
-// Reference test runner: `tz test <каталог>`. No external dependencies.
-//
-// Comments at the beginning of the .tz file:
-// // args: a b c arguments of the program
-// // stdin: 1 2 3 line stdin (may be several)
-// // out: text expected line stdout (in order)
-// // error: adjustment expected error (diagnosis adjustment)
-// // instances: dot(...) expected instance
-// // check: substrate expected line of `tz check` report
-// Check-error: Predicted static parsing error
-// // residual: ab construct residual program for arguments
-// // residual-has: text... it has a line
-// // residual-lacks: text ... there is no line in it
-// // slice: function variable
-// // slice-has: text / slice-lacks: text
-// // fmt-stable check fmtffmt = fmt
-// // fmt-ct-has: text is in projection after elaboration (tz fmt-ct)
-// // fmt-ct-lacks: text not in it
-// // fmt-has: text in projection (with holes) has a string
-// // fmt-projection: projection key - record module (tz fmt-projection, §4.5 )
-// // fmt-projection-has: text ... in its text there is a line
-// // store-roundtrip save to .tzdb, download: same projection and same output
+// Run reference tests (`tz test <каталог>`) - in the language (lib/tools.tz, step 3 transfer tuling): header
+// directives, reconciliations and cause texts, order and parallelity - there.
+// 
+// - reconciliation of engines; Here is the base: engines over the test program (interpreter, JIT, AArch64,
+// process machine, check, residual, slice, print), status directories, children (fork) and session/editor
+// scripts.
 #pragma once
 
 #include "interp.hpp"
@@ -34,184 +18,15 @@
 #include "machine.hpp"
 #include "jit/jit.hpp"
 #include "dump.hpp"
+#include "tools.hpp"
 
 #include <filesystem>
 #include <thread>
 
 namespace tz {
 
-struct test_runner {
-  bool a64 = false; // --a64: each instance JIT is also coded AArch64 in qemu
-  uint32_t a64_checked = 0, a64_skipped = 0;
-  std::set<std::string> a64_notes;
-  std::string projection; // Projection k: only reversibility of programs in projection k (§4.5)
-
-  int run(std::string const & dir) {
-    std::vector<std::filesystem::path> files;
-    if(std::filesystem::is_regular_file(dir)) files.push_back(dir); // test
-    else
-      for(auto & e: std::filesystem::directory_iterator(dir))
-        if(e.path().extension() == ".tz" || (projection.empty() && (e.path().extension() == ".session" || e.path().extension() == ".wire"))) files.push_back(e.path());
-    std::ranges::sort(files);
-    uint32_t passed = 0;
-    auto show = [&](std::filesystem::path const & f, std::string const & why) {
-      if(why.empty()) {
-        ++passed;
-        put(stdout, cat("  ok   ", f.filename().string(), "\n"));
-      } else {
-        put(stdout, cat("  FAIL ", f.filename().string(), "\n", why, "\n"));
-      }
-    };
-    if(uint32_t jobs = test_jobs(); jobs > 1) run_forked(files, jobs, show);
-    else for(auto & f: files) show(f, run_one(f));
-    if(a64) {
-      put(stdout, cat("AArch64: проверено вызовов ", a64_checked, ", не проверено ", a64_skipped, "\n"));
-      for(auto const & n: a64_notes) put(stdout, cat("  не проверено  ", n, "\n"));
-    }
-    put(stdout, cat(passed, "/", files.size(), " тестов прошло\n"));
-    return passed == files.size() ? 0 : 1;
-  }
-
-  // Simultaneous tests: TZ_TEST_JOBS, otherwise - on the cores; 1 - in a row in this process, without fork.
-  static uint32_t test_jobs() {
-    if(char const * s = std::getenv("TZ_TEST_JOBS")) {
-      uint32_t n = 0;
-      std::from_chars(s, s + std::strlen(s), n);
-      return std::max(n, 1u);
-    }
-    return std::max(std::thread::hardware_concurrency(), 1u);
-  }
-
-  // Each test is in its child (fork), no more jobs at once; the results are in the order of the
-  // files, as when running in a row. The child sends to the pipe: counters and notes AArch64
-  // (they are saved by the runner between tests), then the text parsing (empty - passed).
-  void run_forked(std::vector<std::filesystem::path> const & files, uint32_t jobs, auto && show) {
-    struct running {
-      os::child c;
-      std::string got;
-      bool done = false;
-      int code = 0;
-    };
-    std::vector<running> kids(files.size());
-    std::size_t next = 0, shown = 0;
-    uint32_t busy = 0;
-    while(shown < files.size()) {
-      for(; busy < jobs && next < files.size(); ++next, ++busy)
-        kids[next].c = os::fork_child([&] {
-          a64_checked = a64_skipped = 0;
-          a64_notes.clear();
-          std::string why;
-          try {
-            why = run_one(files[next]);
-          } catch(diagnostic const & d) {
-            why = cat("    ", d.what(), "\n");
-          }
-          std::string out;
-          put_u32(out, a64_checked);
-          put_u32(out, a64_skipped);
-          put_u32(out, uint32_t(a64_notes.size()));
-          for(auto const & n: a64_notes) {
-            put_u32(out, uint32_t(n.size()));
-            out += n;
-          }
-          return out + why;
-        });
-      std::vector<int> fds;
-      std::vector<std::size_t> who;
-      for(std::size_t i = shown; i < next; ++i)
-        if(!kids[i].done) {
-          fds.push_back(kids[i].c.fd);
-          who.push_back(i);
-        }
-      if(!fds.empty()) {
-        auto ready = os::wait_readable(fds);
-        for(std::size_t k = 0; k < who.size(); ++k) {
-          auto & r = kids[who[k]];
-          if(!ready[k] || os::read_some(r.c.fd, r.got)) continue;
-          os::close_fd(r.c.fd);
-          r.code = os::wait_child(r.c.pid);
-          r.done = true;
-          --busy;
-        }
-      }
-      for(; shown < next && kids[shown].done; ++shown) {
-        auto & r = kids[shown];
-        if(r.code != 0) { // The fallen child did not complete the result
-          show(files[shown], cat("    тест не закончился: ", r.code < 0 ? cat("сигнал ", -r.code) : cat("код ", r.code), "\n"));
-          continue;
-        }
-        std::string_view in = r.got;
-        a64_checked += take_u32(in);
-        a64_skipped += take_u32(in);
-        for(uint32_t k = 0, notes = take_u32(in); k < notes; ++k) {
-          uint32_t n = std::min<uint32_t>(take_u32(in), uint32_t(in.size()));
-          a64_notes.emplace(in.substr(0, n));
-          in.remove_prefix(n);
-        }
-        show(files[shown], std::string(in));
-        r.got = {};
-      }
-    }
-  }
-
-  static void put_u32(std::string & to, uint32_t v) { to.append(reinterpret_cast<char const *>(&v), 4); }
-  static uint32_t take_u32(std::string_view & from) {
-    uint32_t v = 0;
-    if(from.size() < 4) return 0;
-    std::memcpy(&v, from.data(), 4);
-    from.remove_prefix(4);
-    return v;
-  }
-  struct expect {
-    std::vector<std::string> args, stdin_lines, out, out2, errors, instances, check, check_lacks, check_errors;
-    std::vector<std::string> residual, residual_has, residual_lacks, slice, slice_has, slice_lacks, jit_compiled, jit_stats, fmt_has, fmt_ct_has, fmt_ct_lacks, fmt_projection, fmt_projection_has, unknown;
-    bool fmt_stable = false;
-    bool machine = false; // The same program is a process machine: the same output
-    bool no_jit = false; // JIT-free: the outcome depends on the engine (host stack depth)
-    std::vector<std::string> machine_dump; // dump step: dump, restore to new base, count
-    std::vector<std::string> dump_out; // output of the run with the dump, if it is different (host resources do not survive the transfer)
-    std::vector<std::string> quantum; // background displacement quantum at safe points (TZ_SLICE): deterministic order
-    std::vector<std::string> grant; // resources given to the program by the user (TZ_GRANT): fs, net
-    bool store_roundtrip = false;
-  };
-
-  static expect read_header(std::string const & src) {
-    expect e;
-    for(std::string_view line: lines_of(src)) {
-      if(!line.starts_with("//")) {
-        if(line.empty()) continue;
-        break;
-      }
-      auto body = line.substr(2);
-      while(body.starts_with(' ')) body.remove_prefix(1);
-      auto take = [&](std::string_view key, std::vector<std::string> & to) {
-        if(!body.starts_with(key)) return false;
-        auto rest = body.substr(key.size());
-        while(rest.starts_with(' ')) rest.remove_prefix(1);
-        to.emplace_back(rest);
-        return true;
-      };
-      std::vector<std::string> args_line;
-      if(take("args:", args_line)) {
-        for(auto a: words_of(args_line[0])) e.args.emplace_back(a);
-      } else if(take("stdin:", e.stdin_lines) || take("out2:", e.out2) || take("dump-out:", e.dump_out) || take("quantum:", e.quantum) || take("grant:", e.grant) || take("out:", e.out) || take("error:", e.errors) || take("instances:", e.instances) || take("check-error:", e.check_errors) || take("check-lacks:", e.check_lacks) || take("check:", e.check) || take("residual-has:", e.residual_has) || take("residual-lacks:", e.residual_lacks) || take("residual:", e.residual) || take("slice-has:", e.slice_has) || take("slice-lacks:", e.slice_lacks) || take("slice:", e.slice) || take("jit-compiled:", e.jit_compiled) || take("jit-stats:", e.jit_stats) || take("fmt-has:", e.fmt_has) || take("fmt-projection-has:", e.fmt_projection_has) || take("fmt-projection:", e.fmt_projection) || take("fmt-ct-has:", e.fmt_ct_has) || take("fmt-ct-lacks:", e.fmt_ct_lacks)) {
-      } else if(take("machine-dump:", e.machine_dump)) {
-        e.machine = true;
-      } else if(body == "no-jit") {
-        e.no_jit = true;
-      } else if(body == "machine") {
-        e.machine = true;
-      } else if(body.starts_with("fmt-stable")) {
-        e.fmt_stable = true;
-      } else if(body.starts_with("store-roundtrip")) {
-        e.store_roundtrip = true;
-      } else if(auto c = body.find(':'); c != std::string::npos && c > 0 && std::ranges::all_of(body.substr(0, c), [](char ch) { return (ch >= 'a' && ch <= 'z') || ch == '-'; })) {
-        e.unknown.emplace_back(body.substr(0, c)); // a typo in the directive shall not silently turn off the check
-      }
-    }
-    return e;
-  }
-
+// Scenarios of the VM session (.session) and the editor's protocol (.wire).
+struct scenario_runner {
   // Scenario of the VM session: commands and after each waiting for its conclusion.
   // // program: file.tz program (relative to script directory)
   // // expect: substring // expect-not: substring (ой - translation of a line) Scenario .wire - the same through
@@ -608,357 +423,264 @@ struct test_runner {
     }
   };
 
-  // projection text without a test cap: comments are typed (§4.5), and the expectation
-  // of fmt-has from the cap would otherwise be found in the cap itself.
-  static std::string without_header(std::string const & text, std::string_view src) {
-    size_t lines = 0;
-    for(std::string_view l: lines_of(src)) {
-      if(!l.starts_with("//")) break;
-      ++lines;
-    }
-    size_t at = 0;
-    for(size_t k = 0; k < lines && at < text.size(); ++k) {
-      if(!std::string_view(text).substr(at).starts_with("//")) return text;
-      at = std::min(text.find('\n', at), text.size());
-      if(at < text.size()) ++at;
-    }
-    return text.substr(at);
-  }
+};
 
-  // A second language on top of a single AST (§4.5): a program printed in projection k - the
-  // text that itself tells you how to parse it (use k; at the beginning) - is disassembled
-  // into the same tree, and its printing is stable.
-// 
-  // The tree is compared with a dump (without node numbers).
-  std::string roundtrip(std::filesystem::path const & path) {
-    os::mapped_file file(path.string());
-    std::string src(file.text());
-    auto dir = path.parent_path();
-    auto module = [&](ast_db const & db) {
-      auto it = db.strings.index.find(projection);
-      return it != db.strings.index.end() ? find_module(db, it->second) : node_id{};
-    };
-    auto print = [&](ast_db & db, node_id root) {
-      std::vector<diagnostic> ignored = preload_uses(db, cat("use ", projection, ";"), dir);
-      printer pr(db);
-      pr.projection = module(db);
-      pr.header = true;
-      return pr.projection ? pr.print(root) : std::string{};
-    };
-    ast_db db, db2;
-    std::vector<diagnostic> errors, errors2;
-    node_id root = parse_program(db, src, dir, errors);
-    std::string once = print(db, root);
-    if(once.empty()) return cat("    нет модуля проекции ", projection, "\n");
-    node_id root2 = parse_program(db2, once, dir, errors2);
-    if(errors.empty() && !errors2.empty()) return cat("    текст в проекции не разбирается: ", render(errors2.front(), "проекция", db2), once);
-    std::string twice = print(db2, root2);
-    if(once != twice) return cat("    печать в проекции нестабильна:\n", first_difference(once, twice));
-    std::string a = dumper(db).dump(root), b = dumper(db2).dump(root2);
-    std::string use = cat("  n_use key=", projection, "\n");
-    if(std::size_t at = b.find(use); at != std::string::npos && !a.contains(use)) b.erase(at, use.size());
-    if(a != b) return cat("    другое дерево после разбора проекции:\n", first_difference(a, b), "    текст:\n", once);
-    return {};
+// Test program: base, root, text, file name, directory, errors parsing text.
+struct test_program {
+  ast_db db;
+  node_id root;
+  std::string src, name;
+  std::filesystem::path dir;
+  std::string errors;
+  bool parsed = true;
+};
+
+// Temporary state directories of the program (§12.2): its own for each execution
+struct state_dirs {
+  std::vector<std::filesystem::path> made;
+  void fresh() {
+    std::string t = (std::filesystem::temp_directory_path() / "tz-state-XXXXXX").string();
+    if(!mkdtemp(t.data())) throw diagnostic("раннер: нет временного каталога состояния", {});
+    made.emplace_back(t);
+    state_dir = t;
   }
-  // The first differing line of two texts is with neighboring ones (was/became).
-  static std::string first_difference(std::string const & a, std::string const & b) {
-    auto la = lines_of(a), lb = lines_of(b);
-    std::size_t k = 0;
-    while(k < la.size() && k < lb.size() && la[k] == lb[k]) ++k;
-    std::string out;
-    for(std::size_t i = k >= 3 ? k - 3 : 0; i < k + 3; ++i) {
-      if(i < la.size()) out += cat("      было  ", i + 1, ": ", la[i], "\n");
-      if(i < lb.size() && i >= k) out += cat("      стало ", i + 1, ": ", lb[i], "\n");
-    }
+  void clear() {
+    for(auto const & d: made) std::filesystem::remove_all(d);
+    made.clear();
+    state_dir.clear();
+  }
+  ~state_dirs() { clear(); }
+};
+
+struct test_host {
+  std::deque<std::optional<test_program>> programs; // number
+  state_dirs states;
+  // AArch64 last JIT launch (-a64)
+  uint32_t a64_checked = 0, a64_skipped = 0;
+  std::vector<std::string> a64_notes, a64_mismatches;
+
+  test_program & at(int64_t p) {
+    if(p < 0 || std::size_t(p) >= programs.size() || !programs[std::size_t(p)]) throw diagnostic("раннер: нет программы теста", {});
+    return *programs[std::size_t(p)];
+  }
+  // path file program: parsing with modules near (use k;)
+  int64_t load(std::string const & path) {
+    std::filesystem::path f(path);
+    auto & x = programs.emplace_back().emplace();
+    x.src = std::string(os::mapped_file(path).text());
+    x.name = f.filename().string();
+    x.dir = f.parent_path();
+    std::vector<diagnostic> errors;
+    x.root = parse_program(x.db, x.src, x.dir, errors);
+    for(auto const & d: errors) x.errors += render(d, x.name, x.db);
+    x.parsed = errors.empty();
+    return int64_t(programs.size() - 1);
+  }
+  void close(int64_t p) {
+    if(p >= 0 && std::size_t(p) < programs.size()) programs[std::size_t(p)].reset();
+  }
+  std::vector<std::string> run_args(test_program const & x, std::vector<std::string> const & args) {
+    std::vector<std::string> out{x.name};
+    out.insert(out.end(), args.begin(), args.end());
     return out;
   }
-
-  std::string run_one(std::filesystem::path const & path) {
-    if(!projection.empty()) return roundtrip(path);
-    if(path.extension() == ".session" || path.extension() == ".wire") return run_session(path);
-    os::mapped_file file(path.string());
-    std::string src(file.text());
-    expect e = read_header(src);
-    if(e.quantum.empty()) ::unsetenv("TZ_SLICE");
-    else ::setenv("TZ_SLICE", e.quantum[0].c_str(), 1);
-    { // Resources of the program: "You give" - here they give the test (TZ_GRANT )
-      std::string g;
-      for(auto const & line: e.grant)
-        for(auto w: words_of(line)) g += (g.empty() ? "" : ",") + std::string(w);
-      if(g.empty()) ::unsetenv("TZ_GRANT");
-      else ::setenv("TZ_GRANT", g.c_str(), 1);
-    }
-
-    ast_db db;
-    std::vector<diagnostic> parse_errors;
-    node_id root = parse_program(db, src, path.parent_path(), parse_errors); // use k; modules next to the program
-
-    std::string errors;
-    for(auto const & d: parse_errors) errors += render(d, path.filename().string(), db);
-
-    if(e.fmt_stable) {
-      std::string once = printer(db).print(root);
-      ast_db db2;
-      std::vector<diagnostic> ignored;
-      std::string twice = printer(db2).print(parse_program(db2, once, path.parent_path(), ignored));
-      if(once != twice) return "    проекция нестабильна: fmt∘fmt ≠ fmt\n";
-    }
-    if(!e.fmt_has.empty()) {
-      std::string text = without_header(printer(db).print(root), src);
-      for(auto & want: e.fmt_has)
-        if(!text.contains(want)) return cat("    нет в проекции: ", in_quotes(want), "\n", text);
-    }
-    for(auto const & key: e.fmt_projection) { // projection is a key recording module like use k (§4.5)
-      ast_db pdb; // projection module is not included in the executable program
-      std::vector<diagnostic> ignored;
-      node_id proot = parse_program(pdb, src, path.parent_path(), ignored);
-      ignored = preload_uses(pdb, cat("use ", key, ";"), path.parent_path());
-      printer pr(pdb);
-      if(auto it = pdb.strings.index.find(key); it != pdb.strings.index.end()) pr.projection = find_module(pdb, it->second);
-      if(!pr.projection) return cat("    нет модуля проекции ", key, "\n");
-      std::string text = without_header(pr.print(proot), src);
-      for(auto & want: e.fmt_projection_has)
-        if(!text.contains(want)) return cat("    нет в проекции ", key, ": ", in_quotes(want), "\n", text);
-    }
-    if((!e.fmt_ct_has.empty() || !e.fmt_ct_lacks.empty()) && errors.empty()) { // projection after elaboration (tz fmt --ct)
-      std::string text;
-      try {
-        text = without_header(elaborated_text(db, root, path.filename().string()), src);
-      } catch(diagnostic const & d) {
-        return cat("    ошибка элаборации: ", render(d, path.filename().string(), db));
-      }
-      for(auto & want: e.fmt_ct_has)
-        if(!text.contains(want)) return cat("    нет в проекции после элаборации: ", in_quotes(want), "\n", text);
-      for(auto & bad: e.fmt_ct_lacks)
-        if(text.contains(bad)) return cat("    лишнее в проекции после элаборации: ", in_quotes(bad), "\n", text);
-    }
-
-    // stdin - queue of interpreter lines (as in a session), output - in a row
-    auto input = [&] { return interpreter::known_inputs{e.stdin_lines}; };
-
-    // Program state (§12.2) in its temporary directory for each execution
-    // out2: — вывод второго запуска с тем же состоянием
-    state_dirs states;
-    states.fresh();
-    std::string out;
-    std::string instances;
-    if(errors.empty()) {
-      std::vector<std::string> args{path.filename().string()};
-      args.insert(args.end(), e.args.begin(), e.args.end());
-      interpreter vm(db, root, args, mode::run, input());
-      vm.capture_output(&out);
-      try {
-        vm.run_main();
-      } catch(diagnostic const & d) {
-        errors += render(d, path.filename().string(), db);
-      }
-      instances = vm.instances();
-    }
-    std::string why_state;
-    if(!e.out2.empty() && errors.empty()) { // second launch - state from the first
-      std::string again;
-      std::vector<std::string> args{path.filename().string()};
-      interpreter vm(db, root, args, mode::run, input());
-      vm.capture_output(&again);
-      try {
-        vm.run_main();
-      } catch(diagnostic const & d) {
-        why_state += render(d, path.filename().string(), db);
-      }
-      uint32_t k = 0;
-      for(std::string_view line: lines_of(again)) {
-        if(k >= e.out2.size() || line != e.out2[k]) why_state += cat("    второй запуск, строка ", k + 1, ": ", in_quotes(line), "\n");
-        ++k;
-      }
-      if(k < e.out2.size()) why_state += "    второй запуск: не всё выведено\n";
-    }
-    states.fresh();
-
-    std::string why;
-    for(auto & d: e.unknown) why += cat("    неизвестная директива теста: ", d, "\n");
-    // Differential (§10.5): With JIT, the output and error locations coincide with the interpreter.
-    if(parse_errors.empty() && !e.no_jit) {
-      std::string out3, err3;
-      std::vector<std::string> args{path.filename().string()};
-      args.insert(args.end(), e.args.begin(), e.args.end());
-      interpreter vm3(db, root, args, mode::run, input());
-      jit_engine jit(db, root);
-      vm3.use_jit(&jit);
-      a64_check check(db, root);
-      if(a64) vm3.a64 = &check;
-      vm3.capture_output(&out3);
-      try {
-        vm3.run_main();
-      } catch(diagnostic const & d) {
-        err3 = render(d, path.filename().string(), db);
-      }
-      auto first_loc = [](std::string const & t) { return t.substr(0, t.find(": ошибка")); };
-      if(a64) {
-        a64_checked += check.checked;
-        a64_skipped += check.skipped;
-        a64_notes.insert(check.notes.begin(), check.notes.end());
-        for(auto const & m: check.mismatches) why += cat("    AArch64: ", m, "\n");
-      }
-      if(out3 != out) why += cat("    JIT: вывод отличается: ", in_quotes(out3), " против ", in_quotes(out), "\n", jit.stats());
-      for(auto & want: e.jit_stats)
-        if(!jit.stats().contains(want)) why += cat("    нет в статистике JIT: ", in_quotes(want), "\n", jit.stats());
-      for(auto & fn: e.jit_compiled)
-        if(!jit.stats().contains(cat("jit  ", fn, "("))) why += cat("    JIT не скомпилировал ", fn, ":\n", jit.stats());
-      if(first_loc(err3) != first_loc(errors) && !(errors.empty() && err3.empty()))
-        why += cat("    JIT: ошибка отличается:\n", err3, "против\n", errors);
-    }
-    if(!e.check.empty() || !e.check_lacks.empty() || !e.check_errors.empty()) {
-      std::string check_errors, report;
-      if(parse_errors.empty()) {
-        interpreter chk(db, root, {path.filename().string()}, mode::check);
-        try {
-          chk.run_main();
-        } catch(diagnostic const & d) {
-          check_errors = render(d, path.filename().string(), db);
-        }
-        report = chk.report(path.filename().string(), src);
-      }
-      for(auto & want: e.check)
-        if(!report.contains(want)) why += cat("    нет в отчёте check: ", in_quotes(want), "\n", report);
-      for(auto & bad: e.check_lacks)
-        if(report.contains(bad)) why += cat("    лишнее в отчёте check: ", in_quotes(bad), "\n", report);
-      for(auto & want: e.check_errors)
-        if(!check_errors.contains(want)) why += cat("    нет ошибки check: ", in_quotes(want), "; есть: ", check_errors, "\n");
-      if(e.check_errors.empty() && !check_errors.empty()) why += "    неожиданная ошибка check:\n" + check_errors;
-    }
-    if(!e.residual.empty() && parse_errors.empty()) {
-      std::vector<std::string> args{path.filename().string()};
-      for(auto a: words_of(e.residual[0])) args.emplace_back(a);
-      interpreter vm(db, root, args, mode::check, interpreter::known_inputs{});
-      try {
-        vm.run_main();
-      } catch(diagnostic const &) {
-      }
-      std::string text = residual_view(db, vm).print(root);
-      for(auto & want: e.residual_has)
-        if(!text.contains(want)) why += cat("    нет в остаточной программе: ", in_quotes(want), "\n", text);
-      for(auto & bad: e.residual_lacks)
-        if(text.contains(bad)) why += cat("    лишнее в остаточной программе: ", in_quotes(bad), "\n", text);
-    }
-    if(!e.slice.empty() && parse_errors.empty()) {
-      auto w = words_of(e.slice[0]);
-      std::string fn(w.size() > 0 ? w[0] : ""), var(w.size() > 1 ? w[1] : "");
-      std::string text = slice_view(db).print(root, fn, var);
-      for(auto & want: e.slice_has)
-        if(!text.contains(want)) why += cat("    нет в срезе: ", in_quotes(want), "\n", text);
-      for(auto & bad: e.slice_lacks)
-        if(text.contains(bad)) why += cat("    лишнее в срезе: ", in_quotes(bad), "\n", text);
-    }
-    if(e.store_roundtrip) {
-      auto tmp = std::filesystem::temp_directory_path() / cat("tz-test-", path.stem().string(), "-", getpid(), ".tzdb");
-      save_db(db, root, tmp.string());
-      ast_db db2;
-      node_id root2 = load_db(db2, tmp.string());
-      std::filesystem::remove(tmp);
-      if(printer(db).print(root) != printer(db2).print(root2)) why += "    проекция после загрузки базы отличается\n";
-      std::string out2;
-      std::vector<std::string> args{path.filename().string()};
-      args.insert(args.end(), e.args.begin(), e.args.end());
-      states.fresh();
-      interpreter vm2(db2, root2, args, mode::run, input());
-      vm2.capture_output(&out2);
-      try {
-        vm2.run_main();
-      } catch(diagnostic const &) {
-      }
-      if(out2 != out) why += cat("    вывод из базы отличается: ", in_quotes(out2), " против ", in_quotes(out), "\n");
-    }
-    why += why_state;
-    states.fresh();
-    if(e.machine && parse_errors.empty()) why += machine_check(db, root, path, e, out, errors);
-    uint32_t i = 0;
-    for(std::string_view line: lines_of(out)) {
-      if(i >= e.out.size()) {
-        why += cat("    лишний вывод: ", line, "\n");
-        continue;
-      }
-      if(line != e.out[i]) why += cat("    строка ", i + 1, ": ожидалось ", in_quotes(e.out[i]), ", получено ", in_quotes(line), "\n");
-      ++i;
-    }
-    for(; i < e.out.size(); ++i) why += cat("    не выведено: ", in_quotes(e.out[i]), "\n");
-    for(auto & want: e.errors)
-      if(!errors.contains(want)) why += cat("    нет ожидаемой ошибки: ", in_quotes(want), "\n");
-    if(e.errors.empty() && !errors.empty()) why += "    неожиданная ошибка:\n" + errors;
-    for(auto & want: e.instances)
-      if(!instances.contains(want)) why += cat("    нет экземпляра ", in_quotes(want), "; есть:\n", instances);
-    return why;
-  }
-
-  // Process machine (M5): the same conclusion as the interpreter; with dump - dump after
-  // N steps, recovery in a new database from journal dump ("in another VM") and counting:
-  // output to dump + after recovery = complete. Error text without space: "...: Error:
-  // <text>" of the first line.
-  static std::string error_text(std::string const & rendered) {
-    auto at = rendered.find("ошибка: ");
-    if(at == std::string::npos) return {};
-    auto end = rendered.find('\n', at);
-    return rendered.substr(at + 14, end == std::string::npos ? std::string::npos : end - at - 14);
-  }
-
-  // Temporary state directories of the program (§12.2): its own for each execution
-  struct state_dirs {
-    std::vector<std::filesystem::path> made;
-    void fresh() {
-      std::string t = (std::filesystem::temp_directory_path() / "tz-state-XXXXXX").string();
-      if(!mkdtemp(t.data())) throw diagnostic("раннер: нет временного каталога состояния", {});
-      made.emplace_back(t);
-      state_dir = t;
-    }
-    ~state_dirs() {
-      for(auto const & d: made) std::filesystem::remove_all(d);
-      state_dir.clear();
-    }
-  };
-
-  static std::string machine_check(ast_db & db, node_id root, std::filesystem::path const & path, expect const & e, std::string const & out,
-      std::string const & errors) {
-    std::string why, mout, merr;
-    state_dirs states;
-    states.fresh();
+  // Interpreter startup: output, errors, instance
+  std::array<std::string, 3> run(int64_t p, std::vector<std::string> const & args, std::vector<std::string> const & input) {
+    test_program & x = at(p);
+    std::array<std::string, 3> r;
+    interpreter vm(x.db, x.root, run_args(x, args), mode::run, interpreter::known_inputs{input});
+    vm.capture_output(&r[0]);
     try {
-      process_machine m(db, root, path.filename().string());
-      m.captured = &mout;
-      m.start(e.args, e.stdin_lines);
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      r[1] = render(d, x.name, x.db);
+    }
+    r[2] = vm.instances();
+    return r;
+  }
+  // Launch with JIT (and AArch64 code in qemu): output, error, JIT statistics
+  std::array<std::string, 3> run_jit(int64_t p, std::vector<std::string> const & args, std::vector<std::string> const & input, bool a64) {
+    test_program & x = at(p);
+    std::array<std::string, 3> r;
+    interpreter vm(x.db, x.root, run_args(x, args), mode::run, interpreter::known_inputs{input});
+    jit_engine jit(x.db, x.root);
+    vm.use_jit(&jit);
+    a64_check check(x.db, x.root);
+    if(a64) vm.a64 = &check;
+    vm.capture_output(&r[0]);
+    try {
+      vm.run_main();
+    } catch(diagnostic const & d) {
+      r[1] = render(d, x.name, x.db);
+    }
+    r[2] = jit.stats();
+    a64_checked = check.checked;
+    a64_skipped = check.skipped;
+    a64_notes.assign(check.notes.begin(), check.notes.end());
+    a64_mismatches = check.mismatches;
+    return r;
+  }
+  // static parsing: error, report
+  std::array<std::string, 2> check(int64_t p) {
+    test_program & x = at(p);
+    std::array<std::string, 2> r;
+    interpreter chk(x.db, x.root, {x.name}, mode::check);
+    try {
+      chk.run_main();
+    } catch(diagnostic const & d) {
+      r[0] = render(d, x.name, x.db);
+    }
+    r[1] = chk.report(x.name, x.src);
+    return r;
+  }
+  std::string residual(int64_t p, std::vector<std::string> const & args) {
+    test_program & x = at(p);
+    interpreter vm(x.db, x.root, run_args(x, args), mode::check, interpreter::known_inputs{});
+    try {
+      vm.run_main();
+    } catch(diagnostic const &) {
+    }
+    return residual_view(x.db, vm).print(x.root);
+  }
+  // save to .tzdb and download: is the same projection; output from downloaded
+  std::pair<bool, std::string> store_roundtrip(int64_t p, std::vector<std::string> const & args, std::vector<std::string> const & input) {
+    test_program & x = at(p);
+    auto tmp = std::filesystem::temp_directory_path() / cat("tz-test-", std::filesystem::path(x.name).stem().string(), "-", getpid(), ".tzdb");
+    save_db(x.db, x.root, tmp.string());
+    ast_db db2;
+    node_id root2 = load_db(db2, tmp.string());
+    std::filesystem::remove(tmp);
+    bool same = printer(x.db).print(x.root) == printer(db2).print(root2);
+    std::string out;
+    interpreter vm(db2, root2, run_args(x, args), mode::run, interpreter::known_inputs{input});
+    vm.capture_output(&out);
+    try {
+      vm.run_main();
+    } catch(diagnostic const &) {
+    }
+    return {same, out};
+  }
+  // Process machine: output, error
+  std::array<std::string, 2> machine(int64_t p, std::vector<std::string> const & args, std::vector<std::string> const & input) {
+    test_program & x = at(p);
+    std::array<std::string, 2> r;
+    try {
+      process_machine m(x.db, x.root, x.name);
+      m.captured = &r[0];
+      m.start(args, input);
       m.run();
     } catch(diagnostic const & d) {
-      merr = render(d, path.filename().string(), db);
+      r[1] = render(d, x.name, x.db);
     }
-    if(mout != out) why += cat("    машина процессов: вывод ", in_quotes(mout), " против ", in_quotes(out), "\n");
-    if(error_text(merr) != error_text(errors)) why += cat("    машина процессов: ошибка ", in_quotes(error_text(merr)), " против ", in_quotes(error_text(errors)), "\n");
-    for(auto const & at: e.machine_dump) { // each directive - its launch with a dump at this step
-      uint64_t n = 0;
-      std::from_chars(at.data(), at.data() + at.size(), n);
-      std::string dout;
-      states.fresh();
-      try {
-        std::string bytes;
-        { // The original process goes away: the restored one has the same addresses (pages as is)
-          process_machine m(db, root, path.filename().string());
-          m.captured = &dout;
-          m.start(e.args, e.stdin_lines);
-          m.run(n);
-          if(m.st.done) why += cat("    машина: процесс закончился раньше шага дампа ", n, "\n");
-          bytes = m.dump();
+    return r;
+  }
+  // Machine with dump after n steps, recovery in a new base from journal dump (“in another VM”) and
+  // counting: output before the dump and after recovery; whether the process ended before the dump step.
+  std::pair<std::string, bool> machine_dump(int64_t p, std::vector<std::string> const & args, std::vector<std::string> const & input, uint64_t n) {
+    test_program & x = at(p);
+    std::string out;
+    bool early = false;
+    try {
+      std::string bytes;
+      { // The original process goes away: the restored one has the same addresses (pages as is)
+        process_machine m(x.db, x.root, x.name);
+        m.captured = &out;
+        m.start(args, input);
+        m.run(n);
+        early = m.st.done;
+        bytes = m.dump();
+      }
+      restored_process r(bytes);
+      r.m->captured = &out;
+      r.m->run();
+    } catch(diagnostic const &) {
+    }
+    return {out, early};
+  }
+
+  // --- tests in children: each - fork, no more jobs at once; results - in the order of files ---
+  struct running {
+    os::child c;
+    std::string got;
+    bool done = false;
+    int code = 0;
+  };
+  std::vector<std::string> files;
+  std::vector<running> kids;
+  std::size_t next = 0, shown = 0;
+  uint32_t busy = 0, jobs = 1;
+  bool a64_mode = false; // Run mode: --a64, --projection k
+  std::string projection;
+  void start(std::vector<std::string> fs, uint32_t n) {
+    files = std::move(fs);
+    kids.assign(files.size(), {});
+    next = shown = 0;
+    busy = 0;
+    jobs = std::max(n, 1u);
+  }
+  // The result of the next test in order: the text of the child, the exit code (signal - minus), whether the
+  // language performed the test to the end. body(файл) is the performance of the test in a child.
+  std::tuple<std::string, int, bool> take_next(auto && body) {
+    while(shown < files.size()) {
+      for(; busy < jobs && next < files.size(); ++next, ++busy)
+        kids[next].c = os::fork_child([&] {
+          try {
+            return std::string(1, '\1') + body(files[next]); // tongue performed the test to the end
+          } catch(diagnostic const & d) {
+            return std::string(1, '\0') + cat("    ", d.what(), "\n");
+          }
+        });
+      if(kids[shown].done) {
+        auto & r = kids[shown++];
+        std::string got = std::move(r.got);
+        bool whole = !got.empty() && got[0] == '\1';
+        return {got.empty() ? std::string() : got.substr(1), r.code, whole};
+      }
+      std::vector<int> fds;
+      std::vector<std::size_t> who;
+      for(std::size_t i = shown; i < next; ++i)
+        if(!kids[i].done) {
+          fds.push_back(kids[i].c.fd);
+          who.push_back(i);
         }
-        restored_process r(bytes); // New base from journal dump - "another VM"
-        r.m->captured = &dout;
-        r.m->run();
-      } catch(diagnostic const & d) {
+      auto ready = os::wait_readable(fds);
+      for(std::size_t k = 0; k < who.size(); ++k) {
+        auto & r = kids[who[k]];
+        if(!ready[k] || os::read_some(r.c.fd, r.got)) continue;
+        os::close_fd(r.c.fd);
+        r.code = os::wait_child(r.c.pid);
+        r.done = true;
+        --busy;
       }
-      std::string want = out;
-      if(!e.dump_out.empty()) {
-        want.clear();
-        for(auto const & l: e.dump_out) want += l + "\n";
-      }
-      if(dout != want) why += cat("    дамп на шаге ", n, ": вывод ", in_quotes(dout), " против ", in_quotes(want), "\n");
     }
-    return why;
+    return {"", 0, false};
   }
 };
+
+// Runner, whose work goes on: primitives run tests module tools (native "cpp")
+thread_local test_host * tests_host = nullptr;
+
+// Text program (not file) - parsing with modules next to the dir directory: print by default or in projection
+// key (key recording module, like use k; header - the text itself tells how to disassemble it); wood dump and
+// the first parsing error. Bottom line: no projection module is false.
+std::pair<bool, std::string> print_text(std::string const & text, std::string const & dir, std::string const & key, bool header) {
+  ast_db db;
+  std::vector<diagnostic> ignored;
+  node_id root = parse_program(db, text, dir, ignored);
+  printer pr(db);
+  if(!key.empty()) {
+    ignored = preload_uses(db, cat("use ", key, ";"), dir);
+    if(auto it = db.strings.index.find(key); it != db.strings.index.end()) pr.projection = find_module(db, it->second);
+    if(!pr.projection) return {false, ""};
+    pr.header = header;
+  }
+  return {true, pr.print(root)};
+}
+std::pair<std::string, std::string> parse_dump(std::string const & text, std::string const & dir, std::string const & name) {
+  ast_db db;
+  std::vector<diagnostic> errors;
+  node_id root = parse_program(db, text, dir, errors);
+  return {errors.empty() ? std::string() : render(errors.front(), name, db), dumper(db).dump(root)};
+}
 
 } // namespace tz
