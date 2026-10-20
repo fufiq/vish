@@ -490,12 +490,11 @@ struct test_runner {
     // the editor (layout: a hole - only your text).
     std::string checked_text(uint32_t view) {
       std::string t = text(root);
-      // draft (typed text) - projection of the VM presentation itself
-      for(auto const & w: peer->views)
-        if(w.id == view && w.root && w.draft.open) {
-          if(t != w.text) mismatch = cat("собрано:\n", t, "\nпредставление VM:\n", w.text);
-          return cat("текст:\n", t, "\n");
-        }
+      // draft (typed text) - projection of the presentation itself (the language knows it, the editor module)
+      if(auto typed = server->draft_text(*peer, view)) {
+        if(t != *typed) mismatch = cat("собрано:\n", t, "\nпредставление VM:\n", *typed);
+        return cat("текст:\n", t, "\n");
+      }
       std::vector<node_layout> scratch;
       // The presentation of the module does not show the internal elements
       std::vector<uint32_t> inner;

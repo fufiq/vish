@@ -424,7 +424,7 @@ struct printer {
     if(k.form) return {node_id(k.form - 1)};
     if(!body_scan) {
       body_scan = true;
-      for(uint32_t i = 0; i < db.size(); ++i) {
+      for(uint32_t i: db.fn_nodes) {
         node_id f(i);
         if(!db.is<n_fn>(f) || !db.is<n_block>(db.as<n_fn>(f).body) || !db.as<n_fn>(f).form.empty() || !db[f].parent) continue;
         node_id up = db[f].parent;
@@ -647,7 +647,7 @@ struct printer {
   bool shadowed(node_id n, rec const & x, node_id home = {}, int64_t home_at = -1) {
     if(!fn_names_scanned) {
       fn_names_scanned = true;
-      for(uint32_t i = 0; i < db.size(); ++i)
+      for(uint32_t i: db.fn_nodes)
         if(db.is<n_fn>(node_id(i)) && db.as<n_fn>(node_id(i)).form.empty() && db.as<n_fn>(node_id(i)).name) fn_names.insert(db.as<n_fn>(node_id(i)).name.value);
     }
     symbol w = db.as<n_fn>(x.first).name;

@@ -409,10 +409,25 @@ struct ast_db {
     ++revision;
     where.source = pinned_source != ~uint32_t{0} ? pinned_source : uint32_t(sources.empty() ? 0 : sources.size() - 1);
     node_id id = nodes.add(node{std::move(k), where, {}});
+    note_fn(id);
     node_rev.push_back(revision);
     birth.push_back(++births);
     log({j_add{id.value, nodes[id].kind, where}});
     return id;
+  }
+
+  // node, at least once former functions, increasing (superset: the view could change) - bypassing “all
+  // functions of the base” without bypassing the entire database: it has a prelude and editor module,
+  // and it grows with each edit (print: closing records, construction with records in the body). Mine. *
+  std::vector<uint32_t> fn_nodes;
+  std::vector<uint8_t> fn_noted;
+  void note_fn(node_id n) {
+    if(!std::holds_alternative<n_fn>(nodes[n].kind)) return;
+    if(fn_noted.size() <= n.value) fn_noted.resize(std::max<std::size_t>(n.value + 1, fn_noted.size() * 2), 0);
+    if(fn_noted[n.value]) return;
+    fn_noted[n.value] = 1;
+    if(fn_nodes.empty() || fn_nodes.back() < n.value) fn_nodes.push_back(n.value);
+    else fn_nodes.insert(std::ranges::lower_bound(fn_nodes, n.value), n.value);
   }
 
   // node revision - when the last time its subtree within a function changed (reactive
@@ -575,6 +590,7 @@ struct ast_db {
     ++revision;
     ++edits;
     nodes[n].kind = std::move(k);
+    note_fn(n);
     touch(n);
     if(edited_at.size() <= n.value) edited_at.resize(n.value + 1);
     edited_at[n.value] = revision;
@@ -627,6 +643,7 @@ struct ast_db {
     if(source) mutations.push_back({n.value, source, revision, std::move(nodes[n].kind)});
     else retired.push_back(std::move(nodes[n].kind));
     nodes[n].kind = std::move(k);
+    note_fn(n);
     if(!source && reopened(n)) return; // Derivative taken again: in journal - when reconciled
     touch(n);
     changed.push_back(n.value);
@@ -647,6 +664,7 @@ struct ast_db {
       if(m.target < edited_at.size() && edited_at[m.target] > m.at) continue;
       retired.push_back(std::move(nodes[n].kind));
       nodes[n].kind = std::move(m.old);
+      note_fn(n);
       touch(n);
       changed.push_back(m.target);
     }
@@ -849,6 +867,7 @@ struct ast_db {
       reopen[x] = 1;
       node_kind was = std::move(nodes[n].kind);
       nodes[n].kind = std::move(k); // Type at Birth: Continue reading
+      note_fn(n);
       reborn.push_back({x, std::move(was), nodes[n].parent, &holder});
       nodes[n].parent = {}; // The new owner (link_parents)
       birth[x] = ++births;

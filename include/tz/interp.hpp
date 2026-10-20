@@ -1125,11 +1125,17 @@ struct interpreter {
   }
   // Service Descriptor: Create or read fields - only the code of the service itself (and prelude VM)
   void service_guard(std::string_view type, node_id at, std::string_view what) {
+    std::optional<node_id> here;
+    service_guard(type, at, what, here);
+  }
+  // here is a location module, if already known (path a[i].f.g - one place, module - once)
+  void service_guard(std::string_view type, node_id at, std::string_view what, std::optional<node_id> & here) {
     auto const & h = vm_root->service_types;
     if(h.empty()) return;
     auto it = h.find(type);
     if(it == h.end()) return;
-    node_id m = module_of(at);
+    if(!here) here = module_of(at);
+    node_id m = *here;
     if(m && m != node_id(it->second) && m != db.prelude)
       fail(cat("дескриптор ", type, " сервиса ", str(db.as<n_module>(node_id(it->second)).name), ": ", what, " — только в сервисе («секреты остаются в сервисе»)"), db[at].where);
   }
@@ -3336,9 +3342,11 @@ struct interpreter {
     std::vector<value> a;
     for(node_id pn: db.as<n_fn>(native_owner(db, n)).params) {
       value * c = env->find(db.as<n_param>(pn).name);
-      a.push_back(c ? *c : value());
+      if(c && c->is<array_v>()) a.push_back(value(array_v::borrow(c->as<array_v>()))); // Loan - Loan: native does not keep it
+      else a.push_back(c ? *c : value());
     }
     value r = e->fn(*this, a, db[n].where);
+    if(r.is<array_v>() && r.as<array_v>().borrowed) r.as<array_v>().own(); // The loan doesn't survive the challenge
     if(checking() && !r.known()) // “Not proven” at the level of staticity, not the type of exception
       for(auto const & k: instance_keys) emit({report_event::rt_check, k, "native", {}, db[n].where, {}});
     return ok(std::move(r));
@@ -4620,7 +4628,90 @@ struct interpreter {
 
   // --- field access ---
 
+  // a[i] - kernels: [] not overloaded with program code (as in eval_node)
+  bool core_index(node_id x) {
+    return db.is_index(x) && (user_ops.empty() || !user_ops.contains(known(sym_index_op).value) || db.in_prelude(x));
+  }
+  // Reading a path from a variable (views[v].lay.node[k], w.cursor) when executed - by cells, without a
+  // copy containing: only the result is copied.
+// The process machine reads the same (step 12.2, “read by reference”). Indices
+  // It is calculated in the order of the text, then the path goes in place - like peek in a simple name.
+  // Not the path from a variable (or parsing, or track record - steps of intermediate node) - false:
+  // ordinary calculation.
+  bool read_path(node_id n, scope * env, uint32_t frame, flow & result) {
+    if(checking() || tracer) return false;
+    std::array<node_id, 8> steps;
+    uint32_t depth = 0;
+    node_id x = n;
+    for(;;) {
+      bool member = db.is_member(x), index = !member && core_index(x);
+      if(!member && !index) break;
+      if(depth == steps.size()) return false;
+      steps[depth++] = x;
+      x = member ? db.member_of(x).object : db.index_of(x).object;
+    }
+    if(!depth || !db.is<n_ident>(x)) return false;
+    value const * base = peek(x, env);
+    if(!base || base->is<ref_v>()) return false;
+    std::array<value, 8> idx;
+    for(uint32_t k = depth; k-- > 0;)
+      if(!db.is_member(steps[k])) {
+        flow f = eval(db.index_of(steps[k]).index, env, frame);
+        if(!f.normal()) {
+          result = std::move(f);
+          return true;
+        }
+        idx[k] = std::move(f.v);
+      }
+    value const * at = peek(x, env); // the same cell; the contents after the indexes
+    value owned; // No cell (element of dense array, calculated field) - the value of the path
+    if(!at) { // Indices have already been calculated - the basis of ordinary calculation, without repeating the indices
+      flow b = eval(x, env, frame);
+      if(!b.normal()) {
+        result = std::move(b);
+        return true;
+      }
+      owned = std::move(b.v);
+      at = &owned;
+    }
+    std::optional<node_id> here; // Module of place - for the service guard, once on the way
+    for(uint32_t k = depth; k-- > 0;) {
+      node_id s = steps[k];
+      span where = db[s].where;
+      if(db.is_member(s)) {
+        symbol name = db.member_of(s).name;
+        if(at->is<agg_v>() && !code_agg(*at) && !is_shared(*at)) {
+          if(!vm_root->service_types.empty()) service_guard(types.name(at->as<agg_v>().type), s, "читать поля", here);
+          value const * field = nullptr;
+          for(auto const & [fk, fv]: at->as<agg_v>().fields)
+            if(fk == name) field = &fv;
+          if(field) {
+            at = field;
+            continue;
+          }
+        }
+        if(!vm_root->service_types.empty())
+          if(value const * sh = at->is<agg_v>() ? at : shape_of(*at); sh && sh->is<agg_v>()) service_guard(types.name(sh->as<agg_v>().type), s, "читать поля", here);
+        value r = lift(*at, [&](value const & o) { return member(o, name, where); });
+        owned = std::move(r);
+        at = &owned;
+        continue;
+      }
+      if(at->is<array_v>() && at->as<array_v>().kind() == array_v::layout::generic && idx[k].known() && idx[k].is<int64_t>()) {
+        array_v const & a = at->as<array_v>().r();
+        at = &a.items[checked_index(*at, idx[k], where)];
+        continue;
+      }
+      flow f = index_rt(s, db.index_of(s), *at, idx[k], env);
+      owned = std::move(f.v);
+      at = &owned;
+    }
+    result = ok(*at);
+    return true;
+  }
+
   flow eval_member(node_id n, member_view const & m, scope * env, uint32_t frame) {
+    if(flow r; read_path(n, env, frame, r)) return r;
     value r;
     if(value const * o = peek(m.object, env); o && o->is<array_v>()) r = member(*o, m.name, db[n].where);
     else {
@@ -4690,6 +4781,8 @@ struct interpreter {
   }
 
   flow eval_index(node_id n, index_view const & i, scope * env, uint32_t frame) {
+    if(!db.is<n_ident>(i.object))
+      if(flow r; read_path(n, env, frame, r)) return r;
     span where = db[n].where;
     if(value const * arr = peek(i.object, env); arr && arr->is<array_v>()) {
       TZ_TRY(idx, eval(i.index, env, frame));
@@ -4715,6 +4808,7 @@ struct interpreter {
     // index type - property of instance, not values: place of use instantiation error
     // (§13.4), including when array and index is run-time
     auto index_type = [&](value const & x) {
+      if(x.is<int64_t>()) return; // i64 - no string type (hot path a[i])
       if(std::string t = types.describe(x); t != types.int_name()) fail(cat("индекс должен быть ", types.int_name(), ", получено ", t), where);
     };
     if(idx.is<split_v>())
