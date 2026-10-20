@@ -16,7 +16,7 @@
 #include "proto.hpp"
 #include "complete.hpp"
 #include "editor_lib.hpp"
-#include "merge.hpp"
+#include "tools.hpp"
 #include "modules.hpp"
 #include "parser.hpp"
 #include "session.hpp"
@@ -109,8 +109,10 @@ struct editor_server {
     editor_server * host;
     peer * was_peer;
     editor_server * was_host = std::exchange(editor_host, host);
+    tools_context * was_tools = std::exchange(tools_host, &host->versions); // Tools module: version 0 - session base
     ~host_hold() {
       editor_host = was_host;
+      tools_host = was_tools;
       host->now_peer = was_peer;
     }
   };
@@ -1331,116 +1333,85 @@ struct editor_server {
     if(!live) return;
     finish_run("stopped");
   }
-  // Editing - in a live process (drafts are closed): elements of the program modules, changed from the last time, are
-  // replaced by a key in its database. struct, which has the living values of the old layout - through the migrate(T
-  // old) program (§9.3), there is no one - the process stops. The bottom line is what to say to the person.
-  std::string sync_run() {
-    if(!live || !live->m || live->m->st.done || live->edits == session.db.edits) return "";
-    live_run & r = *live;
-    r.edits = session.db.edits;
-    process_machine & m = *r.m;
-    std::vector<node_id> modules = m.helper.module_order;
-    if(modules.empty()) modules.push_back(r.root);
-    std::vector<std::pair<node_id, std::string>> migrations; // struct with living old values
-    std::size_t changed = 0;
-    for(node_id mod: modules) {
-      if(mod.value >= session.db.size() || !session.db.is<n_module>(mod)) continue;
-      auto mine = module_items(session.db, mod), theirs = module_items(r.db, mod);
-      std::vector<std::string> keys;
-      for(auto const * xs: {&mine, &theirs})
-        for(auto const & x: *xs)
-          if(!std::ranges::contains(keys, x.key)) keys.push_back(x.key);
-      for(auto const & key: keys) {
-        auto now = find_item(mine, key), was = find_item(theirs, key);
-        if(now && was && now->text == was->text) continue;
-        ++changed;
-        if(now && session.db.is_struct(now->node) && was) {
-          std::vector<process_machine::field_decl> fields;
-          for(node_id x: session.db.as<n_extend>(now->node).items)
-            if(session.db.is<n_var>(x)) {
-              node_id ty = session.db.as<n_var>(x).type;
-              fields.push_back({session.db.as<n_var>(x).name, ty && session.db.is<n_ident>(ty) ? std::string(session.db.strings.text(session.db.as<n_ident>(ty).name)) : std::string()});
-            }
-          std::string tn(session.db.strings.text(session.db.as<n_extend>(now->node).name));
-          type_id t = m.helper.types.named(tn);
-          if(uint64_t stale = m.stale_values(t, fields)) {
-            if(!find_item(mine, cat("migrate(", tn, ")"))) {
-              stop_run();
-              return cat("struct ", tn, " изменён, а живой процесс держит значений старой раскладки: ", stale, " — нужна migrate(", tn, " old) => ", tn, "{…}; процесс остановлен");
-            }
-            migrations.push_back({node_id{}, tn});
-          }
-        }
-        if(was && !now && r.db.is<n_fn>(was->node)) // Removed: new challenges do not see it
-          std::erase(m.helper.functions[r.db.as<n_fn>(was->node).name], was->node);
-        take_theirs(r.db, mod, {}, key, now);
-        if(now && !was)
-          if(auto fresh = find_item(module_items(r.db, mod), key)) m.helper.register_item(fresh->node);
-      }
-    }
-    if(!changed) return "";
-    for(auto & [fn, tn]: migrations) { // migrate - overload in the assistant, as in the module
-      symbol mig = r.db.strings.intern("migrate");
-      m.helper.functions[mig].clear();
-      std::vector<process_machine::field_decl> fields;
-      node_id item;
-      for(node_id x: r.db.as<n_module>(r.root).items) {
-        if(r.db.is<n_fn>(x) && r.db.as<n_fn>(x).name == mig) {
-          m.helper.register_item(x);
-          auto const & ps = r.db.as<n_fn>(x).params;
-          node_id ty = ps.size() == 1 ? r.db.as<n_param>(ps[0]).type : node_id{};
-          if(ty && r.db.is<n_ident>(ty) && r.db.strings.text(r.db.as<n_ident>(ty).name) == tn) fn = x;
-        }
-        if(r.db.is_struct(x) && r.db.strings.text(r.db.as<n_extend>(x).name) == tn) item = x;
-      }
-      if(!item) continue;
-      for(node_id x: r.db.as<n_extend>(item).items)
-        if(r.db.is<n_var>(x)) {
-          node_id ty = r.db.as<n_var>(x).type;
-          fields.push_back({r.db.as<n_var>(x).name, ty && r.db.is<n_ident>(ty) ? std::string(r.db.strings.text(r.db.as<n_ident>(ty).name)) : std::string()});
-        }
-      try {
-        m.migrate_values(m.helper.types.named(tn), fields, fn);
-      } catch(diagnostic const & d) {
-        std::string why = d.what();
-        stop_run();
-        return cat("migrate ", tn, ": ", why, "; процесс остановлен");
-      }
-    }
-    m.refresh_ct(); // ct new code - in place in canonical order
-    return "";
+  // Editing in a living process (drafts closed): what has changed and what to do with it, the language
+  // decides (sync_program, lib/editor.tz); here is the process of the machine: its base is the version of
+  // the tool module, old values of struct, overload assistant, migrate, ct in place. The process is waiting
+  // for edits: it comes, not finished, the base is corrected from the last time (noted)
+  bool live_sync_due() {
+    if(!live || !live->m || live->m->st.done || live->edits == session.db.edits) return false;
+    live->edits = session.db.edits;
+    return true;
   }
-
-  merge_result pending; // conflicts of the last merger before the decision of the person
-
-  // merger:
-// conflicts - before a human decision; "" - merged, otherwise a mistake
-  std::string merge_from(std::string const & path) {
-    node_id theirs_root;
-    std::vector<journal_entry> theirs;
+  int64_t live_version() { return live ? versions.adopt(live->db, live->root) : -1; }
+  // Process program modules that are also in the session database
+  std::vector<node_id> live_modules() const {
+    std::vector<node_id> out;
+    if(!live || !live->m) return out;
+    std::vector<node_id> modules = live->m->helper.module_order;
+    if(modules.empty()) modules.push_back(live->root);
+    for(node_id m: modules)
+      if(m.value < session.db.size() && session.db.is<n_module>(m)) out.push_back(m);
+    return out;
+  }
+  // struct n layout of db base: names and types of fields
+  static std::vector<process_machine::field_decl> struct_fields(ast_db const & db, node_id n) {
+    std::vector<process_machine::field_decl> fields;
+    for(node_id x: db.as<n_extend>(n).items)
+      if(db.is<n_var>(x)) {
+        node_id ty = db.as<n_var>(x).type;
+        fields.push_back({db.as<n_var>(x).name, ty && db.is<n_ident>(ty) ? std::string(db.strings.text(db.as<n_ident>(ty).name)) : std::string()});
+      }
+    return fields;
+  }
+  // Struct n (session bases) of the old layout in a living process
+  uint64_t live_stale(node_id n) {
+    if(!live || !live->m || !session.db.is_struct(n)) return 0;
+    process_machine & m = *live->m;
+    return m.stale_values(m.helper.types.named(std::string(session.db.strings.text(session.db.as<n_extend>(n).name))), struct_fields(session.db, n));
+  }
+  // process base function n removed: new calls do not see it; added - see
+  void live_forget(node_id n) {
+    if(live && live->m && live->db.is<n_fn>(n)) std::erase(live->m->helper.functions[live->db.as<n_fn>(n).name], n);
+  }
+  void live_register(node_id n) {
+    if(live && live->m) live->m->helper.register_item(n);
+  }
+  // The struct tn values of the old layout - through the migrate(tn old) process (§9.3);' - are transferred.
+  std::string live_migrate(std::string const & tn) {
+    if(!live || !live->m) return "";
+    live_run & r = *live;
+    process_machine & m = *r.m;
+    symbol mig = r.db.strings.intern("migrate");
+    m.helper.functions[mig].clear(); // overload migrate in the assistant - as in the module
+    node_id fn, item;
+    for(node_id x: r.db.as<n_module>(r.root).items) {
+      if(r.db.is<n_fn>(x) && r.db.as<n_fn>(x).name == mig) {
+        m.helper.register_item(x);
+        auto const & ps = r.db.as<n_fn>(x).params;
+        node_id ty = ps.size() == 1 ? r.db.as<n_param>(ps[0]).type : node_id{};
+        if(ty && r.db.is<n_ident>(ty) && r.db.strings.text(r.db.as<n_ident>(ty).name) == tn) fn = x;
+      }
+      if(r.db.is_struct(x) && r.db.strings.text(r.db.as<n_extend>(x).name) == tn) item = x;
+    }
+    if(!item) return "";
     try {
-      theirs = read_journal(path, theirs_root);
+      m.migrate_values(m.helper.types.named(tn), struct_fields(r.db, item), fn);
     } catch(diagnostic const & d) {
       return d.what();
     }
-    pending = merge_into(session.db, session.root, session.db.journal(), theirs, theirs_root);
-    return {};
+    return "";
   }
-  // The conflict is resolved: 0 is not such, 1 is mine (the same base), 2 is their (the base has changed)
-  int take_version(std::string const & key, bool theirs) {
-    auto it = std::ranges::find(pending.conflicts, key, &merge_conflict::key);
-    if(it == pending.conflicts.end()) return 0;
-    if(theirs) take_theirs(session.db, session.root, pending.base_items, it->id, it->theirs_exists ? it->their : std::nullopt);
-    pending.conflicts.erase(it);
-    return theirs ? 2 : 1;
+  void live_refresh() {
+    if(live && live->m) live->m->refresh_ct(); // ct new code - in place in canonical order
   }
-  void send_merge(bool with_taken) {
-    proto::s_merge out{with_taken ? pending.taken : std::vector<std::string>{}, {}};
-    for(auto const & c: pending.conflicts) out.conflicts.push_back({c.key, c.base, c.mine, c.theirs});
-    if(now_peer) send(*now_peer, out);
+
+  // merger conflicts (and self-contained) to the client
+  void send_merge(std::vector<std::string> taken, std::vector<proto::s_conflict> conflicts) {
+    if(now_peer) send(*now_peer, proto::s_merge{std::move(taken), std::move(conflicts)});
   }
 
   vm_session & session;
+  tools_context versions{session.db, session.root}; // Tools module version: 0 - session base
   node_id editor_module; // Editor's decisions - in the language (lib/editor.tz)
   struct lang_vm {
     node_id module;

@@ -19,6 +19,7 @@
 //.
 // *Моё:* модуль отдельный — его грузит только сервер редактора, программы его не разбирают.
 [[service]] module editor;
+use tools; // тулинг вне редактора: версии базы, слияние (lib/tools.tz)
 
 // --- состояние представлений --------------------------------------------------------------
 // Раскладка представления — печать проекции (print_view): текст и места курсора (перед каждой
@@ -106,6 +107,7 @@ struct edit_hint { i64 node; i64 piece; i64 offset; i64 removed; i64 inserted; b
 views = array{};   // все представления всех клиентов: номер — место в массиве
 clients = array{}; // по номеру клиента
 hint = edit_hint{-1, 0, 0, 0, 0, false};
+merge_state = no_merge(); // конфликты последнего слияния — до решения человеком
 
 // --- примитивы базы: печать проекции, разбор правки, отправка (у VM) ------------------------
 // Неизвестный при разборе аргумент — стёртое значение (как у прелюдии), без эффектов.
@@ -650,8 +652,38 @@ stop_program() => native "cpp" {
   return value(int64_t(0));
 };
 program_running() => native "cpp" { return value(editor_host->running()); };
-// принятые правки — в живой процесс; итог — что сказать (пусто — нечего)
-sync_program() => native "cpp" { return value(editor_host->sync_run()); };
+// Живой процесс (F5) и правки: процесс ждёт правок (отмечается); его база — версией модуля tools;
+// модули его программы, которые есть в базе сессии; значений struct n старой раскладки в нём;
+// функция его базы убрана или добавлена; migrate(T old) для struct T ("" — перенесено); ct — по месту
+live_sync_due() => native "cpp" { return value(editor_host->live_sync_due()); };
+live_version() => native "cpp" { return value(editor_host->live_version()); };
+live_modules() => native "cpp" {
+  std::vector<value> xs;
+  for(node_id m: editor_host->live_modules()) xs.push_back(value(int64_t(m.value)));
+  return value(array_v::of(std::move(xs)));
+};
+live_stale(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->live_stale(node_id(uint32_t((a[0]).as<int64_t>())))));
+};
+live_forget(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->live_forget(node_id(uint32_t((a[0]).as<int64_t>())));
+  return value(int64_t(0));
+};
+live_register(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->live_register(node_id(uint32_t((a[0]).as<int64_t>())));
+  return value(int64_t(0));
+};
+live_migrate(str tn) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->live_migrate(std::string((a[0]).as<str_v>().view())));
+};
+live_refresh() => native "cpp" {
+  editor_host->live_refresh();
+  return value(int64_t(0));
+};
 // вывод запуска клиенту: more — продолжение прежнего, state — "running", "stopped" или "" (закончен)
 run_output(str text, bool ok, bool more, str state) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known()) return erase(value(int64_t(0)));
@@ -692,20 +724,19 @@ program_apply(str fn) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
   return value(editor_host->session.apply(std::string((a[0]).as<str_v>().view())));
 };
-// слияние с другой копией базы (§9.4): "" — слито (конфликты — у VM до решения), иначе — ошибка
-merge_db(str path) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  return value(editor_host->merge_from(std::string((a[0]).as<str_v>().view())));
-};
-// решить конфликт: их вариант или мой; 0 — нет такого, 1 — мой, 2 — их (база изменилась)
-take_db(str key, bool theirs) => native "cpp" {
+// конфликты слияния (и взятое само) — клиенту: conflicts — conflict модуля tools
+send_merge_list(taken, conflicts) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  return value(int64_t(editor_host->take_version(std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>())));
-};
-// конфликты слияния (и взятое само) — клиенту
-send_merge(bool taken) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  editor_host->send_merge((a[0]).as<bool>());
+  auto & h = *editor_host;
+  std::vector<std::string> taken;
+  for(uint32_t k = 0; k < (a[0]).as<array_v>().size(); ++k) taken.emplace_back((a[0]).as<array_v>().get(k).as<str_v>().view());
+  std::vector<proto::s_conflict> cs;
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) {
+    value c = (a[1]).as<array_v>().get(k);
+    auto s = [&](std::string_view f) { return std::string(h.field(c, f, where).as<str_v>().view()); };
+    cs.push_back({s("key"), s("base"), s("mine"), s("theirs")});
+  }
+  h.send_merge(std::move(taken), std::move(cs));
   return value(int64_t(0));
 };
 // модуль программы и прелюдия
@@ -1203,6 +1234,58 @@ refresh_all() {
 }
 // Пауза набора: проверка (реактивный check) и метки всем представлениям; черновики закрыты —
 // принятые правки ложатся в живой процесс запуска (горячая замена, §9.3).
+// Правки — в живой процесс (черновики закрыты): элементы модулей программы, изменённые с прошлого
+// раза, — заменой по ключу в его базе, как proc/edit (§9.3); начатые кадры доживают в старом теле.
+// struct, у которого живые значения старой раскладки, — через migrate(T old) программы, нет её —
+// процесс останавливается.  
+// Итог — что сказать человеку ("" — нечего).
+sync_program() {
+  if(!live_sync_due()) return "";
+  lv = live_version();
+  changed = 0;
+  migrations = array{};
+  for(mod : live_modules()) {
+    now_items = module_items(0, mod, array{});
+    was_items = module_items(lv, mod, array{});
+    keys = array{};
+    for(x : now_items) if(!has_text(keys, x.key)) keys.push(x.key);
+    for(x : was_items) if(!has_text(keys, x.key)) keys.push(x.key);
+    for(key : keys) {
+      now = find_key(now_items, key);
+      was = find_key(was_items, key);
+      if(!(now.present && (was.present && (now.text == was.text)))) {
+        changed += 1;
+        if(now.present && (was.present && (version_signature(0, now.node)[0] == "struct"))) {
+          tn = version_signature(0, now.node)[1];
+          stale = live_stale(now.node);
+          if(stale > 0) {
+            if(!find_key(now_items, ("migrate(" + tn) + ")").present) {
+              stop_program();
+              return ((((((("struct " + tn) + " изменён, а живой процесс держит значений старой раскладки: ") + text(stale)) + " — нужна migrate(") + tn) + " old) => ") + tn) + "{…}; процесс остановлен";
+            }
+            migrations.push(tn);
+          }
+        }
+        if(was.present && !now.present) {
+          wk = version_signature(lv, was.node)[0];
+          if((wk == "fn") || (wk == "syntax")) live_forget(was.node); // убрана: новые вызовы её не видят
+        }
+        got = take_theirs(lv, mod, array{}, key, now);
+        if(now.present && (!was.present && (got >= 0))) live_register(got);
+      }
+    }
+  }
+  if(changed == 0) return "";
+  for(tn : migrations) {
+    why = live_migrate(tn);
+    if(why != "") {
+      stop_program();
+      return ((("migrate " + tn) + ": ") + why) + "; процесс остановлен";
+    }
+  }
+  live_refresh();
+  ""
+}
 idle() {
   clear_pending();
   recheck();
@@ -2868,11 +2951,6 @@ shown_facts(ns) {
   }
   r
 }
-has_text(xs, str x) {
-  r = false;
-  for(y : xs) if(y == x) r = true;
-  r
-}
 // типы узлов ns (по всем экземплярам), без повторов
 types_of_nodes(ns) {
   ts = array{};
@@ -3522,21 +3600,34 @@ apply_edit(str fn) {
   if(starts_with(r, "применена")) refresh_all();
   r
 }
-// слияние: конфликты — у VM до решения человеком; "" — слито, иначе ошибка
+// Слияние с копией базы (§9.4, модуль tools): 
+// Взятое само — в базе; конфликты — до решения человеком (состояние
+// редактора). "" — слито, иначе ошибка.
 merge_from(str path) {
-  error = merge_db(path);
-  if(error == "") {
-    refresh_all();
-    send_merge(true);
-  }
-  error
+  v = version_open(path);
+  if(v < 0) return version_error();
+  merge_state = merge_versions(0, v);
+  version_close(v);
+  refresh_all();
+  send_merge(true);
+  ""
 }
+send_merge(bool with_taken) => send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts);
 // конфликт решён: их вариант (база изменилась — представления заново) или мой; false — нет такого
 take_version(str key, bool theirs) {
-  r = take_db(key, theirs);
-  if(r == 2) refresh_all();
-  if(r > 0) send_merge(false);
-  r > 0
+  k = -1;
+  for(j : range(merge_state.conflicts.size)) if((k < 0) && (merge_state.conflicts[j].key == key)) k = j;
+  if(k < 0) return false;
+  c = merge_state.conflicts[k];
+  rest = array{};
+  for(j : range(merge_state.conflicts.size)) if(j != k) rest.push(merge_state.conflicts[j]);
+  merge_state.conflicts = rest;
+  if(theirs) {
+    take_theirs(0, -1, merge_state.base_items, c.id, c.their);
+    refresh_all();
+  }
+  send_merge(false);
+  true
 }
 // функция правки программы (решение автора 2026-10-17): правки — в базу
 on_apply(str fn) {

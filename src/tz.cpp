@@ -17,7 +17,7 @@
 #include "tz/session.hpp"
 #include "tz/server.hpp"
 #include "tz/editor_lib.hpp"
-#include "tz/merge.hpp"
+#include "tz/tools.hpp"
 #include "tz/machine.hpp"
 #include "tz/modules.hpp"
 #include "tz/jit/jit.hpp"
@@ -140,30 +140,10 @@ int run(int argc, char ** argv) {
       if(argc > 4 && std::string_view(argv[3]) == "--projection") r.projection = argv[4]; // Second language reversibility (§4.5)
       return r.run(argv[2]);
     }
-    // Versions (§9.4): Semantic diff and triangular .tzdb fusion.
-    if(cmd == "diff" && argc == 4) {
-      tz::db_copy a, b;
-      tz::node_id ra, rb;
-      auto ea = tz::read_journal(argv[2], ra), eb = tz::read_journal(argv[3], rb);
-      tz::load_journal(a, ea, ra);
-      tz::load_journal(b, eb, rb);
-      put(stdout, tz::describe_diff(a.db, a.root, b.db, b.root));
-      return 0;
-    }
-    if(cmd == "merge" && argc >= 4) {
-      tz::db_copy mine;
-      tz::node_id rm, rt;
-      auto em = tz::read_journal(argv[2], rm), et = tz::read_journal(argv[3], rt);
-      tz::load_journal(mine, em, rm);
-      auto r = tz::merge_into(mine.db, mine.root, em, et, rt);
-      for(auto const & k: r.taken) put(stdout, cat("взято у них: ", k, "\n"));
-      for(auto const & c: r.conflicts)
-        put(stdout, cat("конфликт: ", c.key, "\n  база: ", c.base.empty() ? "—" : c.base, "\n  мой:  ", c.mine.empty() ? "—" : c.mine, "\n  их:   ", c.theirs.empty() ? "—" : c.theirs, "\n"));
-      std::string out = argc >= 5 ? argv[4] : argv[2];
-      tz::save_db(mine.db, mine.root, out);
-      put(stdout, cat("записано: ", out, r.conflicts.empty() ? "" : " (конфликты — мой вариант; слить руками)", "\n"));
-      return r.conflicts.empty() ? 0 : 1;
-    }
+    // Versions (§9.4): semantic diff and triangular merging of .tzdb bases in the language (lib/tools.tz).
+    if(cmd == "diff" && argc == 4) return tz::run_tools("diff_files", {tz::value(std::string(argv[2])), tz::value(std::string(argv[3]))});
+    if(cmd == "merge" && argc >= 4)
+      return tz::run_tools("merge_files", {tz::value(std::string(argv[2])), tz::value(std::string(argv[3])), tz::value(std::string(argc >= 5 ? argv[4] : argv[2]))});
     // Renew the process from the dump - "to another VM" (M5): another tz process.
     if(cmd == "resume") {
       int k = 2;
