@@ -296,6 +296,7 @@ struct editor_server {
     } catch(diagnostic const & d) {
       send(p, proto::s_error{d.what()});
     }
+    if(!deciding) session.db.sweep_retired(); // Message served - no rounds
   }
 
   // --- Messages: each - solution in language ---
@@ -371,6 +372,7 @@ struct editor_server {
     if(!check_pending) return;
     check_pending = false;
     decide(nullptr, -1, "on_idle", {});
+    session.db.sweep_retired();
   }
 
   // --- check-up ---
@@ -1464,6 +1466,7 @@ struct editor_server {
       r.m->save_state_vars(true);
       return finish_run("");
     }
+    r.db.sweep_retired(); // There are no process base quanta
     if(!r.out.empty()) run_output("running");
   }
   // output to the client - on_run_output solution in the language, after the current solution (start and

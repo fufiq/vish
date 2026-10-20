@@ -1,0 +1,20 @@
+// Base growth after loading .tzdb (test 217 - in one session): node derivatives are labeled in journal
+// (j_derived), playback puts them in a pool - open base elaboration takes the former, rather than producing
+// new ones (§7.4). The first parsing after download was +63 node.
+// program: db_growth.tz
+open_view module
+idle
+journal
+save_to out/growth.tzdb
+reopen out/growth.tzdb
+// Reproduced journal - the same (marked derivatives - also in it)
+journal
+// expect: журнал: +0 записей ()
+open_view module
+idle
+journal
+// expect-not: j_add
+// expect-not: j_derived
+idle
+journal
+// expect: журнал: +0 записей ()

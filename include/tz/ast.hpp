@@ -380,7 +380,12 @@ struct j_gap {
   uint32_t nodes;
   uint32_t imports;
 };
-using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place, j_note, j_gap>;
+// Node id - derivative (derive): playback journal puts it in the pool, and elaboration after loading
+// .tzdb takes the former derivatives, rather than producing new ones (base growth, test 217).
+struct j_derived {
+  uint32_t id;
+};
+using journal_op = std::variant<j_intern, j_add, j_replace, j_link, j_import, j_mutate, j_rollback, j_place, j_note, j_gap, j_derived>;
 
 struct journal_entry {
   uint64_t revision;
@@ -673,6 +678,16 @@ struct ast_db {
     log({j_rollback{source}});
   }
 
+  // Retired: Name between server messages and session commands when there are no rounds (no one to keep their
+  // lists; human editing - replace - and so destroys the former look at once). Otherwise, a long session of
+  // the editor accumulates them with each elaboration. With stripes, the background can bypass the base - do
+  // not touch.
+  void sweep_retired() {
+    if(lanes_on.load(std::memory_order_acquire)) return;
+    retired.clear();
+    retired.shrink_to_fit();
+  }
+
   // Re-elaboration (ct module over written): rollback of all mutations, ct code makes them again.
   // *My:* if the result is the same (the subtrees of the modified node are the same in
   // structure), node revisions return to the same, and rollback and repetition are not in
@@ -880,6 +895,7 @@ struct ast_db {
     born.emplace(n.value, born_rec{std::move(k), key});
     list.ids.push_back(n.value);
     list.cursor = list.ids.size();
+    log({j_derived{n.value}});
     hold(n.value, holder);
     return n;
   }
@@ -1070,6 +1086,12 @@ struct ast_db {
           place(node_id(op.id), op.where);
         } else if constexpr(std::is_same_v<T, j_note>) {
           set_note(node_id(op.id), op.note);
+        } else if constexpr(std::is_same_v<T, j_derived>) {
+          node_id n(op.id);
+          uint64_t key = kind_hash(nodes[n].kind, nodes[n].where);
+          born.emplace(op.id, born_rec{nodes[n].kind, key});
+          reusable[key].ids.push_back(op.id); // free: cursor from the beginning
+          log({j_derived{op.id}});
         } else if constexpr(std::is_same_v<T, j_gap>) {
           for(uint32_t i = 0; i < op.nodes; ++i) {
             pinned_source = 0;

@@ -41,8 +41,14 @@ namespace tz {
 struct vm_session {
   vm_session(ast_db & db, node_id root, std::string name) : db(db), root(root), name(std::move(name)) {}
 
-  // Execute one command; to edit transfer the body to `body`.
+  // Perform one command; to edit transfer the body to `body`. session command; after it there are no
+  // bypasses - filmed views of node won (long session does not accumulate them)
   std::string exec(std::string const & line, std::string const & body = {}) {
+    std::string out = exec_now(line, body);
+    db.sweep_retired();
+    return out;
+  }
+  std::string exec_now(std::string const & line, std::string const & body) {
     auto words = words_of(line);
     std::string cmd = words.empty() ? std::string() : std::string(words[0]);
     std::vector<std::string> args;
