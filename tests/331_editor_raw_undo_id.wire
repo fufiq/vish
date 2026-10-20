@@ -1,0 +1,25 @@
+// Raw block during rollback and repetition (§4.4, §13.1): block - the same node (id), editing in the
+// second subblock changes only its node - subblock first, the call block outside and the rest do not
+// correct (graft: the same view - the node is intact):
+//.
+// program: 173_raw_sub_blocks.tz
+open_view module
+// let: blk @print(1
+idle
+journal
+pointer 1 @print(1 0 55
+key 1 1
+// expect: курсор:       x += 41‸;
+idle
+journal
+// corrected: number, second subblock, and call block are not all node elements
+// expect: j_replace 3)
+key 1 Escape
+// retraction of the accepted edit - the same block
+key 1 z 2
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{\n    first { print(1 ~ 2); }\n    second {\n      x += 4;
+// repeat
+key 1 y 2
+// expect: node=$blk nodes=⏎  id=$blk kind="n_raw" pieces=["{\n    first { print(1 ~ 2); }\n    second {\n      x += 41;
+run
+// expect: output text="first\n12\nsecond\n42\n44\n" ok=true

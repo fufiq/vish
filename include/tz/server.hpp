@@ -889,7 +889,9 @@ struct editor_server {
         }
       }
     }, k);
-    db.replace(o, std::move(k));
+    // The same view (children - the same id) - the knot is not corrected: revision and caches behind it are
+    // intact, editing neighboring brackets does not touch it; the place is new.
+    if(!db.kind_equal(db[o].kind, k)) db.replace(o, std::move(k));
     db.place(o, db[n].where);
     db.set_note(o, db.note_of(n) ? *db.note_of(n) : node_note{});
     return o;
