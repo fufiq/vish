@@ -2,89 +2,13 @@
 // 
 // 
 // 
-// Модуль встроен в сборку, как editor; его грузят команды tz и
-// сервер редактора (editor — use tools), программы его не видят. У VM — база: версии базы (копии по
-// журналам), элементы модуля данными, разбор элемента на месте, вывод — примитивы native "cpp".
+// Модули тулинга встроены в сборку, как editor, и грузятся
+// командой, которой нужны (программы их не видят): tools — общее (строки, вывод, ОС, команды
+// сессии VM), versions — версии базы, tests — прогон тестов, cli — строка запуска tz. У VM — база:
+// примитивы native "cpp".
 //
 // Цепочки одного ассоциативного оператора (a + b + c) — скобками, как в editor.tz.
 module tools;
-
-// --- примитивы: версии базы (у VM) ----------------------------------------------------------
-// Версия — копия базы по журналу .tzdb; номер 0 — база, с которой работают (программа сессии
-// редактора), у команды tz — пусто. Общее начало журналов двух версий — их общая база.
-
-// копия по файлу; -1 — не открылась (version_error — почему)
-version_open(str path) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(-1)));
-  return value(tools_host->open(std::string((a[0]).as<str_v>().view())));
-};
-version_error() => native "cpp" { return value(tools_host->error); };
-// общая база версий a и b (корень — корень a)
-version_base(i64 a, i64 b) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(-1)));
-  return value(tools_host->base((a[0]).as<int64_t>(), (a[1]).as<int64_t>()));
-};
-// копия больше не нужна
-version_close(i64 v) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  tools_host->close((a[0]).as<int64_t>());
-  return value(int64_t(0));
-};
-// Элементы модуля root версии v (-1 — модуль программы): array{номер, текст, внутренний, пустых
-// строк перед ним, комментарии перед ним, комментарий в конце строки}
-version_items(i64 v, i64 root) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  if(!x) return value(array_v::of({}));
-  return value(array_v::of(module_item_facts(*x->db, tools_host->module_of(*x, (a[1]).as<int64_t>()))));
-};
-// что за элемент n версии v: array{вид, имя, части, цель}: fn (части — типы параметров, «_» — без
-// типа), syntax (слова формы), struct, extend, extend_ref (цель — расширяемая функция), var, other
-version_signature(i64 v, i64 n) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  int64_t n = (a[1]).as<int64_t>();
-  if(!x || n < 0 || uint64_t(n) >= x->db->size()) return value(array_v::of({value(std::string("other")), value(std::string()), value(array_v::of({})), value(int64_t(-1))}));
-  return item_signature(*x->db, node_id(uint32_t(n)));
-};
-// Элемент модуля root версии v — текстом, разбором по правилам его места (§4.4): mine — заменить
-// его (узел сохраняет id), -1 — новый после after (-1 — в конец); раскладка — пустые строки,
-// внутренний, комментарии. Итог — номер элемента; не разобрался — -1.
-version_put(i64 v, i64 root, i64 mine, str text, str name, i64 after, i64 blank, bool inner, lead, str tail) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(int64_t(-1)));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  if(!x) return value(int64_t(-1));
-  node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>());
-  if(!m) return value(int64_t(-1));
-  auto num = [](value const & v) { return v.as<int64_t>() < 0 ? node_id{} : node_id(uint32_t(v.as<int64_t>())); };
-  node_note note;
-  for(uint32_t k = 0; k < (a[8]).as<array_v>().size(); ++k) note.lead.emplace_back((a[8]).as<array_v>().get(k).as<str_v>().view());
-  note.tail = std::string((a[9]).as<str_v>().view());
-  node_id got = put_item(*x->db, m, num(a[2]), std::string((a[3]).as<str_v>().view()), std::string((a[4]).as<str_v>().view()), num(a[5]), uint32_t((a[6]).as<int64_t>()), (a[7]).as<bool>(), std::move(note));
-  return value(got ? int64_t(got.value) : int64_t(-1));
-};
-// убрать элемент n модуля root версии v
-version_remove(i64 v, i64 root, i64 n) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(int64_t(0)));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  if(!x) return value(int64_t(0));
-  if(node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>()); m && (a[2]).as<int64_t>() >= 0) remove_item(*x->db, m, node_id(uint32_t((a[2]).as<int64_t>())));
-  return value(int64_t(0));
-};
-// журнал версии v — в файл .tzdb; "" — записан, иначе ошибка
-version_save(i64 v, str path) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  if(!x) return value(std::string("нет версии"));
-  try {
-    save_db(*x->db, x->root, std::string((a[1]).as<str_v>().view()));
-  } catch(std::exception const & e) {
-    return value(std::string(e.what()));
-  }
-  return value(std::string());
-};
 
 // --- примитивы: вывод команды (у VM) --------------------------------------------------------
 // текст — в stdout и stderr как есть (без перевода строки)
@@ -281,1297 +205,176 @@ same_lines(xs, ys) {
   for(k : range(xs.size)) if(xs[k] != ys[k]) r = false;
   r
 }
-
-// --- версии базы: семантический дифф и трёхстороннее слияние (§9.4) --------------------------
-//  
-//  — живая правка через VM конфликтов не даёт. Копии базы
-// расходятся, только когда работа шла в двух местах; тогда 
-// 
-// 
-// База — версии и их элементы; решение (что чьё, что берётся само, где конфликт) — здесь.
-// Дифф и слияние — по элементам модуля: функция опознаётся по имени и сигнатуре, а не по строкам.
-
-// Элемент модуля в версии: кто он (id — номер узла, если элемент был в общей базе: смена сигнатуры
-// — правка того же элемента; иначе — ключ), как называется (key), какой он (текст проекции) и его
-// раскладка: внутренний (§13.3), пустые строки перед ним, комментарии, сосед перед ним (after — его
-// id):   — элемент переносится со всем, что у него есть.
-struct item { bool present; i64 node; str id; str key; str text; bool inner; i64 blank; array lead; str tail; str after; }
-no_item() => item{false, -1, "", "", "", false, 0, array{}, "", ""};
-
-// Ключ элемента: функция — имя и типы параметров, syntax — слова записи формы, struct, расширения,
-// переменная — имя; прочее — сам текст.
-item_key(i64 v, i64 n, str shown) {
-  array{kind, name, parts, target} = version_signature(v, n);
-  if(kind == "syntax") {
-    k = "syntax";
-    for(p : parts) k = (k + " ") + p;
-    return k;
-  }
-  if(kind == "fn") {
-    k = name + "(";
-    for(j : range(parts.size)) k = (k + (if(j > 0) ", " else "")) + parts[j];
-    return k + ")";
-  }
-  if(kind == "struct") return "struct " + name;
-  if(kind == "extend_ref") return ("&" + item_key(v, target, "")) + " { … }";
-  if(kind == "extend") return name + " { … }";
-  if(kind == "var") return name;
-  shown
-}
-// Элементы модуля root версии v (-1 — модуль программы); base_items — номера элементов общей базы.
-module_items(i64 v, i64 root, base_items) {
-  found = array{};
-  prev = "";
-  for(x : version_items(v, root)) {
-    array{n, shown, inner, blank, lead, tail} = x;
-    first = item_key(v, n, shown);
-    key = first;
-    j = 2;
-    while(find_item(found, key).present) {
-      key = (first + " #") + text(j);
-      j += 1;
-    }
-    id = if(has_number(base_items, n)) "#" + text(n) else key;
-    found.push(item{true, n, id, key, shown, inner, blank, lead, tail, prev});
-    prev = id;
-  }
-  found
-}
-find_item(xs, str id) {
-  r = no_item();
-  for(x : xs) if(!r.present && (x.id == id)) r = x;
-  r
-}
-find_key(xs, str key) {
-  r = no_item();
-  for(x : xs) if(!r.present && (x.key == key)) r = x;
-  r
-}
-// что сравнивает слияние: текст и раскладка (элемента нет — тоже состояние)
-same_state(item x, item y) {
-  if(x.present != y.present) return false;
-  if(!x.present) return true;
-  (x.text == y.text) && ((x.inner == y.inner) && ((x.blank == y.blank) && ((x.tail == y.tail) && same_lines(x.lead, y.lead))))
-}
-
-// Заменить (или добавить, или убрать) элемент id модуля root версии v их элементом: текст — разбором
-// на месте элемента (§4.4), раскладка — как у них; новый — после того же соседа, что у них (нет его
-// — в конец). Итог — номер элемента (-1 — убран или не разобрался).
-take_theirs(i64 v, i64 root, base_items, str id, item theirs) {
-  items = module_items(v, root, base_items);
-  mine = find_item(items, id);
-  if(!theirs.present) {
-    if(mine.present) version_remove(v, root, mine.node);
-    return -1;
-  }
-  prev = find_item(items, theirs.after);
-  version_put(v, root, if(mine.present) mine.node else -1, theirs.text, id, if(prev.present) prev.node else -1, theirs.blank, theirs.inner, theirs.lead, theirs.tail)
-}
-
-// Конфликт — оба варианта человеку: текст общей базы, мой, их (пусто — элемента в версии нет) и их
-// элемент с раскладкой — для «взять их».
-struct conflict { str id; str key; str base; str mine; str theirs; item their; }
-struct merge_result { array taken; array conflicts; array base_items; }
-no_merge() => merge_result{array{}, array{}, array{}};
-
-// Трёхстороннее слияние их версии в мою (mine меняется на месте): изменённое только у них берётся
-// само, у обоих по-разному — конфликт.
-merge_versions(i64 mine, i64 theirs) {
-  bv = version_base(mine, theirs);
-  base_items = array{};
-  for(x : version_items(bv, -1)) base_items.push(x[0]);
-  b = module_items(bv, -1, base_items);
-  m = module_items(mine, -1, base_items);
-  t = module_items(theirs, -1, base_items);
-  version_close(bv);
-  ids = array{};
-  for(x : b) if(!has_text(ids, x.id)) ids.push(x.id);
-  for(x : m) if(!has_text(ids, x.id)) ids.push(x.id);
-  for(x : t) if(!has_text(ids, x.id)) ids.push(x.id);
-  r = no_merge();
-  r.base_items = base_items;
-  for(id : ids) {
-    bi = find_item(b, id);
-    mi = find_item(m, id);
-    ti = find_item(t, id);
-    name = if(mi.present) mi.key else if(ti.present) ti.key else bi.key;
-    if(!same_state(mi, ti) && !same_state(ti, bi)) { // совпало или у них без изменений — нечего
-      if(same_state(mi, bi)) { // изменено только у них — берётся само
-        take_theirs(mine, -1, base_items, id, ti);
-        r.taken.push(name);
-      } else r.conflicts.push(conflict{id, name, bi.text, mi.text, ti.text, ti});
-    }
-  }
-  r
-}
-
-// Двусторонний дифф: что в b иначе, чем в a (по элементам модуля).
-diff_versions(i64 a, i64 b) {
-  xa = module_items(a, -1, array{});
-  xb = module_items(b, -1, array{});
-  r = "";
-  for(x : xa) {
-    y = find_key(xb, x.key);
-    if(!y.present) r = r + (("- " + x.key) + "\n");
-    else if(y.text != x.text) r = r + ((((((("~ " + x.key) + "\n  было:  ") + x.text) + "\n  стало: ") + y.text) + "\n"));
-    else if(!same_state(x, y)) r = r + (("~ " + x.key) + " — раскладка (внутренний, пустые строки, комментарий)\n");
-  }
-  for(y : xb) if(!find_key(xa, y.key).present) r = r + (((("+ " + y.key) + "\n  ") + y.text) + "\n");
-  if(r == "") "без различий\n" else r
-}
-
-// --- команды tz: diff, merge ------------------------------------------------------------------
+// причина — в stderr, код 1
 fail(str why) {
   write_err(why + "\n");
   1
 }
-// tz diff a.tzdb b.tzdb — семантический дифф баз
-diff_files(str a, str b) {
-  va = version_open(a);
-  if(va < 0) return fail(version_error());
-  vb = version_open(b);
-  if(vb < 0) return fail(version_error());
-  write_out(diff_versions(va, vb));
-  0
-}
-// tz merge мой.tzdb их.tzdb [итог.tzdb] — трёхстороннее слияние; конфликты — мой вариант, код 1
-merge_files(str mine, str theirs, str result) {
-  mv = version_open(mine);
-  if(mv < 0) return fail(version_error());
-  tv = version_open(theirs);
-  if(tv < 0) return fail(version_error());
-  r = merge_versions(mv, tv);
-  for(k : r.taken) write_out(("взято у них: " + k) + "\n");
-  for(c : r.conflicts) write_out(((((((("конфликт: " + c.key) + "\n  база: ") + dash(c.base)) + "\n  мой:  ") + dash(c.mine)) + "\n  их:   ") + dash(c.theirs)) + "\n");
-  why = version_save(mv, result);
-  if(why != "") return fail(why);
-  write_out((("записано: " + result) + (if(r.conflicts.size == 0) "" else " (конфликты — мой вариант; слить руками)")) + "\n");
-  if(r.conflicts.size == 0) 0 else 1
-}
-dash(str s) => if(s == "") "—" else s;
 
-// --- прогон тестов: tz test <каталог> [--a64 | --projection k] -------------------------------
-// 
-//   — движки сверяются друг с другом (интерпретатор,
-// JIT, AArch64, машина процессов);. Тест —
-// программа .tz с директивами в шапке, сценарий сессии VM (.session) или протокола редактора
-// (.wire). Здесь — директивы, сверки, тексты причин, порядок и параллельность; движки, каталоги
-// состояния, дети (fork) и сценарии — примитивы VM.
-
-// примитивы прогона (у VM): программа теста, её печать, движки
-test_load(str path) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(-1)));
-  return value(tests_host->load(std::string((a[0]).as<str_v>().view())));
-};
-test_close(i64 p) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  tests_host->close((a[0]).as<int64_t>());
-  return value(int64_t(0));
-};
-// текст, ошибки разбора (текстом), разобрана ли, каталог
-test_source(i64 p) => native "cpp" {
+// --- сессия VM: команды строками (tz vm, сценарии .session, tz apply) -------------------------
+// правка функции — операция над базой, check
+// пересчитывает только затронутое (§10.1). Строка — команда и слова; тело edit — до строки «.».
+// Сами команды — у VM (session.hpp); ошибка — текстом с местом.
+vm_check(i64 s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
-  return value(tests_host->at((a[0]).as<int64_t>()).src);
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.check(); }));
 };
-test_errors(i64 p) => native "cpp" {
+vm_report(i64 s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
-  return value(tests_host->at((a[0]).as<int64_t>()).errors);
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.last_report; }));
 };
-test_parsed(i64 p) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(false));
-  return value(tests_host->at((a[0]).as<int64_t>()).parsed);
-};
-test_dir_of(i64 p) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  return value(tests_host->at((a[0]).as<int64_t>()).dir.string());
-};
-// каноническая проекция; после элаборации (tz fmt --ct): array{удалось, текст или ошибка}
-test_print(i64 p) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  auto & x = tests_host->at((a[0]).as<int64_t>());
-  return value(printer(x.db).print(x.root));
-};
-test_elaborated(i64 p) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  auto & x = tests_host->at((a[0]).as<int64_t>());
-  try {
-    return value(array_v::of({value(true), value(elaborated_text(x.db, x.root, x.name))}));
-  } catch(diagnostic const & d) {
-    return value(array_v::of({value(false), value(render(d, x.name, x.db))}));
-  }
-};
-// Текст программы (не файл) — разбор с модулями в каталоге dir и печать: по умолчанию или в проекции
-// key (header — с `use key;`): array{есть модуль проекции, текст}; разбор и дамп дерева: array{первая
-// ошибка, дамп}
-print_text(str text, str dir, str key, bool header) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto [ok, t] = print_text(std::string((a[0]).as<str_v>().view()), std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view()), (a[3]).as<bool>());
-  return value(array_v::of({value(ok), value(std::move(t))}));
-};
-parse_dump(str text, str dir, str name) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto [e, d] = parse_dump(std::string((a[0]).as<str_v>().view()), std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view()));
-  return value(array_v::of({value(std::move(e)), value(std::move(d))}));
-};
-// каталог состояния программы (§12.2) — свежий на каждое исполнение; убрать все
-state_fresh() => native "cpp" {
-  tests_host->states.fresh();
-  return value(int64_t(0));
-};
-state_clear() => native "cpp" {
-  tests_host->states.clear();
-  return value(int64_t(0));
-};
-// Интерпретатором: array{вывод, ошибка, экземпляры}; с JIT (a64 — и код AArch64 в qemu):
-// array{вывод, ошибка, статистика JIT}; AArch64 последнего запуска: array{проверено, не проверено,
-// заметки, расхождения}
-test_run(i64 p, args, input) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto r = tests_host->run((a[0]).as<int64_t>(), strings_of(a[1]), strings_of(a[2]));
-  return value(array_v::of({value(r[0]), value(r[1]), value(r[2])}));
-};
-test_run_jit(i64 p, args, input, bool a64) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto r = tests_host->run_jit((a[0]).as<int64_t>(), strings_of(a[1]), strings_of(a[2]), (a[3]).as<bool>());
-  return value(array_v::of({value(r[0]), value(r[1]), value(r[2])}));
-};
-a64_last() => native "cpp" {
-  auto & h = *tests_host;
-  return value(array_v::of({value(int64_t(h.a64_checked)), value(int64_t(h.a64_skipped)), strings_value(h.a64_notes), strings_value(h.a64_mismatches)}));
-};
-// статический разбор: array{ошибка, отчёт}; остаточная программа для аргументов; срез
-test_check(i64 p) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  auto r = tests_host->check((a[0]).as<int64_t>());
-  return value(array_v::of({value(r[0]), value(r[1])}));
-};
-test_residual(i64 p, args) => native "cpp" {
+// строка stdin для следующих run (очередь; stdin сессии — не stdin процесса)
+vm_stdin(i64 s, str line) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  return value(tests_host->residual((a[0]).as<int64_t>(), strings_of(a[1])));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] {
+    x.stdin_lines.emplace_back((a[1]).as<str_v>().view());
+    return std::string();
+  }));
 };
-test_slice(i64 p, str fn, str var) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(std::string()));
-  auto & x = tests_host->at((a[0]).as<int64_t>());
-  return value(slice_view(x.db).print(x.root, std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view())));
-};
-// в .tzdb и обратно: array{та же проекция, вывод из загруженной}
-test_store_roundtrip(i64 p, args, input) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto [same, out] = tests_host->store_roundtrip((a[0]).as<int64_t>(), strings_of(a[1]), strings_of(a[2]));
-  return value(array_v::of({value(same), value(std::move(out))}));
-};
-// машина процессов: array{вывод, ошибка}; с дампом после n шагов и восстановлением в новой базе:
-// array{вывод, процесс закончился раньше}
-test_machine(i64 p, args, input) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto r = tests_host->machine((a[0]).as<int64_t>(), strings_of(a[1]), strings_of(a[2]));
-  return value(array_v::of({value(r[0]), value(r[1])}));
-};
-test_machine_dump(i64 p, args, input, i64 n) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto [out, early] = tests_host->machine_dump((a[0]).as<int64_t>(), strings_of(a[1]), strings_of(a[2]), uint64_t((a[3]).as<int64_t>()));
-  return value(array_v::of({value(std::move(out)), value(early)}));
-};
-// Сценарий (у VM): сессия VM, у .wire — сервер редактора и два клиента в том же процессе (пары
-// сокетов). Открыть, программа (ошибка — ""), есть ли сессия, сохранить и открыть заново журнал,
-// квант запуска, команда сессии, рост журнала, журнал в новую базу, ожидание запуска, пауза
-// набора, идёт ли запуск, досчитать запуск.
-scn_open(str path, bool wire) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(-1)));
-  tests_host->scenarios.emplace_back().emplace(std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>());
-  return value(int64_t(tests_host->scenarios.size() - 1));
-};
-scn_close(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  tests_host->scenarios[std::size_t((a[0]).as<int64_t>())].reset();
-  return value(int64_t(0));
-};
-scn_program(i64 h, str file) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  return value(tests_host->scene((a[0]).as<int64_t>()).program(std::string((a[1]).as<str_v>().view())));
-};
-scn_ready(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(false));
-  return value(tests_host->scene((a[0]).as<int64_t>()).session.has_value());
-};
-scn_save(i64 h, str file) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto & x = tests_host->scene((a[0]).as<int64_t>());
-  save_db(*x.dbp, x.root, std::string((a[1]).as<str_v>().view()));
-  return value(int64_t(0));
-};
-scn_reopen(i64 h, str file) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  return value(tests_host->scene((a[0]).as<int64_t>()).reopen(std::string((a[1]).as<str_v>().view())));
-};
-scn_quantum(i64 h, i64 n) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto & x = tests_host->scene((a[0]).as<int64_t>());
-  if(x.server) x.server->quantum_steps = uint64_t((a[1]).as<int64_t>());
-  return value(int64_t(0));
-};
-scn_has_server(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(false));
-  return value(tests_host->scene((a[0]).as<int64_t>()).server.has_value());
-};
-scn_exec(i64 h, str line, str body) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(std::string()));
-  return value(tests_host->scene((a[0]).as<int64_t>()).session->exec(std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view())));
-};
-// array{записей, виды, сколько по виду, байт текста импортов}
-scn_journal(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  auto [n, names, counts, text] = tests_host->scene((a[0]).as<int64_t>()).journal();
-  std::vector<value> cs;
-  for(int64_t c: counts) cs.push_back(value(c));
-  return value(array_v::of({value(n), strings_value(names), value(array_v::of(std::move(cs))), value(text)}));
-};
-scn_roundtrip(i64 h) => native "cpp" {
+vm_jit(i64 s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
-  return value(tests_host->scene((a[0]).as<int64_t>()).session->roundtrip());
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.jit.stats(); }));
 };
-scn_wait(i64 h, i64 n) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  tests_host->scene((a[0]).as<int64_t>()).wait((a[1]).as<int64_t>());
-  return value(int64_t(0));
+vm_run(i64 s, args) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  auto args = strings_of(a[1]);
+  return value(x.guarded([&] { return x.run(args); }));
 };
-scn_idle(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  auto & x = tests_host->scene((a[0]).as<int64_t>());
-  x.server->idle();
-  x.settle();
-  return value(int64_t(0));
+vm_residual(i64 s, args) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  auto args = strings_of(a[1]);
+  return value(x.guarded([&] { return x.residual(args); }));
 };
-scn_running(i64 h) => native "cpp" {
+vm_fmt(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return printer(x.db).print(x.root); }));
+};
+vm_edit(i64 s, str fn, str body) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  std::string fn((a[1]).as<str_v>().view()), body((a[2]).as<str_v>().view());
+  return value(x.guarded([&] { return x.edit(fn, body); }));
+};
+vm_apply(i64 s, str fn) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  std::string fn((a[1]).as<str_v>().view());
+  return value(x.guarded([&] { return x.apply(fn); }));
+};
+vm_save(i64 s, str path) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  std::string path((a[1]).as<str_v>().view());
+  return value(x.guarded([&] {
+    save_db(x.db, x.root, path);
+    return cat("сохранено: ", path, "\n");
+  }));
+};
+vm_stats(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.stats(); }));
+};
+vm_roundtrip(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.roundtrip(); }));
+};
+// живой процесс машины (§9.3): есть ли; запустить; шаги (n < 0 — до конца); где; ресурс дать или
+// забрать; давление; завершить; проба выражения в клоне (fork)
+vm_proc_live(i64 s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
-  return value(tests_host->scene((a[0]).as<int64_t>()).server->running());
+  return value(tools_host->session((a[0]).as<int64_t>()).proc != nullptr);
 };
-scn_finish(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(int64_t(0)));
-  tests_host->scene((a[0]).as<int64_t>()).finish();
-  return value(int64_t(0));
+vm_proc_start(i64 s, args) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  auto args = strings_of(a[1]);
+  return value(x.guarded([&] { return x.proc_start(args); }));
 };
-// Сообщение клиента c (0, 1) вида kind из значений полей — кадром по его сокету; сервер крутится,
-// пока все не получат своё. Итог — "" или ошибка.
-scn_send(i64 h, i64 c, str kind, values) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(std::string()));
-  auto m = proto::client_from((a[2]).as<str_v>().view(), strings_of(a[3]));
-  if(!m) return value(cat("протокол: неизвестное сообщение ", (a[2]).as<str_v>().view()));
-  try {
-    tests_host->scene((a[0]).as<int64_t>()).send(int((a[1]).as<int64_t>()), *m);
-  } catch(diagnostic const & d) {
-    return value(std::string(d.what()));
-  }
-  return value(std::string());
+vm_proc_step(i64 s, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  int64_t n = (a[1]).as<int64_t>();
+  return value(x.guarded([&] { return x.proc_step(n < 0 ? ~uint64_t{0} : uint64_t(n)); }));
 };
-// пришедшие клиенту c сообщения VM — плоскими деревьями: array{виды, имена, тексты, числа, детей,
-// после поддерева}; сколько сообщений клиент послал
-scn_collect(i64 h, i64 c) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  std::vector<value> out;
-  for(auto const & m: tests_host->scene((a[0]).as<int64_t>()).collect(int((a[1]).as<int64_t>()))) out.push_back(flat_value(m));
-  return value(array_v::of(std::move(out)));
+vm_proc_where(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.proc->where_now(); }));
 };
-scn_sent(i64 h, i64 c) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  return value(int64_t(tests_host->scene((a[0]).as<int64_t>()).clients[(a[1]).as<int64_t>()].sent));
+vm_proc_grant(i64 s, str what, bool give) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  std::string what((a[1]).as<str_v>().view());
+  bool give = (a[2]).as<bool>();
+  return value(x.guarded([&] { return x.proc_grant(what, give); }));
 };
-// черновик представления view клиента c (текст как набран — у языка редактора): array{есть, текст}
-scn_draft(i64 h, i64 c, i64 view) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(array_v::of({})));
-  auto & x = tests_host->scene((a[0]).as<int64_t>());
-  auto d = x.server->draft_text(*x.clients[(a[1]).as<int64_t>()].peer, uint32_t((a[2]).as<int64_t>()));
-  return value(array_v::of({value(d.has_value()), value(d ? *d : std::string())}));
+vm_proc_pressure(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] { return x.proc_pressure(); }));
 };
-// проекция узла root (номер) для сверки: представление модуля — без внутренних; key — модуль записей
-scn_print(i64 h, i64 root, bool module_view, str key) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(std::string()));
-  int64_t r = (a[1]).as<int64_t>();
-  if(r < 0) return value(std::string());
-  return value(tests_host->scene((a[0]).as<int64_t>()).print(node_id(uint32_t(r)), (a[2]).as<bool>(), std::string((a[3]).as<str_v>().view())));
+vm_proc_stop(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.guarded([&] {
+    x.proc.reset();
+    return std::string("процесс завершён\n");
+  }));
 };
-scn_has_module(i64 h, str key) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
-  return value(tests_host->scene((a[0]).as<int64_t>()).has_module(std::string((a[1]).as<str_v>().view())));
+vm_proc_call(i64 s, str expr) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  std::string expr((a[1]).as<str_v>().view());
+  return value(x.guarded([&] { return x.probe(expr); }));
 };
-// мета-информация протокола: сообщения клиента — array{имя, поля, виды полей (string, node, num)}
-proto_client_kinds() => native "cpp" {
-  std::vector<value> out;
-  for(auto const & k: proto::client_kinds()) {
-    std::vector<std::string> fs(k.fields.begin(), k.fields.end()), ks(k.kinds.begin(), k.kinds.end());
-    out.push_back(value(array_v::of({value(std::string(k.name)), strings_value(fs), strings_value(ks)})));
-  }
-  return value(array_v::of(std::move(out)));
-};
-// Тесты в детях (fork): не больше jobs разом; итоги — по порядку файлов: array{итог, код выхода
-// (сигнал — минус), язык исполнил тест до конца}. Ребёнок исполняет test_packed(файл, режим).
-tests_start(files, i64 jobs, bool a64, str projection) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(int64_t(0)));
-  tests_host->start(strings_of(a[0]), uint32_t(std::max<int64_t>(1, (a[1]).as<int64_t>())));
-  tests_host->a64_mode = (a[2]).as<bool>();
-  tests_host->projection = std::string((a[3]).as<str_v>().view());
-  return value(int64_t(0));
-};
-tests_next() => native "cpp" {
-  node_id f = tools_host->fn("test_packed");
-  auto [text, code, whole] = tests_host->take_next([&](std::string const & path) {
-    return std::string(vm.analyze_instance(f, {value(path), value(tests_host->a64_mode), value(tests_host->projection)}).as<str_v>().view());
-  });
-  return value(array_v::of({value(std::move(text)), value(int64_t(code)), value(whole)}));
-};
-
-// Директивы шапки — строки `// ключ: значение` в начале файла (до первой строки кода):
-//   args: a b c          аргументы программы          stdin: строка        строка stdin (несколько)
-//   out: текст           строка stdout по порядку     out2: текст          второй запуск с тем же состоянием
-//   error: подстрока     ожидаемая ошибка             instances: f(...)    экземпляр (подстрока таблицы)
-//   check: / check-lacks: / check-error:  отчёт и ошибка tz check
-//   residual: a b / residual-has: / residual-lacks:   остаточная программа для аргументов
-//   slice: функция переменная / slice-has: / slice-lacks:
-//   fmt-stable — fmt∘fmt = fmt; fmt-has: текст; fmt-ct-has: / fmt-ct-lacks: — после элаборации
-//   fmt-projection: ключ / fmt-projection-has: текст — проекция модулем записей (§4.5)
-//   jit-compiled: f / jit-stats: текст; no-jit — без сверки с JIT
-//   machine — и машиной процессов; machine-dump: N — дамп на шаге N; dump-out: — вывод с дампом
-//   quantum: N — квант вытеснения фоновых (TZ_SLICE); grant: fs net — ресурсы программе (TZ_GRANT)
-//   store-roundtrip — в .tzdb и обратно: та же проекция и тот же вывод
-// Опечатка в директиве не должна молча выключать проверку — неизвестная директива — причина.
-struct header { array keys; array values; }
-header_keys() => array{"args", "stdin", "out2", "dump-out", "quantum", "grant", "out", "error", "instances", "check-error", "check-lacks", "check", "residual-has", "residual-lacks", "residual", "slice-has", "slice-lacks", "slice", "jit-compiled", "jit-stats", "fmt-has", "fmt-projection-has", "fmt-projection", "fmt-ct-has", "fmt-ct-lacks", "machine-dump"};
-directive_word(str w) {
-  r = w.size > 0;
-  for(k : range(w.size)) if(!(((w[k] >= 'a') && (w[k] <= 'z')) || (w[k] == '-'))) r = false;
-  r
-}
-read_header(str src) {
-  h = header{array{}, array{}};
-  known = header_keys();
-  done = false;
-  for(line : lines_of(src)) if(!done) {
-    if(!starts_with(line, "//")) {
-      if(line != "") done = true;
-    } else {
-      body = trim_lead(text_from(line, 2));
-      key = "";
-      for(k : known) if((key == "") && starts_with(body, k + ":")) key = k;
-      if(key != "") {
-        h.keys.push(key);
-        h.values.push(trim_lead(text_from(body, key.size + 1)));
-      } else if((body == "no-jit") || ((body == "machine") || (starts_with(body, "fmt-stable") || starts_with(body, "store-roundtrip")))) {
-        h.keys.push(if(starts_with(body, "fmt-stable")) "fmt-stable" else if(starts_with(body, "store-roundtrip")) "store-roundtrip" else body);
-        h.values.push("");
-      } else {
-        colon = find_text(body, ":");
-        if((colon > 0) && directive_word(slice_text(body, 0, colon))) {
-          h.keys.push("?");
-          h.values.push(slice_text(body, 0, colon));
-        }
-      }
-    }
-  }
-  h
-}
-// значения директивы key по порядку; есть ли она
-wanted(header h, str key) {
+// слова с номера k
+words_from(xs, i64 k) {
   r = array{};
-  for(k : range(h.keys.size)) if(h.keys[k] == key) r.push(h.values[k]);
+  for(j : range(xs.size)) if(j >= k) r.push(xs[j]);
   r
 }
-has_key(header h, str key) => wanted(h, key).size > 0;
-// аргументы программы — слова директив args
-args_of(header h) {
-  r = array{};
-  for(line : wanted(h, "args")) for(w : words_of(line)) r.push(w);
-  r
-}
-// Текст проекции без шапки теста: комментарии печатаются (§4.5), и ожидание fmt-has из шапки иначе
-// нашлось бы в самой шапке.
-without_header(str shown, str src) {
-  n = 0;
-  stop = false;
-  for(l : lines_of(src)) if(!stop) {
-    if(starts_with(l, "//")) {
-      n += 1;
-    } else stop = true;
-  }
-  at = 0;
-  for(k : range(n)) if(at < shown.size) {
-    if(!starts_with(text_from(shown, at), "//")) return shown;
-    nl = find_text(text_from(shown, at), "\n");
-    at = if(nl < 0) shown.size else (at + nl) + 1;
-  }
-  text_from(shown, at)
-}
-// Текст ошибки без места: «…: ошибка: <текст>» первой строки
-error_text(str rendered) {
-  at = find_text(rendered, "ошибка: ");
-  if(at < 0) return "";
-  rest = text_from(rendered, at + 14);
-  nl = find_text(rest, "\n");
-  if(nl < 0) rest else slice_text(rest, 0, nl)
-}
-// место первой ошибки (до «: ошибка»)
-first_place(str rendered) {
-  at = find_text(rendered, ": ошибка");
-  if(at < 0) rendered else slice_text(rendered, 0, at)
-}
-// Первая различающаяся строка двух текстов — с соседними (было / стало).
-first_difference(str a, str b) {
-  la = lines_of(a);
-  lb = lines_of(b);
-  k = 0;
-  while((k < la.size) && ((k < lb.size) && (la[k] == lb[k]))) k += 1;
-  r = "";
-  i = if(k >= 3) k - 3 else 0;
-  while(i < (k + 3)) {
-    if(i < la.size) r = r + (((("      было  " + text(i + 1)) + ": ") + la[i]) + "\n");
-    if((i < lb.size) && (i >= k)) r = r + (((("      стало " + text(i + 1)) + ": ") + lb[i]) + "\n");
-    i += 1;
-  }
-  r
-}
-
-// Тест .tz: причины ("" — прошёл).
-test_tz(str path, bool a64) {
-  p = test_load(path);
-  src = test_source(p);
-  h = read_header(src);
-  dir = test_dir_of(p);
-  q = wanted(h, "quantum");
-  if(q.size == 0) env_unset("TZ_SLICE") else env_set("TZ_SLICE", q[0]);
-  grants = ""; // ресурсы программы: «Даёшь ты» — здесь их даёт тест (TZ_GRANT)
-  for(line : wanted(h, "grant")) for(w : words_of(line)) grants = (grants + (if(grants == "") "" else ",")) + w;
-  if(grants == "") env_unset("TZ_GRANT") else env_set("TZ_GRANT", grants);
-  counts = array{0, 0};
-  notes = array{};
-  why = test_program(p, h, src, dir, a64, counts, notes);
-  state_clear();
-  test_close(p);
-  test_result{why, counts[0], counts[1], notes}
-}
-// counts, notes — AArch64 этого теста (проверено, не проверено; заметки)
-test_program(i64 p, header h, str src, str dir, bool a64, counts, notes) {
-  errors = test_errors(p);
-  parsed = test_parsed(p);
-  args = args_of(h);
-  input = wanted(h, "stdin");
-  if(has_key(h, "fmt-stable")) {
-    once = test_print(p);
-    if(once != print_text(once, dir, "", false)[1]) return "    проекция нестабильна: fmt∘fmt ≠ fmt\n";
-  }
-  if(has_key(h, "fmt-has")) {
-    shown = without_header(test_print(p), src);
-    for(want : wanted(h, "fmt-has")) if(!contains(shown, want)) return (("    нет в проекции: " + in_quotes(want)) + "\n") + shown;
-  }
-  for(key : wanted(h, "fmt-projection")) { // проекция — модуль записей по ключу, как use k (§4.5)
-    array{ok, printed} = print_text(src, dir, key, false);
-    if(!ok) return ("    нет модуля проекции " + key) + "\n";
-    shown = without_header(printed, src);
-    for(want : wanted(h, "fmt-projection-has")) if(!contains(shown, want)) return (((("    нет в проекции " + key) + ": ") + in_quotes(want)) + "\n") + shown;
-  }
-  if((has_key(h, "fmt-ct-has") || has_key(h, "fmt-ct-lacks")) && (errors == "")) { // после элаборации (tz fmt --ct)
-    array{ok, printed} = test_elaborated(p);
-    if(!ok) return "    ошибка элаборации: " + printed;
-    shown = without_header(printed, src);
-    for(want : wanted(h, "fmt-ct-has")) if(!contains(shown, want)) return (("    нет в проекции после элаборации: " + in_quotes(want)) + "\n") + shown;
-    for(bad : wanted(h, "fmt-ct-lacks")) if(contains(shown, bad)) return (("    лишнее в проекции после элаборации: " + in_quotes(bad)) + "\n") + shown;
-  }
-  // состояние программы (§12.2) — свой каталог на каждое исполнение; out2: — второй запуск с ним же
-  state_fresh();
-  out = "";
-  instances = "";
-  if(errors == "") {
-    array{o, e, i} = test_run(p, args, input);
-    out = o;
-    errors = errors + e;
-    instances = i;
-  }
-  why_state = "";
-  if(has_key(h, "out2") && (errors == "")) {
-    array{again, e2, _} = test_run(p, array{}, input);
-    why_state = why_state + e2;
-    want2 = wanted(h, "out2");
-    k = 0;
-    for(line : lines_of(again)) {
-      if((k >= want2.size) || (line != want2[k])) why_state = why_state + (((("    второй запуск, строка " + text(k + 1)) + ": ") + in_quotes(line)) + "\n");
-      k += 1;
-    }
-    if(k < want2.size) why_state = why_state + "    второй запуск: не всё выведено\n";
-  }
-  state_fresh();
-  why = "";
-  for(k : range(h.keys.size)) if(h.keys[k] == "?") why = why + (("    неизвестная директива теста: " + h.values[k]) + "\n");
-  // дифференциально (§10.5): с JIT вывод и места ошибок — как у интерпретатора
-  if(parsed && !has_key(h, "no-jit")) {
-    array{out3, err3, stats} = test_run_jit(p, args, input, a64);
-    if(a64) {
-      array{c, sk, ns, ms} = a64_last();
-      counts[0] = c;
-      counts[1] = sk;
-      for(n : ns) notes.push(n);
-      for(m : ms) why = why + (("    AArch64: " + m) + "\n");
-    }
-    if(out3 != out) why = why + ((((("    JIT: вывод отличается: " + in_quotes(out3)) + " против ") + in_quotes(out)) + "\n") + stats);
-    for(want : wanted(h, "jit-stats")) if(!contains(stats, want)) why = why + ((("    нет в статистике JIT: " + in_quotes(want)) + "\n") + stats);
-    for(fn : wanted(h, "jit-compiled")) if(!contains(stats, ("jit  " + fn) + "(")) why = why + ((("    JIT не скомпилировал " + fn) + ":\n") + stats);
-    if((first_place(err3) != first_place(errors)) && !((errors == "") && (err3 == ""))) why = why + (((("    JIT: ошибка отличается:\n" + err3) + "против\n") + errors));
-  }
-  if(has_key(h, "check") || (has_key(h, "check-lacks") || has_key(h, "check-error"))) {
-    check_errors = "";
-    report = "";
-    if(parsed) {
-      array{ce, rep} = test_check(p);
-      check_errors = ce;
-      report = rep;
-    }
-    for(want : wanted(h, "check")) if(!contains(report, want)) why = why + ((("    нет в отчёте check: " + in_quotes(want)) + "\n") + report);
-    for(bad : wanted(h, "check-lacks")) if(contains(report, bad)) why = why + ((("    лишнее в отчёте check: " + in_quotes(bad)) + "\n") + report);
-    for(want : wanted(h, "check-error")) if(!contains(check_errors, want)) why = why + ((((("    нет ошибки check: " + in_quotes(want)) + "; есть: ") + check_errors) + "\n"));
-    if(!has_key(h, "check-error") && (check_errors != "")) why = why + ("    неожиданная ошибка check:\n" + check_errors);
-  }
-  if(has_key(h, "residual") && parsed) {
-    shown = test_residual(p, words_of(wanted(h, "residual")[0]));
-    for(want : wanted(h, "residual-has")) if(!contains(shown, want)) why = why + ((("    нет в остаточной программе: " + in_quotes(want)) + "\n") + shown);
-    for(bad : wanted(h, "residual-lacks")) if(contains(shown, bad)) why = why + ((("    лишнее в остаточной программе: " + in_quotes(bad)) + "\n") + shown);
-  }
-  if(has_key(h, "slice") && parsed) {
-    w = words_of(wanted(h, "slice")[0]);
-    shown = test_slice(p, if(w.size > 0) w[0] else "", if(w.size > 1) w[1] else "");
-    for(want : wanted(h, "slice-has")) if(!contains(shown, want)) why = why + ((("    нет в срезе: " + in_quotes(want)) + "\n") + shown);
-    for(bad : wanted(h, "slice-lacks")) if(contains(shown, bad)) why = why + ((("    лишнее в срезе: " + in_quotes(bad)) + "\n") + shown);
-  }
-  if(has_key(h, "store-roundtrip")) {
-    state_fresh();
-    array{same, out2} = test_store_roundtrip(p, args, input);
-    if(!same) why = why + "    проекция после загрузки базы отличается\n";
-    if(out2 != out) why = why + (((("    вывод из базы отличается: " + in_quotes(out2)) + " против ") + in_quotes(out)) + "\n");
-  }
-  why = why + why_state;
-  state_fresh();
-  if((has_key(h, "machine") || has_key(h, "machine-dump")) && parsed) why = why + machine_diff(p, h, args, input, out, errors);
-  want_out = wanted(h, "out");
-  i = 0;
-  for(line : lines_of(out)) {
-    if(i >= want_out.size) why = why + (("    лишний вывод: " + line) + "\n");
-    else if(line != want_out[i]) why = why + (((((("    строка " + text(i + 1)) + ": ожидалось ") + in_quotes(want_out[i])) + ", получено ") + in_quotes(line)) + "\n");
-    i += 1;
-  }
-  while(i < want_out.size) {
-    why = why + (("    не выведено: " + in_quotes(want_out[i])) + "\n");
-    i += 1;
-  }
-  for(want : wanted(h, "error")) if(!contains(errors, want)) why = why + (("    нет ожидаемой ошибки: " + in_quotes(want)) + "\n");
-  if(!has_key(h, "error") && (errors != "")) why = why + ("    неожиданная ошибка:\n" + errors);
-  for(want : wanted(h, "instances")) if(!contains(instances, want)) why = why + ((((("    нет экземпляра " + in_quotes(want)) + "; есть:\n") + instances)));
-  why
-}
-// Машина процессов (M5): тот же вывод и та же ошибка, что у интерпретатора; с дампом — дамп после
-// N шагов, восстановление в новой базе из журнала дампа («в другой VM») и досчёт: вывод до дампа и
-// после восстановления — полный (или dump-out:, если ресурсы хоста не переживают перенос).
-machine_diff(i64 p, header h, args, input, str out, str errors) {
-  why = "";
-  state_fresh();
-  array{mout, merr} = test_machine(p, args, input);
-  if(mout != out) why = why + (((("    машина процессов: вывод " + in_quotes(mout)) + " против ") + in_quotes(out)) + "\n");
-  if(error_text(merr) != error_text(errors)) why = why + (((("    машина процессов: ошибка " + in_quotes(error_text(merr))) + " против ") + in_quotes(error_text(errors))) + "\n");
-  for(at : wanted(h, "machine-dump")) { // каждая директива — свой запуск с дампом на этом шаге
-    state_fresh();
-    array{dout, early} = test_machine_dump(p, args, input, number_of(at));
-    if(early) why = why + (("    машина: процесс закончился раньше шага дампа " + at) + "\n");
-    want = out;
-    if(has_key(h, "dump-out")) {
-      want = "";
-      for(l : wanted(h, "dump-out")) want = (want + l) + "\n";
-    }
-    if(dout != want) why = why + (((((("    дамп на шаге " + at) + ": вывод ") + in_quotes(dout)) + " против ") + in_quotes(want)) + "\n");
-  }
-  why
-}
-
-// Второй язык поверх одного АСТ (§4.5): программа, напечатанная в проекции k, — текст, который сам
-// говорит, как его разбирать (use k; в начале), — разбирается в то же дерево, и её печать
-// стабильна. 
-// Дерево сравнивается дампом.
-test_projection(str path, str key) {
-  src = read_text(path);
-  dir = path_dir(path);
-  array{ok, once} = print_text(src, dir, key, true);
-  if(!ok || (once == "")) return ("    нет модуля проекции " + key) + "\n";
-  array{errors, dump_a} = parse_dump(src, dir, "программа");
-  array{errors2, dump_b} = parse_dump(once, dir, "проекция");
-  if((errors == "") && (errors2 != "")) return ("    текст в проекции не разбирается: " + errors2) + once;
-  twice = print_text(once, dir, key, true)[1];
-  if(once != twice) return "    печать в проекции нестабильна:\n" + first_difference(once, twice);
-  use_line = ("  n_use key=" + key) + "\n";
-  b = dump_b;
-  at = find_text(b, use_line);
-  if((at >= 0) && !contains(dump_a, use_line)) b = slice_text(b, 0, at) + text_from(b, at + use_line.size);
-  if(dump_a != b) return (("    другое дерево после разбора проекции:\n" + first_difference(dump_a, b)) + "    текст:\n") + once;
-  ""
-}
-// каталог файла (без косой в конце; нет — "")
-path_dir(str path) {
-  slash = -1;
-  for(k : range(path.size)) if(path[k] == '/') slash = k;
-  if(slash < 0) "" else slice_text(path, 0, slash)
-}
-// имя файла
-path_name(str path) => text_from(path, path_dir(path).size + (if(path_dir(path) == "") 0 else 1));
-
-// --- сценарии: сессия VM (.session) и протокол редактора (.wire) -----------------------------
-// Строка — команда сессии (`check`, `edit f` … `.`) или сообщение клиента в текстовой форме
-// (`key 1 End`, `[2] …` — второй клиент той же VM); после неё — ожидания к выводу:
-//   // program: файл.tz        программа (относительно каталога сценария)
-//   // expect: подстрока        / // expect-not: подстрока   (⏎ — перевод строки)
-//   @подстрока[:N] — номер N-го узла, в чьём тексте она есть (сценарии не зависят от номеров);
-//   // let: имя @подстрока — номер сейчас, $имя в ожиданиях — он же (узел сохраняет id после правки);
-//   // run: live — запуск не ждать до конца; // quantum: N — квант в шагах машины;
-//   // grant: fs net — ресурсы запуску; save_to / reopen файл.tzdb — копии базы для слияния (§9.4);
-//   wait [N], idle, journal, roundtrip — запуск, пауза набора, рост журнала, журнал в новую базу.
-
-// Текстовая форма сообщений — поверх мета-информации протокола: 
-// 
-// Сообщение клиента: имя без c_, поля — словами по порядку (нехватающие —
-// нули), `\s` — пробел, `\n` — перевод строки, узел — `#N`. Итог: array{удалось, вид, значения
-// полей, ошибка}.
-all_digits(str w) {
-  r = w.size > 0;
-  for(k : range(w.size)) if((w[k] < '0') || (w[k] > '9')) r = false;
-  r
-}
-client_message(str line) {
+// Команда сессии s строкой: вывод
+vm_command(i64 s, str line, str body) {
   ws = words_of(line);
-  if(ws.size == 0) return array{false, "", array{}, "протокол: пустое сообщение"};
-  for(m : proto_client_kinds()) {
-    array{name, fs, kinds} = m;
-    if(name == ws[0]) {
-      values = array{};
-      for(j : range(fs.size)) if((j + 1) < ws.size) {
-        w = ws[j + 1];
-        if(kinds[j] == "string") values.push(replace_all(replace_all(w, "\\s", " "), "\\n", "\n"));
-        else {
-          digits = if((kinds[j] == "node") && starts_with(w, "#")) text_from(w, 1) else w;
-          if(!all_digits(digits)) return array{false, "", array{}, "протокол: не число: " + w};
-          values.push(digits);
-        }
-      }
-      return array{true, name, values, ""};
-    }
-  }
-  array{false, "", array{}, "протокол: неизвестное сообщение " + ws[0]}
+  cmd = if(ws.size > 0) ws[0] else "";
+  args = words_from(ws, 1);
+  if(cmd == "check") return vm_check(s);
+  if(cmd == "stdin") return vm_stdin(s, if(line.size > 6) text_from(line, 6) else "");
+  if(cmd == "report") return vm_report(s);
+  if(cmd == "jit") return vm_jit(s);
+  if(cmd == "run") return vm_run(s, args);
+  if(cmd == "residual") return vm_residual(s, args);
+  if(cmd == "fmt") return vm_fmt(s);
+  if((cmd == "edit") && (args.size == 1)) return vm_edit(s, args[0], body);
+  if((cmd == "apply") && (args.size == 1)) return vm_apply(s, args[0]);
+  if(cmd == "stats") return vm_stats(s);
+  if(cmd == "roundtrip") return vm_roundtrip(s);
+  if(cmd == "proc") return proc_command(s, args, line);
+  if((cmd == "save") && (args.size == 1)) return vm_save(s, args[0]);
+  ("неизвестная команда: " + line) + "\n"
 }
-// Сообщение VM — плоское дерево m (array{виды, имена, тексты, числа, детей, после поддерева}) —
-// текстом: имя, поля по порядку `имя=значение`; узел — #N (нет — ·), строка — в кавычках, список
-// агрегатов — с новой строки каждый, прочий список — [a b].
-describe(m) {
-  parts = array{m[1][0], " "};
-  describe_fields(m, 0, parts);
-  parts.push("\n");
-  join_texts(parts)
-}
-describe_fields(m, i64 at, parts) {
-  j = at + 1;
-  for(k : range(m[4][at])) {
-    if(k > 0) parts.push(" ");
-    parts.push(m[1][j]);
-    parts.push("=");
-    describe_value(m, j, parts);
-    j = m[5][j];
-  }
-  true
-}
-describe_value(m, i64 j, parts) {
-  kind = m[0][j];
-  if(kind == "node") parts.push(if(m[3][j] < 0) "·" else ("#" + text(m[3][j])));
-  else if(kind == "num") parts.push(m[2][j]);
-  else if(kind == "str") parts.push(in_quotes(m[2][j]));
-  else if(kind == "struct") describe_fields(m, j, parts);
-  else if(m[2][j] == "structs") {
-    e = j + 1;
-    for(k : range(m[4][j])) {
-      parts.push("\n  ");
-      describe_fields(m, e, parts);
-      e = m[5][e];
-    }
-  } else {
-    parts.push("[");
-    e = j + 1;
-    for(k : range(m[4][j])) {
-      if(k > 0) parts.push(" ");
-      describe_value(m, e, parts);
-      e = m[5][e];
-    }
-    parts.push("]");
-  }
-  true
-}
-// поле name агрегата at плоского дерева: номер записи (-1 — нет)
-field_at(m, i64 at, str name) {
-  r = -1;
-  j = at + 1;
-  for(k : range(m[4][at])) {
-    if((r < 0) && (m[1][j] == name)) r = j;
-    j = m[5][j];
-  }
-  r
+// proc …: живой процесс машины (§9.3)
+proc_command(i64 s, args, str line) {
+  sub = if(args.size > 0) args[0] else "";
+  if(sub == "start") return vm_proc_start(s, words_from(args, 1));
+  if(!vm_proc_live(s)) return "нет живого процесса: proc start\n";
+  if((sub == "step") || (sub == "run")) return vm_proc_step(s, if(sub == "run") -1 else (if(args.size > 1) number_of(args[1]) else 1));
+  if(sub == "where") return vm_proc_where(s);
+  if(((sub == "grant") || (sub == "revoke")) && (args.size == 2)) return vm_proc_grant(s, args[1], sub == "grant");
+  if(sub == "pressure") return vm_proc_pressure(s);
+  if(sub == "stop") return vm_proc_stop(s);
+  if(sub == "call") return vm_proc_call(s, text_from(line, find_text(line, "call") + 4));
+  "proc: start, step N, run, where, call <выражение>, pressure, grant/revoke fs|net, stop\n"
 }
 
-// Клиент сценария — как редактор: узлы (номер, вид, куски — текст или ребёнок), представления
-// (номер → корень, вид), проекции представлений; текст собирается из кусков и сверяется с проекцией
-// VM.
-struct wclient { array ids; array kinds; array first; array count; array ptext; array pkid; array sorted; array slots; array vids; array vroots; array vkinds; i64 root; array pviews; array pkeys; str mismatch; }
-new_client() => wclient{array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, -1, array{}, array{}, ""};
-// место узла n в таблице клиента c (-1 — нет)
-node_slot(cl, i64 c, i64 n) {
-  k = lower_bound(cl[c].sorted, n);
-  if((k < cl[c].sorted.size) && (cl[c].sorted[k] == n)) cl[c].slots[k] else -1
-}
-// узлы сообщения (поле nodes): новые — в таблицу, известные — заменяются
-take_nodes(cl, i64 c, m) {
-  list = field_at(m, 0, "nodes");
-  fresh = false;
-  e = list + 1;
-  for(k : range(m[4][list])) {
-    id = m[3][field_at(m, e, "id")];
-    pieces = field_at(m, e, "pieces");
-    slot = node_slot(cl, c, id);
-    if(slot < 0) {
-      slot = cl[c].ids.size;
-      cl[c].ids.push(id);
-      cl[c].kinds.push("");
-      cl[c].first.push(0);
-      cl[c].count.push(0);
-      fresh = true;
-    }
-    cl[c].kinds[slot] = m[2][field_at(m, e, "kind")];
-    cl[c].first[slot] = cl[c].ptext.size;
-    cl[c].count[slot] = m[4][pieces];
-    p = pieces + 1;
-    for(j : range(m[4][pieces])) {
-      if(m[0][p] == "str") {
-        cl[c].ptext.push(m[2][p]);
-        cl[c].pkid.push(-1);
-      } else {
-        cl[c].ptext.push("");
-        cl[c].pkid.push(m[3][p]);
-      }
-      p = m[5][p];
-    }
-    e = m[5][e];
-  }
-  if(fresh) {
-    sorted = array{};
-    slots = array{};
-    for(k : sorted_numbers(cl[c].ids)) {
-      sorted.push(cl[c].ids[k]);
-      slots.push(k);
-    }
-    cl[c].sorted = sorted;
-    cl[c].slots = slots;
-  }
-  true
-}
-// корень и вид представления v клиента c (-1, "" — нет); задать
-view_index(cl, i64 c, i64 v) {
-  r = -1;
-  for(k : range(cl[c].vids.size)) if(cl[c].vids[k] == v) r = k;
-  r
-}
-view_root_of(cl, i64 c, i64 v) {
-  k = view_index(cl, c, v);
-  if(k < 0) -1 else cl[c].vroots[k]
-}
-view_kind_of(cl, i64 c, i64 v) {
-  k = view_index(cl, c, v);
-  if(k < 0) "" else cl[c].vkinds[k]
-}
-set_view(cl, i64 c, i64 v, i64 root, str kind) {
-  k = view_index(cl, c, v);
-  if(k < 0) {
-    cl[c].vids.push(v);
-    cl[c].vroots.push(root);
-    cl[c].vkinds.push(kind);
-  } else {
-    cl[c].vroots[k] = root;
-    cl[c].vkinds[k] = kind;
-  }
-  true
-}
-// проекция представления v (ключ модуля записей; "" — по умолчанию)
-projection_of(cl, i64 c, i64 v) {
-  r = "";
-  for(k : range(cl[c].pviews.size)) if(cl[c].pviews[k] == v) r = cl[c].pkeys[k];
-  r
-}
-set_projection(cl, i64 c, i64 v, str key) {
-  k = -1;
-  for(j : range(cl[c].pviews.size)) if(cl[c].pviews[j] == v) k = j;
-  if(k < 0) {
-    cl[c].pviews.push(v);
-    cl[c].pkeys.push(key);
-  } else cl[c].pkeys[k] = key;
-  true
-}
-// Текст узла n, собранный из кусков — как его соберёт редактор; курсор (узел cn, кусок cp, смещение
-// co в кодовых точках) — ‸ на его месте.
-text_of(cl, i64 c, i64 n, i64 cn, i64 cp, i64 co) {
-  parts = array{};
-  pieces_of(cl, c, n, cn, cp, co, parts);
-  join_texts(parts)
-}
-pieces_of(cl, i64 c, i64 n, i64 cn, i64 cp, i64 co, parts) {
-  slot = node_slot(cl, c, n);
-  if(slot < 0) return true;
-  f = cl[c].first[slot];
-  for(i : range(cl[c].count[slot])) {
-    kid = cl[c].pkid[f + i];
-    if(kid >= 0) pieces_of(cl, c, kid, cn, cp, co, parts);
-    else if((cn == n) && (cp == i)) parts.push(with_caret(cl[c].ptext[f + i], co));
-    else parts.push(cl[c].ptext[f + i]);
-  }
-  true
-}
-// ‸ перед кодовой точкой co (после последней — в конце)
-with_caret(str t, i64 co) {
-  points = 0;
-  for(k : range(t.size)) if((t[k] & 0xC0) != 0x80) {
-    if(points == co) return (slice_text(t, 0, k) + "‸") + text_from(t, k);
-    points += 1;
-  }
-  if(points == co) t + "‸" else t
-}
-// строка с курсором
-cursor_line(cl, i64 c, i64 cn, i64 cp, i64 co) {
-  all = text_of(cl, c, cl[c].root, cn, cp, co);
-  r = "?";
-  for(l : lines_of(all)) if((r == "?") && contains(l, "‸")) r = l;
-  if((r == "?") && ends_with(all, "\n‸")) "‸" else r
-}
-// Собранный текст и его сверка: черновик (текст как набран) — проекция самого представления, иначе
-// — проекция VM (раскладка: дыра — только свой текст).
-checked_text(i64 h, cl, i64 c, i64 v) {
-  t = text_of(cl, c, cl[c].root, -1, -1, -1);
-  array{typed, draft} = scn_draft(h, c, v);
-  if(typed) {
-    if(t != draft) cl[c].mismatch = (("собрано:\n" + t) + "\nпредставление VM:\n") + draft;
-  } else {
-    want = scn_print(h, cl[c].root, view_kind_of(cl, c, v) == "module", projection_of(cl, c, v));
-    if(t != want) cl[c].mismatch = (("собрано:\n" + t) + "\nпроекция:\n") + want;
-  }
-  ("текст:\n" + t) + "\n"
-}
-// ответы VM клиенту c — текстом; представлению — собранный текст, курсору — строка с ‸
-collect(i64 h, cl, i64 c) {
-  out = "";
-  for(m : scn_collect(h, c)) {
-    out = out + describe(m);
-    name = m[1][0];
-    if(name == "view") {
-      take_nodes(cl, c, m);
-      v = m[3][field_at(m, 0, "view")];
-      set_view(cl, c, v, m[3][field_at(m, 0, "root")], m[2][field_at(m, 0, "kind")]);
-      cl[c].root = view_root_of(cl, c, v);
-      out = out + checked_text(h, cl, c, v);
-    } else if(name == "update") {
-      take_nodes(cl, c, m);
-      v = m[3][field_at(m, 0, "view")];
-      cl[c].root = view_root_of(cl, c, v);
-      out = out + checked_text(h, cl, c, v);
-    } else if(name == "cursor") {
-      cl[c].root = view_root_of(cl, c, m[3][field_at(m, 0, "view")]);
-      out = ((out + "курсор: ") + cursor_line(cl, c, m[3][field_at(m, 0, "node")], m[3][field_at(m, 0, "piece")], m[3][field_at(m, 0, "offset")])) + "\n";
-    }
-  }
-  out
-}
-// текст без комментариев (`//…` до конца строки, `/*…*/`): в кусках контекста строк нет
-without_comments(str t) {
-  r = "";
-  i = 0;
-  while(i < t.size) {
-    rest = text_from(t, i);
-    if(starts_with(rest, "//")) {
-      nl = find_text(rest, "\n");
-      i = if(nl < 0) t.size else i + nl;
-    } else if(starts_with(rest, "/*")) {
-      e = find_text(text_from(t, i + 2), "*/");
-      i = if(e < 0) t.size else (i + 2) + (e + 2);
-    } else {
-      nl = find_text(rest, "/");
-      take = if(nl < 0) rest.size else (if(nl == 0) 1 else nl);
-      r = r + slice_text(t, i, i + take);
-      i += take;
-    }
-  }
-  r
-}
-// N-й узел (от корня, по порядку текста), в чьём собственном тексте есть want; notes — искать и в
-// комментариях (свой текст контекста — модуля, блока — без них: они не узлы)
-find_node(cl, i64 c, i64 n, str want, bool notes, left) {
-  slot = node_slot(cl, c, n);
-  if((slot < 0) || (left[1] >= 0)) return true;
-  ctx = !notes && ((cl[c].kinds[slot] == "n_module") || (cl[c].kinds[slot] == "n_block"));
-  f = cl[c].first[slot];
-  hit = false;
-  for(i : range(cl[c].count[slot])) if(!hit && (cl[c].pkid[f + i] < 0)) {
-    t = cl[c].ptext[f + i];
-    if(contains(if(ctx) without_comments(t) else t, want)) {
-      hit = true;
-      left[0] = left[0] - 1;
-      if(left[0] == 0) left[1] = n;
-    }
-  }
-  for(i : range(cl[c].count[slot])) if(cl[c].pkid[f + i] >= 0) find_node(cl, c, cl[c].pkid[f + i], want, notes, left);
-  true
-}
-// @подстрока[:N] — номер узла (#N, не нашлось — #?); `сообщение N …` — ищется в представлении N
-resolve(cl, i64 c, str line) {
-  ws = words_of(line);
-  if(ws.size > 1) {
-    v = view_index(cl, c, number_of(ws[1]));
-    if(v >= 0) cl[c].root = cl[c].vroots[v];
-  }
-  r = "";
-  for(w : ws) {
-    if(r != "") r = r + " ";
-    if(!starts_with(w, "@")) r = r + w;
-    else {
-      want = text_from(w, 1);
-      nth = 1;
-      colon = -1;
-      for(k : range(want.size)) if(want[k] == ':') colon = k;
-      if((colon >= 0) && (((colon + 1) < want.size) && ((want[colon + 1] >= '1') && (want[colon + 1] <= '9')))) {
-        nth = number_of(text_from(want, colon + 1));
-        want = slice_text(want, 0, colon);
-      }
-      left = array{nth, -1};
-      find_node(cl, c, cl[c].root, want, false, left);
-      if(left[1] < 0) {
-        left = array{nth, -1};
-        find_node(cl, c, cl[c].root, want, true, left);
-      }
-      r = r + (if(left[1] < 0) "#?" else "#" + text(left[1]));
-    }
-  }
-  r
-}
-// Сообщение клиента c строкой: ссылки — номерами, текстовая форма — сообщением, ответы — текстом.
-// Проекция представления (c_projection): сверка текста — по ней, если модуль нашёлся. Итог: array{
-// удалось, ответы или ошибка}.
-exchange(i64 h, cl, i64 c, str line) {
-  array{ok, kind, values, error} = client_message(resolve(cl, c, line));
-  if(!ok) return array{false, error};
-  view = -1;
-  was = "";
-  key = "";
-  if(kind == "projection") {
-    view = if(values.size > 0) number_of(values[0]) else 0;
-    key = if(values.size > 1) values[1] else "";
-    was = projection_of(cl, c, view);
-    set_projection(cl, c, view, key);
-  }
-  failed = scn_send(h, c, kind, values);
-  if(failed != "") return array{false, failed};
-  out = collect(h, cl, c);
-  if((kind == "projection") && ((key != "") && !scn_has_module(h, key))) set_projection(cl, c, view, was); // модуля нет — прежняя
-  array{true, out}
-}
-// Ожидание сценария: без ведущих пробелов; ⏎ — перевод строки вывода (\n в кавычках — экранирование
-// в самом выводе).
-lines_joined(str s) => replace_all(trim_lead(s), "⏎", "\n");
-// Сценарий: причины ("" — прошёл).
-run_scenario(str path) {
-  env_unset("TZ_GRANT"); // ресурсы — только по `// grant:` сценария
-  lines = lines_of(read_text(path));
-  wire = ends_with(path, ".wire");
-  h = scn_open(path, wire);
-  cl = array{new_client(), new_client()};
-  last = "";
-  why = "";
-  names = array{}; // `// let:` — запомненные узлы
-  ids = array{};
-  live = false; // `// run: live` — запуск не ждать до конца
-  i = 0;
-  while(i < lines.size) {
-    l = lines[i];
-    at = text(i + 1);
-    if(starts_with(l, "// program:")) {
-      failed = scn_program(h, trim_one(text_from(l, 11)));
-      if(failed != "") {
-        scn_close(h);
-        return failed;
-      }
-    } else if(wire && starts_with(l, "save_to ")) { // журнал базы — в файл; reopen — сессия заново из него
-      scn_save(h, text_from(l, 8));
-      last = "";
-    } else if(wire && starts_with(l, "reopen ")) {
-      failed = scn_reopen(h, text_from(l, 7));
-      if(failed != "") {
-        scn_close(h);
-        return failed;
-      }
-      cl = array{new_client(), new_client()};
-      last = "";
-    } else if(wire && starts_with(l, "// let:")) {
-      ws = words_of(text_from(l, 7));
-      if(ws.size == 2) {
-        id = text_from(resolve(cl, 0, "x " + ws[1]), 2);
-        k = -1;
-        for(j : range(names.size)) if(names[j] == ws[0]) k = j;
-        if(k < 0) {
-          names.push(ws[0]);
-          ids.push(id);
-        } else ids[k] = id;
-      }
-    } else if(wire && starts_with(l, "// grant:")) {
-      g = "";
-      for(w : words_of(text_from(l, 9))) g = (g + (if(g == "") "" else ",")) + w;
-      env_set("TZ_GRANT", g);
-    } else if(wire && (l == "// run: live")) live = true;
-    else if(wire && (starts_with(l, "// quantum:") && scn_has_server(h))) scn_quantum(h, number_of(trim_lead(text_from(l, 11))));
-    else if(starts_with(l, "// expect:")) {
-      want = lines_joined(text_from(l, 10));
-      order = sorted_indices(names);
-      k = order.size;
-      while(k > 0) { // blk2 — раньше blk
-        k -= 1;
-        want = replace_all(want, "$" + names[order[k]], ids[order[k]]);
-      }
-      if(!contains(last, want)) why = why + ((((("    строка " + at) + ": нет ") + in_quotes(want)) + " в выводе:\n") + last);
-    } else if(starts_with(l, "// expect-not:")) {
-      bad = lines_joined(text_from(l, 14));
-      if(contains(last, bad)) why = why + ((((("    строка " + at) + ": лишнее ") + in_quotes(bad)) + " в выводе:\n") + last);
-    } else if((l == "") || (starts_with(l, "//") || !scn_ready(h))) {
-    } else if(wire && (l == "journal")) { // рост журнала базы с прошлого раза: записи и байты текста импортов
-      array{n, kinds, counts, bytes} = scn_journal(h);
-      by = "";
-      for(k : range(kinds.size)) by = (((by + (if(by == "") "" else ", ")) + kinds[k]) + " ") + text(counts[k]);
-      last = (((((("журнал: +" + text(n)) + " записей (") + by) + "), текст импортов +") + text(bytes)) + " байт\n");
-    } else if(wire && (l == "roundtrip")) last = scn_roundtrip(h);
-    else if(wire && ((l == "wait") || starts_with(l, "wait "))) { // запуск: кванты до конца (wait N — N квантов) или до ожидания хоста
-      scn_wait(h, if(l == "wait") -1 else number_of(text_from(l, 5)));
-      last = collect(h, cl, 0);
-    } else if(wire && (l == "idle")) { // пауза набора: проверка и метки (без часов)
-      scn_idle(h);
-      last = collect(h, cl, 0);
-      also = collect(h, cl, 1);
-      if(also != "") last = (last + "другому клиенту:\n") + also;
-    } else if(wire) {
-      who = if(starts_with(l, "[2] ")) 1 else 0;
-      array{ok, got} = exchange(h, cl, who, if(who == 1) text_from(l, 4) else l);
-      if(!ok) why = why + (((("    строка " + at) + ": ") + got) + "\n");
-      else {
-        last = got;
-        if(!live && scn_running(h)) { // запуск — до конца (кванты), если сценарий не просил иначе
-          scn_finish(h);
-          last = last + collect(h, cl, who);
-        }
-        other = 1 - who; // ответы, разосланные другому клиенту (одно состояние на всех)
-        if(scn_sent(h, other) > 0) {
-          also = collect(h, cl, other);
-          if(also != "") last = (last + "другому клиенту:\n") + also;
-        }
-        for(c : range(2)) if(cl[c].mismatch != "") {
-          why = why + (((("    строка " + at) + ": текст представления расходится с проекцией:\n") + cl[c].mismatch));
-          cl[c].mismatch = "";
-        }
-      }
-    } else {
-      body = "";
-      if(starts_with(l, "edit ")) {
-        i += 1;
-        while((i < lines.size) && (lines[i] != ".")) {
-          body = (body + lines[i]) + "\n";
-          i += 1;
-        }
-      }
-      last = scn_exec(h, l, body);
-    }
-    i += 1;
-  }
-  scn_close(h);
-  why
-}
-// без одного пробела в начале
-trim_one(str s) => if(starts_with(s, " ")) text_from(s, 1) else s;
-
-// Итог теста: причины ("" — прошёл) и AArch64 этого теста (--a64): проверено, не проверено, заметки.
-struct test_result { str why; i64 checked; i64 skipped; array notes; }
-// Один тест: проекция (--projection k) — только обратимость программы; сценарий; программа.
-test_one(str path, bool a64, str projection) {
-  if(projection != "") return test_result{test_projection(path, projection), 0, 0, array{}};
-  if(ends_with(path, ".session") || ends_with(path, ".wire")) return test_result{run_scenario(path), 0, 0, array{}};
-  test_tz(path, a64)
-}
-// Итог теста ребёнка (fork) родителю — строками: «проверено не_проверено заметок», заметки, причины.
-test_packed(str path, bool a64, str projection) {
-  r = test_one(path, a64, projection);
-  t = ((((text(r.checked) + " ") + text(r.skipped)) + " ") + text(r.notes.size)) + "\n";
-  for(n : r.notes) t = (t + n) + "\n";
-  t + r.why
-}
-// tz test <каталог> [--a64 | --projection k]: прогон; код 0 — все прошли. Одновременно тестов —
-// TZ_TEST_JOBS, иначе по ядрам; 1 — подряд в этом процессе, без fork.
-run_tests(str dir, bool a64, str projection) {
-  names = array{};
-  for(f : files_in(dir)) if(ends_with(f, ".tz") || ((projection == "") && (ends_with(f, ".session") || ends_with(f, ".wire")))) names.push(f);
-  files = array{};
-  for(k : sorted_indices(names)) files.push(names[k]);
-  jobs = if(env_get("TZ_TEST_JOBS") != "") number_of(env_get("TZ_TEST_JOBS")) else cpu_count();
-  if(jobs < 1) jobs = 1;
-  passed = 0;
-  checked = 0;
-  skipped = 0;
-  notes = array{};
-  if(jobs > 1) tests_start(files, jobs, a64, projection);
-  for(f : files) {
-    why = "";
-    if(jobs > 1) {
-      array{got, code, whole} = tests_next();
-      if(code != 0) why = ("    тест не закончился: " + (if(code < 0) ("сигнал " + text(0 - code)) else ("код " + text(code)))) + "\n";
-      else if(!whole) why = got;
-      else {
-        // счётчики AArch64 ребёнка: «проверено не_проверено заметок», заметки, причины
-        nl = find_text(got, "\n");
-        ws = words_of(slice_text(got, 0, nl));
-        checked += number_of(ws[0]);
-        skipped += number_of(ws[1]);
-        rest = text_from(got, nl + 1);
-        for(j : range(number_of(ws[2]))) {
-          e = find_text(rest, "\n");
-          n = slice_text(rest, 0, e);
-          if(!has_text(notes, n)) notes.push(n);
-          rest = text_from(rest, e + 1);
-        }
-        why = rest;
-      }
-    } else {
-      r = test_one(f, a64, projection);
-      why = r.why;
-      checked += r.checked;
-      skipped += r.skipped;
-      for(n : r.notes) if(!has_text(notes, n)) notes.push(n);
-    }
-    if(why == "") {
-      passed += 1;
-      write_out(("  ok   " + path_name(f)) + "\n");
-    } else write_out(((("  FAIL " + path_name(f)) + "\n") + why) + "\n");
-  }
-  if(a64) {
-    write_out(((("AArch64: проверено вызовов " + text(checked)) + ", не проверено ") + text(skipped)) + "\n");
-    for(k : sorted_indices(notes)) write_out(("  не проверено  " + notes[k]) + "\n");
-  }
-  write_out((((text(passed) + "/") + text(files.size)) + " тестов прошло\n"));
-  if(passed == files.size) 0 else 1
-}

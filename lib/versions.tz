@@ -1,0 +1,249 @@
+// Версии базы — дифф и слияние на языке (§9.4; шаг 2 переноса тулинга). Модуль встроен в сборку;
+// его видят редактор (use versions) и команды tz diff, tz merge.
+module versions;
+use tools;
+
+// --- примитивы: версии базы (у VM) ----------------------------------------------------------
+// Версия — копия базы по журналу .tzdb; номер 0 — база, с которой работают (программа сессии
+// редактора), у команды tz — пусто. Общее начало журналов двух версий — их общая база.
+
+// копия по файлу; -1 — не открылась (version_error — почему)
+version_open(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(-1)));
+  return value(tools_host->open(std::string((a[0]).as<str_v>().view())));
+};
+version_error() => native "cpp" { return value(tools_host->error); };
+// общая база версий a и b (корень — корень a)
+version_base(i64 a, i64 b) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(-1)));
+  return value(tools_host->base((a[0]).as<int64_t>(), (a[1]).as<int64_t>()));
+};
+// копия больше не нужна
+version_close(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  tools_host->close((a[0]).as<int64_t>());
+  return value(int64_t(0));
+};
+// Элементы модуля root версии v (-1 — модуль программы): array{номер, текст, внутренний, пустых
+// строк перед ним, комментарии перед ним, комментарий в конце строки}
+version_items(i64 v, i64 root) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(array_v::of({}));
+  return value(array_v::of(module_item_facts(*x->db, tools_host->module_of(*x, (a[1]).as<int64_t>()))));
+};
+// что за элемент n версии v: array{вид, имя, части, цель}: fn (части — типы параметров, «_» — без
+// типа), syntax (слова формы), struct, extend, extend_ref (цель — расширяемая функция), var, other
+version_signature(i64 v, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  int64_t n = (a[1]).as<int64_t>();
+  if(!x || n < 0 || uint64_t(n) >= x->db->size()) return value(array_v::of({value(std::string("other")), value(std::string()), value(array_v::of({})), value(int64_t(-1))}));
+  return item_signature(*x->db, node_id(uint32_t(n)));
+};
+// Элемент модуля root версии v — текстом, разбором по правилам его места (§4.4): mine — заменить
+// его (узел сохраняет id), -1 — новый после after (-1 — в конец); раскладка — пустые строки,
+// внутренний, комментарии. Итог — номер элемента; не разобрался — -1.
+version_put(i64 v, i64 root, i64 mine, str text, str name, i64 after, i64 blank, bool inner, lead, str tail) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(-1)));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(int64_t(-1));
+  node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>());
+  if(!m) return value(int64_t(-1));
+  auto num = [](value const & v) { return v.as<int64_t>() < 0 ? node_id{} : node_id(uint32_t(v.as<int64_t>())); };
+  node_note note;
+  for(uint32_t k = 0; k < (a[8]).as<array_v>().size(); ++k) note.lead.emplace_back((a[8]).as<array_v>().get(k).as<str_v>().view());
+  note.tail = std::string((a[9]).as<str_v>().view());
+  node_id got = put_item(*x->db, m, num(a[2]), std::string((a[3]).as<str_v>().view()), std::string((a[4]).as<str_v>().view()), num(a[5]), uint32_t((a[6]).as<int64_t>()), (a[7]).as<bool>(), std::move(note));
+  return value(got ? int64_t(got.value) : int64_t(-1));
+};
+// убрать элемент n модуля root версии v
+version_remove(i64 v, i64 root, i64 n) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(int64_t(0));
+  if(node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>()); m && (a[2]).as<int64_t>() >= 0) remove_item(*x->db, m, node_id(uint32_t((a[2]).as<int64_t>())));
+  return value(int64_t(0));
+};
+// журнал версии v — в файл .tzdb; "" — записан, иначе ошибка
+version_save(i64 v, str path) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(std::string("нет версии"));
+  try {
+    save_db(*x->db, x->root, std::string((a[1]).as<str_v>().view()));
+  } catch(std::exception const & e) {
+    return value(std::string(e.what()));
+  }
+  return value(std::string());
+};
+
+// --- версии базы: семантический дифф и трёхстороннее слияние (§9.4) --------------------------
+//  
+//  — живая правка через VM конфликтов не даёт. Копии базы
+// расходятся, только когда работа шла в двух местах; тогда 
+// 
+// 
+// База — версии и их элементы; решение (что чьё, что берётся само, где конфликт) — здесь.
+// Дифф и слияние — по элементам модуля: функция опознаётся по имени и сигнатуре, а не по строкам.
+
+// Элемент модуля в версии: кто он (id — номер узла, если элемент был в общей базе: смена сигнатуры
+// — правка того же элемента; иначе — ключ), как называется (key), какой он (текст проекции) и его
+// раскладка: внутренний (§13.3), пустые строки перед ним, комментарии, сосед перед ним (after — его
+// id):   — элемент переносится со всем, что у него есть.
+struct item { bool present; i64 node; str id; str key; str text; bool inner; i64 blank; array lead; str tail; str after; }
+no_item() => item{false, -1, "", "", "", false, 0, array{}, "", ""};
+
+// Ключ элемента: функция — имя и типы параметров, syntax — слова записи формы, struct, расширения,
+// переменная — имя; прочее — сам текст.
+item_key(i64 v, i64 n, str shown) {
+  array{kind, name, parts, target} = version_signature(v, n);
+  if(kind == "syntax") {
+    k = "syntax";
+    for(p : parts) k = (k + " ") + p;
+    return k;
+  }
+  if(kind == "fn") {
+    k = name + "(";
+    for(j : range(parts.size)) k = (k + (if(j > 0) ", " else "")) + parts[j];
+    return k + ")";
+  }
+  if(kind == "struct") return "struct " + name;
+  if(kind == "extend_ref") return ("&" + item_key(v, target, "")) + " { … }";
+  if(kind == "extend") return name + " { … }";
+  if(kind == "var") return name;
+  shown
+}
+// Элементы модуля root версии v (-1 — модуль программы); base_items — номера элементов общей базы.
+module_items(i64 v, i64 root, base_items) {
+  found = array{};
+  prev = "";
+  for(x : version_items(v, root)) {
+    array{n, shown, inner, blank, lead, tail} = x;
+    first = item_key(v, n, shown);
+    key = first;
+    j = 2;
+    while(find_item(found, key).present) {
+      key = (first + " #") + text(j);
+      j += 1;
+    }
+    id = if(has_number(base_items, n)) "#" + text(n) else key;
+    found.push(item{true, n, id, key, shown, inner, blank, lead, tail, prev});
+    prev = id;
+  }
+  found
+}
+find_item(xs, str id) {
+  r = no_item();
+  for(x : xs) if(!r.present && (x.id == id)) r = x;
+  r
+}
+find_key(xs, str key) {
+  r = no_item();
+  for(x : xs) if(!r.present && (x.key == key)) r = x;
+  r
+}
+// что сравнивает слияние: текст и раскладка (элемента нет — тоже состояние)
+same_state(item x, item y) {
+  if(x.present != y.present) return false;
+  if(!x.present) return true;
+  (x.text == y.text) && ((x.inner == y.inner) && ((x.blank == y.blank) && ((x.tail == y.tail) && same_lines(x.lead, y.lead))))
+}
+
+// Заменить (или добавить, или убрать) элемент id модуля root версии v их элементом: текст — разбором
+// на месте элемента (§4.4), раскладка — как у них; новый — после того же соседа, что у них (нет его
+// — в конец). Итог — номер элемента (-1 — убран или не разобрался).
+take_theirs(i64 v, i64 root, base_items, str id, item theirs) {
+  items = module_items(v, root, base_items);
+  mine = find_item(items, id);
+  if(!theirs.present) {
+    if(mine.present) version_remove(v, root, mine.node);
+    return -1;
+  }
+  prev = find_item(items, theirs.after);
+  version_put(v, root, if(mine.present) mine.node else -1, theirs.text, id, if(prev.present) prev.node else -1, theirs.blank, theirs.inner, theirs.lead, theirs.tail)
+}
+
+// Конфликт — оба варианта человеку: текст общей базы, мой, их (пусто — элемента в версии нет) и их
+// элемент с раскладкой — для «взять их».
+struct conflict { str id; str key; str base; str mine; str theirs; item their; }
+struct merge_result { array taken; array conflicts; array base_items; }
+no_merge() => merge_result{array{}, array{}, array{}};
+
+// Трёхстороннее слияние их версии в мою (mine меняется на месте): изменённое только у них берётся
+// само, у обоих по-разному — конфликт.
+merge_versions(i64 mine, i64 theirs) {
+  bv = version_base(mine, theirs);
+  base_items = array{};
+  for(x : version_items(bv, -1)) base_items.push(x[0]);
+  b = module_items(bv, -1, base_items);
+  m = module_items(mine, -1, base_items);
+  t = module_items(theirs, -1, base_items);
+  version_close(bv);
+  ids = array{};
+  for(x : b) if(!has_text(ids, x.id)) ids.push(x.id);
+  for(x : m) if(!has_text(ids, x.id)) ids.push(x.id);
+  for(x : t) if(!has_text(ids, x.id)) ids.push(x.id);
+  r = no_merge();
+  r.base_items = base_items;
+  for(id : ids) {
+    bi = find_item(b, id);
+    mi = find_item(m, id);
+    ti = find_item(t, id);
+    name = if(mi.present) mi.key else if(ti.present) ti.key else bi.key;
+    if(!same_state(mi, ti) && !same_state(ti, bi)) { // совпало или у них без изменений — нечего
+      if(same_state(mi, bi)) { // изменено только у них — берётся само
+        take_theirs(mine, -1, base_items, id, ti);
+        r.taken.push(name);
+      } else r.conflicts.push(conflict{id, name, bi.text, mi.text, ti.text, ti});
+    }
+  }
+  r
+}
+
+// Двусторонний дифф: что в b иначе, чем в a (по элементам модуля).
+diff_versions(i64 a, i64 b) {
+  xa = module_items(a, -1, array{});
+  xb = module_items(b, -1, array{});
+  r = "";
+  for(x : xa) {
+    y = find_key(xb, x.key);
+    if(!y.present) r = r + (("- " + x.key) + "\n");
+    else if(y.text != x.text) r = r + ((((((("~ " + x.key) + "\n  было:  ") + x.text) + "\n  стало: ") + y.text) + "\n"));
+    else if(!same_state(x, y)) r = r + (("~ " + x.key) + " — раскладка (внутренний, пустые строки, комментарий)\n");
+  }
+  for(y : xb) if(!find_key(xa, y.key).present) r = r + (((("+ " + y.key) + "\n  ") + y.text) + "\n");
+  if(r == "") "без различий\n" else r
+}
+
+// --- команды tz: diff, merge (cli грузит модуль по ключу) ------------------------------------------------------------------
+// tz diff a.tzdb b.tzdb — семантический дифф баз
+diff_files(str a, str b) {
+  va = version_open(a);
+  if(va < 0) return fail(version_error());
+  vb = version_open(b);
+  if(vb < 0) return fail(version_error());
+  write_out(diff_versions(va, vb));
+  0
+}
+// tz merge мой.tzdb их.tzdb [итог.tzdb] — трёхстороннее слияние; конфликты — мой вариант, код 1
+merge_files(str mine, str theirs, str result) {
+  mv = version_open(mine);
+  if(mv < 0) return fail(version_error());
+  tv = version_open(theirs);
+  if(tv < 0) return fail(version_error());
+  r = merge_versions(mv, tv);
+  for(k : r.taken) write_out(("взято у них: " + k) + "\n");
+  for(c : r.conflicts) write_out(((((((("конфликт: " + c.key) + "\n  база: ") + dash(c.base)) + "\n  мой:  ") + dash(c.mine)) + "\n  их:   ") + dash(c.theirs)) + "\n");
+  why = version_save(mv, result);
+  if(why != "") return fail(why);
+  write_out((("записано: " + result) + (if(r.conflicts.size == 0) "" else " (конфликты — мой вариант; слить руками)")) + "\n");
+  if(r.conflicts.size == 0) 0 else 1
+}
+dash(str s) => if(s == "") "—" else s;
+
+// точки входа для cli: слова после команды
+diff_command(args) => if(args.size == 2) diff_files(args[0], args[1]) else 2;
+merge_command(args) => if(args.size >= 2) merge_files(args[0], args[1], if(args.size >= 3) args[2] else args[0]) else 2;

@@ -1,7 +1,7 @@
 // Editor Module (lib/editor.tz): Editor solutions are code in a language embedded in the VM build as
 // prelude. It is loaded only by the editor's server - programs do not disassemble it (user solution
 // 2026-10-19). In the database, which is edited by the editor, it lies like prelude: in journal there is,
-// the program does not see it (does not use). He sees the tool module (use tools) - it loads earlier.
+// the program does not see it (does not use). It sees tools and versions modules - they load earlier.
 #pragma once
 
 #include "parser.hpp"
@@ -18,10 +18,10 @@ std::string const & editor_text() {
   return text;
 }
 
-// Base editor module: already there (the base is saved by the editor) - it, otherwise parsing text;
-// tool module - before it
+// Base editor module: already there (base saved by editor) - it, otherwise parsing text; tools and
+// versions modules - before it (use)
 node_id load_editor(ast_db & db) {
-  load_tools(db);
+  load_builtin(db, "versions");
   return load_builtin_module(db, "editor", editor_text(), "editor.tz");
 }
 

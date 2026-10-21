@@ -4,26 +4,14 @@
 // the next check recalculates only instance, depending on the changed, the next run goes to
 // the new version.
 //
-// Commands (by line):
-// check static parsing; prints what is recalculated and what from the cache
-// Full report from the last check
-// stdin <line> string stdin for the next run (queue; session stdin - not process stdin)
-// run [arguments] execute main() (machine code - JIT session)
-// jit instance JIT: compiled and reasons for failure
-// Residual [arguments] program for given arguments
-// fmt text projection
-// edit <function> then the lines of the new function, the end is a line from one point
-// Save the way. tzdb> write down journal
-// stats base size: node, journal records, .tzdb bytes; growth from past stats
-// roundtrip journal to new base: same projection and run output
-// Proc start [arg...] live process of the machine (§9.3): started, is up to steps
-// proc step N | proc run N steps | to the end; process output from last time
-// proc where step and footage
-// proc call <expression> sample in the clone (fork): expression in the current frame of the stopped
-// process; the process itself does not change
-// Proc stop finishing the edit process in a live process - a hot replacement: new calls - in a new
-// version, started frames live in the old one; editing struct with living values of the old layout
-// - only with migrate(T old) in the same text.
+// Session commands (`tz vm`, scripts .session, `tz apply`) are in rows; their parsing and order are in
+// the language: check, report, stdin <line>, run [arguments], jit, residual [arguments], fmt, edit
+// <function> (body - up to a line from one point), <function>, <save. tzdb>, stats, roundtrip, proc start
+// [arg...] | step N | run | where | call <expression> | grant/revoke fs|net | pressure | stop. Here are
+// the commands themselves: parsing, execution, base editing, live machine process. editing in a live
+// process is a hot replacement: new calls to a new version, started frames live in the old one; editing
+// struct with living values of the old layout - only with migrate(T old) in the same text.
+//
 //
 #pragma once
 
@@ -41,42 +29,17 @@ namespace tz {
 struct vm_session {
   vm_session(ast_db & db, node_id root, std::string name) : db(db), root(root), name(std::move(name)) {}
 
-  // Perform one command; to edit transfer the body to `body`. session command; after it there are no
-  // bypasses - filmed views of node won (long session does not accumulate them)
-  std::string exec(std::string const & line, std::string const & body = {}) {
-    std::string out = exec_now(line, body);
+  // Session command: Error parsing or execution - text (with a place), not an exception. After the command,
+  // there are no bypasses - the removed views of node won (a long session does not accumulate them).
+  std::string guarded(auto && command) {
+    std::string out;
+    try {
+      out = command();
+    } catch(diagnostic const & d) {
+      out = render(d, name, db);
+    }
     db.sweep_retired();
     return out;
-  }
-  std::string exec_now(std::string const & line, std::string const & body) {
-    auto words = words_of(line);
-    std::string cmd = words.empty() ? std::string() : std::string(words[0]);
-    std::vector<std::string> args;
-    for(std::size_t k = 1; k < words.size(); ++k) args.emplace_back(words[k]);
-    try {
-      if(cmd == "check") return check();
-      if(cmd == "stdin") {
-        stdin_lines.push_back(line.size() > 6 ? line.substr(6) : "");
-        return {};
-      }
-      if(cmd == "report") return last_report;
-      if(cmd == "jit") return jit.stats();
-      if(cmd == "run") return run(args);
-      if(cmd == "residual") return residual(args);
-      if(cmd == "fmt") return printer(db).print(root);
-      if(cmd == "edit" && args.size() == 1) return edit(args[0], body);
-      if(cmd == "apply" && args.size() == 1) return apply(args[0]);
-      if(cmd == "stats") return stats();
-      if(cmd == "roundtrip") return roundtrip();
-      if(cmd == "proc") return proc_cmd(args, line);
-      if(cmd == "save" && args.size() == 1) {
-        save_db(db, root, args[0]);
-        return cat("сохранено: ", args[0], "\n");
-      }
-    } catch(diagnostic const & d) {
-      return render(d, name, db);
-    }
-    return cat("неизвестная команда: ", line, "\n");
   }
   std::string check() {
     cache.hits = cache.recomputed = 0;
@@ -206,46 +169,34 @@ struct vm_session {
   }
 
   // --- living ---
-  std::string proc_cmd(std::vector<std::string> const & args, std::string const & line) {
-    std::string sub = args.empty() ? std::string() : args[0];
-    if(sub == "start") {
-      proc.reset();
-      proc_out.clear();
-      proc = std::make_unique<process_machine>(db, root, name);
-      proc->captured = &proc_out;
-      proc->start({args.begin() + 1, args.end()}, stdin_lines);
-      return cat("процесс запущен\n");
+  std::string proc_start(std::vector<std::string> const & args) {
+    proc.reset();
+    proc_out.clear();
+    proc = std::make_unique<process_machine>(db, root, name);
+    proc->captured = &proc_out;
+    proc->start(args, stdin_lines);
+    return cat("процесс запущен\n");
+  }
+  // n steps (~0 - to the end), output from the last time and where
+  std::string proc_step(uint64_t n) {
+    try {
+      proc->run(n);
+    } catch(diagnostic const & d) {
+      proc_out += render(d, name, db);
+      proc->st.done = true;
     }
-    if(!proc) return "нет живого процесса: proc start\n";
-    if(sub == "step" || sub == "run") {
-      uint64_t n = sub == "run" ? ~uint64_t{0} : args.size() > 1 ? std::stoull(args[1]) : 1;
-      try {
-        proc->run(n);
-      } catch(diagnostic const & d) {
-        proc_out += render(d, name, db);
-        proc->st.done = true;
-      }
-      std::string out = std::exchange(proc_out, {});
-      return out + proc->where_now();
-    }
-    if(sub == "where") return proc->where_now();
-    if((sub == "grant" || sub == "revoke") && args.size() == 2) { // "You give": resource on the move
-      proc->grant(args[1], sub == "grant");
-      return cat(sub == "grant" ? "дано: " : "забрано: ", args[1], "\n");
-    }
-    if(sub == "pressure") { // external management:
-      proc->pressure();
-      return cat("давление: обработчиков ", proc->st.pressure.size(), "\n");
-    }
-    if(sub == "stop") {
-      proc.reset();
-      return "процесс завершён\n";
-    }
-    if(sub == "call") {
-      std::size_t at = line.find("call");
-      return probe(line.substr(at + 4));
-    }
-    return cat("proc: start, step N, run, where, call <выражение>, pressure, grant/revoke fs|net, stop\n");
+    std::string out = std::exchange(proc_out, {});
+    return out + proc->where_now();
+  }
+  // "You give": resource on the move
+  std::string proc_grant(std::string const & what, bool give) {
+    proc->grant(what, give);
+    return cat(give ? "дано: " : "забрано: ", what, "\n");
+  }
+  // external management:
+  std::string proc_pressure() {
+    proc->pressure();
+    return cat("давление: обработчиков ", proc->st.pressure.size(), "\n");
   }
 
   // Sample - in a clone: fork host copies the VM as a whole (pages - a copy when writing), the clone disassembles

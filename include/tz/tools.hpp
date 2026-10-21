@@ -16,18 +16,33 @@
 
 namespace tz {
 
+struct vm_session;
+
+// Tuling modules (lib/*.tz) are texts in the assembly; they are loaded by the command that is needed.
 constexpr unsigned char tools_bytes[] = {
 #embed "../../lib/tools.tz"
 };
-
-std::string const & tools_text() {
-  static std::string const text(reinterpret_cast<char const *>(tools_bytes), sizeof tools_bytes);
-  return text;
+constexpr unsigned char versions_bytes[] = {
+#embed "../../lib/versions.tz"
+};
+constexpr unsigned char tests_bytes[] = {
+#embed "../../lib/tests.tz"
+};
+constexpr unsigned char cli_bytes[] = {
+#embed "../../lib/cli.tz"
+};
+std::string_view builtin_text(std::string_view key) {
+  auto view = [](auto const & bytes) { return std::string_view(reinterpret_cast<char const *>(bytes), sizeof bytes); };
+  if(key == "tools") return view(tools_bytes);
+  if(key == "versions") return view(versions_bytes);
+  if(key == "tests") return view(tests_bytes);
+  if(key == "cli") return view(cli_bytes);
+  return {};
 }
 
-// Built-in name module (editor, tools): already in the database (the database is saved with it) - it,
-// otherwise parsing text; error parsing - with a place in the file.
-node_id load_builtin_module(ast_db & db, std::string_view name, std::string const & text, std::string_view file) {
+// Built-in name module (editor, tools...): it is already in the database (the database is saved with
+// it) - it, otherwise parsing text; parsing error - with space in the file.
+node_id load_builtin_module(ast_db & db, std::string_view name, std::string_view text, std::string_view file) {
   for(uint32_t i = 0; i < db.size(); ++i)
     if(db.is<n_module>(node_id(i)) && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == name && !db[node_id(i)].parent)
       return node_id(i);
@@ -40,8 +55,22 @@ node_id load_builtin_module(ast_db & db, std::string_view name, std::string cons
   }
   return m;
 }
+// Tuling module by key; tools - before the rest (they use tools)
+node_id load_builtin(ast_db & db, std::string_view key) {
+  if(key != "tools") load_builtin_module(db, "tools", builtin_text("tools"), "tools.tz");
+  if(builtin_text(key).empty()) throw diagnostic(cat("нет встроенного модуля ", key), {});
+  return load_builtin_module(db, key, builtin_text(key), cat(key, ".tz"));
+}
+node_id load_tools(ast_db & db) { return load_builtin(db, "tools"); }
 
-node_id load_tools(ast_db & db) { return load_builtin_module(db, "tools", tools_text(), "tools.tz"); }
+// the file name of the embedded module, where the error text (import source); not built-in - "tools.tz"
+std::string builtin_file(ast_db const & db, uint32_t source) {
+  for(std::string_view key: {"tools", "versions", "tests", "cli"})
+    for(uint32_t i = 0; i < db.size(); ++i)
+      if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == key && db[node_id(i)].where.source == source)
+        return cat(key, ".tz");
+  return "tools.tz";
+}
 
 // Versions of the base (§9.4): Version is a copy of the base according to journal; number 0 is the base
 // from which they work (the editor session program; the tz team has empty). The common beginning of journal
@@ -61,6 +90,18 @@ struct tools_context {
   std::string error; // opening error
   ast_db * db = nullptr; // the base of the tool module (tz command): its functions - by name
   node_id module;
+  std::vector<vm_session *> sessions; // VM sessions (tz vm, scripts .session, tz apply): language number
+
+  int64_t session_of(vm_session & s) {
+    for(std::size_t k = 0; k < sessions.size(); ++k)
+      if(sessions[k] == &s) return int64_t(k);
+    sessions.push_back(&s);
+    return int64_t(sessions.size() - 1);
+  }
+  vm_session & session(int64_t k) {
+    if(k < 0 || std::size_t(k) >= sessions.size()) throw diagnostic("tools: нет сессии", {});
+    return *sessions[std::size_t(k)];
+  }
 
   tools_context() { versions.emplace_back(); }
   tools_context(ast_db & db, node_id root) : tools_context() {
@@ -251,28 +292,6 @@ void remove_item(ast_db & db, node_id m, node_id n) {
   std::erase(mod.inner, n.value);
   db.replace(m, mod);
   db.link_parents(m);
-}
-
-// tz command in language: function fn tool module in its database (prelude and module) - the result is the
-// output code. Module code error with space in tools.tz.
-int run_tools(std::string_view name, std::vector<value> args) {
-  ast_db db;
-  load_prelude(db);
-  tools_context ctx;
-  ctx.db = &db;
-  ctx.module = load_tools(db);
-  node_id f = ctx.fn(name);
-  if(!f) throw diagnostic(cat("нет функции tools.", name), {});
-  struct hold {
-    tools_context * was;
-    ~hold() { tools_host = was; }
-  } h{std::exchange(tools_host, &ctx)};
-  interpreter vm(db, ctx.module, {}, mode::run);
-  try {
-    return int(vm.analyze_instance(f, std::move(args)).as<int64_t>());
-  } catch(diagnostic const & d) {
-    throw diagnostic(cat("tools: ", render(d, "tools.tz", db)), {});
-  }
 }
 
 } // namespace tz
