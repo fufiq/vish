@@ -347,103 +347,125 @@ void decode(std::string_view body, auto & m) {
   if(!r.at_end()) throw diagnostic("протокол: лишние байты в кадре", {});
 }
 
-// --- text form (test scripts, debugging) ---
+// --- Meta information for text form (test scripts) ---
 //
-// The message name is the name of the aggregate without the prefix c /s ; the field is in order.
+// Text message form (`key 1 End` → c_key, VM → `cursor view=1 …` answers) - in language (lib/tools.tz): Here
+// is meta-information by reflection: message names and fields, client message from field values, VM message
+// by flat tree. The message name is the name of the unit without the prefix c /s .
+//
+//
 
 consteval std::string_view short_name(std::meta::info t) {
   std::string_view n = std::meta::identifier_of(std::meta::dealias(t));
   return n.substr(2);
 }
 
-void describe_fields(std::string & out, auto const & x);
-
-void describe_value(std::string & out, auto const & x) {
-  using T = std::remove_cvref_t<decltype(x)>;
-  if constexpr(std::is_same_v<T, node_id>) out += x ? cat("#", x.value) : std::string("·");
-  else if constexpr(std::is_arithmetic_v<T>) out += cat(x);
-  else if constexpr(std::is_same_v<T, std::string>) out += in_quotes(x);
-  else if constexpr(is_variant<T>::value) std::visit([&](auto const & a) { describe_value(out, a); }, x);
-  else if constexpr(is_vector<T>::value) {
-    using E = typename T::value_type;
-    if constexpr(std::is_aggregate_v<E> && !is_id<E>::value) {
-      for(auto const & e: x) {
-        out += "\n  ";
-        describe_fields(out, e);
-      }
-    } else {
-      out += '[';
-      for(std::size_t i = 0; i < x.size(); ++i) {
-        if(i) out += ' ';
-        describe_value(out, x[i]);
-      }
-      out += ']';
-    }
-  } else describe_fields(out, x);
+// Type of text field: string, node, num
+consteval std::string_view field_kind(std::meta::info t) {
+  if(std::meta::dealias(t) == std::meta::dealias(^^std::string)) return "string";
+  if(std::meta::dealias(t) == std::meta::dealias(^^node_id)) return "node";
+  return "num";
 }
 
-void describe_fields(std::string & out, auto const & x) {
-  bool first = true;
-  template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
-    if(!first) out += ' ';
-    first = false;
-    out += cat(std::meta::identifier_of(m), "=");
-    describe_value(out, x.[:m:]);
-  }
-}
-
-std::string describe(auto const & msg) {
-  std::string out;
-  std::visit([&](auto const & m) {
-    out += short_name(std::meta::remove_cvref(^^decltype(m)));
-    out += ' ';
-    describe_fields(out, m);
-  },
-      msg);
-  return out + '\n';
-}
-
-// parsing text form: words in the order of fields; missing fields - zeros; in the line `\s` - space
-// (space key: `key 1 \s 2` - Ctrl + Space), `\n` - line translation.
-void parse_fields(auto & m, std::vector<std::string_view> const & words) {
-  std::size_t at = 1;
-  template for(constexpr auto f: fields_of<std::remove_cvref_t<decltype(m)>>()) {
-    using F = [:std::meta::type_of(f):];
-    if(at < words.size()) {
-      auto w = words[at++];
-      if constexpr(std::is_same_v<F, std::string>) {
-        std::string t(w);
-        for(std::size_t k; (k = t.find("\\s")) != std::string::npos;) t.replace(k, 2, " ");
-        for(std::size_t k; (k = t.find("\\n")) != std::string::npos;) t.replace(k, 2, "\n");
-        m.[:f:] = t;
-      }
-      else {
-        auto digits = w.substr(std::is_same_v<F, node_id> && w.starts_with('#'));
-        uint64_t x = 0;
-        auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), x);
-        if(ec != std::errc{} || end != digits.data() + digits.size()) throw diagnostic(cat("протокол: не число: ", w), {});
-        if constexpr(std::is_same_v<F, node_id>) m.[:f:] = node_id(uint32_t(x));
-        else m.[:f:] = F(x);
-      }
-    }
-  }
-}
-
-client_msg parse_client(std::string_view line) {
-  auto words = words_of(line);
-  if(words.empty()) throw diagnostic("протокол: пустое сообщение", {});
-  std::optional<client_msg> out;
-  static constexpr auto kinds = [] {
+// Customer Messages: by appearance - name and fields (names and types) in order.
+struct client_kind {
+  std::string_view name;
+  std::vector<std::string_view> fields, kinds;
+};
+std::vector<client_kind> client_kinds() {
+  std::vector<client_kind> out;
+  static constexpr auto ks = [] {
     std::array<std::size_t, std::variant_size_v<client_msg>> a{};
     for(std::size_t k = 0; k < a.size(); ++k) a[k] = k;
     return a;
   }();
-  template for(constexpr std::size_t k: kinds) {
-    constexpr std::string_view name = short_name(^^std::variant_alternative_t<k, client_msg>);
-    if(!out && words[0] == name) parse_fields(std::get<k>(out.emplace(std::in_place_index<k>)), words);
+  template for(constexpr std::size_t k: ks) {
+    using M = std::variant_alternative_t<k, client_msg>;
+    client_kind x{short_name(^^M), {}, {}};
+    template for(constexpr auto f: fields_of<M>()) {
+      x.fields.push_back(std::meta::identifier_of(f));
+      x.kinds.push_back(field_kind(std::meta::type_of(f)));
+    }
+    out.push_back(std::move(x));
   }
-  if(!out) throw diagnostic(cat("протокол: неизвестное сообщение ", words[0]), {});
-  return *out;
+  return out;
+}
+// A name client message from the values of the fields in order (lines as is, numbers and node are
+// decimal); missing ones are zeros. There's no such thing, empty.
+std::optional<client_msg> client_from(std::string_view name, std::vector<std::string> const & values) {
+  std::optional<client_msg> out;
+  static constexpr auto ks = [] {
+    std::array<std::size_t, std::variant_size_v<client_msg>> a{};
+    for(std::size_t k = 0; k < a.size(); ++k) a[k] = k;
+    return a;
+  }();
+  template for(constexpr std::size_t k: ks) {
+    using M = std::variant_alternative_t<k, client_msg>;
+    if(!out && name == short_name(^^M)) {
+      M & m = std::get<k>(out.emplace(std::in_place_index<k>));
+      std::size_t at = 0;
+      template for(constexpr auto f: fields_of<M>()) {
+        using F = [:std::meta::type_of(f):];
+        if(at < values.size()) {
+          std::string const & w = values[at++];
+          if constexpr(std::is_same_v<F, std::string>) m.[:f:] = w;
+          else {
+            uint64_t x = 0;
+            std::from_chars(w.data(), w.data() + w.size(), x);
+            if constexpr(std::is_same_v<F, node_id>) m.[:f:] = node_id(uint32_t(x));
+            else m.[:f:] = F(x);
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// Message VM - flat tree (order of bypass): on the record - view (struct, list, node, num, str), field name
+// (the message - his name), text (line; number - as printed; list - structs, if elements aggregates), number
+// (node; no node - - -1), children, record number after subtree.
+struct flat_tree {
+  std::vector<std::string_view> kind;
+  std::vector<std::string> name, text;
+  std::vector<int64_t> num, count, next;
+
+  std::size_t put(std::string_view k, std::string_view n, std::string t, int64_t x, int64_t c) {
+    kind.push_back(k);
+    name.emplace_back(n);
+    text.push_back(std::move(t));
+    num.push_back(x);
+    count.push_back(c);
+    next.push_back(0);
+    return kind.size() - 1;
+  }
+  void value_of(std::string_view n, auto const & x) {
+    using T = std::remove_cvref_t<decltype(x)>;
+    if constexpr(std::is_same_v<T, node_id>) put("node", n, "", x ? int64_t(x.value) : -1, 0);
+    else if constexpr(std::is_arithmetic_v<T>) put("num", n, cat(x), int64_t(x), 0);
+    else if constexpr(std::is_same_v<T, std::string>) put("str", n, x, 0, 0);
+    else if constexpr(is_variant<T>::value) std::visit([&](auto const & a) { value_of(n, a); }, x);
+    else if constexpr(is_vector<T>::value) {
+      using E = typename T::value_type;
+      std::size_t at = put("list", n, std::is_aggregate_v<E> && !is_id<E>::value ? "structs" : "values", 0, int64_t(x.size()));
+      for(auto const & e: x) value_of("", e);
+      next[at] = int64_t(kind.size());
+    } else {
+      std::size_t at = put("struct", n, "", 0, int64_t(fields_of<T>().size()));
+      template for(constexpr auto m: fields_of<T>()) value_of(std::meta::identifier_of(m), x.[:m:]);
+      next[at] = int64_t(kind.size());
+    }
+    if(next.back() == 0) next.back() = int64_t(kind.size());
+  }
+};
+flat_tree flat(server_msg const & msg) {
+  flat_tree t;
+  std::visit([&](auto const & m) {
+    std::size_t at = t.put("struct", short_name(std::meta::remove_cvref(^^decltype(m))), "", 0, int64_t(fields_of<std::remove_cvref_t<decltype(m)>>().size()));
+    template for(constexpr auto f: fields_of<std::remove_cvref_t<decltype(m)>>()) t.value_of(std::meta::identifier_of(f), m.[:f:]);
+    t.next[at] = int64_t(t.kind.size());
+  }, msg);
+  return t;
 }
 
 } // namespace tz::proto

@@ -767,40 +767,6 @@ record_parts(str t) => native "cpp" {
   for(auto const & [name, tn]: type_registry::record_parts((a[0]).as<str_v>().view())) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(tn))})));
   return value(array_v::of(std::move(xs)));
 };
-// место в упорядоченном массиве: первое, не меньшее x (двоичный поиск — примитив базы); строки —
-// по байтам
-lower_bound(xs, str x) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto const & xs = (a[0]).as<array_v>();
-  auto x = (a[1]).as<str_v>().view();
-  uint32_t lo = 0, hi = xs.size();
-  while(lo < hi) {
-    uint32_t mid = (lo + hi) / 2;
-    if(xs.get(mid).as<str_v>().view() < x) lo = mid + 1;
-    else hi = mid;
-  }
-  return value(int64_t(lo));
-};
-lower_bound(xs, i64 x) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto const & xs = (a[0]).as<array_v>();
-  int64_t x = (a[1]).as<int64_t>();
-  uint32_t lo = 0, hi = xs.size();
-  if(xs.kind() == array_v::layout::ints) {
-    int64_t const * d = xs.ints();
-    while(lo < hi) {
-      uint32_t mid = (lo + hi) / 2;
-      if(d[mid] < x) lo = mid + 1;
-      else hi = mid;
-    }
-  } else
-    while(lo < hi) {
-      uint32_t mid = (lo + hi) / 2;
-      if(xs.get(mid).as<int64_t>() < x) lo = mid + 1;
-      else hi = mid;
-    }
-  return value(int64_t(lo));
-};
 // строки — байты (§4.0): подпоследовательность и регистр ASCII — примитивы базы (поиск, срез — модуль tools)
 // w — подпоследовательность s (байты по порядку, не подряд)
 subsequence(str s, str w) => native "cpp" {

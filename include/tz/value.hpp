@@ -834,12 +834,15 @@ struct type_registry {
     }
     if(x.is<array_v>()) {
       auto const & a = x.as<array_v>();
+      // elements - at the link: get copies, and the motorcade of arrays is the entire array for each call
+      // (call with the motorcade of arrays was square, 2026-10-21)
       if(is_tuple(a)) {
         std::string s;
-        for(uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + describe(a.get(i));
+        for(uint32_t i = 0; i < a.size(); ++i) s += (i ? ", " : "") + describe(a.r().items[i]);
         return cat("tuple<", s, ">");
       }
-      return cat("array<", a.empty() ? std::string("?") : describe(a.get(0)), ">");
+      if(a.empty()) return "array<?>";
+      return cat("array<", a.kind() == array_v::layout::generic ? describe(a.r().items[0]) : describe(a.get(0)), ">");
     }
     return std::string(name(of(x)));
   }
