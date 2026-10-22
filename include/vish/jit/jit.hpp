@@ -754,10 +754,12 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
 
   std::vector<uint64_t> raw(vals.size());
   std::vector<value *> cells(vals.size()); // Argument array cells: the compiler code in the language holds their addresses
-  // Path-argument (field, element) - in place, if the root is local. The root of another argument (f(b.xs,
-  // b)) is the interpreter: the called will replace the aggregate or move the buffer as long as the
-  // machine code holds the address, and the copy would not see the change through alias (§6.2). The root
-  // is a variable module or reference: variable to the interpreter, immutable to the copy (loan, too).
+  // Path-argument (field, element) - alias place (§6.2): The machine code holds the location address if the
+  // root is a local caller variable that is no longer in the arguments. Otherwise, to the interpreter: the
+  // root and in another argument (f(b.xs, b)) - the called will replace the aggregate or move the data while
+  // the code holds the address; the root - a variable module or reference - it changes and the VM node, and a
+  // copy of this would not see. The element of the dense array of the local root is a scalar copy: there is no
+  // one to change it for a call (*my*).
   auto root_of = [&](node_id x) {
     while(db.is_member(x) || db.is_index(x)) x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
     return db.is<n_ident>(x) ? db.as<n_ident>(x).name : symbol{};
@@ -768,6 +770,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     symbol r = root_of(args[i]);
     for(uint32_t j = 0; j < args.size(); ++j)
       if(j != i && r.valid() && root_of(args[j]) == r) return std::nullopt; // alias of the same root - the copy has the wrong
+    if(value * rc = r.valid() ? find(env, r) : nullptr; rc && (rc->is<ref_v>() || globals->find(r) == rc)) return std::nullopt; // root
     if(!arg_place(args[i], env, true)) in_place[i] = false;
     if(!in_place[i] && writes_param(f, i)) return std::nullopt;
     if(!in_place[i] && vals[i].is<array_v>() && vals[i].as<array_v>().borrowed) vals[i] = value(array_v(vals[i].as<array_v>()));

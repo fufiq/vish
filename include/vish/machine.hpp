@@ -3283,8 +3283,8 @@ struct process_machine {
     mval const & v = st.scopes[p.scope].vars[p.slot].v;
     return v.is<m_alias>() && (v.as<m_alias>().index != m_none || v.as<m_alias>().field != m_none || v.as<m_alias>().path_scope != m_none);
   }
-  // Link-to-path (§12.1, tail of step 10): chain indexes take turns (phases), then steps to the area
-  // where the link is declared; like an interpreter, up to three steps.
+  // Link-path (§12.1, tail of step 10): chain indexes - in turn (phases), then steps - to the area where
+  // the link is declared; depth - any (the interpreter - a chain of three steps).
   void push_path_ref(node_id n, uint32_t scope, uint32_t frame, bool arg = false) {
     auto & f = fib();
     f.tasks.push_back(m_task{m_path_ref, n, 0, scope, frame, uint32_t(f.vals.size())});
@@ -3358,7 +3358,7 @@ struct process_machine {
         if(k < 0 || uint64_t(k) >= size) out_of_bounds(k, size, db[c].where);
         steps.push_back({uint32_t(k), false});
       }
-      if(steps.size() > 3) throw diagnostic("ссылка — не глубже трёх шагов (поле, элемент)", db[t.node].where);
+      if(steps.size() > 255) throw diagnostic("ссылка — не глубже 255 шагов (поле, элемент)", db[t.node].where);
     }
     fib().vals.resize(t.base);
     uint32_t at = uint32_t(st.scopes[t.scope].steps.size());
@@ -3391,21 +3391,11 @@ struct process_machine {
       }
     return false;
   }
-  // The path of the argument is placed in the link-path: from the name, up to three steps along with the root-link steps.
+  // The path of the argument is on behalf of the variable: its place will become a link-path (steps
+  // - in the area of the call to the end, depth - any).
   bool path_arg(node_id x, uint32_t scope) {
-    uint32_t n = 0;
-    while(db.is_member(x) || db.is_index(x)) {
-      ++n;
-      x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
-    }
-    if(!db.is<n_ident>(x)) return false;
-    place p = find(scope, db.as<n_ident>(x).name);
-    if(p.scope == m_none) return false;
-    if(mval const & v = st.scopes[p.scope].vars[p.slot].v; v.is<m_alias>()) {
-      m_alias const & r = v.as<m_alias>();
-      n += r.path_scope != m_none ? r.path_n : uint32_t(r.index != m_none) + uint32_t(r.field != m_none);
-    }
-    return n <= 3;
+    while(db.is_member(x) || db.is_index(x)) x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    return db.is<n_ident>(x) && find(scope, db.as<n_ident>(x).name).scope != m_none;
   }
   // The program module variable found in the module domain is foreign to the module code that the
   // program does not see (the structure body prelude): like interpreter::foreign_global.

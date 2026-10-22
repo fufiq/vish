@@ -232,8 +232,11 @@ struct ref_v { // The order of the fields is tight: the value size does not grow
   symbol field; // The first step is a field (otherwise an element).
   bool rt_index = false; // The index is known only in runtime (parsing).
   uint8_t more = 0; // steps after the first
+  // root - a cell in which another link lies (the path is deeper than three steps - a chain: no heap, an
+  // intermediate link - in the cell of the area or call)
+  bool chained = false;
   ref_step rest[2];
-  bool path() const { return more || field.valid(); }
+  bool path() const { return more || field.valid() || chained; }
 };
 
 struct value {

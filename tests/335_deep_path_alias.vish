@@ -1,0 +1,36 @@
+// out: [7, 2] 7
+// out: 1 [0, 9, 0]
+// out: 1 2
+// machine
+// Путь любой глубины — алиас места (§6.2):,
+// Глубже трёх шагов —
+// цепочкой ссылок (*моё*: без кучи). Индекс пути вычисляется один раз — вместе с аргументами
+// (было: изменяемый элемент брал ссылку, вычисляя индекс ещё раз). Неизменяемый параметр видит
+// изменение источника другим путём — и у разбора (значение не сворачивается старым).
+struct c { array v; }
+struct b { c x; }
+struct a { array bs; }
+set_first(xs) { xs[0] = 7; }
+first(xs) => xs[0];
+bump(n) { n = n + 9; }
+next(cnt) {
+  cnt[0] = cnt[0] + 1;
+  1
+}
+seen(k, o) {
+  k0 = k;
+  o.n = o.n + 1;
+  print(k0, k);
+}
+struct h { i64 n; }
+main() {
+  t = a{array{b{c{array{1, 2}}}}};
+  set_first(t.bs[0].x.v);
+  print(t.bs[0].x.v, first(t.bs[0].x.v));
+  ys = array{0, 0, 0};
+  counter = array{0};
+  bump(ys[next(counter)]);
+  print(counter[0], ys);
+  w = h{args.size};
+  seen(w.n, w);
+}

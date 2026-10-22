@@ -4772,7 +4772,7 @@ struct interpreter {
     value const * c = find(env, db.as<n_ident>(n).name);
     if(c && foreign_global(c, n, env, db.as<n_ident>(n).name)) return nullptr; // other variable module - the error will give eval
     if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
-    if(c && c->is<ref_v>() && !checking()) return path_place(c->as<ref_v>(), 1 + c->as<ref_v>().more, db[n].where, true); // link - its place (the element of a dense array is empty)
+    if(c && c->is<ref_v>()) return path_like_place(c->as<ref_v>(), db[n].where); // reference - its place (no cell - empty: value by calculation)
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
 
@@ -5355,7 +5355,7 @@ struct interpreter {
       return ok();
     }
     auto r = element_ref(v.init, env, frame, n);
-    if(!r) r = path_ref(v.init, env, frame, n);
+    if(!r) r = path_ref(v.init, env, frame, n, env->storage); // chain - in the area of reference
     if(!r) fail("auto& — ссылка на переменную, поле или элемент массива", db[v.init].where);
     env->declare(v.name, std::move(*r));
     return ok();
@@ -5364,11 +5364,11 @@ struct interpreter {
   // --- link-path (§12.1, tail of step 10)
   // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // (§12.1, D13). root
-  // - a variable cell, steps - a field and an element; a place is searched for anew at each call - there
-  // is nothing like a field in a variable parameter (§6.2): the field of the replaced aggregate - the
-  // field of a new one, the element of the grown or replaced array - the same index; there is no element -
-  // out_of_bounds . * My: * up to three steps (without a heap: steps - in the reference itself); parsing
-  // follows with hooks the support-variable first step.
+  // - a variable cell, steps - a field and an element; a place is searched for anew at each call - there is nothing like a field
+  // in a variable parameter (§6.2): the field of the replaced aggregate - the field of a new one, the element of the grown or
+  // replaced array - the same index; there is no element - out_of_bounds. *My: * three steps in the reference itself (without a
+  // heap), deeper - by a chain (path_ref, hold); parsing follows the hooks for the support-variable first step.
+  //
   static ref_step step_of(ref_v const & r, uint32_t k) { return k == 0 ? ref_step{r.index, r.field, r.rt_index} : r.rest[k - 1]; }
   static void set_step(ref_v & r, uint32_t k, ref_step const & s) {
     if(k == 0) {
@@ -5380,7 +5380,10 @@ struct interpreter {
       r.more = uint8_t(k);
     }
   }
-  std::optional<value> path_ref(node_id place_node, scope * env, uint32_t frame, node_id born) {
+  // hold - where the intermediate links of the path are deeper than three steps (chain): the ad area (&e
+  // = ...) or the call (argument-path); live no less than the link itself. Soft is a path that is not a
+  // place (the field that is not: xs.size) is empty, not a mistake.
+  std::optional<value> path_ref(node_id place_node, scope * env, uint32_t frame, node_id born, std::deque<value> & hold, bool soft = false) {
     std::vector<node_id> chain;
     node_id x = place_node;
     while(db.is_index(x) || db.is_member(x)) {
@@ -5404,20 +5407,32 @@ struct interpreter {
     }
     r.born = born.value + 1;
     for(auto it = chain.rbegin(); it != chain.rend(); ++it) {
-      if(n == 3) fail("ссылка — не глубже трёх шагов (поле, элемент)", where);
+      if(n == 3) { // deeper - chain: the path traveled is the root of the next link
+        hold.push_back(value(r));
+        ref_v next;
+        next.cell = &hold.back();
+        next.name = r.name;
+        next.born = r.born;
+        next.chained = true;
+        r = next;
+        n = 0;
+      }
       ref_step st;
       if(db.is_member(*it)) st.field = db.member_of(*it).name;
       else {
         flow fi = eval(db.index_of(*it).index, env, frame);
         if(!fi.normal()) return std::nullopt;
         if(!checking()) { // stride array - in place, without a copy
-          value const & box = n ? *path_place(r, n, where) : *r.cell;
-          if(!box.is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(box), " — не массив"), where);
+          value const & box = *path_place(r, n, where);
+          if(!box.is<array_v>()) {
+            if(soft) return std::nullopt;
+            fail(cat("ссылка на элемент: ", types.describe(box), " — не массив"), where);
+          }
           st.index = checked_index(box, fi.v, where);
           set_step(r, n++, st);
           continue;
         }
-        value box = n ? path_value(r, n, where) : *r.cell; // stride
+        value box = path_value(r, n, where); // stride
         if(box.is<array_v>() && fi.v.known()) st.index = checked_index(box, fi.v, where);
         else {
           st.rt_index = true;
@@ -5425,7 +5440,7 @@ struct interpreter {
         }
       }
       set_step(r, n++, st);
-      if(!checking() && st.field) path_place(r, n, where); // The field is - immediately (parsing - in value below)
+      if(!checking() && st.field && !path_place(r, n, where, soft)) return std::nullopt; // The field is - immediately (parsing - in value below)
     }
     if(checking()) {
       value probe = path_value(r, n, where); // Type of place - field error here, not when reading
@@ -5438,6 +5453,11 @@ struct interpreter {
   // current data). soft - parsing: No cell (run-time) is empty.
   value * path_place(ref_v const & r, uint32_t n, span where, bool soft = false) {
     value * c = r.cell;
+    if(r.chained) { // root
+      ref_v const & in = c->as<ref_v>();
+      c = path_place(in, 1 + in.more, where, soft);
+      if(!c) return nullptr;
+    }
     for(uint32_t k = 0; k < n; ++k) {
       ref_step st = step_of(r, k);
       if(is_shared(*c)) c = &slot_of(*c).v; // shareable
@@ -5468,7 +5488,7 @@ struct interpreter {
   // The value after the first n steps is by value (parsing: run-time -index - element type, field
   // run-time -aggregate - by sample).
   value path_value(ref_v const & r, uint32_t n, span where) {
-    value cur = *r.cell;
+    value cur = r.chained ? path_value(r.cell->as<ref_v>(), 1 + r.cell->as<ref_v>().more, where) : *r.cell;
     for(uint32_t k = 0; k < n; ++k) {
       ref_step st = step_of(r, k);
       if(st.field) {
@@ -5505,7 +5525,7 @@ struct interpreter {
       if(value * p = path_place(r, n, where, checking())) {
         if(op == "=" && res_any() && has_resource(*p)) drop_value(*p, where); // Overwrite - the old resource is released
         *p = std::move(res);
-      } else *r.cell = erase(*r.cell); // parsing: the place behind run-time-step is the value of the variable run-time
+      } else root_cell(r) = erase(root_cell(r)); // parsing: the place behind run-time-step is the value of the variable run-time
       return ok();
     }
     value * box = path_place(r, n - 1, where, checking());
@@ -5514,9 +5534,11 @@ struct interpreter {
       return ok();
     }
     if(box) *box = erase(*box); // element on run-time -index changed - array run-time
-    else *r.cell = erase(*r.cell);
+    else root_cell(r) = erase(root_cell(r));
     return ok();
   }
+  // the variable from which the link path (through the chain)
+  value & root_cell(ref_v const & r) { return r.chained ? root_cell(r.cell->as<ref_v>()) : *r.cell; }
 
   void ref_valid(ref_v const & r, span where) {
     if(checking()) return hook_ref_used(r, where);
@@ -5584,9 +5606,9 @@ struct interpreter {
         if(now.is<array_v>() && x.known()) now.as<array_v>().push(x);
         else now = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
         now.ct = keep;
-        book.written(r.cell, true);
+        book.written(&root_cell(r), true);
         if(value * at = path_place(r, 1 + r.more, where, true)) *at = std::move(now);
-        else *r.cell = erase(*r.cell); // place after run-time - step - variable run-time
+        else root_cell(r) = erase(root_cell(r)); // place after run-time - step - variable run-time
         return ok();
       }
     }
@@ -5752,7 +5774,7 @@ struct interpreter {
       for(uint32_t k = 0; k < fn.params.size() && k < vals.size(); ++k) {
         symbol p = db.as<n_param>(fn.params[k]).name;
         value * cell = k < args.size() ? place_or_null(args[k], env) : nullptr;
-        if(cell && cell->is<ref_v>()) cell = cell->as<ref_v>().cell;
+        if(cell && cell->is<ref_v>()) cell = path_like_place(cell->as<ref_v>(), db[args[k]].where); // reference
         if(!cell) {
           s->declare(p, vals[k]);
           continue;
@@ -5762,8 +5784,9 @@ struct interpreter {
           for(std::size_t j = 0; j < as.size(); ++j)
             if(same_alt(as[j], vals[k])) {
               book.written(cell, false);
+              value pick = as[j]; // copy before replacement: as - part of *cell
               alts.push_back({cell, *cell, j});
-              *cell = as[j];
+              *cell = std::move(pick);
               break;
             }
         }
@@ -7048,7 +7071,7 @@ struct interpreter {
       while(db.is_member(root) || db.is_index(root)) root = db.is_member(root) ? db.member_of(root).object : db.index_of(root).object;
       if(db.is<n_ident>(root))
         if(value * c = find(env, db.as<n_ident>(root).name); c && c->is<ref_v>())
-          if(auto r = path_ref(lhs, env, frame, lhs)) return path_assign(r->as<ref_v>(), op, rhs, where);
+          if(std::deque<value> hold; auto r = path_ref(lhs, env, frame, lhs, hold)) return path_assign(r->as<ref_v>(), op, rhs, where);
     }
     value * target = place(lhs, env, frame);
     if(!target) {
@@ -7586,6 +7609,14 @@ struct interpreter {
       return dispatch_split(fns, vals, 0, args, env, frame, site, base);
     }
     std::vector<value> vals(args.size());
+    struct refs_pop {
+      interpreter & vm;
+      bool on;
+      ~refs_pop() {
+        if(on) vm.arg_refs.pop_back();
+      }
+    } refs_hold{*this, std::ranges::any_of(args, [&](node_id a) { return db.is_member(a) || db.is_index(a); })};
+    if(refs_hold.on) arg_refs.push_back({&args, std::vector<value>(args.size()), {}});
     for(uint32_t i = 0; i < args.size(); ++i) {
       bool expr_everywhere = true;
       for(node_id f: fns) {
@@ -7599,7 +7630,21 @@ struct interpreter {
       }
       if(expr_everywhere) vals[i] = value(thunk_v{args[i], frame, env, ctx});
       else if(out_everywhere) vals[i] = out_place(args[i], db.as<n_fn>(fns[0]).params[i], env);
-      else if(value * cell = arg_place(args[i], env); cell && (cell->is<array_v>() || cell->is<agg_v>()))
+      else if(refs_hold.on && (db.is_member(args[i]) || db.is_index(args[i])) && path_root(args[i], env)) { // path - reference (§6.2)
+        span where = db[args[i]].where;
+        taken_refs & tr = arg_refs.back();
+        std::optional<value> r = element_ref(args[i], env, frame, args[i]); // v[i] - with index facts (parsing, JIT)
+        if(!r) r = path_ref(args[i], env, frame, args[i], tr.hold, true);
+        if(r && !checking()) { // performance: indexes - once, value - by place
+          ref_v const & rv = r->as<ref_v>();
+          value * at = path_like_place(rv, where);
+          vals[i] = at ? lend(*at) : deref(rv, where);
+        } else {
+          VISH_TRY(v, eval(args[i], env, frame)); // parsing is the value of the argument; not the place (xs.size)
+          vals[i] = std::move(v);
+        }
+        if(r) tr.refs[i] = std::move(*r);
+      } else if(value * cell = arg_place(args[i], env); cell && (cell->is<array_v>() || cell->is<agg_v>()))
         vals[i] = lend(*cell); // place (and field, and link) - loan, not copy
       else {
         VISH_TRY(v, eval(args[i], env, frame));
@@ -8322,29 +8367,25 @@ struct interpreter {
         unpack_into(p.type, vals[i], inner, inner, 0, db[params[i]].where);
         continue;
       }
-      // array element to variable parameter - reference to element, not copy
-      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && db.is_index(args[i]) && writes_param(f, i))
-        if(auto r = element_ref(args[i], env, 0, args[i])) {
-          inner->declare(p.name, std::move(*r));
-          continue;
-        }
-      // The field (path on behalf) in the variable parameter is the alias of the place by:
-// Place is searched for at each address - a replaced unit
-      // gives a field of new
-// ), the element of the increased array is the same index, no it is out_of_bounds.
-      // No copy at the entrance and no recording at the exit. Invariable is also alias : ,; parsing
-      // has a value (it does not change - the same thing is observed until the source is changed in
-      // another way). *My:* path up to three steps, as in &e = p.x, with a place at execution
-      // (aggregate fields, simple indexes - arg_place); otherwise - a copy and a record at the output.
-      //
-      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && p.mode != param_mode::out && (db.is_member(args[i]) || db.is_index(args[i])) && path_fits(args[i], env) && (checking() ? writes_param(f, i) : arg_place(args[i], env) != nullptr))
-        if(auto r = path_ref(args[i], env, 0, args[i])) {
-          value const * at = checking() ? nullptr : path_place(r->as<ref_v>(), 1 + r->as<ref_v>().more, db[args[i]].where, true);
-          if(checking() || (at && types.of(*at) == types.of(vals[i]))) {
-            inner->declare(p.name, std::move(*r));
+      // The path from the name (field, element; deeper than three steps - chain) to the parameter - alias place:
+// 
+// 
+      // . The place is searched for at each appeal: the replaced unit gives the field of a
+      // new one, the element of the grown or replaced array - the same index.
+// ), no him - out_of_bounds.
+      // The link was taken by the caller along with the values of the arguments (call_overloaded: indexes -
+      // once, check boundaries - his). The argument converted to a parameter type is another value: the copy
+      // (and the output field record if the parameter changes).
+      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && p.mode != param_mode::out) {
+        if(value const * r = taken_ref(args, i)) {
+          ref_v const & rv = r->as<ref_v>();
+          value const * at = checking() ? nullptr : path_like_place(rv, db[args[i]].where);
+          if(checking() || (at ? types.of(*at) : types.of(deref(rv, db[args[i]].where))) == types.of(vals[i])) { // spotless
+            inner->declare(p.name, *r);
             continue;
           }
         }
+      }
       if(p.mode == param_mode::out && i < args.size() && db.is<n_ident>(args[i])) // The place of the result is the name of the caller.
         if(value * cell = find(env, db.as<n_ident>(args[i]).name)) {
           inner->alias(p.name, cell);
@@ -8363,22 +8404,34 @@ struct interpreter {
     }
   }
 
-  // The path of the argument is placed in the reference (up to three steps from the name; from the reference - with its steps).
-  bool path_fits(node_id x, scope * env) {
-    uint32_t n = 0;
-    while(db.is_member(x) || db.is_index(x)) {
-      ++n;
-      x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
-    }
+  // The path of an argument is on behalf of a variable (not an expr parameter): its place can become a reference.
+  bool path_root(node_id x, scope * env) {
+    while(db.is_member(x) || db.is_index(x)) x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
     if(!db.is<n_ident>(x)) return false;
     value * c = find(env, db.as<n_ident>(x).name);
-    if(!c || c->is<thunk_v>()) return false;
-    if(c->is<ref_v>()) n += 1 + c->as<ref_v>().more;
-    return n <= 3;
+    return c && !c->is<thunk_v>();
+  }
+  // Reference location cell (Dense Array element is empty: value without cell)
+  value * path_like_place(ref_v const & r, span where) {
+    if(r.path()) return path_place(r, 1 + r.more, where, true);
+    return !r.rt_index && r.cell->is<array_v>() ? r.cell->as<array_v>().generic_cell(checked_index(*r.cell, value(r.index), where)) : nullptr;
+  }
+  // References of the ways-arguments of the call during execution: are taken together with the values of the arguments
+  // (indices - once), parameter binding - according to them. Intermediate links of chains live until the end of the call.
+  struct taken_refs {
+    node_list const * args;
+    std::vector<value> refs; // Unit: An argument is no way
+    std::deque<value> hold;
+  };
+  std::deque<taken_refs> arg_refs; // deque: indices computation calls add their entries in place
+  value const * taken_ref(node_list const & args, uint32_t i) const {
+    for(auto it = arg_refs.rbegin(); it != arg_refs.rend(); ++it)
+      if(it->args == &args) return i < it->refs.size() && it->refs[i].is<ref_v>() ? &it->refs[i] : nullptr;
+    return nullptr;
   }
 
-  // Field to a variable parameter that has not become a reference (a path deeper than three steps, conversion
-  // to a parameter type): a copy at the input, a record in the caller field at the output (when excluded - no).
+  // Field to a variable parameter that has not become a reference (conversion to a parameter type): a
+  // copy at the input, a record in the caller field at the output (if excluded - no).
   void write_back_fields(node_id f, node_list const & params, node_list const & args, scope * env, scope * inner, call_site const & site) {
     for(uint32_t i = 0; i < params.size() && i < args.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
