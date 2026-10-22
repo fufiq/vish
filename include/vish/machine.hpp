@@ -535,6 +535,16 @@ struct process_machine {
       }
       return *c;
     }
+    if(al.index != m_none) { // element (then, if any, its field: cl[c].xs)
+      if(!c->is<m_arr>() || c->as<m_arr>().gen != al.gen) {
+        diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
+        d.type = "invalidated_alias";
+        throw d;
+      }
+      auto & xs = c->as<m_arr>().items;
+      if(al.index >= xs.size()) out_of_bounds(al.index, xs.size(), here());
+      c = &xs[al.index];
+    }
     if(al.field != m_none) { // path by field number - allowed at each request, there is nothing to hang
       if(!c->is<m_agg>() || al.field >= c->as<m_agg>().fields.size()) {
         diagnostic d("ссылка на поле использована после замены агрегата", here(), diag_kind::runtime);
@@ -543,15 +553,7 @@ struct process_machine {
       }
       return c->as<m_agg>().fields[al.field].v;
     }
-    if(al.index == m_none) return *c;
-    if(!c->is<m_arr>() || c->as<m_arr>().gen != al.gen) {
-      diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
-      d.type = "invalidated_alias";
-      throw d;
-    }
-    auto & xs = c->as<m_arr>().items;
-    if(al.index >= xs.size()) out_of_bounds(al.index, xs.size(), here());
-    return xs[al.index];
+    return *c;
   }
   span here() { return fib().tasks.empty() ? span{} : db[fib().tasks.back().node].where; }
   mval deref(mval const & x) {
@@ -2799,8 +2801,9 @@ struct process_machine {
     uint32_t local = m_none;
     std::vector<node_id> fns = overloads_of(n, t.extra, t.scope, &local);
     if(t.phase == 2) { // challenge
-      mval r = pop_val();
-      return finish(deref(r));
+      mval r = deref(pop_val());
+      if(t.b > t.a) st.scopes[t.scope].steps.resize(t.b - t.a - 1);
+      return finish(std::move(r));
     }
     while(t.b < t.a) {
       uint32_t i = t.b++;
@@ -2829,7 +2832,16 @@ struct process_machine {
       }
       if(writes && elem_place(db, args[i])) return push_elem_ref(args[i], t.scope, t.frame);
       if(writes && field_alias(args[i], t.scope)) continue; // variable field - alias by field number
+      // A deeper path (a.b.c, cl[c].xs.ys) is a link-path like &e = ...:
+// Steps - in the area of calling to the end of the challenge
+      if(writes && (db.is_member(args[i]) || db.is_index(args[i])) && path_arg(args[i], t.scope)) return push_path_ref(args[i], t.scope, t.frame);
       return push_eval(args[i], t.scope, t.frame); // the value (or alias of the place) on the stack
+    }
+    if(t.phase != 2) { // link-path steps of arguments are removed after the call (the cycle does not accumulate)
+      uint32_t mark = m_none;
+      for(uint32_t k = t.base; k < fib().vals.size(); ++k)
+        if(mval const & v = fib().vals[k]; v.is<m_alias>() && v.as<m_alias>().path_scope == t.scope) mark = std::min(mark, uint32_t(v.as<m_alias>().path_at));
+      if(mark != m_none) t.b = t.a + 1 + mark;
     }
     t.phase = 2;
     uint32_t frame = t.frame;
@@ -2884,6 +2896,24 @@ struct process_machine {
       mval const & xs = ref_of(fib().vals[t.base + 1]);
       if(i.is<int64_t>() && xs.is<m_arr>()) return finish(mval{i.as<int64_t>() >= 0 && uint64_t(i.as<int64_t>()) < xs.as<m_arr>().items.size()});
     }
+    if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: link of the car - cell and number, moving them does not break
+      mval & xs = follow(fib().vals[t.base].as<m_alias>());
+      if(!xs.is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
+      xs.as<m_arr>().pinned = true;
+      return finish(mval{m_unit{}});
+    }
+    if(helper.str(name) == "append" && t.a == 2 && fib().vals[t.base].is<m_alias>()) { // push: the place of the caller grows (before the name of the arguments - without a copy of the array)
+      m_alias al = fib().vals[t.base].as<m_alias>();
+      mval & xs = follow(al);
+      if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
+      auto & items = xs.as<m_arr>().items;
+      void const * was = items.empty() ? nullptr : items.data();
+      mval x = deref(fib().vals[t.base + 1]);
+      if(st.res_on) take_from(call_args(n)[1], x, t.scope); // resource in an array - transfer or copy, as in the assignment
+      items.push_back(std::move(x));
+      if(was && items.data() != was && !xs.as<m_arr>().pinned) xs.as<m_arr>().gen = ++st.array_gen; // Data moved - links broken
+      return finish(mval{m_unit{}});
+    }
     std::vector<mval> a;
     for(uint32_t i = 0; i < t.a; ++i) a.push_back(deref(fib().vals[t.base + i]));
     if(helper.str(name) == "shared" && t.a == 1 && !helper.functions.contains(name)) { // vault
@@ -2909,24 +2939,6 @@ struct process_machine {
     if(helper.str(name) == "shared_count" && t.a == 1 && !helper.functions.contains(name)) {
       if(!is_shared_v(a[0])) throw diagnostic("shared_count: ожидался shared", db[n].where);
       return finish(mval{int64_t(slot_of(a[0]).count)});
-    }
-    if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: link of the car - cell and number, moving them does not break
-      mval & xs = follow(fib().vals[t.base].as<m_alias>());
-      if(!xs.is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
-      xs.as<m_arr>().pinned = true;
-      return finish(mval{m_unit{}});
-    }
-    if(helper.str(name) == "append" && t.a == 2 && fib().vals[t.base].is<m_alias>()) { // push: the place of the caller grows
-      m_alias al = fib().vals[t.base].as<m_alias>();
-      mval & xs = follow(al);
-      if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
-      auto & items = xs.as<m_arr>().items;
-      void const * was = items.empty() ? nullptr : items.data();
-      mval x = a[1];
-      if(st.res_on) take_from(call_args(n)[1], x, t.scope); // resource in an array - transfer or copy, as in the assignment
-      items.push_back(std::move(x));
-      if(was && items.data() != was && !xs.as<m_arr>().pinned) xs.as<m_arr>().gen = ++st.array_gen; // Data moved - links broken
-      return finish(mval{m_unit{}});
     }
     if(helper.str(name).starts_with("stream_")) { // Can block: the task will remain and repeat
       mval out;
@@ -3319,8 +3331,10 @@ struct process_machine {
       al = m_alias{r.scope, r.slot};
       if(r.path_scope != m_none)
         for(uint32_t k = 0; k < r.path_n; ++k) steps.push_back(st.scopes[r.path_scope].steps[r.path_at + k]);
-      else if(r.index != m_none) steps.push_back({r.index, r.gen, false});
-      else if(r.field != m_none) steps.push_back({r.field, 0, true});
+      else {
+        if(r.index != m_none) steps.push_back({r.index, r.gen, false});
+        if(r.field != m_none) steps.push_back({r.field, 0, true}); // field
+      }
     }
     uint32_t next = 0;
     for(node_id c: chain) {
@@ -3361,7 +3375,7 @@ struct process_machine {
     finish(mval{al});
   }
   // b.f in the variable parameter - alias on the field (as an array element): "parameter - alias"
-  // (§6.2). Only the field of the variable (a.b.c)
+  // (§6.2). A variable field or reference to an element (e.f at &e = v[i]); deeper is the path.
   bool field_alias(node_id x, uint32_t scope) {
     if(!db.is_member(x) || !db.is<n_ident>(db.member_of(x).object)) return false;
     place p = find(scope, db.as<n_ident>(db.member_of(x).object).name);
@@ -3369,7 +3383,7 @@ struct process_machine {
     m_alias al{p.scope, p.slot};
     if(st.scopes[p.scope].vars[p.slot].v.is<m_alias>()) {
       al = st.scopes[p.scope].vars[p.slot].v.as<m_alias>();
-      if(al.index != m_none || al.field != m_none) return false; // field of an element or field - value n
+      if(al.field != m_none || al.path_scope != m_none) return false; // field
     }
     mval & agg = follow(al);
     if(!agg.is<m_agg>()) return false;
@@ -3382,6 +3396,22 @@ struct process_machine {
         return true;
       }
     return false;
+  }
+  // The path of the argument is placed in the link-path: from the name, up to three steps along with the root-link steps.
+  bool path_arg(node_id x, uint32_t scope) {
+    uint32_t n = 0;
+    while(db.is_member(x) || db.is_index(x)) {
+      ++n;
+      x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    }
+    if(!db.is<n_ident>(x)) return false;
+    place p = find(scope, db.as<n_ident>(x).name);
+    if(p.scope == m_none) return false;
+    if(mval const & v = st.scopes[p.scope].vars[p.slot].v; v.is<m_alias>()) {
+      m_alias const & r = v.as<m_alias>();
+      n += r.path_scope != m_none ? r.path_n : uint32_t(r.index != m_none) + uint32_t(r.field != m_none);
+    }
+    return n <= 3;
   }
   // The program module variable found in the module domain is foreign to the module code that the
   // program does not see (the structure body prelude): like interpreter::foreign_global.

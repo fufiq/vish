@@ -3342,6 +3342,14 @@ struct interpreter {
     std::vector<value> a;
     for(node_id pn: db.as<n_fn>(native_owner(db, n)).params) {
       value * c = env->find(db.as<n_param>(pn).name);
+      if(c && c->is<ref_v>()) { // parameter-link (field, element) - its place; element of a dense array - the value n
+        ref_v const & r = c->as<ref_v>();
+        if(value * at = checking() ? nullptr : path_place(r, 1 + r.more, db[n].where, true)) c = at;
+        else {
+          a.push_back(deref(r, db[n].where));
+          continue;
+        }
+      }
       if(c && c->is<array_v>()) a.push_back(value(array_v::borrow(c->as<array_v>()))); // Loan - Loan: native does not keep it
       else a.push_back(c ? *c : value());
     }
@@ -4764,6 +4772,7 @@ struct interpreter {
     value const * c = find(env, db.as<n_ident>(n).name);
     if(c && foreign_global(c, n, env, db.as<n_ident>(n).name)) return nullptr; // other variable module - the error will give eval
     if(c) not_hidden(*c, db.as<n_ident>(n).name, db[n].where);
+    if(c && c->is<ref_v>() && !checking()) return path_place(c->as<ref_v>(), 1 + c->as<ref_v>().more, db[n].where, true); // link - its place (the element of a dense array is empty)
     return c && !c->is<thunk_v>() ? c : nullptr;
   }
 
@@ -5404,12 +5413,16 @@ struct interpreter {
       else {
         flow fi = eval(db.index_of(*it).index, env, frame);
         if(!fi.normal()) return std::nullopt;
-        value box = n ? path_value(r, n, where) : *r.cell; // stride
-        if(!checking()) {
+        if(!checking()) { // stride array - in place, without a copy
+          value const & box = n ? *path_place(r, n, where) : *r.cell;
           if(!box.is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(box), " — не массив"), where);
           st.index = checked_index(box, fi.v, where);
           st.gen = box.as<array_v>().gen;
-        } else if(box.is<array_v>() && fi.v.known()) st.index = checked_index(box, fi.v, where);
+          set_step(r, n++, st);
+          continue;
+        }
+        value box = n ? path_value(r, n, where) : *r.cell; // stride
+        if(box.is<array_v>() && fi.v.known()) st.index = checked_index(box, fi.v, where);
         else {
           st.rt_index = true;
           rt_check("out_of_bounds", where);
@@ -5561,10 +5574,29 @@ struct interpreter {
     span where = db[n].where;
     if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("append(массив, значение)", where);
     value * cell = find(env, db.as<n_ident>(args[0]).name);
-    if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("append: первый аргумент — переменная-массив", where);
+    if(!cell || cell->is<thunk_v>()) fail("append: первый аргумент — переменная-массив или ссылка на место", where);
     not_hidden(*cell, db.as<n_ident>(args[0]).name, where);
     VISH_TRY(x0, eval(args[1], env, frame));
     VISH_TAKE(x, args[1], x0, env, frame); // resource in an array - transfer or copy, as in the assignment
+    if(cell->is<ref_v>()) { // link to place (field, element, path) - the array grows there, without a copy
+      ref_v const r = cell->as<ref_v>();
+      if(!checking()) cell = path_place(r, 1 + r.more, where);
+      else { // parsing: the value of the place, growth, writing back - the meaning is the same as the name
+        value now = path_deref(r, where);
+        value const * shape = shape_of(now);
+        if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(now)), where);
+        if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
+          fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(now)), where);
+        uint32_t keep = now.ct;
+        if(now.is<array_v>() && x.known()) now.as<array_v>().push(x);
+        else now = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
+        now.ct = keep;
+        book.written(r.cell, true);
+        if(value * at = path_place(r, 1 + r.more, where, true)) *at = std::move(now);
+        else *r.cell = erase(*r.cell); // place after run-time - step - variable run-time
+        return ok();
+      }
+    }
     if(!checking()) {
       if(!cell->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
       array_v & a = cell->as<array_v>();
@@ -7580,8 +7612,8 @@ struct interpreter {
       }
       if(expr_everywhere) vals[i] = value(thunk_v{args[i], frame, env, ctx});
       else if(out_everywhere) vals[i] = out_place(args[i], db.as<n_fn>(fns[0]).params[i], env);
-      else if(value * cell = checking() ? nullptr : place_or_null(args[i], env); cell && cell->is<array_v>())
-        vals[i] = value(array_v::borrow(cell->as<array_v>())); // place-link, not copy
+      else if(value * cell = arg_place(args[i], env); cell && (cell->is<array_v>() || cell->is<agg_v>()))
+        vals[i] = lend(*cell); // place (and field, and link) - loan, not copy
       else {
         VISH_TRY(v, eval(args[i], env, frame));
         vals[i] = std::move(v);
@@ -7909,6 +7941,8 @@ struct interpreter {
   std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env, scope * base, bool open = false) {
     auto const & fn = db.as<n_fn>(f);
     if(!db.is<n_block>(fn.body)) return {true, 0, "", false}; // и f(x) => { require(…); … }
+    if(auto const & items = db.as<n_block>(fn.body).items; items.empty() || !db.require_cond(items[0]) || db.is_assume(items[0]))
+      return {true, 0, "", false}; // require no - no trial binding is needed (the loan of the argument field she copied)
     scope * probe = new_scope(base);
     probe->caller = env;
     probe->fn = f;
@@ -7939,7 +7973,30 @@ struct interpreter {
   // *My:* parameters - values (without mut/out/own/expr, pack); call environment (O4) - original.
   std::unordered_map<uint32_t, std::unordered_set<uint32_t>> tail_calls_of; // function of its tail calls itself
   std::vector<value> tail_vals;
-  // cell - in areas of the working call f (from the place of the call to the root of its body)
+  // cell - in areas of the working call f (from the place of the call to the root of its body) The value of
+  // the place-argument without a copy of the data (choice overload, binding): the array is a borrowed type
+  // of cell, the aggregate is a shell with borrowed arrays in fields. A copy of the loan is its own
+  // (parameter-value remains value), the loan does not live longer than the call. My:* as a loan of an
+  // array-argument struct by name is no longer copied in its entirety; resource (rid), code, and shared by
+  // value.
+  value lend(value const & c) {
+    if(c.is<array_v>()) return value(array_v::borrow(c.as<array_v>()));
+    if(!c.is<agg_v>() || c.as<agg_v>().rid || code_agg(c) || is_shared(c)) return c;
+    agg_v a;
+    a.type = c.as<agg_v>().type;
+    for(auto const & [k, v]: c.as<agg_v>().fields)
+      if(v.is<array_v>() || v.is<agg_v>()) a.fields.push_back({k, lend(v)});
+      else a.fields.push_back({k, v});
+    value r(std::move(a));
+    r.ct = c.ct;
+    r.pinned = c.pinned;
+    return r;
+  }
+  static void own_lent(value & v) {
+    if(v.is<array_v>()) v.as<array_v>().own();
+    else if(v.is<agg_v>())
+      for(auto & [k, x]: v.as<agg_v>().fields) own_lent(x);
+  }
   static bool in_frame(array_v const * a, scope * env, node_id f) {
     for(scope * s = env; s; s = s->parent) {
       for(auto const & x: s->storage)
@@ -7980,6 +8037,7 @@ struct interpreter {
     if(!checking() && site.node && tail_self(f, site.node)) { // tail challenge itself - transition: values - working call
       for(value & v: vals) // The loan of the outgoing frame cell would hang - its value; the owner's loan above - lives.
         if(v.is<array_v>() && v.as<array_v>().borrowed && in_frame(v.as<array_v>().borrowed, env, f)) v.as<array_v>().own();
+        else if(v.is<agg_v>()) own_lent(v); // Loans in the fields of the unit - their own (the field place in the frame is not sought)
       tail_vals = std::move(vals);
       return flow{flow_kind::tail, {}, 0};
     }
@@ -8283,6 +8341,22 @@ struct interpreter {
           inner->declare(p.name, std::move(*r));
           continue;
         }
+      // The field (path on behalf) in the variable parameter is the alias of the place by:
+// Place is searched for at each address - a replaced unit
+      // gives a field of new
+// ), crossed the buffer along the way - invalidated_alias ( ).
+// Without a copy at the entrance and recording on
+      // Get out. *My:* path up to three steps, as in &e = p.x, with a place at execution (aggregate
+      // fields, simple indexes - arg_place); otherwise - a copy and a record at the output. An immutable
+      // parameter is a value: a link would see the caller changing the source in a different way.
+      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && p.mode != param_mode::out && (db.is_member(args[i]) || db.is_index(args[i])) && path_fits(args[i], env) && writes_param(f, i) && (checking() || arg_place(args[i], env)))
+        if(auto r = path_ref(args[i], env, 0, args[i])) {
+          value const * at = checking() ? nullptr : path_place(r->as<ref_v>(), 1 + r->as<ref_v>().more, db[args[i]].where, true);
+          if(checking() || (at && types.of(*at) == types.of(vals[i]))) {
+            inner->declare(p.name, std::move(*r));
+            continue;
+          }
+        }
       if(p.mode == param_mode::out && i < args.size() && db.is<n_ident>(args[i])) // The place of the result is the name of the caller.
         if(value * cell = find(env, db.as<n_ident>(args[i]).name)) {
           inner->alias(p.name, cell);
@@ -8301,21 +8375,73 @@ struct interpreter {
     }
   }
 
-  // Field to variable parameter (§6.2: "parameter - alias", the change is output): copy at the input,
-  // write in the caller field at the output. *My:* is observed as a alias place, but without reference
-  // to the inside of the aggregate, which would hang if the summoned (through the environment of the
-  // caller, O4) replaces the aggregate as a whole - "no UB" (§3.5); when excluded - does not write.
+  // The path of the argument is placed in the reference (up to three steps from the name; from the reference - with its steps).
+  bool path_fits(node_id x, scope * env) {
+    uint32_t n = 0;
+    while(db.is_member(x) || db.is_index(x)) {
+      ++n;
+      x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    }
+    if(!db.is<n_ident>(x)) return false;
+    value * c = find(env, db.as<n_ident>(x).name);
+    if(!c || c->is<thunk_v>()) return false;
+    if(c->is<ref_v>()) n += 1 + c->as<ref_v>().more;
+    return n <= 3;
+  }
+
+  // Field to a variable parameter that has not become a reference (a path deeper than three steps, conversion
+  // to a parameter type): a copy at the input, a record in the caller field at the output (when excluded - no).
   void write_back_fields(node_id f, node_list const & params, node_list const & args, scope * env, scope * inner, call_site const & site) {
     for(uint32_t i = 0; i < params.size() && i < args.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
       if(p.mode == param_mode::expr || p.mode == param_mode::own || p.pack || (p.type && db.is<n_pat>(p.type))) continue;
       if(!db.is_member(args[i]) || !writes_param(f, i)) continue;
       value * now = inner->find(p.name);
-      if(!now || now->is<thunk_v>()) continue;
+      if(!now || now->is<thunk_v>() || now->is<ref_v>()) continue; // alias seats - already there
       value v = *now;
       flow w = assign(args[i], "=", std::move(v), env, site.frame, db[args[i]].where);
       if(!w.normal()) fail("запись поля-аргумента после вызова не завершилась", db[args[i]].where);
     }
+  }
+
+  // The place of the argument in execution is a cell without a copy: name, reference (its place), path
+  // of fields and elements in name with simple indexes (name, number: calculation without effects, text
+  // order is not broken). No space is empty (the value is calculated as usual). local - the path root
+  // is only a local variable (machine code holds the address all the time of the call, and the module
+  // variable can be replaced by a VM node; local called without the environment O4 does not see).
+  value * arg_place(node_id n, scope * env, bool local = false) {
+    if(checking()) return nullptr;
+    std::array<node_id, 8> steps;
+    uint32_t depth = 0;
+    node_id x = n;
+    while(db.is_member(x) || core_index(x)) {
+      if(depth == steps.size()) return nullptr;
+      steps[depth++] = x;
+      x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    }
+    value * c = place_or_null(x, env);
+    if(!c) return nullptr;
+    if(local && (c->is<ref_v>() || (depth && globals->find(db.as<n_ident>(x).name) == c))) return nullptr;
+    if(c->is<ref_v>()) c = path_place(c->as<ref_v>(), 1 + c->as<ref_v>().more, db[n].where, true);
+    for(uint32_t k = depth; k-- > 0 && c;) {
+      if(is_shared(*c)) c = &slot_of(*c).v;
+      if(db.is_member(steps[k])) {
+        if(!c->is<agg_v>() || code_agg(*c)) return nullptr;
+        value * f = nullptr;
+        for(auto & [name, v]: c->as<agg_v>().fields)
+          if(name == db.member_of(steps[k]).name) f = &v;
+        c = f;
+        continue;
+      }
+      node_id i = db.index_of(steps[k]).index;
+      int64_t at;
+      if(db.is<n_int>(i)) at = db.as<n_int>(i).value;
+      else if(value const * v = db.is<n_ident>(i) ? peek(i, env) : nullptr; v && v->is<int64_t>()) at = v->as<int64_t>();
+      else return nullptr;
+      if(!c->is<array_v>() || at < 0 || uint64_t(at) >= c->as<array_v>().size()) return nullptr; // Error will give normal calculation
+      c = c->as<array_v>().generic_cell(uint32_t(at));
+    }
+    return c;
   }
 
   value * place_or_null(node_id n, scope * env) {

@@ -700,75 +700,77 @@ field_at(m, i64 at, str name) {
   r
 }
 
-// Клиент сценария — как редактор: узлы (номер, вид, куски — текст или ребёнок), представления
-// (номер → корень, вид), проекции представлений; текст собирается из кусков и сверяется с проекцией
-// VM. Таблица узлов — массивы-переменные
-// сценария, передаются именами (алиас места — без копии; поле-аргумент изменяемого параметра VM
-// копирует на входе и пишет на выходе — вставка в поле структуры была бы копией всей таблицы на
-// каждый кусок; *моё*). Ключ узла — номер·2 + клиент (у клиентов свои узлы: черновик — у автора).
-// Текст узла — кэшем: правка узла снимает кэш у него и предков (родитель — по последней сборке),
-// курсор собирается только по пути к нему.
+// Script client - as editor: node (number, view, chunks - text or child), representation (number → root,
+// view), projection representations; text is collected from pieces and checked with projection VM. Table node
+// - structure wtable, one per script, is transmitted by name; growth of fields (tab.ids.push) - by place:
+// field in variable parameter - alias place. Key node - number ·2 + client (clients have their node: draft -
+// the author). Text node - cache: editing node removes the cache from him and his ancestors (parent -
+// according to the last assembly), the cursor is collected only on the way to it.
+//
 // ids - place: key; info - place by fours: first piece, pieces, parent, whether there is cache;
 // types, cache - by place: view, collected text; ptext, pkid - by piece: text or child (-1 -)
 // text); sorted, slots - keys to increase and their places.
 struct wclient { array vids; array vroots; array vkinds; i64 root; array pviews; array pkeys; str mismatch; }
 new_client() => wclient{array{}, array{}, array{}, -1, array{}, array{}, ""};
-// node n client c in the table (-1 - no)
-node_slot(sorted, slots, i64 c, i64 n) {
+struct wtable { array ids; array info; array kinds; array cache; array ptext; array pkid; array sorted; array slots; }
+new_table() => wtable{array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}};
+// node n client c in the table (-1 - no); keys - reference: reading without a copy
+node_slot(tab, i64 c, i64 n) {
   key = (n * 2) + c;
-  k = lower_bound(sorted, key);
-  if((k < sorted.size) && (sorted[k] == key)) slots[k] else -1
+  &keys = tab.sorted;
+  k = lower_bound(keys, key);
+  if((k < keys.size) && (keys[k] == key)) tab.slots[k] else -1
 }
 // node messages (nodes field): new - to the table, known - replaced; cache - over them and ancestors
-take_nodes(i64 c, m, ids, info, kinds, cache, ptext, pkid, sorted, slots) {
+take_nodes(i64 c, m, tab) {
   list = field_at(m, 0, "nodes");
   fresh = false;
   e = list + 1;
   for(k : range(m[4][list])) {
     id = m[3][field_at(m, e, "id")];
     pieces = field_at(m, e, "pieces");
-    slot = node_slot(sorted, slots, c, id);
+    slot = node_slot(tab, c, id);
     if(slot < 0) {
-      slot = ids.size;
-      ids.push((id * 2) + c);
-      kinds.push("");
-      cache.push("");
-      info.push(0);
-      info.push(0);
-      info.push(-1);
-      info.push(0);
+      slot = tab.ids.size;
+      tab.ids.push((id * 2) + c);
+      tab.kinds.push("");
+      tab.cache.push("");
+      tab.info.push(0);
+      tab.info.push(0);
+      tab.info.push(-1);
+      tab.info.push(0);
       fresh = true;
     }
     up = slot;
     hops = 0;
     while((up >= 0) && (hops < 100000)) {
-      info[(up * 4) + 3] = 0;
-      up = info[(up * 4) + 2];
+      tab.info[(up * 4) + 3] = 0;
+      up = tab.info[(up * 4) + 2];
       hops += 1;
     }
-    kinds[slot] = m[2][field_at(m, e, "kind")];
-    info[slot * 4] = ptext.size;
-    info[(slot * 4) + 1] = m[4][pieces];
+    tab.kinds[slot] = m[2][field_at(m, e, "kind")];
+    tab.info[slot * 4] = tab.ptext.size;
+    tab.info[(slot * 4) + 1] = m[4][pieces];
     p = pieces + 1;
     for(j : range(m[4][pieces])) {
       if(m[0][p] == "str") {
-        ptext.push(m[2][p]);
-        pkid.push(-1);
+        tab.ptext.push(m[2][p]);
+        tab.pkid.push(-1);
       } else {
-        ptext.push("");
-        pkid.push(m[3][p]);
+        tab.ptext.push("");
+        tab.pkid.push(m[3][p]);
       }
       p = m[5][p];
     }
     e = m[5][e];
   }
   if(fresh) {
-    order = sorted_numbers(ids);
-    sorted = array{};
-    slots = array{};
+    order = sorted_numbers(tab.ids);
+    tab.sorted = array{};
+    tab.slots = array{};
     for(k : order) {
-      sorted.push(ids[k]);
-      slots.push(k);
+      tab.sorted.push(tab.ids[k]);
+      tab.slots.push(k);
     }
   }
   true
@@ -816,57 +818,57 @@ set_projection(cl, i64 c, i64 v, str key) {
 }
 // Text node n client c, collected from pieces - as it will collect the editor; cursor (node cn, piece cp,
 // offset co at code points; cn -1 - no) - х in its place.
-text_of(i64 c, i64 n, i64 cn, i64 cp, i64 co, info, cache, ptext, pkid, sorted, slots) {
-  t = node_text(c, n, info, cache, ptext, pkid, sorted, slots); // At the same time, parents in this assembly
+text_of(i64 c, i64 n, i64 cn, i64 cp, i64 co, tab) {
+  t = node_text(c, n, tab); // At the same time, parents in this assembly
   if(cn < 0) return t;
   path = array{}; // from node cursor up to n
-  s = node_slot(sorted, slots, c, cn);
-  top = node_slot(sorted, slots, c, n);
+  s = node_slot(tab, c, cn);
+  top = node_slot(tab, c, n);
   while((s >= 0) && (path.size < 100000)) {
     path.push(s);
-    s = if(s == top) -1 else info[(s * 4) + 2];
+    s = if(s == top) -1 else tab.info[(s * 4) + 2];
   }
   if((path.size == 0) || (path[path.size - 1] != top)) return t; // cursor
   parts = array{};
-  caret_pieces(c, n, cn, cp, co, path, parts, info, cache, ptext, pkid, sorted, slots);
+  caret_pieces(c, n, cn, cp, co, path, parts, tab);
   join_texts(parts)
 }
 // text node n (cache)
-node_text(i64 c, i64 n, info, cache, ptext, pkid, sorted, slots) {
-  slot = node_slot(sorted, slots, c, n);
+node_text(i64 c, i64 n, tab) {
+  slot = node_slot(tab, c, n);
   if(slot < 0) return "";
-  if(info[(slot * 4) + 3] == 1) return cache[slot];
+  if(tab.info[(slot * 4) + 3] == 1) return tab.cache[slot];
   parts = array{};
-  f = info[slot * 4];
-  for(i : range(info[(slot * 4) + 1])) {
-    kid = pkid[f + i];
+  f = tab.info[slot * 4];
+  for(i : range(tab.info[(slot * 4) + 1])) {
+    kid = tab.pkid[f + i];
     if(kid >= 0) {
-      ks = node_slot(sorted, slots, c, kid);
-      if(ks >= 0) info[(ks * 4) + 2] = slot;
-      parts.push(node_text(c, kid, info, cache, ptext, pkid, sorted, slots));
-    } else parts.push(ptext[f + i]);
+      ks = node_slot(tab, c, kid);
+      if(ks >= 0) tab.info[(ks * 4) + 2] = slot;
+      parts.push(node_text(c, kid, tab));
+    } else parts.push(tab.ptext[f + i]);
   }
   t = join_texts(parts);
-  cache[slot] = t;
-  info[(slot * 4) + 3] = 1;
+  tab.cache[slot] = t;
+  tab.info[(slot * 4) + 3] = 1;
   t
 }
 // pieces of node n with cursor: node paths to the cursor - by pieces, others - by cache
-caret_pieces(i64 c, i64 n, i64 cn, i64 cp, i64 co, path, parts, info, cache, ptext, pkid, sorted, slots) {
-  slot = node_slot(sorted, slots, c, n);
+caret_pieces(i64 c, i64 n, i64 cn, i64 cp, i64 co, path, parts, tab) {
+  slot = node_slot(tab, c, n);
   if(slot < 0) return true;
   on_path = false;
   for(x : path) if(x == slot) on_path = true;
   if(!on_path) {
-    parts.push(node_text(c, n, info, cache, ptext, pkid, sorted, slots));
+    parts.push(node_text(c, n, tab));
     return true;
   }
-  f = info[slot * 4];
-  for(i : range(info[(slot * 4) + 1])) {
-    kid = pkid[f + i];
-    if(kid >= 0) caret_pieces(c, kid, cn, cp, co, path, parts, info, cache, ptext, pkid, sorted, slots);
-    else if((cn == n) && (cp == i)) parts.push(with_caret(ptext[f + i], co));
-    else parts.push(ptext[f + i]);
+  f = tab.info[slot * 4];
+  for(i : range(tab.info[(slot * 4) + 1])) {
+    kid = tab.pkid[f + i];
+    if(kid >= 0) caret_pieces(c, kid, cn, cp, co, path, parts, tab);
+    else if((cn == n) && (cp == i)) parts.push(with_caret(tab.ptext[f + i], co));
+    else parts.push(tab.ptext[f + i]);
   }
   true
 }
@@ -880,16 +882,16 @@ with_caret(str t, i64 co) {
   if(points == co) t + "‸" else t
 }
 // cursor
-cursor_line(cl, i64 c, i64 cn, i64 cp, i64 co, info, cache, ptext, pkid, sorted, slots) {
-  all = text_of(c, cl[c].root, cn, cp, co, info, cache, ptext, pkid, sorted, slots);
+cursor_line(cl, i64 c, i64 cn, i64 cp, i64 co, tab) {
+  all = text_of(c, cl[c].root, cn, cp, co, tab);
   r = "?";
   for(l : lines_of(all)) if((r == "?") && contains(l, "‸")) r = l;
   if((r == "?") && ends_with(all, "\n‸")) "‸" else r
 }
 // The collected text and its reconciliation: draft (text as typed) - projection of the presentation itself,
 // otherwise - projection VM (layout: hole - only your text).
-checked_text(i64 h, cl, i64 c, i64 v, info, cache, ptext, pkid, sorted, slots) {
-  t = text_of(c, cl[c].root, -1, -1, -1, info, cache, ptext, pkid, sorted, slots);
+checked_text(i64 h, cl, i64 c, i64 v, tab) {
+  t = text_of(c, cl[c].root, -1, -1, -1, tab);
   array{typed, draft} = scn_draft(h, c, v);
   if(typed) {
     if(t != draft) cl[c].mismatch = (("собрано:\n" + t) + "\nпредставление VM:\n") + draft;
@@ -900,41 +902,41 @@ checked_text(i64 h, cl, i64 c, i64 v, info, cache, ptext, pkid, sorted, slots) {
   ("текст:\n" + t) + "\n"
 }
 // VM answers to client c in quiet mode: only the node table and views (for @links)
-take_quiet(i64 h, cl, i64 c, ids, info, kinds, cache, ptext, pkid, sorted, slots) {
+take_quiet(i64 h, cl, i64 c, tab) {
   for(m : scn_collect_kinds(h, c, array{"view", "update", "cursor"})) {
     name = m[1][0];
     if(name == "view") {
-      take_nodes(c, m, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      take_nodes(c, m, tab);
       v = m[3][field_at(m, 0, "view")];
       set_view(cl, c, v, m[3][field_at(m, 0, "root")], m[2][field_at(m, 0, "kind")]);
       cl[c].root = view_root_of(cl, c, v);
     } else if(name == "update") {
-      take_nodes(c, m, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      take_nodes(c, m, tab);
       cl[c].root = view_root_of(cl, c, m[3][field_at(m, 0, "view")]);
     } else if(name == "cursor") cl[c].root = view_root_of(cl, c, m[3][field_at(m, 0, "view")]);
   }
   true
 }
 // VM answers to client c - text; presentation - collected text, cursor - line with а
-collect(i64 h, cl, i64 c, ids, info, kinds, cache, ptext, pkid, sorted, slots) {
+collect(i64 h, cl, i64 c, tab) {
   out = "";
   for(m : scn_collect(h, c)) {
     out = out + describe(m);
     name = m[1][0];
     if(name == "view") {
-      take_nodes(c, m, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      take_nodes(c, m, tab);
       v = m[3][field_at(m, 0, "view")];
       set_view(cl, c, v, m[3][field_at(m, 0, "root")], m[2][field_at(m, 0, "kind")]);
       cl[c].root = view_root_of(cl, c, v);
-      out = out + checked_text(h, cl, c, v, info, cache, ptext, pkid, sorted, slots);
+      out = out + checked_text(h, cl, c, v, tab);
     } else if(name == "update") {
-      take_nodes(c, m, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      take_nodes(c, m, tab);
       v = m[3][field_at(m, 0, "view")];
       cl[c].root = view_root_of(cl, c, v);
-      out = out + checked_text(h, cl, c, v, info, cache, ptext, pkid, sorted, slots);
+      out = out + checked_text(h, cl, c, v, tab);
     } else if(name == "cursor") {
       cl[c].root = view_root_of(cl, c, m[3][field_at(m, 0, "view")]);
-      out = ((out + "курсор: ") + cursor_line(cl, c, m[3][field_at(m, 0, "node")], m[3][field_at(m, 0, "piece")], m[3][field_at(m, 0, "offset")], info, cache, ptext, pkid, sorted, slots)) + "\n";
+      out = ((out + "курсор: ") + cursor_line(cl, c, m[3][field_at(m, 0, "node")], m[3][field_at(m, 0, "piece")], m[3][field_at(m, 0, "offset")], tab)) + "\n";
     }
   }
   out
@@ -962,26 +964,26 @@ without_comments(str t) {
 }
 // N-th node (from the root, in the order of the text), in whose own text there is a want; notes - to search
 // in the comments (their text of the context - module, block - without them: they are not node)
-find_node(i64 c, i64 n, str want, bool notes, left, kinds, info, ptext, pkid, sorted, slots) {
-  slot = node_slot(sorted, slots, c, n);
+find_node(i64 c, i64 n, str want, bool notes, left, tab) {
+  slot = node_slot(tab, c, n);
   if((slot < 0) || (left[1] >= 0)) return true;
-  ctx = !notes && ((kinds[slot] == "n_module") || (kinds[slot] == "n_block"));
-  f = info[slot * 4];
-  count = info[(slot * 4) + 1];
+  ctx = !notes && ((tab.kinds[slot] == "n_module") || (tab.kinds[slot] == "n_block"));
+  f = tab.info[slot * 4];
+  count = tab.info[(slot * 4) + 1];
   hit = false;
-  for(i : range(count)) if(!hit && (pkid[f + i] < 0)) {
-    t = ptext[f + i];
+  for(i : range(count)) if(!hit && (tab.pkid[f + i] < 0)) {
+    t = tab.ptext[f + i];
     if(contains(if(ctx) without_comments(t) else t, want)) {
       hit = true;
       left[0] = left[0] - 1;
       if(left[0] == 0) left[1] = n;
     }
   }
-  for(i : range(count)) if(pkid[f + i] >= 0) find_node(c, pkid[f + i], want, notes, left, kinds, info, ptext, pkid, sorted, slots);
+  for(i : range(count)) if(tab.pkid[f + i] >= 0) find_node(c, tab.pkid[f + i], want, notes, left, tab);
   true
 }
 // @ substring[:N] - node number (#N, not found - #?); `сообщение N …` - searched in representation N
-resolve(cl, i64 c, str line, kinds, info, ptext, pkid, sorted, slots) {
+resolve(cl, i64 c, str line, tab) {
   ws = words_of(line);
   if(ws.size > 1) {
     v = view_index(cl, c, number_of(ws[1]));
@@ -1001,10 +1003,10 @@ resolve(cl, i64 c, str line, kinds, info, ptext, pkid, sorted, slots) {
         want = slice_text(want, 0, colon);
       }
       left = array{nth, -1};
-      find_node(c, cl[c].root, want, false, left, kinds, info, ptext, pkid, sorted, slots);
+      find_node(c, cl[c].root, want, false, left, tab);
       if(left[1] < 0) {
         left = array{nth, -1};
-        find_node(c, cl[c].root, want, true, left, kinds, info, ptext, pkid, sorted, slots);
+        find_node(c, cl[c].root, want, true, left, tab);
       }
       r = r + (if(left[1] < 0) "#?" else "#" + text(left[1]));
     }
@@ -1014,8 +1016,8 @@ resolve(cl, i64 c, str line, kinds, info, ptext, pkid, sorted, slots) {
 // Message of the client with a line: links - numbers, text form - message, answers - text. projection
 // representation (c_projection): text reconciliation - according to it, if the module is found. Bottom line:
 // array { удалось, ответы или ошибка}.
-exchange(i64 h, cl, i64 c, str line, kinds_all, ids, info, kinds, cache, ptext, pkid, sorted, slots) {
-  array{ok, kind, values, error} = client_message(resolve(cl, c, line, kinds, info, ptext, pkid, sorted, slots), kinds_all);
+exchange(i64 h, cl, i64 c, str line, kinds_all, tab) {
+  array{ok, kind, values, error} = client_message(resolve(cl, c, line, tab), kinds_all);
   if(!ok) return array{false, error};
   view = -1;
   was = "";
@@ -1028,7 +1030,7 @@ exchange(i64 h, cl, i64 c, str line, kinds_all, ids, info, kinds, cache, ptext, 
   }
   failed = scn_send(h, c, kind, values);
   if(failed != "") return array{false, failed};
-  out = collect(h, cl, c, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+  out = collect(h, cl, c, tab);
   if((kind == "projection") && ((key != "") && !scn_has_module(h, key))) set_projection(cl, c, view, was); // No module - former
   array{true, out}
 }
@@ -1041,14 +1043,7 @@ run_scenario(str path) {
   lines = lines_of(read_text(path));
   wire = ends_with(path, ".wire");
   h = scn_open(path, wire);
-  ids = array{}; // Customer node table (see above)
-  info = array{};
-  kinds = array{};
-  cache = array{};
-  ptext = array{};
-  pkid = array{};
-  sorted = array{};
-  slots = array{};
+  tab = new_table(); // Customer node table (see above)
   cl = array{new_client(), new_client()};
   last = "";
   why = "";
@@ -1076,20 +1071,13 @@ run_scenario(str path) {
         scn_close(h);
         return failed;
       }
-      ids = array{}; // Table node - again
-      info = array{};
-      kinds = array{};
-      cache = array{};
-      ptext = array{};
-      pkid = array{};
-      sorted = array{};
-      slots = array{};
+      tab = new_table(); // Table node - again
       cl = array{new_client(), new_client()};
       last = "";
     } else if(wire && starts_with(l, "// let:")) {
       ws = words_of(text_from(l, 7));
       if(ws.size == 2) {
-        id = text_from(resolve(cl, 0, "x " + ws[1], kinds, info, ptext, pkid, sorted, slots), 2);
+        id = text_from(resolve(cl, 0, "x " + ws[1], tab), 2);
         k = -1;
         for(j : range(let_names.size)) if(let_names[j] == ws[0]) k = j;
         if(k < 0) {
@@ -1125,32 +1113,32 @@ run_scenario(str path) {
     } else if(wire && (l == "roundtrip")) last = scn_roundtrip(h);
     else if(wire && ((l == "wait") || starts_with(l, "wait "))) { // launch: quanta to end (wait N - N quanta) or to wait for host
       scn_wait(h, if(l == "wait") -1 else number_of(text_from(l, 5)));
-      last = collect(h, cl, 0, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      last = collect(h, cl, 0, tab);
     } else if(wire && (l == "idle")) { // Set pause: check and tags (without hours)
       scn_idle(h);
-      last = collect(h, cl, 0, ids, info, kinds, cache, ptext, pkid, sorted, slots);
-      also = collect(h, cl, 1, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      last = collect(h, cl, 0, tab);
+      also = collect(h, cl, 1, tab);
       if(also != "") last = (last + "другому клиенту:\n") + also;
     } else if(wire && quiet) {
-      array{ok, kind, values, error} = client_message(resolve(cl, 0, l, kinds, info, ptext, pkid, sorted, slots), kinds_all);
+      array{ok, kind, values, error} = client_message(resolve(cl, 0, l, tab), kinds_all);
       failed = if(ok) scn_send(h, 0, kind, values) else error;
       if(failed != "") why = why + (((("    строка " + at) + ": ") + failed) + "\n");
-      take_quiet(h, cl, 0, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      take_quiet(h, cl, 0, tab);
       scn_drain(h, 1);
       last = "";
     } else if(wire) {
       who = if(starts_with(l, "[2] ")) 1 else 0;
-      array{ok, got} = exchange(h, cl, who, if(who == 1) text_from(l, 4) else l, kinds_all, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+      array{ok, got} = exchange(h, cl, who, if(who == 1) text_from(l, 4) else l, kinds_all, tab);
       if(!ok) why = why + (((("    строка " + at) + ": ") + got) + "\n");
       else {
         last = got;
         if(!live && scn_running(h)) { // launch - to the end (quantas), unless the script requested otherwise
           scn_finish(h);
-          last = last + collect(h, cl, who, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+          last = last + collect(h, cl, who, tab);
         }
         other = 1 - who; // Answers sent to another client (one state for all)
         if(scn_sent(h, other) > 0) {
-          also = collect(h, cl, other, ids, info, kinds, cache, ptext, pkid, sorted, slots);
+          also = collect(h, cl, other, tab);
           if(also != "") last = (last + "другому клиенту:\n") + also;
         }
         for(c : range(2)) if(cl[c].mismatch != "") {

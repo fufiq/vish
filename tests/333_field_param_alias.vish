@@ -1,0 +1,30 @@
+// out: [[1, 4], [2, 3]] [1, 9, 10] 7 [2]
+// out: [100] 0 [7, 8]
+// out: поймано invalidated_alias
+// machine
+// Поле в изменяемый параметр — ссылка-путь на место (§6.2, §12.1): место ищется при каждом
+// обращении. Агрегат, заменённый целиком, — поле нового: 
+// буфер по пути переехал —
+// invalidated_alias.
+struct inner { array ys; i64 k; }
+struct outer { inner in; array zs; }
+add(xs, x) { xs.push(x); }
+bump(k) { k = k + 1; }
+replace_then_add(o, xs) { o = outer{inner{array{100}, 0}, array{7}}; xs.push(8); }
+grow_then(xs, gs) { gs.push(array{0}); xs.push(1); }
+main() {
+  t = array{array{1}, array{2}};
+  t[1].push(3);
+  add(t[0], 4);
+  b = outer{inner{array{1}, 5}, array{2}};
+  add(b.in.ys, 9);
+  bump(b.in.k);
+  &r = b.in;
+  add(r.ys, 10);
+  bump(r.k);
+  print(t, b.in.ys, b.in.k, b.zs);
+  replace_then_add(b, b.zs);
+  print(b.in.ys, b.in.k, b.zs);
+  g = array{array{1}};
+  try { grow_then(g[0], g); print("не поймано"); } catch(e) { print("поймано", typeof(e)); }
+}

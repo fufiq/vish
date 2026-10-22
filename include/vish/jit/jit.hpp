@@ -757,6 +757,25 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
 
   std::vector<uint64_t> raw(vals.size());
   std::vector<value *> cells(vals.size()); // Argument array cells: the compiler code in the language holds their addresses
+  // Path-argument (field, element) - in place, if the root is local and no longer occurs in any argument:
+  // otherwise the called will replace the aggregate or move the buffer (f(b.xs, b)), while the machine code
+  // holds the address. Such a path to a variable parameter is an interpreter (link-path with a generation,
+  // §6.2); to an immutable one is a copy (loan too).
+  auto root_of = [&](node_id x) {
+    while(db.is_member(x) || db.is_index(x)) x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
+    return db.is<n_ident>(x) ? db.as<n_ident>(x).name : symbol{};
+  };
+  std::vector<bool> in_place(vals.size(), true);
+  for(uint32_t i = 0; i < vals.size() && i < args.size(); ++i) {
+    if(!db.is_member(args[i]) && !db.is_index(args[i])) continue;
+    symbol r = root_of(args[i]);
+    for(uint32_t j = 0; j < args.size(); ++j)
+      if(j != i && r.valid() && root_of(args[j]) == r) in_place[i] = false;
+    if(!arg_place(args[i], env, true)) in_place[i] = false;
+    if(!in_place[i] && writes_param(f, i)) return std::nullopt;
+    if(!in_place[i] && vals[i].is<array_v>() && vals[i].as<array_v>().borrowed) vals[i] = value(array_v(vals[i].as<array_v>()));
+  }
+  auto place_of = [&](uint32_t i) { return i < args.size() && in_place[i] ? arg_place(args[i], env, true) : nullptr; };
   for(uint32_t i = 0; i < vals.size(); ++i) {
     value const & v = vals[i];
     if(v.is<int64_t>()) raw[i] = uint64_t(v.as<int64_t>());
@@ -764,14 +783,19 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     else if(v.is<double>()) std::memcpy(&raw[i], &v.as<double>(), 8);
     else if(is_stream(param_types[i])) raw[i] = stream_id(v, {});
     else if(param_types[i] == jt::ct) raw[i] = 0; // nontransmittable
-    else if(param_types[i] == jt::handle) { // VM is the address of the cell (caller or copy)
-      value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
+    else if(param_types[i] == jt::handle) { // VM - the address of the cell (caller, its field or copies)
+      value * cell = place_of(i);
       // converted to a type parameter ({x: …} → struct) - a copy, not a cell of the calling
       cells[i] = cell && !cell->is<thunk_v>() && !cell->is<ref_v>() && types.of(*cell) == types.of(vals[i]) ? cell : &vals[i];
+      if(cells[i] == &vals[i]) own_lent(vals[i]); // the shell with loans in the fields is its own: the machine code reads the fields by displacement
       raw[i] = reinterpret_cast<uint64_t>(cells[i]);
-    } else { // array: pointer to array_v caller (alias) or to a copy
-      value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
+    } else { // array: pointer to array_v caller (alias, field with local root) or to a copy
+      value * cell = place_of(i);
       cells[i] = cell && cell->is<array_v>() ? cell : &vals[i];
+      if(cells[i] == &vals[i] && vals[i].as<array_v>().borrowed) { // Loan without its cell (root - link): changes - interpreter
+        if(writes_param(f, i)) return std::nullopt;
+        vals[i].as<array_v>().own();
+      }
       raw[i] = reinterpret_cast<uint64_t>(&cells[i]->as<array_v>());
     }
   }
@@ -889,12 +913,6 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
                                                                                                               : "require_failed";
     fail_rt(type, what, db[at].where);
   }
-  // field to variable parameter: the machine code changed the copy - in the caller field (as in invoke)
-  for(uint32_t i = 0; i < vals.size() && i < args.size(); ++i)
-    if(cells[i] == &vals[i] && db.is_member(args[i]) && writes_param(f, i)) {
-      flow w = assign(args[i], "=", vals[i], env, 0, db[args[i]].where);
-      if(!w.normal()) fail("запись поля-аргумента после вызова не завершилась", db[args[i]].where);
-    }
   emit({report_event::instance, key, {}, {}, {}, {}});
   switch(code->result) {
     case jt::i64_: return ok(value(int64_t(bits)));

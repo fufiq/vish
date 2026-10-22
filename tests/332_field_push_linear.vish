@@ -1,0 +1,27 @@
+// args: 40000
+// out: 40001 40001 40001 40001 40001
+// machine
+// Поле-аргумент изменяемого параметра — алиас места, без копии (§6.2): 
+// push в поле, в поле элемента массива структур, в поле поля и в
+// элемент массива массивов — линейно во всех движках. Было: поле копировалось на входе и
+// писалось на выходе — квадрат (4000 строк — 2,9 с; здесь 40000 — сотни секунд); t[k].push не
+// принимался. Замер — bench/field_push.sh.
+struct client { array xs; i64 n; }
+struct table { array names; array ids; }
+struct deep { table t; }
+add(ys, y) { ys.push(y); }
+main() {
+  n = parse_int(args[1]).value;
+  t = table{array{"a"}, array{0}};
+  cl = array{client{array{"x"}, 0}, client{array{"y"}, 0}};
+  d = deep{table{array{"b"}, array{0}}};
+  g = array{array{0}, array{1}};
+  for(i : range(n)) {
+    t.names.push("s");
+    add(t.ids, i);
+    cl[1].xs.push("s");
+    d.t.names.push("s");
+    g[1].push(i);
+  }
+  print(t.names.size, t.ids.size, cl[1].xs.size, d.t.names.size, g[1].size);
+}
