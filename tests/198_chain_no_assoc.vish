@@ -1,0 +1,13 @@
+// check-error: цепочка операторов неоднозначна
+// out: 1 7 24
+// error: цепочка операторов неоднозначна
+// Without associativity, there is still a brute force of types: a single parsing is
+// taken (i % 2 = = 0), the same associative one tree, and `a - b - c` without
+// [[associative]] in context is the “parent” error.
+pick(i) => if(i % 2 == 0) 1 else 2;
+
+main() {
+  print(pick(4), (10 - 2) - 1, 2 * 3 * 4);
+  a = 10;
+  print(a - 3 - 2);
+}

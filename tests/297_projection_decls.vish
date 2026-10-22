@@ -1,0 +1,43 @@
+// Record Ads (§4.5, step 11.3): The second language announces the same features and struct.
+// 
+//  и 
+// 
+// entries - in geo/words.vish : define #name (params, ...) {body} , define #name (params,
+// ...) means {e} ; record #name {fields} ; #name - bare name, #params - parameters, {fields}
+// - fields like struct. What the second language does not know (operator, clauses, type of
+// result), is printed in the basic language - the same node.
+// fmt-stable
+// fmt-has: define sq(x) means x * x;
+// fmt-has: define total(xs) {
+// fmt-has: record point { f64 x; f64 y = 2.0; }
+// fmt-has: record size { i64 w; i64 h; }
+// fmt-has: define each(n) means n + 1;
+// fmt-has: operator (point a) + (point b) => point{a.x + b.x, a.y + b.y};
+// fmt-has: i64 half(i64 v) => v / 2;
+// fmt-has:   define twice(i64 v) means v + v;
+// jit-compiled: total
+// machine
+// out: 9 6 8 3.0 12
+// out: 4.0 3 2
+use geo.words;
+
+define sq(x) means x * x;
+define total(xs) {
+  s = 0;
+  each (x) in (xs) s += x;
+  s
+}
+record point { f64 x; f64 y = 2.0; }
+struct size { i64 w; i64 h; } // baseline
+operator (point a) + (point b) => point{a.x + b.x, a.y + b.y};
+i64 half(i64 v) => v / 2; // Type of result - the second language is not able to
+define each(n) means n + 1; // Name is the word projection: then each is the function
+
+main() {
+  define twice(i64 v) means v + v;
+  p = point{1.0};
+  s = size{3, 4};
+  print(sq(3), total(array{1, 2, 3}), twice(4), p.x + p.y, s.w * s.h);
+  q = p + p;
+  print(q.y, each(2), half(4));
+}

@@ -1,0 +1,26 @@
+// args: 3
+// out: 12 9
+// out: overflow
+// out: 9223372036854775807 1
+// fmt-stable
+// store-roundtrip
+// machine
+// machine-dump: 120
+// Context Checked (§8.2, M2d): Overrides the operations for everything that is
+// executed in the block, including the functions invoked.
+// 
+// 
+// Outside context, arithmetic is modular (§5.8).
+sq(x) => x * x;
+
+big(n) => 9223372036854775807 - (n - n);
+
+main() {
+  n = parse_int(args[1]).value;
+  a = checked { (n * 4) + 0 };
+  b = checked { sq(n) };
+  print(a, b);
+  r = try { checked { sq(big(n)) } } catch(overflow e) { -1 };
+  if(r == -1) print("overflow");
+  print(big(n), sq(big(n)));
+}

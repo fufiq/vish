@@ -4,7 +4,7 @@
 // is the internal element of the module: in the base and in the execution, but not in the
 // presentation of the module.
 //
-// program: editor_overloads.tz
+// program: editor_overloads.vish
 open_view module
 // F12 on call: selected in instance - first, then all overload
 pointer 1 @area:3 0 1

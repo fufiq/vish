@@ -1,0 +1,7 @@
+// error: в скобках клаузы catch — только имена: catch(e)
+// catch - block with parameter (author, ): in brackets the name
+// (and, if necessary, type), not the expression.
+main() {
+  v = try { throw 1; 0 } catch(e + 1) { 2 };
+  print(v);
+}

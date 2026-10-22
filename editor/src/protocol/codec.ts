@@ -1,6 +1,6 @@
-// Common VM protocol codec by schema (`tz schema`): one reader and one writer for all
-// messages, without code for each type - as writer/reader on reflection in VM
-// (include/tz/serial.hpp). .
+// Common VM protocol codec by schema (`vish schema`): one reader and one writer for
+// all messages, without code for each type - as writer/reader on reflection in VM
+// (include/vish/serial.hpp). .
 //
 //
 // Frame: u32 body length; body u32 message type number, then field in order. Numbers

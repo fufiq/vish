@@ -1,0 +1,33 @@
+// out: 42
+// out: point{x: 1, y: 2, w: 7}
+// out: 15 105
+// fmt-stable
+// store-roundtrip
+// machine
+// Код как значение и порождение сущностей (шаг 1 расширений, §7.3–7.4):
+// quote { объявления } с вставкой #x 
+// emit(код) регистрирует объявления, модульные ct { }
+// исполняются при элаборации в порядке модуля (D14). 
+//.
+struct point { i64 x; i64 y; }
+
+// function generating code: n is the value inserted into the body
+make_adder(name_n) => quote { add_n(x) => x + #name_n; };
+
+ct {
+  k = 40 + 2;
+  emit(quote { answer() => #k; });
+  emit(quote { point { i64 w = 7; } });   // entity extension
+  emit(make_adder(5));
+}
+
+ct {
+  big = 100;
+  emit(quote { add_big(x) => add_n(x) + #big; });   // seeth
+}
+
+main() {
+  print(answer());
+  print(point{1, 2});
+  print(add_n(10), add_big(0));
+}

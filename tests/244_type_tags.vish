@@ -1,0 +1,12 @@
+// out: i64 int 5
+// machine
+// Числа и строки — теги прелюдии над машинными представлениями (§5.8, O15, M6 шаг 9):
+// 
+// The name i64 gives prelude (struct i64 { __int64 value; }); the second type above the same
+// representation is its type (2026-10-17, test 269): literal 1 is still i64.
+//
+struct int { __int64 value; }
+
+main() {
+  print(typeof(1), typeof(int{5}), int{5}.value);
+}

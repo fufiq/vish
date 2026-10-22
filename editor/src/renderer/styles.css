@@ -1,38 +1,38 @@
 :root {
   color-scheme: light dark;
-  --tz-popup: #f1eee8;
-  --tz-selected: #e2dccf;
-  --tz-detail: #8a847c;
-  --tz-type: #4d7c8a;
-  --tz-value: #7c5a8a;
-  --tz-error: #c0392b;
-  --tz-bg: #fbfaf7;
-  --tz-fg: #1f1d1a;
-  --tz-syntax: #6b6660;
-  --tz-caret: #c2410c;
-  --tz-status: #8a847c;
+  --vish-popup: #f1eee8;
+  --vish-selected: #e2dccf;
+  --vish-detail: #8a847c;
+  --vish-type: #4d7c8a;
+  --vish-value: #7c5a8a;
+  --vish-error: #c0392b;
+  --vish-bg: #fbfaf7;
+  --vish-fg: #1f1d1a;
+  --vish-syntax: #6b6660;
+  --vish-caret: #c2410c;
+  --vish-status: #8a847c;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --tz-bg: #1b1a18;
-    --tz-fg: #e8e4dc;
-    --tz-syntax: #9a948a;
-    --tz-caret: #fb923c;
-    --tz-status: #7d776e;
-    --tz-popup: #262422;
-    --tz-selected: #3a3631;
-    --tz-detail: #8f887e;
-    --tz-type: #7fb3c2;
-    --tz-value: #c29fd6;
-    --tz-error: #ef6b5b;
+    --vish-bg: #1b1a18;
+    --vish-fg: #e8e4dc;
+    --vish-syntax: #9a948a;
+    --vish-caret: #fb923c;
+    --vish-status: #7d776e;
+    --vish-popup: #262422;
+    --vish-selected: #3a3631;
+    --vish-detail: #8f887e;
+    --vish-type: #7fb3c2;
+    --vish-value: #c29fd6;
+    --vish-error: #ef6b5b;
   }
 }
 html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--tz-bg);
-  color: var(--tz-fg);
+  background: var(--vish-bg);
+  color: var(--vish-fg);
 }
 body {
   display: flex;
@@ -58,7 +58,7 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border-left: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
 }
 #side-wrap[hidden] {
   display: none;
@@ -67,13 +67,13 @@ body {
   display: flex;
   gap: 4px;
   padding: 6px 16px;
-  border-bottom: 1px solid color-mix(in srgb, var(--tz-fg) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--vish-fg) 10%, transparent);
   overflow-x: auto;
 }
 #layers button {
   font: inherit;
   font-size: 12px;
-  color: var(--tz-status);
+  color: var(--vish-status);
   background: none;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -82,17 +82,17 @@ body {
   white-space: nowrap;
 }
 #layers button[selected] {
-  color: var(--tz-fg);
-  border-color: color-mix(in srgb, var(--tz-fg) 20%, transparent);
-  background: var(--tz-popup);
+  color: var(--vish-fg);
+  border-color: color-mix(in srgb, var(--vish-fg) 20%, transparent);
+  background: var(--vish-popup);
 }
 #layers button[data-kind]::after {
   content: ' ' attr(data-kind);
-  color: var(--tz-type);
+  color: var(--vish-type);
 }
 #goto {
   padding: 6px 24px;
-  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
 }
 #goto[hidden] {
   display: none;
@@ -101,8 +101,8 @@ body {
   width: 100%;
   font: inherit;
   color: inherit;
-  background: var(--tz-popup);
-  border: 1px solid color-mix(in srgb, var(--tz-fg) 20%, transparent);
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 20%, transparent);
   border-radius: 4px;
   padding: 4px 8px;
   outline: none;
@@ -119,20 +119,20 @@ body {
 #status {
   padding: 4px 24px;
   font-size: 12px;
-  color: var(--tz-status);
-  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  color: var(--vish-status);
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
 }
-.tz-caret {
+.vish-caret {
   position: absolute;
   width: 2px;
-  background: var(--tz-caret);
+  background: var(--vish-caret);
   pointer-events: none;
 }
 [noted] {
-  text-decoration: wavy underline var(--tz-caret);
+  text-decoration: wavy underline var(--vish-caret);
   text-underline-offset: 3px;
 }
-.tz-complete {
+.vish-complete {
   position: absolute;
   margin: 2px 0 0;
   padding: 4px 0;
@@ -140,45 +140,45 @@ body {
   min-width: 220px;
   max-height: 260px;
   overflow: auto;
-  background: var(--tz-popup);
-  border: 1px solid color-mix(in srgb, var(--tz-fg) 14%, transparent);
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 14%, transparent);
   border-radius: 4px;
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.25);
   white-space: nowrap;
   z-index: 1;
 }
-.tz-complete li {
+.vish-complete li {
   display: flex;
   justify-content: space-between;
   gap: 24px;
   padding: 1px 10px;
 }
-.tz-complete li[selected] {
-  background: var(--tz-selected);
+.vish-complete li[selected] {
+  background: var(--vish-selected);
 }
-.tz-complete .detail {
-  color: var(--tz-detail);
+.vish-complete .detail {
+  color: var(--vish-detail);
   font-size: 12px;
 }
-.tz-node[error] {
-  text-decoration: wavy underline var(--tz-error);
+.vish-node[error] {
+  text-decoration: wavy underline var(--vish-error);
   text-underline-offset: 3px;
 }
-.tz-node[error][error-range] {
+.vish-node[error][error-range] {
   text-decoration: none;
 }
 /* место ошибки внутри узла (сырой блок: атом и смещение) — VM шлёт from/to */
-::highlight(tz-error) {
-  text-decoration: wavy underline var(--tz-error);
+::highlight(vish-error) {
+  text-decoration: wavy underline var(--vish-error);
 }
 #status[error] {
-  color: var(--tz-error);
+  color: var(--vish-error);
 }
-.tz-node[dead] {
+.vish-node[dead] {
   opacity: 0.4;
 }
 #run {
-  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
   display: grid;
   grid-template-columns: minmax(200px, 1fr) 2fr;
   gap: 12px;
@@ -198,8 +198,8 @@ body {
   font: inherit;
   font-size: 13px;
   color: inherit;
-  background: var(--tz-popup);
-  border: 1px solid color-mix(in srgb, var(--tz-fg) 20%, transparent);
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 20%, transparent);
   border-radius: 4px;
   padding: 4px 8px;
   resize: vertical;
@@ -210,14 +210,14 @@ body {
   font-size: 13px;
 }
 #run-output[error] {
-  color: var(--tz-error);
+  color: var(--vish-error);
 }
-.tz-node[current] {
-  background: color-mix(in srgb, var(--tz-caret) 18%, transparent);
+.vish-node[current] {
+  background: color-mix(in srgb, var(--vish-caret) 18%, transparent);
   border-radius: 3px;
 }
 #merge {
-  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
   padding: 8px 24px;
   max-height: 40vh;
   overflow: auto;
@@ -233,12 +233,12 @@ body {
 }
 .conflict .title {
   grid-column: 1 / -1;
-  color: var(--tz-error);
+  color: var(--vish-error);
 }
 .conflict pre {
   margin: 4px 0 0;
   padding: 6px 8px;
-  background: var(--tz-popup);
+  background: var(--vish-popup);
   border-radius: 4px;
   font-size: 13px;
   overflow: auto;
@@ -246,64 +246,64 @@ body {
 .conflict button {
   font: inherit;
   font-size: 12px;
-  color: var(--tz-fg);
-  background: var(--tz-selected);
+  color: var(--vish-fg);
+  background: var(--vish-selected);
   border: none;
   border-radius: 4px;
   padding: 2px 8px;
   cursor: pointer;
 }
 /* выделение — прямоугольники под текстом (слой в начале панели) */
-.tz-selection {
+.vish-selection {
   position: absolute;
   inset: 0;
   pointer-events: none;
 }
-.tz-selection > div {
+.vish-selection > div {
   position: absolute;
-  background: color-mix(in srgb, var(--tz-caret) 22%, transparent);
+  background: color-mix(in srgb, var(--vish-caret) 22%, transparent);
 }
 /* подсказки: наведения и набора */
-.tz-tip {
+.vish-tip {
   position: absolute;
   z-index: 3;
   max-width: 60ch;
   padding: 4px 8px;
-  background: var(--tz-popup);
-  border: 1px solid color-mix(in srgb, var(--tz-fg) 18%, transparent);
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 18%, transparent);
   border-radius: 4px;
   font-size: 12px;
   white-space: pre-wrap;
   box-shadow: 0 2px 8px color-mix(in srgb, black 18%, transparent);
 }
-.tz-tip[hidden] {
+.vish-tip[hidden] {
   display: none;
 }
-.tz-hint {
+.vish-hint {
   transform: translateY(calc(-100% - 2px));
 }
-.tz-tip .line {
+.vish-tip .line {
   display: flex;
   gap: 8px;
 }
-.tz-tip .kind {
-  color: var(--tz-detail);
+.vish-tip .kind {
+  color: var(--vish-detail);
   min-width: 9ch;
 }
-.tz-tip .line[data-kind='ошибка'] .text {
-  color: var(--tz-error);
+.vish-tip .line[data-kind='ошибка'] .text {
+  color: var(--vish-error);
 }
-.tz-tip .line[data-kind='тип'] .text {
-  color: var(--tz-type);
+.vish-tip .line[data-kind='тип'] .text {
+  color: var(--vish-type);
 }
-.tz-tip .line.link {
+.vish-tip .line.link {
   cursor: pointer;
 }
-.tz-tip .line.link .text {
+.vish-tip .line.link .text {
   text-decoration: underline dotted;
 }
-.tz-tip b {
-  color: var(--tz-caret);
+.vish-tip b {
+  color: var(--vish-caret);
 }
 /* инспектор AST: панель дерева (F2) */
 #ast {
@@ -312,7 +312,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
   font-size: 12px;
 }
 #ast[hidden] {
@@ -320,8 +320,8 @@ body {
 }
 #ast .head {
   padding: 6px 10px;
-  color: var(--tz-status);
-  border-bottom: 1px solid color-mix(in srgb, var(--tz-fg) 10%, transparent);
+  color: var(--vish-status);
+  border-bottom: 1px solid color-mix(in srgb, var(--vish-fg) 10%, transparent);
 }
 #ast .tree {
   flex: 1;
@@ -337,29 +337,29 @@ body {
   line-height: 1.6;
 }
 #ast .row:hover {
-  background: var(--tz-popup);
+  background: var(--vish-popup);
 }
 #ast .row[path] {
-  background: color-mix(in srgb, var(--tz-caret) 8%, transparent);
+  background: color-mix(in srgb, var(--vish-caret) 8%, transparent);
 }
 #ast .row[focus] {
-  background: color-mix(in srgb, var(--tz-caret) 20%, transparent);
+  background: color-mix(in srgb, var(--vish-caret) 20%, transparent);
 }
 #ast .role {
-  color: var(--tz-detail);
+  color: var(--vish-detail);
 }
 #ast .kind {
-  color: var(--tz-value);
+  color: var(--vish-value);
 }
 #ast .types {
-  color: var(--tz-type);
+  color: var(--vish-type);
 }
 #ast .rule {
-  color: var(--tz-caret);
+  color: var(--vish-caret);
   text-decoration: underline dotted;
 }
 #ast .expand {
-  border-top: 1px solid color-mix(in srgb, var(--tz-fg) 12%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
   padding: 6px 10px;
   max-height: 40%;
   overflow: auto;
@@ -374,34 +374,34 @@ body {
 }
 #ast .expand .kind {
   min-width: 10ch;
-  color: var(--tz-detail);
+  color: var(--vish-detail);
 }
 #ast .expand .line.link {
   cursor: pointer;
 }
 /* режим структуры (Ctrl+Shift+A): рамки узлов, подсвеченный узел */
-#panes.structure .tz-node {
-  outline: 1px solid color-mix(in srgb, var(--tz-value) 28%, transparent);
+#panes.structure .vish-node {
+  outline: 1px solid color-mix(in srgb, var(--vish-value) 28%, transparent);
   outline-offset: -1px;
 }
-#panes.structure .tz-node:hover {
-  outline-color: var(--tz-caret);
+#panes.structure .vish-node:hover {
+  outline-color: var(--vish-caret);
 }
-.tz-node[inspected] {
-  background: color-mix(in srgb, var(--tz-caret) 22%, transparent);
-  outline: 1px solid var(--tz-caret);
+.vish-node[inspected] {
+  background: color-mix(in srgb, var(--vish-caret) 22%, transparent);
+  outline: 1px solid var(--vish-caret);
 }
-.tz-structure-label {
+.vish-structure-label {
   position: fixed;
   z-index: 5;
   padding: 2px 6px;
   font-size: 11px;
-  background: var(--tz-popup);
-  border: 1px solid color-mix(in srgb, var(--tz-fg) 18%, transparent);
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 18%, transparent);
   border-radius: 3px;
   pointer-events: none;
   white-space: nowrap;
 }
-.tz-structure-label[hidden] {
+.vish-structure-label[hidden] {
   display: none;
 }

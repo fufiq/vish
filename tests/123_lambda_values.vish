@@ -1,0 +1,19 @@
+// out: 39
+// machine
+// jit-compiled: work
+// Lambda values in machine code - semantic inlining: the lambda argument is associated with the
+// parameter as the definition code, the lambda in the variable as the local function; capture -
+// the definition location (acc changes by reference), the context of parsing - the call location.
+apply2(g, i64 x) => g(g(x));
+each(i64 n, body) {
+  for(i : range(n)) body(i);
+}
+work(i64 n) {
+  acc = 0;
+  scale = (i64 v) => v * 3;
+  each(n, (i64 i) => {
+    acc = acc + scale(i);
+  });
+  acc + apply2((i64 z) => z + 10, 1)
+}
+main() { print(work(4)); }

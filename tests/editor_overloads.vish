@@ -1,0 +1,14 @@
+// The program for the 71_editor_goto.wire script (itself a regular test).
+// machine
+// stdin: 1.5 2
+// out: 4
+// out: 2.25
+area(i64 n) => n * n;
+
+area(f64 x) => x * x;
+
+main() {
+  xs = read_floats(stdin);
+  print(area(xs.size));
+  print(area(xs[0]));
+}

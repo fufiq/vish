@@ -1,0 +1,9 @@
+// error: native twice(i64) не собран в VM
+// native-body program not assembled in VM: VM calls that reassemble.
+twice(i64 x) => native "cpp" {
+  return value(#x.as<int64_t>() * 2);
+};
+
+main() {
+  print(twice(2));
+}

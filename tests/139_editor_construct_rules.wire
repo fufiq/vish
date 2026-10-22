@@ -3,7 +3,7 @@
 // ad in the body of the structure re-arranges its calls (elements after the announcement).
 //  
 //;.
-// program: editor_construct.tz
+// program: editor_construct.vish
 open_view module
 [2] open_view module
 // sqlish line: `~` is the sqlish body rule

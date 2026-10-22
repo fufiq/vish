@@ -1,0 +1,49 @@
+// store-roundtrip
+// args: 5
+// stdin: 1 2 3
+// stdin: 4 5 6
+// out: 32.0
+// out: 32.0
+// out: 14
+// machine
+// residual: 5
+// residual-has: print(32.0);
+// residual-has: print(14);
+// residual-has: s = 0.0;
+// residual-has: print(dot(xs, ys));
+// residual-lacks:  u = 
+// residual-lacks: args.size > 1
+// residual-lacks: unless
+// residual-lacks: try(
+// The known folded, branch with the known condition - in a branch,
+// dead removed.
+module demo;
+
+dot(a, b) {
+  require(a.size == b.size);
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
+  s
+}
+
+try(expr e) {
+  r = e;
+  if(r.is_err()) return(caller) r;
+  r.value
+}
+
+unless(c, expr body) { if(!c) body; }
+
+main() {
+  u = array{1.0, 2.0, 3.0};
+  v = array{4.0, 5.0, 6.0};
+  print(dot(u, v));
+  xs = read_floats(stdin);
+  ys = read_floats(stdin);
+  print(dot(xs, ys));
+  w = if(args.size > 1) array{1, 2, 3} else array{1.0, 2.0, 3.0};
+  print(dot(w, w));
+  p = try(parse_int(args[1]));
+  q = parse_int(args[1])?;
+  unless(p == q) { print("different"); }
+}

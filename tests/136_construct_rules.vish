@@ -1,0 +1,66 @@
+// out: 12 10 42 7
+// out: 2 6 16
+// out: 2 4 3
+// machine
+// machine-dump: 40
+// fmt-stable
+// store-roundtrip
+// jit-stats: вызов sqlish: правила тела для блоков конструкции — интерпретатор
+// The design specifies the parsing rules of its block from its body (user decision
+// 2026-10-02): syntax, operator, and structures declared in the body operate in the block
+// transmitted to it at the call point; external place rules are inherited, can be
+// supplemented and redefined.
+// 
+// 
+// 
+// The execution of the block sees the rules of the body declared for its calculation (the
+// layer above the area of the caller); the other body is not visible to the block.
+operator (a) <+> (b) => a + b; // rule of place - inherited by blocks
+
+sqlish(expr body) {
+  syntax pick (x) => x * 2;
+  operator (a) ~ (b) => (a * 10) + b;
+  body
+}
+
+// machine code of a block with body rules - interpreter (honest failure of the compiler)
+calc(i64 n) => sqlish { n ~ 2 };
+
+// design declared in the body - block construction: twice { … } inside loop2 { … }
+loop2(expr body) {
+  twice(expr b) => {
+    b;
+    b;
+  };
+  body
+}
+
+// overdefinition: + in the block - your own (lexically, only the text of the block)
+upside(expr body) {
+  operator (a) + (b) => sub(a, b);
+  body
+}
+
+// tail-instruction and block with parameter - also blocks of construction
+each(xs, expr body) {
+  operator (a) ** (b) => a * (b * b);
+  for(k : range(xs.size)) body(xs[k]);
+}
+
+main() {
+  r = sqlish { 1 ~ 2 };
+  q = sqlish { pick (5) };
+  w = sqlish { (3 <+> 4) ~ 2 };
+  print(r, q, calc(4), 3 <+> 4);
+  n = 0;
+  loop2 { twice { n += 1; } }
+  m = 0;
+  loop2 {
+    twice() m += 1;
+    twice { m += 1; }
+  }
+  print(w - 70, upside { 7 + 1 }, upside { 7 } + 1 + 8);
+  s = 0;
+  each(x : array{1, 2}) s += x ** 1;
+  print(n, m, s);
+}

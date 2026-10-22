@@ -2,7 +2,7 @@
 // subblock is part of the text of the block, the atoms are in it); the result (code_parse of the
 // subblock by the standard parsing) is recalculated at the next analysis. Broken brackets of the
 // subblock - a mark in place inside the block; fixed - again the block.
-// program: 173_raw_sub_blocks.tz
+// program: 173_raw_sub_blocks.vish
 open_view module
 run
 // expect: output text="first\n12\nsecond\n5\n7\n" ok=true

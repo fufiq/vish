@@ -1,0 +1,20 @@
+// out: 177073
+// machine
+// jit-compiled: walk
+// Recursion of a local function in machine code is a subroutine with its own frame; capture is
+// a frame encompassing through the register (count changes on the link, the array is captured):
+// The first challenge is embedding, recursive is calling the subroutine.
+//
+walk(i64 n) {
+  count = 0;
+  xs = array{5, 1, 4};
+  fib(i64 k) => {
+    count += 1;
+    if(k < 2) return k;
+    fib(k - 1) + fib(k - 2)
+  };
+  depth_sum(i64 i) => if(i >= xs.size) 0 else xs[i] + depth_sum(i + 1);
+  half(f64 x, i64 k) => if(k == 0) x else half(x / 2.0, k - 1);
+  fib(n) + (count * 1000) + depth_sum(0) + i64(half(64.0, 3))
+}
+main() { print(walk(10)); }

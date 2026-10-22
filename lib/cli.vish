@@ -1,0 +1,283 @@
+// The vish launch line is in the language (step 4 transfer tuling). The module is built into the assembly; it
+// is loaded by every vish team except the vish native bootstrap.
+module cli;
+use tools;
+
+// --- commands vish: start line (VM - the commands themselves on the program, cli.hpp) ---
+// 
+// The base of the command is one: prelude, this module and the .vish program (the program
+// does not see it) - . vish native - bootstrap, in C++: collects the primitives themselves
+// (`vish native` before them).
+
+// process string (""" and false - end); output - now
+read_line() => native "cpp" {
+  std::string line;
+  bool ok = os::host_stdin().next(line);
+  return value(array_v::of({value(ok), value(std::move(line))}));
+};
+flush_out() => native "cpp" {
+  std::fflush(stdout);
+  return value(int64_t(0));
+};
+// team program (.vish - to the team database, .vishdb - its database on the journal): number; errors in
+// parsing the text; disassembled; in .vishdb; projection: array{text, errors, whether the projection module
+// was found}; after elaboration (vish fmt --ct); tree; cut
+prog_open(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(-1)));
+  return value(cli_now->open(std::string((a[0]).as<str_v>().view())));
+};
+prog_errors(i64 p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(cli_now->errors((a[0]).as<int64_t>()));
+};
+prog_parsed(i64 p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(cli_now->at((a[0]).as<int64_t>()).errors.empty());
+};
+prog_save(i64 p, str path) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & x = cli_now->at((a[0]).as<int64_t>());
+  save_db(*x.db, x.root, std::string((a[1]).as<str_v>().view()));
+  return value(int64_t(0));
+};
+prog_fmt(i64 p, str key) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto [text, errs, ok] = cli_now->fmt((a[0]).as<int64_t>(), std::string((a[1]).as<str_v>().view()));
+  return value(array_v::of({value(std::move(text)), value(std::move(errs)), value(ok)}));
+};
+prog_fmt_ct(i64 p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = cli_now->at((a[0]).as<int64_t>());
+  return value(elaborated_text(*x.db, x.root, x.path));
+};
+prog_ast(i64 p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = cli_now->at((a[0]).as<int64_t>());
+  return value(dumper(*x.db).dump(x.root));
+};
+prog_slice(i64 p, str fn, str var) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(std::string()));
+  auto & x = cli_now->at((a[0]).as<int64_t>());
+  return value(slice_view(*x.db).print(x.root, std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view())));
+};
+// VM session over program: number
+prog_session(i64 p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(-1)));
+  return value(tools_host->session_of(cli_now->session((a[0]).as<int64_t>())));
+};
+// Execute main(): interpreter (JIT, AArch64 in qemu, instance and statistics in stderr); process
+// machine (dump after n steps in file); check; residual - output code
+prog_run(i64 p, bool instances, bool jit, bool stats, bool a64, args) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(int64_t(0)));
+  return value(int64_t(cli_now->run((a[0]).as<int64_t>(), (a[1]).as<bool>(), (a[2]).as<bool>(), (a[3]).as<bool>(), (a[4]).as<bool>(), strings_of(a[5]))));
+};
+prog_machine(i64 p, i64 n, str dump, args) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(int64_t(0)));
+  return value(int64_t(cli_now->machine((a[0]).as<int64_t>(), uint64_t((a[1]).as<int64_t>()), std::string((a[2]).as<str_v>().view()), strings_of(a[3]))));
+};
+prog_check(i64 p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(cli_now->check((a[0]).as<int64_t>())));
+};
+prog_residual(i64 p, input, args) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(int64_t(0)));
+  return value(int64_t(cli_now->residual((a[0]).as<int64_t>(), strings_of(a[1]), strings_of(a[2]))));
+};
+// VM for the editor on the Unix socket - forever; editor module - up to the program (its journal - as
+// without an editor)
+prog_serve(i64 p, str socket) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  cli_now->serve((a[0]).as<int64_t>(), std::string((a[1]).as<str_v>().view()));
+};
+load_editor_module() => native "cpp" {
+  load_editor(cli_now->db);
+  return value(int64_t(0));
+};
+// resume the process from the dump (in another VM); journal base text; diagram of the editor's protocol
+resume_dump(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(resume_dump(std::string((a[0]).as<str_v>().view()))));
+};
+journal_text(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  node_id root;
+  return value(describe_journal(read_journal(std::string((a[0]).as<str_v>().view()), root)));
+};
+proto_schema() => native "cpp" { return value(proto::schema()); };
+
+// The key tuning module (tests, versions) - to the command base, if it is not there, and its function fn
+// with the words args: exit code. The team only loads what it needs.
+run_module(str key, str fn, args) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(int64_t(0)));
+  return value(int64_t(cli_now->run_module(std::string((a[0]).as<str_v>().view()), std::string((a[1]).as<str_v>().view()), strings_of(a[2]))));
+};
+// vish vm <program>: commands from stdin, output each - after "> command"
+vm_loop(i64 s) {
+  done = false;
+  while(!done) {
+    array{ok, line} = read_line();
+    if(!ok || (line == "quit")) done = true;
+    else if((line != "") && !starts_with(line, "//")) {
+      body = "";
+      if(starts_with(line, "edit ")) { // editing body - up to a line from one point
+        more = true;
+        while(more) {
+          array{got, l} = read_line();
+          if(!got || (l == ".")) more = false;
+          else body = (body + l) + "\n";
+        }
+      }
+      write_out(((("> " + line) + "\n") + vm_command(s, line, body)));
+      flush_out();
+    }
+  }
+  0
+}
+usage() {
+  write_err("использование (<программа> — файл .vish или база .vishdb):\n  vish fmt <программа>        каноническая текстовая проекция\n  vish fmt --ct <программа>   проекция после элаборации: мутации ct-кода и порождённое emit\n  vish fmt --projection <ключ> <программа>   проекция — модуль записей syntax (по ключу, как use)\n  vish ast <программа>        дерево AST\n  vish run [--instances] [--jit] [--jit-stats] [--a64] [--grant fs,net] <программа> [аргументы...]   исполнить main(); --a64 — код AArch64 параллельно, в qemu-aarch64; --grant — ресурсы программе (без него — «0 устройств»)\n  vish run --machine [--dump-after N файл.vishproc] <программа> [аргументы...]   машина процессов; дамп после N шагов\n  vish resume [--grant fs,net] <файл.vishproc>   возобновить процесс из дампа (в другой VM)\n  vish check <программа>      статический разбор: стадии кт/рт, расщепления, экземпляры\n  vish residual <программа> [--stdin СТРОКА]... [аргументы...]   программа для заданных входов\n  vish slice <программа> <функция> <переменная>   только то, что связано с переменной\n  vish save <файл.vish> <база.vishdb>   импортировать текст в базу (журнал на диск)\n  vish log <база.vishdb>         журнал операций базы в тексте\n  vish apply <программа> <функция> [база.vishdb]   применить функцию правки (code_rename…): новый текст, база\n  vish vm <программа>          сессия VM: команды из stdin (check, run, edit <функция> … ., report, save)\n  vish serve <программа> <сокет>   VM для редактора: протокол на Unix-сокете\n  vish schema                  схема протокола редактора (JSON)\n  vish diff <a.vishdb> <b.vishdb>  семантический дифф баз (по элементам модуля)\n  vish merge <мой.vishdb> <их.vishdb> [итог.vishdb]   трёхстороннее слияние; конфликты — слить руками\n  vish test <каталог> [--a64 | --projection <ключ>]   прогнать эталонные тесты; --projection — каждая программа в проекции разбирается в то же дерево\n");
+  2
+}
+// vish <team>...: Start line words (without vish name) - output code
+cli(args) {
+  if((args.size == 1) && (args[0] == "schema")) { // Editor's Protocol Scheme (JSON)
+    write_out(proto_schema());
+    return 0;
+  }
+  if(args.size < 2) return usage();
+  cmd = args[0];
+  at = 1;
+  projection = ""; // vish fmt --projection <key> <program>: projection - record module (§4.4)
+  if((cmd == "fmt") && (args[1] == "--ct")) { // vish fmt --ct <program >>
+    if(args.size < 3) return usage();
+    cmd = "fmt-ct";
+    at = 2;
+  } else if((cmd == "fmt") && (args[1] == "--projection")) {
+    if(args.size < 4) return usage();
+    projection = args[2];
+    at = 3;
+  }
+  if(cmd == "test") return run_module("tests", "test_command", words_from(args, 1));
+  // version (§9.4): semantic diff and trilateral .vishdb fusion
+  if((cmd == "diff") && (args.size == 3)) return run_module("versions", "diff_command", words_from(args, 1));
+  if((cmd == "merge") && (args.size >= 3)) return run_module("versions", "merge_command", words_from(args, 1));
+  if(cmd == "resume") { // The new VM resources are provided by the user.
+    k = 1;
+    if((args[1] == "--grant") && (args.size > 3)) {
+      env_set("VISH_GRANT", args[2]);
+      k = 3;
+    }
+    return resume_dump(args[k]);
+  }
+  if(cmd == "log") {
+    write_out(journal_text(args[1]));
+    return 0;
+  }
+  instances = false;
+  jit = false;
+  stats = false;
+  a64 = false;
+  machine = false;
+  dump_after = 0;
+  dump_path = "";
+  while((cmd == "run") && ((at < args.size) && starts_with(args[at], "--"))) {
+    f = args[at];
+    at += 1;
+    if(f == "--instances") instances = true;
+    else if(f == "--jit") jit = true;
+    else if(f == "--jit-stats") {
+      jit = true;
+      stats = true;
+    } else if(f == "--a64") { // code AArch64 - parallel to host, in qemu
+      jit = true;
+      a64 = true;
+    } else if(f == "--machine") machine = true;
+    else if((f == "--grant") && (at < args.size)) { // Resources are provided by the user: fs,net
+      env_set("VISH_GRANT", args[at]);
+      at += 1;
+    } else if((f == "--dump-after") && ((at + 1) < args.size)) { // -dump-after N file.vishproc
+      machine = true;
+      dump_after = number_of(args[at]);
+      dump_path = args[at + 1];
+      at += 2;
+    } else return usage();
+  }
+  if(at >= args.size) return usage();
+  if((cmd == "serve") && !ends_with(args[at], ".vishdb") && !ends_with(args[at], ".tzdb")) load_editor_module();
+  p = prog_open(args[at]);
+  at += 1;
+  write_err(prog_errors(p));
+  parsed = prog_parsed(p);
+  if(cmd == "save") {
+    if(at >= args.size) return usage();
+    prog_save(p, args[at]);
+    return if(parsed) 0 else 1;
+  }
+  if(cmd == "fmt") {
+    array{shown, errs, ok} = prog_fmt(p, projection);
+    if(!ok) {
+      write_err(errs);
+      return 1;
+    }
+    write_out(shown);
+    write_err(errs);
+    return if(parsed) 0 else 1;
+  }
+  if(cmd == "fmt-ct") { // after elaboration (ct code mutation generated by emit)
+    if(!parsed) return 1;
+    write_out(prog_fmt_ct(p));
+    return 0;
+  }
+  if(cmd == "ast") {
+    write_out(prog_ast(p));
+    return if(parsed) 0 else 1;
+  }
+  if(cmd == "slice") {
+    if((at + 1) >= args.size) return usage();
+    sliced = prog_slice(p, args[at], args[at + 1]);
+    if(sliced == "") {
+      write_err(((("не найдены функция " + args[at]) + " или переменная ") + args[at + 1]) + "\n");
+      return 1;
+    }
+    write_out(sliced);
+    return 0;
+  }
+  if(!parsed) return 1; // We don't do the whole thing - M0
+  if(cmd == "apply") { // editing the program function in the language (§7.4): new projection, base - with journal editing
+    if(at >= args.size) return usage();
+    r = vm_command(prog_session(p), "apply " + args[at], "");
+    write_err(r);
+    if(!starts_with(r, "применена")) return 1;
+    write_out(prog_fmt(p, "")[0]);
+    if((at + 1) < args.size) prog_save(p, args[at + 1]);
+    return 0;
+  }
+  if(cmd == "vm") return vm_loop(prog_session(p));
+  if(cmd == "serve") {
+    if(at >= args.size) return usage();
+    return prog_serve(p, args[at]);
+  }
+  if((cmd == "run") && machine) return prog_machine(p, dump_after, dump_path, words_from(args, at));
+  if(cmd == "run") return prog_run(p, instances, jit, stats, a64, words_from(args, at));
+  if(cmd == "check") return prog_check(p);
+  if(cmd == "residual") {
+    input = array{};
+    extra = array{};
+    k = at;
+    while(k < args.size) {
+      if((args[k] == "--stdin") && ((k + 1) < args.size)) {
+        input.push(args[k + 1]);
+        k += 2;
+      } else {
+        extra.push(args[k]);
+        k += 1;
+      }
+    }
+    return prog_residual(p, input, extra);
+  }
+  usage()
+}

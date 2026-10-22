@@ -1,0 +1,46 @@
+// args: 3
+// out: 4 6 12 true 7 2
+// out: 3 4 1
+// machine
+// jit-compiled: pick
+// jit-compiled: sum3
+// fmt-stable
+// store-roundtrip
+// Операторы кодом (расширения, шаг 3): 
+// 
+// There are no priorities: the chain tree chooses types, [[associative]] is an
+// invariant of logic.
+struct vec { i64 x; i64 y; }
+
+// its operator over its type - overload next to the built-in
+operator (vec a) + (vec b) => vec{a.x + b.x, a.y + b.y};
+operator (vec a) * (i64 k) => vec{a.x * k, a.y * k};
+
+// Postfix with variable parameter: a++ changes place
+operator (mut i64 a)++ { a += 1; }
+
+// Types solve: (i % 2) = = 0 is a single parsing (i % (2 = 0) not instance )
+pick(i) => if(i % 2 == 0) 1 else 2;
+
+// the same associative operator in a row - one tree
+sum3(a, b, c) => a + b + c;
+
+// its design and entity, living only in its block
+[[inside(transaction)]] commit(mut log) { log += 1; }
+
+transaction(expr body) {
+  body;
+  0
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  v = vec{1, 2} + vec{n, 4};
+  w = vec{1, 2} * (n + 3);
+  print(v.x, v.y, w.y, n > 1 && pick(n) == 2, sum3(1, 2, n + 1), pick(n));
+  c = n;
+  c++;
+  log = 0;
+  transaction { commit(log); }
+  print(n, c, log);
+}

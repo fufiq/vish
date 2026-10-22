@@ -1,0 +1,8 @@
+// out: ok
+// check-error: оператор + не определён для i64 и f64
+// A branch is not executed without arguments, but a static parsing passes both
+// branches of run-time conditions and finds an error.
+main() {
+  if(args.size > 5) print(1 + 2.0);
+  print("ok");
+}

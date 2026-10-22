@@ -3,7 +3,7 @@
 // 
 //.
 // Текст один (общая логика), слой меняет метки: типы, значения, не исполняемое.
-// program: editor_layers.tz
+// program: editor_layers.vish
 open_view module
 goto 1 scale
 key 1 Enter

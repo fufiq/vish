@@ -3,7 +3,7 @@
 // revisions of the changed node former, instance cache and machine code are not reset.
 // 
 // Tune - Changes are rolled back and made again.
-// program: ct_inst_edit.tz
+// program: ct_inst_edit.vish
 run
 // expect: 300 15 7
 check

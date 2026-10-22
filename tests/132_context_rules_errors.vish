@@ -1,0 +1,46 @@
+// error: 132_context_rules_errors.vish:15:9: ошибка: ожидалось ';'
+// error: 132_context_rules_errors.vish:35:9: ошибка: ожидалось ';'
+// error: 132_context_rules_errors.vish:37:11: ошибка: ожидалось ';'
+// fmt-has: /* дыра: ожидалось ';' */ twice { n += 1; }
+// fmt-has: /* дыра: ожидалось ';' */ again { k += 100; }
+// fmt-has: /* дыра: ожидалось ';' */ again { k += 10; }
+// parsing Contexts (§4.4): The rule runs from the ad to the end of its context - no
+// higher in text or outside.
+// 
+// Not by the rules of the place, a hole.
+
+// syntax twice announced below: no record
+early() {
+  n = 0;
+  twice { n += 1; }
+  n
+}
+
+syntax twice {body} => {
+  body;
+  body;
+};
+
+// block design is not visible from outside the block
+local() {
+  k = 0;
+  {
+    i64 again(expr body) {
+      body;
+      body;
+      0
+    }
+    again { k += 1; }
+  }
+  again { k += 10; }
+  {
+    again { k += 100; }
+  }
+  k
+}
+
+main() {
+  n = 0;
+  twice { n += 1; }
+  print(early(), local(), n);
+}

@@ -3,7 +3,7 @@
 // 
 // Built-in calls are normal steps. Step - instruction after execution: the meaning
 // of its subexpressions - icons.
-// program: editor_layers.tz
+// program: editor_layers.vish
 open_view module
 trace 3
 // expect: trace active=true step=2 total=

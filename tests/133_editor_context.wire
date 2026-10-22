@@ -4,7 +4,7 @@
 // it.
 // 
 //.
-// program: editor_context.tz
+// program: editor_context.vish
 open_view module
 [2] open_view module
 // The line above the syntax twice advert: no record yet - the hole remains a hole

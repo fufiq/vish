@@ -1,0 +1,19 @@
+// out: 1
+// out: шаг
+// error: 143_mutate_runtime_error.vish:18:3: ошибка: изменение кода — только при компиляции (ct-код модуля или экземпляра)
+// check-error: изменение кода — только при компиляции
+// Changing the code - only when compiling (author's decision 2026-10-02): the code only
+// reads the execution - you can create a node and read its fields, you can change it - no.
+// 
+//.
+step() {
+  print("шаг");
+}
+
+main() {
+  x = ast.int{1};
+  print(x.value);
+  step();
+  f = code(step);
+  f.body = ast.block{};
+}

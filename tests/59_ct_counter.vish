@@ -1,0 +1,32 @@
+// args: 7
+// out: 2 1 1 3
+// out: 0
+// check: порядок инстанцирования (ct):
+// fmt-stable
+// machine
+// machine-dump: 40
+// Compile-time state of order instantiation (§7.3, M4):
+// 
+//.
+// ct-код функции исполняется один раз на экземпляр (место вызова) в
+// каноническом порядке — не зависит от того, какие ветки исполнились.
+ct govno = 0;
+
+foo() => ct {
+  govno += 1;
+  govno
+};
+bar() => ct {
+  govno += 1;
+  govno
+};
+
+main() {
+  n = parse_int(args[1]).value;
+  foo();
+  bar();
+  a = foo();
+  c = foo();
+  print(ct govno - 2, a - 2, c - 3, if(n > 100) foo() else 3); // foo in the branch is also instance (ct = 5)
+  print(0);
+}

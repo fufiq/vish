@@ -1,0 +1,3842 @@
+// Editor in language (M5 → language, 2026-10-19, author's decision: ).
+//
+// 
+// 
+// Key, pointer, input - the functions of this module: what to do, decides the code in the language. A
+// function of its own with the same name in the projection presentation or in the first program (as
+// operand_parens).
+//
+// The chains of one associative operator (a + b + c) are here in parentheses: the VM tree of such a chain
+// builds the base at the first execution by node derivatives, and the editor code does not touch the
+// program base (*my*).
+//
+// The state of views is the variables of this module (author's decision 2026-10-20): the module is a VM
+// service, its state is one on VM, live -, Cursor, selection, draft, rollback history, lists and layout -
+// here; the mechanisms above them (draft, selection of the unit per parsing, sending edits with transfer
+// of cursors, rollback) - too. VM has a language base: projection printing (layout, value), parsing text
+// unit to base, parsing facts, socket - native "cpp" primitives below. *My:* module is separate - only
+// the editor's server loads it, the programs do not disassemble it.
+//
+//
+[[service]] module editor;
+use tools; // Tuling: strings, session commands (lib/tools.vish)
+use versions; // Base version: merger (lib/versions.vish)
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Nodes are numbers (node code)
+//
+//
+struct layout {
+  str text;      // projection
+  str lead;      // the first byte of the symbol of each place ('\n' at the end is the edge of the last line)
+  array node;    // place: node, number of its piece, displacement in the piece (code points) - place in the protocol
+  array piece;
+  array offset;
+  array byte;    // byte of text
+  array nodes;   // by layout number: node
+  array up;      // by layout number: layout of the parent (-1 - root)
+  array from;    // by layout number: text places node [from, to]
+  array to;
+  array sig;     // signature of their pieces (view, texts, children, note)
+  array sub;     // Subtree signature (node, its pieces, children)
+  array first;   // node : [first, first + count] in pchild/pbyte
+  array count;
+  array pchild;  // by piece: child (-1 - text)
+  array pbyte;   // The beginning of his text in ptext
+  array plen;    // by piece: code points of text (the child has 0)
+  array pplace;  // piece by piece: his first place
+  str ptext;     // piece-writing
+  array sorted;  // node by ascending
+  array order;   // layout numbers
+  array chunk_at;   // module: by element number - byte of the beginning of its piece (-1 - not output)
+  array content_at; // - beginning of his lines
+  i64 items_end;    // end of elements (until the end of the module comments)
+  i64 draft_begin;  // Draft text [draft_begin, draft_end]
+  i64 draft_end;
+  i64 group_at;     // printed with the module draft: elements [group_at, group_at + group_count]; -1 - without
+  i64 group_count;
+}
+// Draft (author's decision 2026-10-12): the elements of the module that rule - the text exactly as
+// typed; in the representation of the function - it itself.
+struct draft {
+  bool open;
+  array items;   // elements of the draft module (representation of the function is its root)
+  code next;     // module element after draft (empty - at the end)
+  i64 source;    // Import of typed text: places node - in it
+  array blank;   // Empty parsing lines for the canon
+  array rest;    // comments after the last element - the following
+  i64 since;     // revision of the base at the opening: journal after it - one edit
+  str before;    // text of the unit before the draft (canon) - for rollback of the accepted
+  array sources; // importation
+}
+struct snapshot { str text; i64 caret; } // rollback inside the draft: text and byte of the cursor
+// Accepted editing (closed draft): elements and their text before and after - rollback and repetition of
+// accepted - editing back. *Mine*: History is edited, journal is not rewritten.
+//
+struct closed { array items; code next; str before; str after; }
+struct view {
+  i64 peer;          // client (VM number)
+  i64 id;            // presentation number
+  code root;         // module or function; empty - closed
+  str kind;          // Module - Module without internal elements; fn - one function
+  str layer;         // Presentation Layer: Key instance, "all contexts"
+  code projection;   // projection (§4.4): Module of print records and rules parsing edits; empty - default
+  layout lay;
+  i64 cursor;        // place
+  i64 anchor;        // the second end of the allocation; -1 - no
+  i64 goal;          // column for ↑/↓; -1 - no
+  bool selection_sent;
+  bool hint_shown;   // The tip of the set is shown - to hide when there is nothing
+  bool typing;       // It's a set of words: rollback in a word, not a letter.
+  bool completing;   // The list of additions (or transitions) is open
+  array items;       // Its variants (completion)
+  i64 selected;
+  i64 word_begin;    // beginning
+  array targets;     // transition list (F12, Ctrl+P): by item array {функция, сигнатура «добавить»}
+  draft d;
+  array undo;        // rollback inside the draft (snapshot)
+  array redo;
+  array done;        // Accepted amendments (closed)
+  array undone;
+}
+// client: watches the launch track (step keys - debugger) and its step
+struct client { bool debugging; i64 trace_pos; }
+// Edit the author in coordinates node (up to parsing): cursors of other clients in the same piece are
+// shifted by it, as in a conventional editor.
+struct edit_hint { i64 node; i64 piece; i64 offset; i64 removed; i64 inserted; bool valid; }
+
+views = array{};   // All representations of all customers: number - place in the array
+clients = array{}; // client number
+hint = edit_hint{-1, 0, 0, 0, 0, false};
+merge_state = no_merge(); // conflicts of the last merger before the decision of the person
+
+// --- Primitives of the base: projection printing, parsing editing, sending (in VM)
+// --------------------- Unknown in parsing argument - erased value (as in prelude), without effects.
+
+// Customer whose message is being served
+now_peer() => native "cpp" { return value(int64_t(editor_host->now_peer ? editor_host->index_of(*editor_host->now_peer) : -1)); };
+// code node by number (-1 - empty)
+node_code(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  int64_t n = (a[0]).as<int64_t>();
+  return vm.code_value(n < 0 || n >= int64_t(editor_host->session.db.size()) ? node_id{} : node_id(uint32_t(n)));
+};
+node_codes(ns) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto const & xs = (a[0]).as<array_v>();
+  array_v out;
+  for(uint32_t k = 0; k < xs.size(); ++k) out.push(vm.code_value(node_id(uint32_t(xs.get(k).as<int64_t>()))));
+  return value(std::move(out));
+};
+// base audit
+revision() => native "cpp" { return value(int64_t(editor_host->session.db.revision)); };
+// Print presentation (base of language): layout (layout) - root, module (otherwise one function),
+// projection; draft module - elements [at, at + count) text as typed (count -1 - no); draft function - its
+// text as typed (fn_source -1 - no)
+print_view(root, bool as_module, projection, i64 at, i64 count, i64 source, i64 fn_source) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  return editor_host->print_view(vm, vm.code_node(a[0], where), (a[1]).as<bool>(), editor_host->node_or_none(vm, a[2], where), (a[3]).as<int64_t>(), (a[4]).as<int64_t>(), (a[5]).as<int64_t>(), (a[6]).as<int64_t>());
+};
+// The draft module is corrected in place: print only its area (elements [at, at + count) text as typed,
+// source) and paste in the former lay layout printed with a draft of old elements. VISH_SPLICE_CHECK = 1 is a
+// complete seal reconciliation.
+print_splice(layout lay, root, projection, i64 at, old, i64 count, i64 source) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  node_list old;
+  for(uint32_t k = 0; k < (a[4]).as<array_v>().size(); ++k) old.push_back(vm.code_node((a[4]).as<array_v>().get(k), where));
+  node_id root = vm.code_node(a[1], where);
+  int64_t at = (a[3]).as<int64_t>(), count = (a[5]).as<int64_t>(), source = (a[6]).as<int64_t>();
+  value r = s.print_splice(vm, a[0], root, at, old, count, source, where);
+  static bool const check = std::getenv("VISH_SPLICE_CHECK");
+  if(check) s.splice_check(vm, r, s.print_view(vm, root, true, s.node_or_none(vm, a[2], where), at, count, source, -1));
+  return r;
+};
+// draft: the text of the elements of the module [at, at + old.size] (or root functions) to disassemble and
+// put in the base; the result is array{elements, import of text, empty lines, end comments, redisassembled}
+draft_parse(bool as_module, root, str text, old, next, i64 at, projection) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  node_list old;
+  for(uint32_t k = 0; k < (a[3]).as<array_v>().size(); ++k) old.push_back(vm.code_node((a[3]).as<array_v>().get(k), where));
+  return s.draft_parse(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where));
+};
+// Canon of draft in the database: empty lines, end comments, keys - one edit journal
+draft_close(bool as_module, i64 at, i64 count, next, blank, rest, i64 since, sources, i64 source) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  std::vector<uint32_t> blank, sources;
+  std::vector<std::string> rest;
+  for(uint32_t k = 0; k < (a[4]).as<array_v>().size(); ++k) blank.push_back(uint32_t((a[4]).as<array_v>().get(k).as<int64_t>()));
+  for(uint32_t k = 0; k < (a[5]).as<array_v>().size(); ++k) rest.emplace_back((a[5]).as<array_v>().get(k).as<str_v>().view());
+  for(uint32_t k = 0; k < (a[7]).as<array_v>().size(); ++k) sources.push_back(uint32_t((a[7]).as<array_v>().get(k).as<int64_t>()));
+  s.draft_close((a[0]).as<bool>(), uint32_t((a[1]).as<int64_t>()), uint32_t((a[2]).as<int64_t>()), s.node_or_none(vm, a[3], where), blank, rest, uint64_t((a[6]).as<int64_t>()), sources, uint32_t((a[8]).as<int64_t>()));
+  return value(int64_t(0));
+};
+// unit of parsing (0 - block, 1 - module element, 2 - module) - edit text: array {разобрана, переразобранные}
+unit_edit(n, i64 kind, str text, projection) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  return s.unit_edit(vm, vm.code_node(a[0], where), (a[1]).as<int64_t>(), std::string((a[2]).as<str_v>().view()), s.node_or_none(vm, a[3], where));
+};
+// raw block - text editing; false - not understood
+raw_edit(n, str text) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  return value(editor_host->raw_edit(vm.code_node(a[0], where), std::string((a[1]).as<str_v>().view())));
+};
+// function representation node - a hole with editing text
+fn_hole(n, str text) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  editor_host->fn_hole(vm.code_node(a[0], where), std::string((a[1]).as<str_v>().view()));
+  return value(int64_t(0));
+};
+// set line: elements [k, k + count] of the container c - edit text (count 0 - new at the place k); above / below -
+// translations of the line of the gap before and after the place; array {разобрана, элементов, переразобранные}
+line_edit(c, i64 k, i64 count, str text, bool module_level, projection, i64 above, i64 below) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  return s.line_edit(vm, vm.code_node(a[0], where), uint32_t((a[1]).as<int64_t>()), uint32_t((a[2]).as<int64_t>()), std::string((a[3]).as<str_v>().view()), (a[4]).as<bool>(), s.node_or_none(vm, a[5], where), uint32_t((a[6]).as<int64_t>()), uint32_t((a[7]).as<int64_t>()));
+};
+// reactive check of the program after editing (before layout: the changed ct code can be seen immediately)
+check_program() => native "cpp" {
+  editor_host->recheck();
+  return value(int64_t(0));
+};
+// node modified by elaboration (ct code mutations and their rollback, §7.4): take - and forget
+changed_nodes(bool take) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & db = editor_host->session.db;
+  array_v out;
+  for(uint32_t x: db.changed) out.push(value(int64_t(x)));
+  if((a[0]).as<bool>()) db.changed.clear();
+  return value(std::move(out));
+};
+// set pause: check and tags - by timer (on_idle solution); clear_pending - already done
+schedule_check() => native "cpp" {
+  editor_host->schedule_check();
+  return value(int64_t(0));
+};
+clear_pending() => native "cpp" {
+  editor_host->check_pending = false;
+  return value(int64_t(0));
+};
+// Extension of functions by link in the program module: array {расширение, цель}
+fn_extensions() => native "cpp" {
+  auto const & db = editor_host->session.db;
+  array_v out;
+  for(node_id x: db.as<n_module>(editor_host->session.root).items)
+    if(db.is<n_extend>(x) && db.as<n_extend>(x).target) out.push(value(array_v::of({vm.code_value(x), vm.code_value(node_id(db.as<n_extend>(x).target))})));
+  return value(std::move(out));
+};
+// a raw block with the parsing rule (the unit of editing is himself)
+raw_unit(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  auto const & db = editor_host->session.db;
+  node_id n = vm.code_node(a[0], where);
+  return value(db.is<n_raw>(n) && db.as<n_raw>(n).rule);
+};
+// add an internal element of the program module (ad text); failed - empty
+parse_inner(str text, str sig) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(editor_host->add_inner(std::string((a[0]).as<str_v>().view()), std::string((a[1]).as<str_v>().view())));
+};
+// Key module projection (like use k next to the program): array {модуль, ошибка};
+projection_of(str key) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto [m, error] = editor_host->projection_of(std::string((a[0]).as<str_v>().view()));
+  return value(array_v::of({vm.code_value(m), value(std::move(error))}));
+};
+
+// --- Primitives: sending to the client the whole presentation: node layouts in order
+//
+send_view(i64 peer, i64 id, root, str kind, layout lay) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  s.send_to((a[0]).as<int64_t>(), proto::s_view{uint32_t((a[1]).as<int64_t>()), vm.code_node(a[2], where), s.session.db.revision, s.wire_nodes(a[4], {}, where), std::string((a[3]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+// subtree node at - replaced (id at saved, children new)
+send_update(i64 peer, i64 id, at, layout lay) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  node_id n = vm.code_node(a[2], where);
+  s.send_to((a[0]).as<int64_t>(), proto::s_update{uint32_t((a[1]).as<int64_t>()), s.session.db.revision, n, s.wire_nodes(a[3], n, where)});
+  return value(int64_t(0));
+};
+// cursor and second end of allocation: node (-1 - no), piece, displacement
+send_caret(i64 peer, i64 id, bool selection, i64 n, i64 piece, i64 offset) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  int64_t n = (a[3]).as<int64_t>();
+  node_id at = n < 0 ? node_id{} : node_id(uint32_t(n));
+  uint32_t id = uint32_t((a[1]).as<int64_t>()), piece = uint32_t((a[4]).as<int64_t>()), offset = uint32_t((a[5]).as<int64_t>());
+  if((a[2]).as<bool>()) editor_host->send_to((a[0]).as<int64_t>(), proto::s_select{id, at, piece, offset});
+  else editor_host->send_to((a[0]).as<int64_t>(), proto::s_cursor{id, at, piece, offset});
+  return value(int64_t(0));
+};
+// list of additions (completion) at the place (node, piece, displacement); empty - hide
+send_completion_list(i64 peer, i64 id, i64 n, i64 piece, i64 offset, i64 selected, items) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  int64_t n = (a[2]).as<int64_t>();
+  proto::s_complete out{uint32_t((a[1]).as<int64_t>()), n < 0 ? node_id{} : node_id(uint32_t(n)), uint32_t((a[3]).as<int64_t>()), uint32_t((a[4]).as<int64_t>()), uint32_t((a[5]).as<int64_t>()), {}};
+  auto const & xs = (a[6]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value x = xs.get(k);
+    out.items.push_back({std::string(s.field(x, "name", where).as<str_v>().view()), std::string(s.field(x, "kind", where).as<str_v>().view()), std::string(s.field(x, "detail", where).as<str_v>().view())});
+  }
+  s.send_to((a[0]).as<int64_t>(), out);
+  return value(int64_t(0));
+};
+// a hint of a set at a place (node -1 - without a place); empty - hide
+send_hint_lines(i64 peer, i64 id, i64 n, i64 piece, i64 offset, lines) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  int64_t n = (a[2]).as<int64_t>();
+  s.send_to((a[0]).as<int64_t>(), proto::s_hint{uint32_t((a[1]).as<int64_t>()), n < 0 ? node_id{} : node_id(uint32_t(n)), uint32_t((a[3]).as<int64_t>()), uint32_t((a[4]).as<int64_t>()), s.wire_lines(vm, a[5], where)});
+  return value(int64_t(0));
+};
+// pointer
+send_hover(i64 peer, i64 id, n, lines) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  s.send_to((a[0]).as<int64_t>(), proto::s_hover{uint32_t((a[1]).as<int64_t>()), s.node_or_none(vm, a[2], where), s.wire_lines(vm, a[3], where)});
+  return value(int64_t(0));
+};
+// marker
+send_marks_list(i64 peer, i64 id, marks) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  std::vector<proto::s_mark> out;
+  auto const & xs = (a[2]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value x = xs.get(k);
+    out.push_back({s.node_or_none(vm, s.field(x, "node", where), where), std::string(s.field(x, "kind", where).as<str_v>().view()), std::string(s.field(x, "text", where).as<str_v>().view()), uint32_t(s.field(x, "from", where).as<int64_t>()), uint32_t(s.field(x, "to", where).as<int64_t>())});
+  }
+  s.send_to((a[0]).as<int64_t>(), proto::s_decor{uint32_t((a[1]).as<int64_t>()), s.session.db.revision, std::move(out)});
+  return value(int64_t(0));
+};
+// layer tabs: array{key, kt | mouth}; selected
+send_layer_tabs(i64 peer, i64 id, layers, str selected) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  proto::s_layers out{uint32_t((a[1]).as<int64_t>()), {}, std::string((a[3]).as<str_v>().view())};
+  auto const & xs = (a[2]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value one = xs.get(k);
+    auto const & x = one.as<array_v>();
+    out.layers.push_back({std::string(x.get(0).as<str_v>().view()), std::string(x.get(1).as<str_v>().view())});
+  }
+  editor_host->send_to((a[0]).as<int64_t>(), out);
+  return value(int64_t(0));
+};
+// Inspector: tree (inode), focus, disclosure (line)
+send_inspect(i64 peer, i64 id, root, focus, nodes, expand) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  auto text = [&](value const & x, std::string_view f) { return std::string(s.field(x, f, where).as<str_v>().view()); };
+  proto::s_inspect out{uint32_t((a[1]).as<int64_t>()), s.node_or_none(vm, a[2], where), s.node_or_none(vm, a[3], where), {}, s.wire_lines(vm, a[5], where)};
+  for(uint32_t k = 0; k < (a[4]).as<array_v>().size(); ++k) {
+    value x = (a[4]).as<array_v>().get(k);
+    out.nodes.push_back({s.node_or_none(vm, s.field(x, "node", where), where), uint32_t(s.field(x, "depth", where).as<int64_t>()), text(x, "role"), text(x, "kind"), text(x, "text"), text(x, "rule"), s.node_or_none(vm, s.field(x, "rule_at", where), where), text(x, "types")});
+  }
+  s.send_to((a[0]).as<int64_t>(), out);
+  return value(int64_t(0));
+};
+// track to the client: is open, step, total, step node, stack, output, error
+send_trace(i64 peer, bool active, i64 step, i64 total, n, stack, str text, str error) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_trace t{(a[1]).as<bool>(), uint32_t((a[2]).as<int64_t>()), uint32_t((a[3]).as<int64_t>()), s.node_or_none(vm, a[4], where), {}, std::string((a[6]).as<str_v>().view()), std::string((a[7]).as<str_v>().view())};
+  for(uint32_t k = 0; k < (a[5]).as<array_v>().size(); ++k) t.stack.push_back(std::string((a[5]).as<array_v>().get(k).as<str_v>().view()));
+  s.send_to((a[0]).as<int64_t>(), t);
+  return value(int64_t(0));
+};
+clipboard(str s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_clipboard{std::string((a[0]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+// error-message
+report(str s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_error{std::string((a[0]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+
+// Primitives: facts of parsing and base (VM) ---------------------------------------------- node
+// types for all instances
+node_types(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto it = editor_host->session.node_types.find(vm.code_node(a[0], where).value); it != editor_host->session.node_types.end())
+    for(auto const & t: it->second) xs.push_back(value(t));
+  return value(array_v::of(std::move(xs)));
+};
+// a.f - value on the left
+member_object(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(editor_host->session.db.member_of(vm.code_node(a[0], where)).object);
+};
+// overload selected by parsing on call (over all instance)
+call_targets(c) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto it = editor_host->session.call_targets.find(vm.code_node(a[0], where).value); it != editor_host->session.call_targets.end())
+    for(uint32_t f: it->second) xs.push_back(vm.code_value(node_id(f)));
+  return value(array_v::of(std::move(xs)));
+};
+// node has types (observations of parsing in at least one instance)
+has_types(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->session.node_types.contains(vm.code_node(a[0], where).value));
+};
+// a.f is the name of the member (“non-member”)
+member_name(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto const & db = editor_host->session.db;
+  node_id x = vm.code_node(a[0], where);
+  return value(db.is_member(x) ? std::string(db.strings.text(db.member_of(x).name)) : std::string());
+};
+// Type of parameter: let, mut, own, out, expr, ct, implicit
+param_mode(p) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  static constexpr std::string_view names[] = {"let", "mut", "own", "out", "expr", "ct", "implicit"};
+  return value(std::string(names[uint32_t(editor_host->session.db.as<n_param>(vm.code_node(a[0], where)).mode)]));
+};
+// pre-announcement
+note_lead(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto const * nt = editor_host->session.db.note_of(vm.code_node(a[0], where)))
+    for(auto const & l: nt->lead) xs.push_back(value(l));
+  return value(array_v::of(std::move(xs)));
+};
+// internal element of the program module; in prelude
+is_inner(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->is_inner(vm.code_node(a[0], where)));
+};
+in_prelude(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  auto const & db = editor_host->session.db;
+  return value(db[vm.code_node(a[0], where)].where.source == db[db.prelude].where.source);
+};
+// observation of the layer of the function fn (key instance): the value of node ("" - no"), types node, whether executed
+layer_literal_of(fn, str key, n) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  if(auto const * l = editor_host->layer_of(vm.code_node(a[0], where), std::string((a[1]).as<str_v>().view())))
+    if(auto it = l->literal.find(vm.code_node(a[2], where).value); it != l->literal.end()) return value(it->second);
+  return value(std::string());
+};
+layer_types_of(fn, str key, n) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  if(auto const * l = editor_host->layer_of(vm.code_node(a[0], where), std::string((a[1]).as<str_v>().view())))
+    if(auto it = l->types.find(vm.code_node(a[2], where).value); it != l->types.end())
+      for(auto const & t: it->second) xs.push_back(value(t));
+  return value(array_v::of(std::move(xs)));
+};
+layer_has_of(fn, str key, n) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(false));
+  auto const * l = editor_host->layer_of(vm.code_node(a[0], where), std::string((a[1]).as<str_v>().view()));
+  node_id n = editor_host->node_or_none(vm, a[2], where);
+  return value(l && n && l->types.contains(n.value));
+};
+has_layer(fn, str key) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  return value(editor_host->layer_of(vm.code_node(a[0], where), std::string((a[1]).as<str_v>().view())) != nullptr);
+};
+// Function layers: array{key, kt | mouth}
+fn_layers(fn) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  std::vector<value> xs;
+  if(auto fl = s.session.layers.find(vm.code_node(a[0], where).value); fl != s.session.layers.end())
+    for(auto const & [key, l]: fl->second) xs.push_back(value(array_v::of({value(key), value(std::string(l.ct ? "кт" : "рт"))})));
+  return value(array_v::of(std::move(xs)));
+};
+// The values of node ns when compiling by instance are by types (types by ascending): array {тип, литералы};
+// literatures are different, no more than limit + 1 per type (how much to show, the language decides), empty is
+// the value of runtime. *My:* grouping is a request to facts (there are thousands of them in node in the cycle
+// known during compilation); what to show is language.
+node_values(ns, i64 limit) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto const & xs = (a[0]).as<array_v>();
+  std::size_t limit = std::size_t(std::max<int64_t>(0, (a[1]).as<int64_t>()));
+  std::map<std::string_view, std::vector<std::string_view>> by;
+  auto const & facts = editor_host->session.node_values;
+  for(uint32_t k = 0; k < xs.size(); ++k)
+    if(auto it = facts.find(vm.code_node(xs.get(k), where).value); it != facts.end())
+      for(std::string_view x: it->second) {
+        auto tab = x.find('\t');
+        auto & lits = by[x.substr(0, tab)];
+        std::string_view lit = tab == std::string_view::npos ? std::string_view() : x.substr(tab + 1);
+        if(lits.size() <= limit && !std::ranges::contains(lits, lit)) lits.push_back(lit);
+      }
+  std::vector<value> out;
+  for(auto const & [t, lits]: by) {
+    std::vector<value> ls;
+    for(auto l: lits) ls.push_back(value(std::string(l)));
+    out.push_back(value(array_v::of({value(std::string(t)), value(array_v::of(std::move(ls)))})));
+  }
+  return value(array_v::of(std::move(out)));
+};
+// node ns (numbers) in the text: array {импорты, начала, концы} (bytes)
+node_spans(ns) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto const & db = editor_host->session.db;
+  auto const & xs = (a[0]).as<array_v>();
+  array_v src, from, to;
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    span const & w = db[node_id(uint32_t(xs.get(k).as<int64_t>()))].where;
+    src.push(value(int64_t(w.source)));
+    from.push(value(int64_t(w.begin)));
+    to.push(value(int64_t(w.end)));
+  }
+  return value(array_v::of({value(std::move(src)), value(std::move(from)), value(std::move(to))}));
+};
+// last check error: how much; error k has trace steps, text and place (j -1 is the error itself,
+// otherwise the trice step j); place - array {импорт, начало, конец}
+check_errors() => native "cpp" { return value(int64_t(editor_host->session.errors.size())); };
+check_error_frames(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->session.errors[std::size_t((a[0]).as<int64_t>())].trace.size()));
+};
+check_error_text(i64 k, i64 j) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto const & d = editor_host->session.errors[std::size_t((a[0]).as<int64_t>())];
+  int64_t j = (a[1]).as<int64_t>();
+  return value(j < 0 ? std::string(d.what()) : d.trace[std::size_t(j)].what);
+};
+check_error_place(i64 k, i64 j) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto const & d = editor_host->session.errors[std::size_t((a[0]).as<int64_t>())];
+  int64_t j = (a[1]).as<int64_t>();
+  span w = j < 0 ? d.where : d.trace[std::size_t(j)].where;
+  return value(array_v::of({value(int64_t(w.source)), value(int64_t(w.begin)), value(int64_t(w.end))}));
+};
+
+// ---- primitives: inspector (node fields, records, printing) ------------------------------------------ recording of the
+// syntax of the node (printing and parsing on it): array{announcement, array{array{child, parameter} ...}; no - array{}
+record_rule(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & s = *editor_host;
+  auto const & db = s.session.db;
+  node_id n = vm.code_node(a[0], where);
+  printer pr(db);
+  auto const * r = pr.record_for(n);
+  if(!r) return value(array_v::of({}));
+  auto const & [d, info] = *r;
+  auto const & fn = db.as<n_fn>(d);
+  std::vector<value> roles;
+  for(uint32_t k = 0; k < fn.params.size() && k < info.slot.size(); ++k) {
+    node_id at = info.kind >= 0 ? node_place(db[n].kind, info.slot[k]) : db.as<n_call>(n).args[info.slot[k]];
+    if(at) roles.push_back(value(array_v::of({vm.code_value(at), value(std::string(db.strings.text(db.as<n_param>(fn.params[k]).name)))})));
+  }
+  return value(array_v::of({vm.code_value(d), value(array_v::of(std::move(roles)))}));
+};
+// node rewritten by transformer or modified by ct code (§7.4): source; no - code()
+rewritten_by(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  node_id n = vm.code_node(a[0], where), by;
+  for(auto const & mu: editor_host->session.db.mutations)
+    if(mu.target == n.value && mu.source) by = node_id(mu.source - 1);
+  return vm.code_value(by);
+};
+// projection
+print_node(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(printer(editor_host->session.db).print(vm.code_node(a[0], where)));
+};
+// body with substituted arguments (name → knot; expression-operation - in parentheses outside the parentheses)
+print_with_args(body, names, args) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
+  auto const & db = editor_host->session.db;
+  std::map<std::string, node_id> by;
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) by[std::string((a[1]).as<array_v>().get(k).as<str_v>().view())] = vm.code_node((a[2]).as<array_v>().get(k), where);
+  printer::substitution sub;
+  sub.text = [&](node_id x) -> std::optional<std::string> {
+    if(!db.is<n_ident>(x)) return std::nullopt;
+    auto it = by.find(std::string(db.strings.text(db.as<n_ident>(x).name)));
+    if(it == by.end()) return std::nullopt;
+    std::string t = printer(db).print(it->second);
+    node_id up = db[x].parent; // in parentheses (condition, argument) - without their
+    bool bracketed = up && (db.is<n_if>(up) || db.is<n_call>(up) || db.is<n_loop>(up));
+    return db.is<n_op>(it->second) && !bracketed ? cat("(", t, ")") : t;
+  };
+  return value(printer(db, {}, sub).print(vm.code_node(a[0], where)));
+};
+// a line of text, up to n code points (longer - "...")
+clip(str s, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  std::string t((a[0]).as<str_v>().view());
+  for(auto & c: t)
+    if(c == '\n') c = ' ';
+  uint32_t n = uint32_t((a[1]).as<int64_t>());
+  if(code_points(t) > n) {
+    std::size_t b = 0;
+    for(uint32_t k = 0; k < n && b < t.size(); ++k) b += cp_len(t, b);
+    t = t.substr(0, b) + "…";
+  }
+  return value(std::move(t));
+};
+
+// --- Primitives: launch track (debugger) --------------------------------------- steps of the
+// route: node, depth of call, how much output to it, value
+trace_size() => native "cpp" { return value(int64_t(editor_host->session.trace.size())); };
+trace_node(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  return vm.code_value(node_id(editor_host->session.trace[uint32_t((a[0]).as<int64_t>())].node));
+};
+trace_depth(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->session.trace[uint32_t((a[0]).as<int64_t>())].depth));
+};
+trace_value(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->session.trace[uint32_t((a[0]).as<int64_t>())].value);
+};
+// output of the program to step k (k - - -1: all) and start error
+trace_output(i64 k) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & s = *editor_host;
+  int64_t k = (a[0]).as<int64_t>();
+  if(k < 0) return value(s.trace_output);
+  return value(s.trace_output.substr(0, std::min<std::size_t>(s.session.trace[uint32_t(k)].out, s.trace_output.size())));
+};
+trace_error() => native "cpp" { return value(editor_host->trace_error); };
+// Primitives: VM commands (launch, base, merger) main() received code - the process of the machine in the
+// same VM (the server executes it with quants, the output - the solution on run output); the previous
+// start is replaced
+start_program(str args, str input) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  std::vector<std::string> args, input;
+  for(auto w: words_of((a[0]).as<str_v>().view())) args.emplace_back(w);
+  for(auto l: lines_of((a[1]).as<str_v>().view())) input.emplace_back(l);
+  editor_host->start_run(std::move(args), std::move(input));
+  return value(int64_t(0));
+};
+stop_program() => native "cpp" {
+  editor_host->stop_run();
+  return value(int64_t(0));
+};
+program_running() => native "cpp" { return value(editor_host->running()); };
+// Live process (F5) and edits: the process is waiting for editing (noted); its base is the version of the tool
+// module; modules of its program, which are in the session database; the values of struct n of the old layout in it;
+// the function of its base is removed or added; migrate(T old) for struct T (""" - transferred); ct - in place
+live_sync_due() => native "cpp" { return value(editor_host->live_sync_due()); };
+live_version() => native "cpp" { return value(editor_host->live_version()); };
+live_modules() => native "cpp" {
+  std::vector<value> xs;
+  for(node_id m: editor_host->live_modules()) xs.push_back(value(int64_t(m.value)));
+  return value(array_v::of(std::move(xs)));
+};
+live_stale(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  return value(int64_t(editor_host->live_stale(node_id(uint32_t((a[0]).as<int64_t>())))));
+};
+live_forget(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->live_forget(node_id(uint32_t((a[0]).as<int64_t>())));
+  return value(int64_t(0));
+};
+live_register(i64 n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  editor_host->live_register(node_id(uint32_t((a[0]).as<int64_t>())));
+  return value(int64_t(0));
+};
+live_migrate(str tn) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->live_migrate(std::string((a[0]).as<str_v>().view())));
+};
+live_refresh() => native "cpp" {
+  editor_host->live_refresh();
+  return value(int64_t(0));
+};
+// Launch output to the client: more is a continuation of the previous, state - "running", "stopped" or "finished"
+run_output(str text, bool ok, bool more, str state) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known()) return erase(value(int64_t(0)));
+  if(editor_host->now_peer)
+    editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), (a[2]).as<bool>(), std::string((a[3]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+// Start with the track (steps - on it)
+trace_program(str args, str input) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & h = *editor_host;
+  h.session.stdin_lines.clear();
+  for(auto l: lines_of((a[1]).as<str_v>().view())) h.session.stdin_lines.emplace_back(l);
+  std::vector<std::string> args;
+  for(auto w: words_of((a[0]).as<str_v>().view())) args.emplace_back(w);
+  bool ok = true;
+  h.trace_output = h.session.trace_run(args, ok, h.trace_error);
+  return value(int64_t(0));
+};
+show_output(str text, bool ok) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), false, ""});
+  return value(int64_t(0));
+};
+// name of the program of the session (the way is open)
+program_name() => native "cpp" { return value(editor_host->session.name); };
+// journal database - in the file .vishdb
+save_program(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  std::string path((a[0]).as<str_v>().view());
+  save_db(s.session.db, s.session.root, path);
+  if(s.now_peer) s.send(*s.now_peer, proto::s_saved{path});
+  return value(int64_t(0));
+};
+// function of editing the program: the result (used... - edits in the database)
+program_apply(str fn) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(editor_host->session.apply(std::string((a[0]).as<str_v>().view())));
+};
+// Merge conflicts (and taken by itself) - to the client: conflicts - conflict tools module
+send_merge_list(taken, conflicts) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & h = *editor_host;
+  std::vector<std::string> taken;
+  for(uint32_t k = 0; k < (a[0]).as<array_v>().size(); ++k) taken.emplace_back((a[0]).as<array_v>().get(k).as<str_v>().view());
+  std::vector<proto::s_conflict> cs;
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) {
+    value c = (a[1]).as<array_v>().get(k);
+    auto s = [&](std::string_view f) { return std::string(h.field(c, f, where).as<str_v>().view()); };
+    cs.push_back({s("key"), s("base"), s("mine"), s("theirs")});
+  }
+  h.send_merge(std::move(taken), std::move(cs));
+  return value(int64_t(0));
+};
+// program module and prelude
+program() => native "cpp" {
+  return vm.code_value(editor_host->session.root);
+};
+prelude() => native "cpp" {
+  return vm.code_value(editor_host->session.db.prelude);
+};
+// Keybase module (geo.vec); no - empty code
+module_of_key(str key) => native "cpp" {
+  if(!(a[0]).known()) return erase(vm.code_value(node_id{}));
+  auto & db = editor_host->session.db;
+  auto it = db.strings.index.find(std::string((a[0]).as<str_v>().view()));
+  return vm.code_value(it == db.strings.index.end() ? node_id{} : find_module(db, it->second));
+};
+// VM functions visible to the program: array {имя, параметры}
+vm_builtins() => native "cpp" {
+  std::vector<value> xs;
+  for(auto const & [name, sig]: interpreter::visible_builtins) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(sig))})));
+  return value(array_v::of(std::move(xs)));
+};
+// Syntax (if, return...) is parsing, not entity
+is_record(c) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(bool(record_of(editor_host->session.db, vm.code_node(a[0], where))));
+};
+// node type of kernel (ast.if...): in addition - only on the typed prefix
+core_node_kind(str name) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(is_node_kind((a[0]).as<str_v>().view()));
+};
+// name of the type of machine: 2 - integer, 4 - bytes (line)
+type_tag(i64 m) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  return value(std::string(type_registry::tag(uint32_t((a[0]).as<int64_t>()))));
+};
+// Type {x: …}: array {имя, тип}
+record_parts(str t) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  std::vector<value> xs;
+  for(auto const & [name, tn]: type_registry::record_parts((a[0]).as<str_v>().view())) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(tn))})));
+  return value(array_v::of(std::move(xs)));
+};
+// strings - bytes (§4.0 ): subsequence and ASCII register - base primitives (search, slice - tool module) w -
+// subsequence s (bytes in order, not in a row)
+subsequence(str s, str w) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  auto x = (a[0]).as<str_v>().view(), y = (a[1]).as<str_v>().view();
+  std::size_t k = 0;
+  for(char c: x)
+    if(k < y.size() && c == y[k]) ++k;
+  return value(k == y.size());
+};
+lower(str s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  std::string r((a[0]).as<str_v>().view());
+  for(char & c: r)
+    if(c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+  return value(std::move(r));
+};
+
+// --- Views: Find, Open, Close ---
+empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0, 0, -1};
+empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}};
+new_view(i64 peer, i64 id, root, str kind) => view{peer, id, root, kind, "", code(), empty_layout(), 0, -1, -1, false, false, false, false, array{}, 0, 0, array{}, empty_draft(), array{}, array{}, array{}, array{}};
+// Representation of the client whose message is served by his number; -1 - no (or closed); number -1 -
+// first open
+view_of(i64 id) {
+  p = now_peer();
+  r = -1;
+  for(w : range(views.size)) if((r < 0) && ((views[w].peer == p) && (given(views[w].root) && ((id < 0) || (views[w].id == id))))) r = w;
+  r
+}
+// How many views the client opened (the number of the next one is one more)
+peer_view_count(i64 p) {
+  n = 0;
+  for(w : range(views.size)) if(views[w].peer == p) n += 1;
+  n
+}
+// Open representations of the customer whose message is served
+peer_views() {
+  p = now_peer();
+  r = array{};
+  for(w : range(views.size)) if((views[w].peer == p) && given(views[w].root)) r.push(w);
+  r
+}
+// projection representation (its solution function in its module - the first); empty - by default
+view_projection(i64 id) {
+  v = view_of(id);
+  if(v < 0) code() else views[v].projection
+}
+// Presentation draft: array {открыт, текст как набран}
+view_draft(i64 id) {
+  v = view_of(id);
+  if((v >= 0) && views[v].d.open) array{true, views[v].lay.text} else array{false, ""}
+}
+// client k (increases as calls are made)
+client_of(i64 p) {
+  while(clients.size <= p) clients.push(client{false, 0});
+  p
+}
+debugging() => clients[client_of(now_peer())].debugging;
+set_debugging(bool on) {
+  clients[client_of(now_peer())].debugging = on;
+  0
+}
+trace_pos() => clients[client_of(now_peer())].trace_pos;
+set_trace_pos(i64 k) {
+  clients[client_of(now_peer())].trace_pos = k;
+  0
+}
+// Edit - the track describes the previous version: close it all
+close_traces() {
+  for(p : range(clients.size)) if(clients[p].debugging) {
+    clients[p].debugging = false;
+    send_trace(p, false, 0, 0, code(), array{}, "", "");
+  }
+  0
+}
+// No representation, no place to tell the customer
+no_view(i64 id) => report("нет представления " + text(id));
+// route to the customer whose message is served
+show_trace(bool active, i64 step, i64 total, n, stack, str text, str error) => send_trace(now_peer(), active, step, total, n, stack, text, error);
+
+// --- layout: places, bytes, node ---
+places(i64 v) => views[v].lay.node.size;
+end_of(i64 v) => places(v) - 1;
+// first byte of the place k symbol ('\n' is the end of the line)
+lead(i64 v, i64 k) => if((k >= 0) && (k < views[v].lay.lead.size)) views[v].lay.lead[k] else 0;
+// the string of the first bytes of places - its own copy for cycles by symbols (call lead to the symbol is more expensive)
+leads(i64 v) => views[v].lay.lead;
+byte_of(i64 v, i64 k) => views[v].lay.byte[k];
+// text of places [from, to]
+text_of(i64 v, i64 from, i64 to) => slice_text(views[v].lay.text, byte_of(v, from), byte_of(v, to));
+// place by byte of text: the first, whose byte is not less
+place_of_byte(i64 v, i64 b) => lower_bound(views[v].lay.byte, b);
+// node n on node by ascending and their numbers (-1 - node is not in it)
+index_in(sorted, order, i64 n) {
+  k = lower_bound(sorted, n);
+  if((k < sorted.size) && (sorted[k] == n)) order[k] else -1
+}
+// the layout number node n in the representation
+layout_at(i64 v, i64 n) {
+  k = lower_bound(views[v].lay.sorted, n);
+  if((k < views[v].lay.sorted.size) && (views[v].lay.sorted[k] == n)) views[v].lay.order[k] else -1
+}
+// node layout number (-1 - node in the view is not); the place of its text [from, to]
+layout_of(i64 v, n) => if(given(n)) layout_at(v, code_id(n)) else -1;
+range_from(i64 v, i64 k) => views[v].lay.from[k];
+range_to(i64 v, i64 k) => views[v].lay.to[k];
+// knot
+place_node(i64 v, i64 k) => if((k >= 0) && (k < places(v))) node_code(views[v].lay.node[k]) else code();
+// cursor to the beginning of node n in the view (-1 - node is not in it)
+node_place(i64 v, n) {
+  k = layout_of(v, n);
+  if(k < 0) -1 else range_from(v, k)
+}
+// Place p - in the protocol: array {узел, кусок, смещение в кодовых точках}; end of text - after the
+// last character of the last empty piece; empty - array {-1, 0, 0}
+caret_of(i64 v, i64 p) => array{views[v].lay.node[p], views[v].lay.piece[p], views[v].lay.offset[p]};
+// Location (node, piece, offset) from the client: the end of the piece is the place after its last symbol;
+// exact is only exactly this place (and the end of the text is its last symbol); -1 - no
+place_at(i64 v, i64 n, i64 piece, i64 offset, bool exact) {
+  k = layout_at(v, n);
+  if((k < 0) || ((piece < 0) || (piece >= views[v].lay.count[k]))) return -1;
+  j = views[v].lay.first[k] + piece;
+  if(views[v].lay.pchild[j] >= 0) return -1;
+  len = views[v].lay.plen[j];
+  start = views[v].lay.pplace[j];
+  if(offset < len) return start + offset;
+  if((offset == len) && ((len > 0) && (!exact || ((start + len) == end_of(v))))) return start + len;
+  -1
+}
+// Number of the first draft element in the module elements (empty - insertion place).
+group_at(i64 v) {
+  items = code_items(program());
+  first = if(views[v].d.items.size > 0) views[v].d.items[0] else views[v].d.next;
+  if(given(first)) for(k : range(items.size)) if(code_id(items[k]) == code_id(first)) return k;
+  k = 0; // In the end, before the internal elements.
+  while((k < items.size) && !is_inner(items[k])) k += 1;
+  k
+}
+// Re-print the presentation (cursor - in the beginning: the place puts the one who prints).
+relayout(i64 v) => relayout_from(v, array{}, false);
+// The draft is corrected on the spot (old - its elements before editing): if the previous layout is
+// printed with it, only its area is printed - otherwise - the entire representation.
+//
+relayout_from(i64 v, old, bool in_place) {
+  if(in_place && ((views[v].kind == "module") && (views[v].d.open && (views[v].lay.group_count == old.size)))) {
+    at = group_at(v);
+    if(views[v].lay.group_at == at) {
+      views[v].lay = print_splice(views[v].lay, views[v].root, views[v].projection, at, old, views[v].d.items.size, views[v].d.source);
+      views[v].cursor = 0;
+      return 0;
+    }
+  }
+  as_module = views[v].kind == "module";
+  count = if(views[v].d.open && as_module) views[v].d.items.size else -1;
+  at = if(count >= 0) group_at(v) else 0;
+  fn_source = if(!as_module && views[v].d.open) views[v].d.source else -1;
+  views[v].lay = print_view(views[v].root, as_module, views[v].projection, at, count, views[v].d.source, fn_source);
+  views[v].cursor = 0;
+  0
+}
+// The cursor on a line of one space (empty line with indentation) - at the end of the indentation: the set
+// will begin in the code column.
+blank_line_end(i64 v, i64 c) {
+  ld = leads(v);
+  if(c >= ld.size) return c;
+  s = c;
+  e = c;
+  while((s > 0) && (ld[s - 1] != '\n')) s -= 1;
+  while(((e + 1) < ld.size) && (ld[e] != '\n')) e += 1;
+  for(k : range(e - s)) if(ld[s + k] != ' ') return c;
+  e
+}
+// subtree: x inside top (or himself)
+within(x, top) {
+  n = x;
+  r = false;
+  while(given(n) && !r) {
+    if(code_id(n) == code_id(top)) r = true;
+    n = code_parent(n);
+  }
+  r
+}
+has_code(xs, c) {
+  r = false;
+  for(x : xs) if(code_id(x) == code_id(c)) r = true;
+  r
+}
+same_codes(xs, ys) {
+  r = xs.size == ys.size;
+  if(r) for(k : range(xs.size)) if(code_id(xs[k]) != code_id(ys[k])) r = false;
+  r
+}
+has_int(xs, i64 x) {
+  r = false;
+  for(y : xs) if(y == x) r = true;
+  r
+}
+greater(i64 x, i64 y) => if(x > y) x else y;
+
+// --- cursor ---
+send_cursor(i64 v) {
+  array{n, p, o} = caret_of(v, views[v].cursor);
+  send_caret(views[v].peer, views[v].id, false, n, p, o);
+  an = views[v].anchor;
+  sel = (an >= 0) && ((an != views[v].cursor) && (an < places(v)));
+  if(!sel && !views[v].selection_sent) return 0;
+  if(sel) {
+    array{an_n, an_p, an_o} = caret_of(v, an);
+    send_caret(views[v].peer, views[v].id, true, an_n, an_p, an_o);
+  } else send_caret(views[v].peer, views[v].id, true, -1, 0, 0);
+  views[v].selection_sent = sel;
+  0
+}
+cursor(i64 v) => views[v].cursor;
+set_cursor(i64 v, i64 k) {
+  views[v].cursor = if(k < 0) 0 else lesser(k, end_of(v));
+  views[v].cursor
+}
+// the second end of the allocation; -1 - no
+anchor(i64 v) => views[v].anchor;
+set_anchor(i64 v, i64 k) {
+  views[v].anchor = if(k < 0) -1 else k;
+  0
+}
+// column for ↑/↓; -1 - no
+goal(i64 v) => views[v].goal;
+set_goal(i64 v, i64 g) {
+  views[v].goal = if(g < 0) -1 else g;
+  0
+}
+draft_open(i64 v) => views[v].d.open;
+set_typing(i64 v, bool on) {
+  views[v].typing = on;
+  0
+}
+
+// --- Lists: Supplement and transition ---
+send_completion(i64 v) {
+  array{n, p, o} = if(views[v].word_begin < places(v)) caret_of(v, views[v].word_begin) else array{-1, 0, 0};
+  send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items);
+}
+// The list of additions (or transitions) is open and there are options
+completing(i64 v) => views[v].completing && (views[v].items.size > 0);
+completion_count(i64 v) => views[v].items.size;
+selected(i64 v) => views[v].selected;
+select_item(i64 v, i64 k) {
+  views[v].selected = k;
+  send_completion(v);
+}
+completion_name(i64 v, i64 k) => views[v].items[k].name;
+// beginning
+word_begin(i64 v) => views[v].word_begin;
+// The list is a transition (F12, Ctrl+P), not an addition
+nav_list(i64 v) => views[v].targets.size > 0;
+close_completion(i64 v) {
+  if(!views[v].completing) return 0;
+  views[v].completing = false;
+  views[v].items = array{};
+  views[v].targets = array{};
+  send_completion(v);
+}
+// item k of the transition list: function (empty - “add”) and signature that
+nav_fn(i64 v, i64 k) => views[v].targets[k][0];
+nav_add(i64 v, i64 k) => views[v].targets[k][1];
+// cursor transition list: options (completion) and goals - array {функция, добавить}
+show_nav(i64 v, items, targets) {
+  views[v].items = items;
+  views[v].targets = targets;
+  views[v].selected = 0;
+  views[v].word_begin = views[v].cursor;
+  views[v].completing = true;
+  send_completion(v);
+}
+// supplement list: options (completion), the beginning of the typed word
+show_completion(i64 v, items, i64 from) {
+  views[v].items = items;
+  views[v].selected = 0;
+  views[v].word_begin = from;
+  views[v].completing = true;
+  send_completion(v);
+}
+hint_shown(i64 v) => views[v].hint_shown;
+// Tip set at the anchor (-1 - no place); empty - hide
+show_hint(i64 v, i64 at, lines) {
+  array{n, p, o} = if((at >= 0) && (at < places(v))) caret_of(v, at) else array{-1, 0, 0};
+  views[v].hint_shown = lines.size > 0;
+  send_hint_lines(views[v].peer, views[v].id, n, p, o, lines);
+}
+hide_hint(i64 v) {
+  if(!views[v].hint_shown) return 0;
+  views[v].hint_shown = false;
+  send_hint_lines(views[v].peer, views[v].id, -1, 0, 0, array{});
+}
+show_hover(i64 v, n, lines) => send_hover(views[v].peer, views[v].id, n, lines);
+show_inspect(i64 v, root, focus, nodes, expand) => send_inspect(views[v].peer, views[v].id, root, focus, nodes, expand);
+show_marks(i64 v, marks) => send_marks_list(views[v].peer, views[v].id, marks);
+// node presentation layouts (in order projection)
+view_nodes(i64 v) => node_codes(views[v].lay.nodes);
+// View: Module - Module, Fn - One Function
+view_kind(i64 v) => views[v].kind;
+view_root(i64 v) => views[v].root;
+view_layer(i64 v) => views[v].layer;
+// Selected layer (context instance) of the function
+in_layer(i64 v) => (views[v].kind == "fn") && ((views[v].layer != "") && has_layer(views[v].root, views[v].layer));
+// the value of node in the presentation layer ("" - no"); layer observations: node types; whether
+layer_literal(i64 v, n) => if(in_layer(v)) layer_literal_of(views[v].root, views[v].layer, n) else "";
+layer_types(i64 v, n) => if(in_layer(v)) layer_types_of(views[v].root, views[v].layer, n) else array{};
+layer_has(i64 v, n) => in_layer(v) && (given(n) && layer_has_of(views[v].root, views[v].layer, n));
+// parsing error on node representation: array {узел, текст, from, to}
+error_marks(i64 v) => errors_on(views[v].lay.nodes);
+// parsing errors in node
+error_texts(i64 v, n) {
+  r = array{};
+  for(e : error_marks(v)) if(code_id(e[0]) == code_id(n)) r.push(e[1]);
+  r
+}
+// Presentation function layers: array{key, kt |Hg}
+layers_of(i64 v) => fn_layers(views[v].root);
+show_layers(i64 v, layers) => send_layer_tabs(views[v].peer, views[v].id, layers, views[v].layer);
+set_layer(i64 v, str key) {
+  views[v].layer = key;
+  0
+}
+// projection submission (key recording module; 'default'); error or '
+set_projection(i64 v, str key) {
+  array{m, error} = projection_of(key);
+  if(error == "") views[v].projection = m;
+  error
+}
+// types of values to the left of the point in place dot (for all instance ): node a.b is its object;
+// otherwise (text is still a hole: xs.) is the name before the point, its types in the region
+object_types(i64 v, i64 dot) {
+  n = place_node(v, dot);
+  while(given(n)) {
+    if(member_name(n) != "") return node_types(member_object(n));
+    n = code_parent(n);
+  }
+  k = dot;
+  while((k > 0) && ident_byte(lead(v, k - 1))) k -= 1;
+  name = text_of(v, k, dot);
+  if(name == "") array{} else name_types(place_node(v, dot), name)
+}
+
+// --- presentation to the client ------------------------------------------------------------------
+// verification of the program and node , modified by its elaboration, - representations where they are visible
+recheck() {
+  check_program();
+  refresh_changed();
+}
+// node modified by ct code mutations and their rollback (check elaboration, source editing, §7.4):
+// representations where they are visible and whose text has changed are updated - the editor shows the
+// result of elaboration.
+//
+refresh_changed() {
+  xs = changed_nodes(true);
+  if(xs.size == 0) return 0;
+  for(w : range(views.size)) if(given(views[w].root)) {
+    shown = array{};
+    for(x : xs) if((layout_at(w, x) >= 0) && !has_int(shown, x)) shown.push(x);
+    if(shown.size > 0) {
+      was = views[w].lay.text;
+      cur = views[w].cursor;
+      array{kn, kp, ko} = caret_of(w, cur);
+      relayout(w); // cursor - in the same place node
+      views[w].cursor = lesser(cur, end_of(w));
+      k = place_at(w, kn, kp, ko, true);
+      if(k >= 0) views[w].cursor = k;
+      if(views[w].lay.text != was) {
+        // one update is a common ancestor of the changed (the client does not see an intermediate mixture)
+        top = code();
+        for(x : shown) if(layout_at(w, x) >= 0) {
+          xc = node_code(x);
+          if(!given(top)) top = xc;
+          while(given(top) && !within(xc, top)) top = code_parent(top);
+        }
+        while(given(top) && (layout_of(w, top) < 0)) top = code_parent(top);
+        if(!given(top)) top = views[w].root;
+        send_update(views[w].peer, views[w].id, top, views[w].lay);
+        send_cursor(w);
+      }
+    }
+  }
+  0
+}
+// presentation again (layout, cursor, tags); fresh - print
+show_view_of(i64 v, bool fresh) {
+  recheck(); // elaboration - to layout: ct-code mutations are visible immediately
+  if(fresh) relayout(v);
+  send_view(views[v].peer, views[v].id, views[v].root, views[v].kind, views[v].lay);
+  send_cursor(v);
+  recheck();
+  send_marks(v);
+}
+show_view(i64 v) => show_view_of(v, true);
+// all representations anew (the base has changed completely: merging, editing function)
+refresh_all() {
+  recheck();
+  for(w : range(views.size)) if(given(views[w].root)) show_view_of(w, true);
+  0
+}
+// Set pause: check (reactive check) and tags to all views; drafts are closed - accepted edits fall into the
+// live launch process (hot replacement, §9.3). Editing - in a live process (drafts closed): the elements of
+// the program modules, modified from the last time, are replaced by a key in its database, as proc/edit
+// (§9.3); the started frames live in the old body. struct, which has the living values of the old layout -
+// through the migrate(T old) program, there is no one - the process stops. The bottom line is what to say to
+// a person ("nothing").
+//
+sync_program() {
+  if(!live_sync_due()) return "";
+  lv = live_version();
+  changed = 0;
+  migrations = array{};
+  for(mod : live_modules()) {
+    now_items = module_items(0, mod, array{});
+    was_items = module_items(lv, mod, array{});
+    keys = array{};
+    for(x : now_items) if(!has_text(keys, x.key)) keys.push(x.key);
+    for(x : was_items) if(!has_text(keys, x.key)) keys.push(x.key);
+    for(key : keys) {
+      now = find_key(now_items, key);
+      was = find_key(was_items, key);
+      if(!(now.present && (was.present && (now.text == was.text)))) {
+        changed += 1;
+        if(now.present && (was.present && (version_signature(0, now.node)[0] == "struct"))) {
+          tn = version_signature(0, now.node)[1];
+          stale = live_stale(now.node);
+          if(stale > 0) {
+            if(!find_key(now_items, ("migrate(" + tn) + ")").present) {
+              stop_program();
+              return ((((((("struct " + tn) + " изменён, а живой процесс держит значений старой раскладки: ") + text(stale)) + " — нужна migrate(") + tn) + " old) => ") + tn) + "{…}; процесс остановлен";
+            }
+            migrations.push(tn);
+          }
+        }
+        if(was.present && !now.present) {
+          wk = version_signature(lv, was.node)[0];
+          if((wk == "fn") || (wk == "syntax")) live_forget(was.node); // Removed: new challenges do not see it
+        }
+        got = take_theirs(lv, mod, array{}, key, now);
+        if(now.present && (!was.present && (got >= 0))) live_register(got);
+      }
+    }
+  }
+  if(changed == 0) return "";
+  for(tn : migrations) {
+    why = live_migrate(tn);
+    if(why != "") {
+      stop_program();
+      return ((("migrate " + tn) + ": ") + why) + "; процесс остановлен";
+    }
+  }
+  live_refresh();
+  ""
+}
+idle() {
+  clear_pending();
+  recheck();
+  for(w : range(views.size)) if(given(views[w].root)) send_marks(w);
+  if(program_running() && !any_draft_open()) {
+    said = sync_program();
+    if(said != "") report(said);
+  }
+  0
+}
+any_draft_open() {
+  r = false;
+  for(w : range(views.size)) if(given(views[w].root) && draft_open(w)) r = true;
+  r
+}
+on_idle() => idle();
+// open the function in the second panel (the client has one representation of the function)
+open_fn(f) {
+  p = now_peer();
+  fv = -1;
+  for(w : range(views.size)) if((views[w].peer == p) && (given(views[w].root) && (views[w].kind == "fn"))) fv = w;
+  if(fv < 0) {
+    views.push(new_view(p, peer_view_count(p) + 1, f, "fn"));
+    fv = views.size - 1;
+  }
+  views[fv].root = f;
+  views[fv].layer = "";
+  views[fv].cursor = 0;
+  views[fv].completing = false;
+  relayout(fv);
+  // cursor to the body: on an empty line, if any, otherwise after `{`
+  n = places(fv);
+  k = 0;
+  while((k + 1) < n) {
+    if(lead(fv, k) == '{') {
+      views[fv].cursor = blank_line_end(fv, if((k + 2) < n) k + 2 else k + 1);
+      k = n;
+    } else k += 1;
+  }
+  show_view_of(fv, false);
+}
+// Add the internal element of the module (text - from add_overload): the element - at the end of
+// the module, internal; tags of the module, open in the second panel.
+add_inner(str text, str sig) {
+  f = parse_inner(text, sig);
+  if(!given(f)) return report("не удалось добавить " + sig);
+  // Module representations: no internal element visible - only labels change
+  recheck();
+  for(w : range(views.size)) if(given(views[w].root) && (views[w].kind == "module")) send_marks(w);
+  open_fn(f);
+}
+
+// Draft: set as in a conventional editor
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// `;`Spaces and empty lines are put by a person, not a projection. Each edit disassembles the draft as a
+// whole (written - nodes, unwritten - holes in their lines, unpaired bracket - indentation, §4.1); layout -
+// by the places of nodes in the typed text, the DOM remains the AST tree. Checking and tags - on a pause of
+// 1 sec; canon - when leaving the module element (cursor outside it, Escape, save, launch, other
+// presentation). .
+//
+//
+
+// The beginning of the lines of the first deduced element with the number j; no - the end of the elements.
+content_from(i64 v, i64 j) {
+  k = j;
+  while(k < views[v].lay.content_at.size) {
+    if(views[v].lay.content_at[k] >= 0) return views[v].lay.content_at[k];
+    k += 1;
+  }
+  views[v].lay.items_end
+}
+// The unit of the draft around the place: the place [from, to), the elements of the module [k0, k1); the
+// last (the end of the text of the elements is its place). ok false - no (module header, end comment).
+struct region { bool ok; i64 from; i64 to; i64 k0; i64 k1; bool last; }
+no_region() => region{false, 0, 0, 0, 0, false};
+holds(region r, i64 p) => (p >= r.from) && ((p < r.to) || ((p == r.to) && r.last));
+unit_of(i64 v, i64 place) {
+  if(views[v].kind != "module") return region{true, 0, end_of(v), 0, 0, true};
+  pb = byte_of(v, place);
+  if(views[v].d.open) {
+    at = group_at(v);
+    r = region{true, place_of_byte(v, views[v].lay.draft_begin), place_of_byte(v, views[v].lay.draft_end), at, at + views[v].d.items.size, views[v].lay.draft_end == views[v].lay.items_end};
+    if(holds(r, place)) return r;
+  }
+  k = -1; // element: the last one whose lines start no further than the place
+  any = false;
+  for(j : range(views[v].lay.content_at.size)) if(views[v].lay.content_at[j] >= 0) {
+    any = true;
+    if(views[v].lay.content_at[j] <= pb) k = j;
+  }
+  if(k < 0) {
+    if(any || (views[v].d.open && (views[v].lay.draft_begin < views[v].lay.draft_end))) return no_region(); // module-cap
+    items = code_items(program());
+    at = 0;
+    while((at < items.size) && !is_inner(items[at])) at += 1;
+    e = place_of_byte(v, views[v].lay.items_end);
+    return region{true, e, e, at, at, true};
+  }
+  to = content_from(v, k + 1);
+  if(views[v].d.open && ((views[v].lay.draft_begin > views[v].lay.chunk_at[k]) && (views[v].lay.draft_begin < to))) to = views[v].lay.draft_begin; // draft
+  r = region{true, place_of_byte(v, views[v].lay.chunk_at[k]), place_of_byte(v, to), k, k + 1, to == views[v].lay.items_end};
+  if(!holds(r, place)) return no_region(); // end-of-module comments
+  r
+}
+draft_region(i64 v) {
+  if(!views[v].d.open) return no_region();
+  if(views[v].kind != "module") return region{true, 0, end_of(v), 0, 0, true};
+  at = group_at(v);
+  region{true, place_of_byte(v, views[v].lay.draft_begin), place_of_byte(v, views[v].lay.draft_end), at, at + views[v].d.items.size, views[v].lay.draft_end == views[v].lay.items_end}
+}
+// Draft Covering Places [a, b]: Open or Expand an Item in another client’s draft - Failure.
+// Result: array{1 - open, 0 - not in the module element, -1 - failure, unit}.
+//
+open_draft(i64 v, i64 a, i64 b) {
+  ra = unit_of(v, a);
+  rb = unit_of(v, b);
+  if(!ra.ok || !rb.ok) return array{0, no_region()};
+  r = region{true, lesser(ra.from, rb.from), greater(ra.to, rb.to), lesser(ra.k0, rb.k0), greater(ra.k1, rb.k1), ra.last || rb.last};
+  group = array{};
+  if(views[v].kind == "module") {
+    items = code_items(program());
+    for(k : range(r.k1 - r.k0)) group.push(items[r.k0 + k]);
+  } else group.push(views[v].root);
+  for(w : range(views.size)) if((w != v) && (given(views[w].root) && views[w].d.open)) {
+    hit = false;
+    for(x : views[w].d.items) if(has_code(group, x)) hit = true;
+    if(hit) {
+      if(views[w].peer != views[v].peer) return array{-1, r};
+      finalize(w); // His other vision is to the canon.
+    }
+  }
+  if(views[v].d.open && same_codes(views[v].d.items, group)) return array{1, r};
+  gb = byte_of(v, r.from);
+  ge = byte_of(v, r.to);
+  if(!views[v].d.open) {
+    views[v].d.since = revision();
+    views[v].d.sources = array{};
+    views[v].d.before = slice_text(views[v].lay.text, gb, ge);
+  } else {
+    was = draft_region(v); // extension: neighbors - their text to the draft
+    if(was.ok) {
+      wb = byte_of(v, was.from);
+      we = byte_of(v, was.to);
+      t = views[v].lay.text;
+      views[v].d.before = (slice_text(t, gb, wb) + views[v].d.before) + slice_text(t, we, ge);
+    }
+  }
+  views[v].d.open = true; // new draft or extension of the open
+  views[v].d.items = group;
+  if(views[v].kind == "module") {
+    items = code_items(program());
+    views[v].d.next = if((r.k1 < items.size) && !is_inner(items[r.k1])) items[r.k1] else code();
+  }
+  array{1, r}
+}
+// byte after n line code points
+cp_bytes(str s, i64 n) {
+  b = 0;
+  k = 0;
+  while((k < n) && (b < s.size)) {
+    b += 1;
+    while((b < s.size) && ((s[b] & 192) == 128)) b += 1;
+    k += 1;
+  }
+  b
+}
+// last n
+tail_of(xs, i64 n) {
+  r = array{};
+  for(k : range(xs.size)) if(k >= (xs.size - n)) r.push(xs[k]);
+  r
+}
+// last
+without_last(xs) {
+  r = array{};
+  for(k : range(xs.size - 1)) r.push(xs[k]);
+  r
+}
+// Edit places [a, b) on ins in the draft; caret - cursor after editing (code points inside ins). 0 - place
+// not in the module element (cap, end comments): normal editing; -1 - rejected.
+draft_edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
+  array{state, r} = open_draft(v, a, b);
+  if(state < 0) {
+    report("элемент правит другой клиент");
+    return -1;
+  }
+  if(state == 0) return 0;
+  base = byte_of(v, r.from);
+  t = slice_text(views[v].lay.text, base, byte_of(v, r.to));
+  ia = byte_of(v, a) - base;
+  ib = byte_of(v, b) - base;
+  edited = (slice_text(t, 0, ia) + ins) + text_from(t, ib);
+  word = (a == b) && ((code_points(ins) == 1) && ident_byte(ins[0]));
+  if(!(word && views[v].typing)) {
+    views[v].undo.push(snapshot{t, byte_of(v, views[v].cursor) - base});
+    if(views[v].undo.size > 500) views[v].undo = tail_of(views[v].undo, 500);
+  }
+  views[v].typing = word;
+  views[v].redo = array{};
+  array{hn, hp, ho} = caret_of(v, a);
+  hint = edit_hint{hn, hp, ho, b - a, code_points(ins), true};
+  commit_draft(v, edited, ia + cp_bytes(ins, caret), r.from, r.to);
+  1
+}
+// Disassemble the text of the draft and put its elements in the module (id elements of the same
+// type are saved); send out the layout. From, to - the draft places before editing.
+commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) {
+  at = if(views[v].kind == "module") group_at(v) else 0;
+  old = views[v].d.items;
+  array{ids, source, blank, rest, reparsed} = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
+  views[v].d.items = ids;
+  views[v].d.source = source;
+  views[v].d.sources.push(source);
+  views[v].d.blank = blank;
+  views[v].d.rest = rest;
+  close_traces();
+  broadcast(v, from, to, caret_at, reparsed, old);
+  hint.valid = false;
+  schedule_check();
+}
+// signature of the subtree node x in the layout before editing (0 - node is not in it)
+tree_sig(nodes, order, sub, x) {
+  k = index_in(nodes, order, code_id(x));
+  if(k < 0) 0 else sub[k]
+}
+// The deepest node, outside of which the layout has not changed: their pieces are the same, and the subtree
+// of exactly one child has changed - the descent into it (editing in a damp block - updating only the block).
+narrowest(i64 w, nodes, order, sig, sub, x) {
+  n = x;
+  while(true) {
+    k = layout_of(w, n);
+    ko = index_in(nodes, order, code_id(n));
+    if((k < 0) || ((ko < 0) || (sig[ko] != views[w].lay.sig[k]))) return n;
+    only = code();
+    changed = 0;
+    f = views[w].lay.first[k];
+    for(j : range(views[w].lay.count[k])) {
+      ch = views[w].lay.pchild[f + j];
+      if(ch >= 0) {
+        kc = layout_at(w, ch);
+        kco = index_in(nodes, order, ch);
+        if((kc < 0) || ((kco < 0) || (sub[kco] != views[w].lay.sub[kc]))) {
+          only = node_code(ch);
+          changed += 1;
+        }
+      }
+    }
+    if(changed != 1) return n;
+    n = only;
+  }
+  n
+}
+// New layout for all performances. The author (av, draft) - cursor on caret_at bytes from the beginning of
+// the draft; changed only inside the draft - updating its elements, otherwise - the module as a whole. The
+// rest is the cursor in the same place node. The edit changed only the text of the draft v: nothing
+// outside it has not been redisassembled and changed by elaboration (rollback of ct-code mutations, §7.4),
+// there are no extensions to the link to its functions (the extension prints the name and signature of the
+// target).
+draft_only(i64 v, reparsed) {
+  if((reparsed.size > 0) || (changed_nodes(false).size > 0)) return false;
+  for(e : fn_extensions()) for(x : views[v].d.items) if(within(e[1], x)) return false;
+  true
+}
+// old - elements of the author's draft before editing (its layout is pasted if the edit did not go
+// beyond the draft)
+broadcast(i64 av, i64 old_from, i64 old_to, i64 caret_at, reparsed, old) {
+  in_place = draft_only(av, reparsed);
+  tops = views[av].d.items; // corrected elements and reconstructed - their layouts before editing
+  for(x : reparsed) {
+    inside = false;
+    for(y : tops) if(within(x, y)) inside = true;
+    if(!inside) tops.push(x);
+  }
+  for(w : range(views.size)) if(given(views[w].root)) {
+    // layout before editing: node, their order and signatures
+    o_nodes = views[w].lay.sorted;
+    o_order = views[w].lay.order;
+    o_sig = views[w].lay.sig;
+    o_sub = views[w].lay.sub;
+    was = views[w].lay.text;
+    mine = w == av;
+    nb = views[w].lay.byte.size;
+    ob = if(mine && (nb > 0)) views[w].lay.byte[lesser(old_from, nb - 1)] else 0;
+    oe = if(mine && (nb > 0)) views[w].lay.byte[lesser(old_to, nb - 1)] else 0;
+    array{kn, kp, ko} = caret_of(w, views[w].cursor);
+    keep_byte = byte_of(w, views[w].cursor);
+    relayout_from(w, old, mine && in_place);
+    if(mine) {
+      start = if(views[w].kind == "module") views[w].lay.draft_begin else 0;
+      views[w].cursor = lesser(place_of_byte(w, start + caret_at), end_of(w));
+      views[w].anchor = -1;
+      views[w].goal = -1;
+    } else {
+      if(hint.valid && ((kn == hint.node) && ((kp == hint.piece) && (ko >= hint.offset))))
+        ko = if(ko >= (hint.offset + hint.removed)) (ko - hint.removed) + hint.inserted else hint.offset + hint.inserted;
+      views[w].cursor = lesser(place_of_byte(w, keep_byte), end_of(w));
+      k = place_at(w, kn, kp, ko, true);
+      if(k >= 0) views[w].cursor = k;
+      if(views[w].anchor >= 0) views[w].anchor = lesser(views[w].anchor, end_of(w));
+    }
+    if(mine || (views[w].lay.text != was)) {
+      // the root is the same (its pieces are the same texts and elements): updates only the draft elements
+      // and redisassembled according to the new rules n
+      inside = (views[w].lay.sig.size > 0) && ((o_sig.size > 0) && (views[w].lay.sig[0] == o_sig[0]));
+      if(mine && (views[w].kind == "module"))
+        inside = inside && ((slice_text(was, 0, ob) == slice_text(views[w].lay.text, 0, views[w].lay.draft_begin)) && (text_from(was, oe) == text_from(views[w].lay.text, views[w].lay.draft_end)));
+      // one update: one element has changed - it, otherwise - the root (the client does not see
+      // the intermediate mixture)
+      changed = array{};
+      for(x : tops) {
+        kx = layout_of(w, x);
+        if((kx >= 0) && (views[w].lay.sub[kx] != tree_sig(o_nodes, o_order, o_sub, x))) {
+          nested = false;
+          for(y : tops) if((code_id(y) != code_id(x)) && ((layout_of(w, y) >= 0) && within(x, y))) nested = true;
+          if(!nested) changed.push(x);
+        }
+      }
+      if(inside && (changed.size == 1)) send_update(views[w].peer, views[w].id, narrowest(w, o_nodes, o_order, o_sig, o_sub, changed[0]), views[w].lay);
+      else if(!inside || (changed.size > 0)) send_update(views[w].peer, views[w].id, views[w].root, views[w].lay);
+      if(!mine) close_completion(w);
+      send_cursor(w);
+    }
+  }
+  0
+}
+// Place x (byte of text before the canon) - after the canon: before the draft - in the same place,
+// inside - aligning the typed text with the canonical, after - with a shift.
+map_place(i64 v, str was, i64 ob, i64 oe, i64 ne, i64 x) {
+  if(x < ob) return place_of_byte(v, x);
+  if((x >= oe) && !((x == oe) && (oe == was.size))) return place_of_byte(v, (x - oe) + ne);
+  got = align(text_from(was, ob), code_points(slice_text(was, ob, x)), text_from(views[v].lay.text, ob));
+  lesser(place_of_byte(v, ob) + got, end_of(v))
+}
+// Canon: the draft leaves, the presentation is printed projection. The course and highlighting - until the
+// draft in the same places, inside - aligning the typed text with the canonical, then with a shift.
+// mode: 0 — правка, 1 — откат, 2 — повтор (история принятого).
+finalize_mode(i64 v, i64 mode) {
+  if(!views[v].d.open) return 0;
+  as_module = views[v].kind == "module";
+  ob = if(as_module) views[v].lay.draft_begin else 0;
+  oe = if(as_module) views[v].lay.draft_end else views[v].lay.text.size;
+  at = if(as_module) group_at(v) else 0;
+  count = views[v].d.items.size;
+  was = views[v].lay.text;
+  cur = byte_of(v, views[v].cursor);
+  anc = if(views[v].anchor >= 0) byte_of(v, views[v].anchor) else -1;
+  draft_close(as_module, at, count, views[v].d.next, views[v].d.blank, views[v].d.rest, views[v].d.since, views[v].d.sources, views[v].d.source);
+  entry = closed{views[v].d.items, views[v].d.next, views[v].d.before, ""};
+  views[v].d = empty_draft();
+  views[v].undo = array{};
+  views[v].redo = array{};
+  views[v].typing = false;
+  check_program(); // elaboration - to layout: the canon shows the changed ct-code
+  relayout(v);
+  ne = if(as_module) content_from(v, at + count) else views[v].lay.text.size;
+  if(as_module && (ne < ob)) ne = ob;
+  if(as_module) { // History of the accepted: the text of the unit after - canon
+    entry.after = slice_text(views[v].lay.text, ob, ne);
+    if(entry.before != entry.after) {
+      if(mode == 1) views[v].undone.push(entry) else views[v].done.push(entry);
+      if(mode == 0) views[v].undone = array{};
+    }
+  }
+  views[v].cursor = map_place(v, was, ob, oe, ne, cur);
+  views[v].anchor = if(anc >= 0) map_place(v, was, ob, oe, ne, anc) else -1;
+  for(w : range(views.size)) if(given(views[w].root)) {
+    fresh = true;
+    if(w != v) {
+      t = views[w].lay.text;
+      array{kn, kp, ko} = caret_of(w, views[w].cursor);
+      relayout(w);
+      k = place_at(w, kn, kp, ko, true);
+      if(k >= 0) views[w].cursor = k;
+      fresh = views[w].lay.text != t;
+    }
+    if(fresh) {
+      send_update(views[w].peer, views[w].id, views[w].root, views[w].lay);
+      send_cursor(w);
+    }
+  }
+  close_completion(v);
+  idle();
+}
+finalize(i64 v) => finalize_mode(v, 0);
+// drafts of all client submissions - to the canon (except for the presentation except; -1 - all)
+finalize_peer(i64 p, i64 except) {
+  for(w : range(views.size)) if((views[w].peer == p) && (given(views[w].root) && (w != except))) finalize(w);
+  0
+}
+finalize_views() => finalize_peer(now_peer(), -1);
+finalize_others(i64 v) => finalize_peer(views[v].peer, v);
+finalize_everyone() {
+  for(w : range(views.size)) if(given(views[w].root)) finalize(w);
+  0
+}
+// Editing [a, b) on ins: in a draft, otherwise (module cap) - over parsing brackets; caret - cursor in
+// the insert (code points; -1 - after it)
+replace(i64 v, i64 a, i64 b, str ins, i64 caret) {
+  n = code_points(ins);
+  c = if((caret < 0) || (caret > n)) n else caret;
+  views[v].anchor = -1;
+  views[v].goal = -1;
+  r = draft_edit(v, a, b, ins, c);
+  if(r == 0) {
+    views[v].typing = false;
+    edit(v, a, b, ins, c);
+  }
+  0
+}
+// The cursor is moved (solution - move_to): the word set is over, the addition is closed; outside the draft
+// - the canon; the cursor and the hint - to the client.
+cursor_moved(i64 v) {
+  views[v].typing = false;
+  close_completion(v);
+  r = draft_region(v);
+  if(r.ok && !(holds(r, views[v].cursor) && ((views[v].anchor < 0) || holds(r, views[v].anchor)))) finalize(v) else send_cursor(v);
+}
+// Retraction and repetition - inside the draft; outside it - accepted editing.
+undo(i64 v, bool again) {
+  r = draft_region(v);
+  n = if(again) views[v].redo.size else views[v].undo.size;
+  if(!r.ok || (n == 0)) return undo_closed(v, again);
+  base = byte_of(v, r.from);
+  now = snapshot{slice_text(views[v].lay.text, base, byte_of(v, r.to)), byte_of(v, views[v].cursor) - base};
+  snap = if(again) views[v].redo[n - 1] else views[v].undo[n - 1];
+  if(again) {
+    views[v].redo = without_last(views[v].redo);
+    views[v].undo.push(now);
+  } else {
+    views[v].undo = without_last(views[v].undo);
+    views[v].redo.push(now);
+  }
+  views[v].typing = false;
+  views[v].anchor = -1;
+  views[v].goal = -1;
+  commit_draft(v, snap.text, snap.caret, r.from, r.to);
+}
+// place of the element in the module elements (-1 - no)
+index_of(items, c) {
+  r = -1;
+  for(k : range(items.size)) if((r < 0) && (code_id(items[k]) == code_id(c))) r = k;
+  r
+}
+// Retracement (repeat) of the adopted editing: the unit - the same elements, its text - as it was before
+// the editing (after it); editing back - with a draft, immediately to the canon. The text of the unit has
+// changed since (another client) is a waiver.
+undo_closed(i64 v, bool again) {
+  finalize(v);
+  n = if(again) views[v].undone.size else views[v].done.size;
+  if(n == 0) return report(if(again) "повторять нечего" else "откатывать нечего");
+  if(views[v].kind != "module") return report("откат принятого — в представлении модуля");
+  e = if(again) views[v].undone[n - 1] else views[v].done[n - 1];
+  if(again) views[v].undone = without_last(views[v].undone) else views[v].done = without_last(views[v].done);
+  items = code_items(program());
+  at = 0;
+  if(e.items.size > 0) {
+    i = index_of(items, e.items[0]);
+    here = (i >= 0) && ((items.size - i) >= e.items.size);
+    if(here) for(k : range(e.items.size)) if(code_id(items[i + k]) != code_id(e.items[k])) here = false;
+    if(!here) return report("откат: элементов правки больше нет");
+    at = i;
+  } else {
+    at = if(given(e.next)) index_of(items, e.next) else -1;
+    if(at < 0) at = items.size;
+    while(!given(e.next) && ((at > 0) && is_inner(items[at - 1]))) at -= 1;
+  }
+  count = e.items.size;
+  ob = if((at < views[v].lay.chunk_at.size) && (count > 0)) views[v].lay.chunk_at[at] else content_from(v, at);
+  oe = content_from(v, at + count);
+  if((ob < 0) || ((oe < ob) || (slice_text(views[v].lay.text, ob, oe) != e.after))) return report("откат: элемент изменился после правки");
+  for(w : range(views.size)) if((w != v) && (given(views[w].root) && views[w].d.open))
+    for(x : views[w].d.items) if(has_code(e.items, x)) return report("элемент правит другой клиент");
+  from_place = place_of_byte(v, ob);
+  to_place = place_of_byte(v, oe);
+  views[v].d = draft{true, e.items, e.next, 0, array{}, array{}, revision(), e.after, array{}};
+  views[v].anchor = -1;
+  views[v].goal = -1;
+  views[v].typing = false;
+  // cursor - in place of editing: the first difference of texts
+  same = 0;
+  while((same < e.before.size) && ((same < e.after.size) && (e.before[same] == e.after[same]))) same += 1;
+  while((same > 0) && ((same < e.before.size) && ((e.before[same] & 192) == 128))) same -= 1;
+  commit_draft(v, e.before, same, from_place, to_place);
+  finalize_mode(v, if(again) 2 else 1);
+}
+
+// --- Introduction: editing the text projection → parsing brackets --------------------------------------
+// Editing places [a, b) on ins. The unit per parsing is the smallest brackets around the edit: block,
+// then module element, then module.
+// 
+// If the brackets of the unit itself are broken, external ones are taken.
+// Any text is understood: unwritten - holes (ibid.). The unit node retains
+// the id.
+struct edit_unit { code node; i64 kind; i64 from; i64 to; } // kind: 0 - block, 1 - module element, 2 - module
+units_around(i64 v, i64 a, i64 b) {
+  found = array{};
+  // blocks, inside the parentheses of which are edited, the ancestors of the node place (from the inside out - in size)
+  k = layout_at(v, views[v].lay.node[a]);
+  while(k >= 0) {
+    fr = range_from(v, k);
+    t = range_to(v, k);
+    if(((t - fr) >= 2) && ((a >= (fr + 1)) && (b <= (t - 1)))) {
+      n = node_code(views[v].lay.nodes[k]);
+      if(code_kind(n) == ast.block) found.push(edit_unit{n, 0, fr, t});
+    }
+    k = views[v].lay.up[k];
+  }
+  for(item : code_items(program())) {
+    ki = layout_of(v, item);
+    if((ki >= 0) && ((a >= range_from(v, ki)) && (b <= range_to(v, ki)))) found.push(edit_unit{item, 1, range_from(v, ki), range_to(v, ki)});
+  }
+  if(views[v].kind == "module") found.push(edit_unit{program(), 2, range_from(v, 0), range_to(v, 0)});
+  found
+}
+// Editing within the unit (in places from its beginning): [from, to] replaced by inserted code points.
+struct change { i64 from; i64 to; i64 inserted; }
+// place before editing → place in the text after editing (up to parsing)
+map_change(change ch, i64 c) => if(c >= ch.to) (c - (ch.to - ch.from)) + ch.inserted else if(c > ch.from) ch.from else c;
+// Mode 0 - text node target; 1 - elements [k, k + count] of the target container (count 0 - place at)
+//
+struct spot { i64 mode; code target; i64 k; i64 count; i64 at; }
+// Container elements in projection: the module has no internal (they are at the end).
+items_of(c) {
+  if(code_kind(c) == ast.block) return code_items(c);
+  r = array{};
+  for(x : code_items(c)) if(!is_inner(x)) r.push(x);
+  r
+}
+// places of the container elements [from, from + count] in the representation w; count 0 is the insert point at
+items_range(i64 w, c, i64 from, i64 count, i64 at) {
+  if(count == 0) return array{at, at};
+  items = items_of(c);
+  array{range_from(w, layout_of(w, items[from])), range_to(w, layout_of(w, items[(from + count) - 1]))}
+}
+spot_before(i64 w, spot s) {
+  if(s.mode == 0) {
+    k = layout_of(w, s.target);
+    return array{range_from(w, k), range_to(w, k)};
+  }
+  items_range(w, s.target, s.k, s.count, s.at)
+}
+spot_after(i64 w, spot s, i64 n_new) {
+  if(s.mode == 0) return spot_before(w, s);
+  if(n_new > 0) return items_range(w, s.target, s.k, n_new, 0);
+  // Element removed: place - after the previous or immediately after `{` block
+  at = if(s.k > 0) range_to(w, layout_of(w, items_of(s.target)[s.k - 1])) else (range_from(w, layout_of(w, s.target)) + (if(code_kind(s.target) == ast.block) 1 else 0));
+  array{at, at}
+}
+// representation, where the target is visible, before editing: the place of editing and the text after it
+struct seen_view { i64 v; i64 from; i64 to; str tail; }
+apply_before(target, spot s) {
+  found = array{};
+  for(w : range(views.size)) if(given(views[w].root) && (layout_of(w, target) >= 0)) {
+    array{f, t} = spot_before(w, s);
+    found.push(seen_view{w, f, t, text_from(views[w].lay.text, byte_of(w, t))});
+  }
+  found
+}
+// The base is changed (parsing units) - the new projection node target to all representations of all
+// clients; the cursor of each is transferred through the alignment of the texts of the changed place.
+apply_after(i64 av, target, spot s, i64 n_new, found, str edited, change ch, i64 caret, reparsed) {
+  // elaboration - to layout: node, modified by the ct code (and rollback of its mutations), - in the
+  // same projection as editing
+  check_program();
+  close_traces();
+  changed = changed_nodes(false);
+  exts = fn_extensions();
+  for(b : found) {
+    w = b.v;
+    c = views[w].cursor;
+    relayout(w);
+    array{rf, rt} = spot_after(w, s, n_new);
+    // was: correct place text + everything after it; became: projection from the beginning of the place
+    was = edited + b.tail;
+    now = text_from(views[w].lay.text, byte_of(w, rf));
+    // cursor of the author - immediately after entering; someone else - is moved by editing; then
+    // alignment with the canonical projection (she puts gaps)
+    if(w == av) c = blank_line_end(w, rf + align(was, ch.from + caret, now));
+    else if(c >= b.from) c = rf + align(was, map_change(ch, c - b.from), now);
+    views[w].cursor = lesser(c, end_of(w));
+    // Disassembled out of place change their text (the hole loses the value of the block): one update of
+    // the common ancestor - the client does not see the intermediate mixture
+    top = target;
+    for(x : reparsed) while(given(top) && (!within(x, top) && given(code_parent(top)))) top = code_parent(top);
+    for(x : changed) if(layout_at(w, x) >= 0) {
+      xc = node_code(x);
+      while(given(top) && (!within(xc, top) && given(code_parent(top)))) top = code_parent(top);
+    }
+    if((code_id(top) != code_id(target)) && (layout_of(w, top) >= 0)) send_update(views[w].peer, views[w].id, top, views[w].lay);
+    else {
+      send_update(views[w].peer, views[w].id, target, views[w].lay);
+      // f(…) { … } prints the name and signature of the target: editing the target changes its projection
+      for(e : exts) if((layout_of(w, e[0]) >= 0) && (within(e[1], target) && !within(e[0], target))) send_update(views[w].peer, views[w].id, e[0], views[w].lay);
+      // Redisassembled under the new parsing rules (after corrected announcement)
+      for(x : reparsed) if((layout_of(w, x) >= 0) && !within(x, target)) {
+        inner = false;
+        for(y : reparsed) if((code_id(y) != code_id(x)) && (within(x, y) && !within(y, target))) inner = true;
+        if(!inner) send_update(views[w].peer, views[w].id, x, views[w].lay);
+      }
+    }
+    if(w != av) close_completion(w); // crossword
+    send_cursor(w);
+  }
+  refresh_changed(); // representations which the amendment did not concern
+  for(b : found) send_marks(b.v);
+  0
+}
+// The edit is not in the draft: the raw block, the string of the set, otherwise the smallest unit.
+edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
+  if(edit_raw(v, a, b, ins, caret)) return 0;
+  if(edit_line(v, a, b, ins, caret)) return 0;
+  done = false;
+  for(u : units_around(v, a, b)) if(!done) {
+    old = text_of(v, u.from, u.to);
+    base = byte_of(v, u.from);
+    edited = (slice_text(old, 0, byte_of(v, a) - base) + ins) + text_from(old, byte_of(v, b) - base);
+    s = spot{0, u.node, 0, 0, 0};
+    found = apply_before(u.node, s);
+    array{ok, reparsed} = unit_edit(u.node, u.kind, edited, views[v].projection);
+    if(ok) {
+      apply_after(v, u.node, s, 0, found, edited, change{a - u.from, b - u.from, code_points(ins)}, caret, reparsed);
+      done = true;
+    }
+  }
+  // representation of function: text ceases to be a function-hole (the same node) until it becomes
+  // again; the module from this projection is not redefined
+  if(!done && (views[v].kind == "fn")) {
+    r0 = range_from(v, 0);
+    old = text_of(v, r0, range_to(v, 0));
+    base = byte_of(v, r0);
+    edited = (slice_text(old, 0, byte_of(v, a) - base) + ins) + text_from(old, byte_of(v, b) - base);
+    target = views[v].root;
+    s = spot{0, target, 0, 0, 0};
+    found = apply_before(target, s);
+    fn_hole(target, edited);
+    apply_after(v, target, s, 0, found, edited, change{a - r0, b - r0, code_points(ins)}, caret, array{});
+  }
+  0
+}
+// Raw block: The unit of editing is the block itself (§4.4). My:* unit is the entire call block (subblock
+// is not: its text is part of the block text); the block brackets are broken to the external unit (line).
+edit_raw(i64 v, i64 a, i64 b, str ins, i64 caret) {
+  k = layout_at(v, views[v].lay.node[a]);
+  while(k >= 0) {
+    fr = range_from(v, k);
+    t = range_to(v, k);
+    n = node_code(views[v].lay.nodes[k]);
+    if(((t - fr) >= 2) && ((a >= (fr + 1)) && ((b <= (t - 1)) && raw_unit(n)))) {
+      old = text_of(v, fr, t);
+      base = byte_of(v, fr);
+      edited = (slice_text(old, 0, byte_of(v, a) - base) + ins) + text_from(old, byte_of(v, b) - base);
+      s = spot{0, n, 0, 0, 0};
+      found = apply_before(n, s);
+      if(!raw_edit(n, edited)) return false;
+      apply_after(v, n, s, 0, found, edited, change{a - fr, b - fr, code_points(ins)}, caret, array{});
+      return true;
+    }
+    k = views[v].lay.up[k];
+  }
+  false
+}
+// Place container: the smallest block, inside the brackets of which is edited, otherwise the module.
+container_of(i64 v, i64 a, i64 b) {
+  r = program();
+  done = false;
+  for(u : units_around(v, a, b)) if(!done && (u.kind == 0)) {
+    r = u.node;
+    done = true;
+  }
+  r
+}
+// Place a in the gap before the element k of the container c - inside the comment: in the interval only
+// spaces and comments (§4.0), `//` - to the end of the line.
+in_comment(i64 v, c, i64 k, i64 a) {
+  items = items_of(c);
+  from = if(k > 0) range_to(v, layout_of(v, items[k - 1])) else (if(code_id(c) == code_id(program())) 0 else range_from(v, layout_of(v, c)) + 1);
+  t = text_of(v, from, a);
+  in_line = false;
+  in_block = false;
+  i = 0;
+  while(i < t.size) {
+    if(in_line) in_line = t[i] != '\n';
+    else if(in_block) {
+      if((t[i] == '*') && (((i + 1) < t.size) && (t[i + 1] == '/'))) {
+        in_block = false;
+        i += 1;
+      }
+    } else if((t[i] == '/') && (((i + 1) < t.size) && (t[i + 1] == '/'))) in_line = true;
+    else if((t[i] == '/') && (((i + 1) < t.size) && (t[i + 1] == '*'))) in_block = true;
+    i += 1;
+  }
+  in_line || in_block
+}
+// Set string (author's decision 2026-09-29): a string is like a new block, not yet disassembled. Editing
+// within a block instruction (or module element) only re-examines its text; typing on an empty line or after
+// `;` creates a new element in that place. The unwritten is only the hole of this line. Broken line brackets
+// - to outer brackets.
+edit_line(i64 v, i64 a, i64 b, str ins, i64 caret) {
+  c = container_of(v, a, b);
+  module_level = code_id(c) == code_id(program());
+  if(module_level && (views[v].kind != "module")) return false; // header of a function in its representation - through a unit-function
+  items = items_of(c);
+  // element whose text is edited (end inclusive: set before `;`)
+  k = 0;
+  count = 0;
+  stop = false;
+  while((k < items.size) && !stop) {
+    l = layout_of(v, items[k]);
+    if(l >= 0) {
+      if((a >= range_from(v, l)) && (b <= range_to(v, l))) {
+        count = 1;
+        stop = true;
+      } else if(range_from(v, l) >= b) stop = true; // In the interval before the element k
+    }
+    if(!stop) k += 1;
+  }
+  blank_text = true;
+  for(i : range(ins.size)) if((ins[i] != ' ') && ((ins[i] != '\n') && (ins[i] != '\t'))) blank_text = false;
+  if((count == 0) && ((a != b) || blank_text)) return false; // erasure and gaps in the gap - through brackets
+  if((count == 0) && in_comment(v, c, k, a)) return false; // Quotation in comments (§4.0) - also in brackets
+  array{of, ot} = items_range(v, c, k, count, a);
+  was = text_of(v, of, ot);
+  base = byte_of(v, of);
+  edited = if(count > 0) (slice_text(was, 0, byte_of(v, a) - base) + ins) + text_from(was, byte_of(v, b) - base) else ins;
+  // Empty space lines when inserted: above and below the new element
+  above = 0;
+  below = 0;
+  if(count == 0) {
+    prev_end = if(k > 0) range_to(v, layout_of(v, items[k - 1])) else (if(module_level) 0 else range_from(v, layout_of(v, c)) + 1);
+    next_start = if(k < items.size) range_from(v, layout_of(v, items[k])) else (if(module_level) end_of(v) else range_to(v, layout_of(v, c)) - 1);
+    ld = leads(v);
+    for(x : range(greater(a - prev_end, 0))) if(ld[prev_end + x] == '\n') above += 1;
+    for(x : range(greater(next_start - a, 0))) if(ld[a + x] == '\n') below += 1;
+  }
+  s = spot{1, c, k, count, a};
+  found = apply_before(c, s);
+  array{ok, n_new, reparsed} = line_edit(c, k, count, edited, module_level, views[v].projection, above, below);
+  if(!ok) return false;
+  apply_after(v, c, s, n_new, found, edited, change{if(count > 0) a - of else 0, if(count > 0) b - of else 0, code_points(ins)}, caret, reparsed);
+  true
+}
+// The length of the UTF-8 code point per byte k.
+cp_len(str s, i64 k) {
+  n = 1;
+  while(((k + n) < s.size) && ((s[k + n] & 192) == 128)) n += 1;
+  n
+}
+space_byte(i64 c) => (c == ' ') || ((c == '\n') || (c == '\t'));
+// The place at (in code points) of the text from - in the text to, which is distinguished by spaces between
+// lexemes (canonical projection after parsing): matching characters go together, unnecessary spaces on
+// either side are missed.
+align(str from, i64 at, str to) {
+  i = 0;
+  j = 0;
+  ci = 0;
+  cj = 0;
+  while((ci < at) && (i < from.size)) {
+    ni = cp_len(from, i);
+    nj = if(j < to.size) cp_len(to, j) else 0;
+    if((nj > 0) && (space_byte(from[i]) && space_byte(to[j]))) {
+      // space gap - completely against the gap: the cursor inside it rises after as many translations of the
+      // line (Enter at the beginning of the line leaves the cursor on the line of code, at the end -
+      // translates to a new one)
+      ie = i;
+      je = j;
+      cie = ci;
+      cje = cj;
+      lines = 0;
+      col = 0;
+      while((ie < from.size) && space_byte(from[ie])) {
+        if(cie < at) {
+          col = if(from[ie] == '\n') 0 else col + 1;
+          if(from[ie] == '\n') lines += 1;
+        }
+        ie += 1;
+        cie += 1;
+      }
+      while((je < to.size) && space_byte(to[je])) {
+        je += 1;
+        cje += 1;
+      }
+      if(at < cie) {
+        seen_lines = 0;
+        while((j < je) && (seen_lines < lines)) {
+          if(to[j] == '\n') seen_lines += 1;
+          j += 1;
+          cj += 1;
+        }
+        while((col > 0) && ((j < je) && (to[j] != '\n'))) {
+          col -= 1;
+          j += 1;
+          cj += 1;
+        }
+        return cj;
+      }
+      i = ie;
+      ci = cie;
+      j = je;
+      cj = cje;
+    } else if((nj > 0) && (slice_text(from, i, i + ni) == slice_text(to, j, j + nj))) {
+      i += ni;
+      j += nj;
+      ci += 1;
+      cj += 1;
+    } else if(space_byte(from[i])) {
+      i += ni;
+      ci += 1;
+    } else if((nj > 0) && space_byte(to[j])) {
+      j += nj;
+      cj += 1;
+    } else if((nj > 0) && (to[j] == ';')) { // `;` delivered projection (after a hole in the block)
+      j += nj;
+      cj += 1;
+    } else if(from[i] == ';') { // Excess `;` set (`y = 2;;`) - projection removed it
+      i += ni;
+      ci += 1;
+    } else { // Divergence (literal written differently) - go together
+      i += ni;
+      ci += 1;
+      if(nj > 0) {
+        j += nj;
+        cj += 1;
+      }
+    }
+  }
+  cj
+}
+
+// --- Client signals: submissions
+// -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+on_open_view() {
+  p = now_peer();
+  views.push(new_view(p, peer_view_count(p) + 1, program(), "module"));
+  show_view_of(views.size - 1, true);
+}
+on_close_view(i64 id) {
+  v = view_of(id);
+  if(v < 0) return 0;
+  finalize(v);
+  views[v].root = code();
+  0
+}
+
+// --- ------------------------------------------------------------------------- character class for
+// words: space 0, name (and non-ASCII) 1, other 2
+char_class(i64 c) {
+  if((c == ' ') || ((c == '\n') || (c == '\t'))) return 0;
+  if(((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || (((c >= '0') && (c <= '9')) || ((c == '_') || (c >= 128))))) return 1;
+  2
+}
+// parameter - alias of the caller location (§6.2): go with your variable
+line_start(i64 v, i64 at) {
+  ld = leads(v);
+  k = at;
+  while((k > 0) && (ld[k - 1] != '\n')) k -= 1;
+  k
+}
+line_end(i64 v, i64 at) {
+  ld = leads(v);
+  k = at;
+  while(((k + 1) < ld.size) && (ld[k] != '\n')) k += 1;
+  k
+}
+word_left(i64 v, i64 at) {
+  ld = leads(v);
+  k = at;
+  while((k > 0) && (char_class(ld[k - 1]) == 0)) k -= 1;
+  if(k == 0) return 0;
+  c = char_class(ld[k - 1]);
+  while((k > 0) && (char_class(ld[k - 1]) == c)) k -= 1;
+  k
+}
+word_right(i64 v, i64 at) {
+  ld = leads(v);
+  k = at;
+  end = ld.size - 1;
+  while((k < end) && (char_class(ld[k]) == 0)) k += 1;
+  if(k == end) return end;
+  c = char_class(ld[k]);
+  while((k < end) && (char_class(ld[k]) == c)) k += 1;
+  k
+}
+// [from, to] - some gaps
+blank(i64 v, i64 from, i64 to) {
+  ld = leads(v);
+  r = true;
+  for(k : range(to - from)) if(ld[from + k] != ' ') r = false;
+  r
+}
+spaces(i64 n) {
+  s = "";
+  for(k : range(n)) s = s + " ";
+  s
+}
+lesser(i64 x, i64 y) => if(x < y) x else y;
+// line up (dir < 0) or down on lines - in the goal column
+vertical(i64 v, i64 dir, i64 lines) {
+  c = cursor(v);
+  ls = line_start(v, c);
+  col = if(goal(v) >= 0) goal(v) else (c - ls);
+  set_goal(v, col);
+  for(n : range(lines)) {
+    if(dir < 0) {
+      if(ls == 0) return if(n == 0) 0 else lesser(ls + col, line_end(v, ls));
+      ls = line_start(v, ls - 1);
+    } else {
+      le = line_end(v, ls);
+      if((le + 1) >= places(v)) return if(n == 0) le else lesser(ls + col, le);
+      ls = le + 1;
+    }
+  }
+  lesser(ls + col, line_end(v, ls))
+}
+// discharge: array {начало, конец}
+selection(i64 v) {
+  c = cursor(v);
+  an = anchor(v);
+  if(an < 0) array{c, c} else if(an < c) array{an, c} else array{c, an}
+}
+// number of code points (bytes-continuations of UTF-8 are not symbols)
+code_points(str s) {
+  n = 0;
+  k = 0;
+  while(k < s.size) {
+    if((s[k] & 192) != 128) n += 1;
+    k += 1;
+  }
+  n
+}
+
+// --- ------------------------------------------------------------------------------------ to the
+// first byte ch (without it)
+before(str s, i64 ch) {
+  r = "";
+  k = 0;
+  while((k < s.size) && (s[k] != ch)) {
+    r = r + text_byte(s[k]);
+    k += 1;
+  }
+  r
+}
+ident_byte(i64 c) => ((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || (((c >= '0') && (c <= '9')) || ((c == '_') || (c >= 128))));
+digits3(i64 n) => if(n < 10) "00" + text(n) else if(n < 100) "0" + text(n) else text(n);
+
+// --- complement ---
+// 
+// 
+// 
+// Context is the way from the place up the AST: the block gives the declared to the place, the function
+// and the block of the structure - the parameters, the module and prelude - their entity. The list is
+// alive: nothing is inserted itself - .
+//
+//
+struct completion { str name; str kind; str detail; i64 depth; }
+
+operator_name(str n) => starts_with(n, "infix") || (starts_with(n, "prefix") || starts_with(n, "postfix"));
+// name in the list (repeat - after, uniq)
+add_name(found, str name, str kind, str detail, i64 depth) {
+  if((name == "") || operator_name(name)) return false;
+  found.push(completion{name, kind, detail, depth});
+  true
+}
+// The near ad hides the far one (found earlier - closer); the function of the same level is overload. Order
+// - by name, then in order of finding (sorting stable): one pass
+uniq(found) {
+  keys = array{};
+  for(x : found) keys.push(x.name);
+  kept = array{};
+  for(k : sorted_indices(keys)) {
+    x = found[k];
+    n = kept.size;
+    if((n > 0) && (kept[n - 1].name == x.name)) {
+      y = kept[n - 1];
+      if((y.kind == "функция") && ((x.kind == "функция") && (y.depth == x.depth))) kept[n - 1] = completion{y.name, y.kind, "перегрузки", y.depth};
+    } else kept.push(x);
+  }
+  kept
+}
+param_list(ps, i64 from) {
+  r = "(";
+  for(k : range(ps.size)) if(k >= from) {
+    ast.parameter{pname, _, _, _, _, _, _} = ps[k];
+    r = (r + (if(k > from) ", " else "")) + pname;
+  }
+  r + ")"
+}
+entities(found, m, i64 depth) {
+  if(!given(m) || (code_kind(m) != ast.module)) return false;
+  for(item : code_items(m)) if(!is_record(item)) {
+    kind = code_kind(item);
+    if(kind == ast.function) {
+      ast.function{name, ps, _, _, _, _, _, _, _} = item;
+      add_name(found, name, "функция", param_list(ps, 0), depth);
+    } else if(kind == ast.extension) {
+      ast.extension{name, _, _, _, of, _} = item;
+      if(of == "struct") add_name(found, name, "тип", "struct", depth);
+    } else if(kind == ast.variable) {
+      ast.variable{name, _, _, _, _, _, _, _} = item;
+      add_name(found, name, "переменная", "модуль", depth);
+    }
+  }
+  true
+}
+// entity modules direct use module m (selective use k. {a, b} - just named, §9.1)
+use_entities(found, m, i64 depth) {
+  for(u : code_items(m)) if(code_kind(u) == ast.use) {
+    ast.use{key, names} = u;
+    um = module_of_key(key);
+    if(given(um)) {
+      xs = array{};
+      entities(xs, um, depth);
+      for(x : xs) {
+        ok = names.size == 0;
+        for(nm : names) if(nm == x.name) ok = true;
+        if(ok) found.push(completion{x.name, x.kind, with_note(x.detail, "модуль " + key), x.depth});
+      }
+    }
+  }
+  0
+}
+// Module on the way before the point (geo.vec). - its entity; no - empty code
+module_before(i64 v, i64 dot) {
+  k = dot;
+  while((k > 0) && (ident_byte(lead(v, k - 1)) || (lead(v, k - 1) == '.'))) k -= 1;
+  path = text_of(v, k, dot);
+  if(path == "") code() else module_of_key(path)
+}
+// x = e announces if a name is not yet available (author's decision: no auto); name - or
+assigned_name(s) {
+  r = "";
+  if(code_kind(s) == ast.operation) {
+    ast.operation{op, xs, _} = s;
+    if((op == "=") && ((xs.size > 0) && (code_kind(xs[0]) == ast.name))) {
+      ast.name{nm} = xs[0];
+      r = nm;
+    }
+  }
+  r
+}
+// identifiers visible at the location at
+context_names(at) {
+  found = array{};
+  depth = 0;
+  child = at;
+  n = at;
+  while(given(n)) {
+    kind = code_kind(n);
+    if(kind == ast.block) {
+      stop = false;
+      for(s : code_items(n)) if(!stop) {
+        if(code_id(s) == code_id(child)) stop = true; // post-sitting
+        else {
+          if(code_kind(s) == ast.variable) {
+            ast.variable{vn, _, _, _, _, _, _, _} = s;
+            add_name(found, vn, "переменная", "", depth);
+          }
+          add_name(found, assigned_name(s), "переменная", "", depth);
+        }
+      }
+    } else if(kind == ast.function) {
+      ast.function{_, ps, _, _, _, _, _, _, _} = n;
+      for(p : ps) {
+        ast.parameter{pn, _, _, _, _, _, _} = p;
+        add_name(found, pn, "параметр", "", depth);
+      }
+    } else if(kind == ast.lambda) {
+      ast.lambda{ps, _, _} = n;
+      for(p : ps) {
+        ast.parameter{pn, _, _, _, _, _, _} = p;
+        add_name(found, pn, "параметр", "блок конструкции", depth);
+      }
+    } else if(kind == ast.module) {
+      entities(found, n, depth);
+      use_entities(found, n, depth + 1);
+    }
+    child = n;
+    n = code_parent(n);
+    depth += 1;
+  }
+  uniq(found)
+}
+// prelude and VM functions are further away from any place in the program (depth 900): do not change -
+// without repetition and in lower case once.: what does not change, does not count again - is remembered in
+// the service state: names, lower case, tail of the order key (depth, name).
+//
+outer_known = false;
+outer_found = array{};
+outer_low = array{};
+outer_tail = array{};
+outer_ready() {
+  if(outer_known) return 0;
+  found = array{};
+  entities(found, prelude(), 900);
+  for(b : vm_builtins()) add_name(found, b[0], "функция", b[1] + " — VM", 901);
+  outer_found = uniq(found);
+  for(x : outer_found) {
+    outer_low.push(lower(x.name));
+    outer_tail.push(digits3(x.depth) + x.name);
+  }
+  outer_known = true;
+  0
+}
+// The names prelude and VM are their numbers. The word has grown from the former - suitable to it among
+// those who approached the former (prefix, substring and subsequence are preserved at the beginning of the
+// word).
+outer_word = "";
+outer_hits = array{};
+// name in the list of members: without repetition
+add_member(found, str name, str kind, str detail, i64 depth) {
+  for(x : found) if(x.name == name) return false;
+  found.push(completion{name, kind, detail, depth});
+  true
+}
+type_text(t) => if(given(t) && (code_kind(t) == ast.name)) {
+  ast.name{nm} = t;
+  nm
+} else "";
+// Value members after `.` for its aggregate field types, array size
+// and string, functions from all entity extensions are functions
+// through a point - a.f(b) и f(a, b) (§4.5).
+//
+member_names(types) {
+  found = array{};
+  for(t : types) {
+    base = before(t, '<');
+    if((base == "array") || (base == type_tag(4))) add_member(found, "size", "поле", (type_tag(2) + " — ") + t, 0);
+    for(part : record_parts(t)) add_member(found, part[0], "поле", (part[1] + " — ") + t, 0);
+    for(m : array{program(), prelude()}) if(given(m)) for(n : code_items(m)) if(code_kind(n) == ast.extension) {
+      ast.extension{en, xs, _, _, _, _} = n;
+      if(en == base) for(x : xs) {
+        if(code_kind(x) == ast.variable) {
+          ast.variable{fname, ft, _, _, _, _, _, _} = x;
+          add_member(found, fname, "поле", (type_text(ft) + " — ") + t, 0);
+        }
+        if(code_kind(x) == ast.function) {
+          ast.function{fname, ps, _, _, _, _, _, _, _} = x;
+          if(ps.size > 0) add_member(found, fname, "функция", param_list(ps, 1), 0);
+        }
+      }
+    }
+  }
+  dot_functions(found, types);
+  found
+}
+// Functions called through a point: the first parameter in some instance received this type or is
+// explicitly typed by it; not instance with this type is not offered.
+dot_functions(found, types) {
+  prog = program();
+  for(m : array{prog, prelude()}) if(given(m)) for(item : code_items(m)) if((code_kind(item) == ast.function) && !is_record(item)) {
+    ast.function{name, ps, _, _, _, _, _, _, _} = item;
+    if((ps.size > 0) && !operator_name(name)) {
+      ast.parameter{_, pt, _, _, _, _, _} = ps[0];
+      fits = false;
+      if(given(pt) && (code_kind(pt) == ast.name)) {
+        want = type_text(pt);
+        for(t : types) if(before(t, '<') == want) fits = true;
+      } else {
+        seen = param_types(item, 0);
+        for(t : types) for(x : seen) if(x == t) fits = true;
+      }
+      if(fits && !construction(item)) { // construction - syntax, not a call through a point
+        fresh = true;
+        for(x : found) if(x.name == name) fresh = false;
+        if(fresh) found.push(completion{name, "функция", param_list(ps, 1), if(code_id(m) == code_id(prog)) 1 else 2});
+      }
+    }
+  }
+  true
+}
+// Live filter: prefix, then substring, then subsequence (without taking into account the register); with
+// equality - near, then by name. Empty word - everything (up to 400: "everything visible" reaches the
+// built-in VM).
+rank(str n, str w) {
+  at = find_text(n, w);
+  if(at == 0) 0 else if(at > 0) 1 else if(subsequence(n, w)) 2 else -1
+}
+// node AST (struct programs generated from VM) - only on the typed prefix: they are needed by the
+// code that works with the code, the rest - noise (*mine*)
+shown(x, str n, str w) => !((x.kind == "тип") && (core_node_kind(x.name) && ((w.size == 0) || (find_text(n, w) != 0))));
+// Suitable: kept - options, keys - order (rank, depth, name: tail - depth and name)
+take(kept, keys, x, str n, str w, str tail) {
+  r = rank(n, w);
+  if((r >= 0) && shown(x, n, w)) {
+    kept.push(x);
+    keys.push(text(r) + tail);
+  }
+  r >= 0
+}
+// near (closer), far, and prelude with VM; distant, eponymous
+filtered(near, bool far, str word) {
+  w = lower(word);
+  kept = array{};
+  keys = array{};
+  for(x : near) take(kept, keys, x, lower(x.name), w, digits3(x.depth) + x.name);
+  if(far) {
+    outer_ready();
+    hits = array{};
+    if((outer_word != "") && starts_with(w, outer_word)) {
+      for(k : outer_hits) if(take(kept, keys, outer_found[k], outer_low[k], w, outer_tail[k])) hits.push(k);
+    } else for(k : range(outer_found.size)) if(take(kept, keys, outer_found[k], outer_low[k], w, outer_tail[k])) hits.push(k);
+    outer_word = w;
+    outer_hits = hits;
+  }
+  // Repeat names among the approached: the neighbor remains (by name, then by depth; sorting is
+  // stable - with equal in order of finds)
+  by_name = array{};
+  for(x : kept) by_name.push((x.name + "\n") + digits3(x.depth));
+  hidden = array{};
+  for(k : range(kept.size)) hidden.push(false);
+  last = "";
+  first = true;
+  for(k : sorted_indices(by_name)) {
+    if(!first && (kept[k].name == last)) hidden[k] = true;
+    last = kept[k].name;
+    first = false;
+  }
+  found = array{};
+  for(k : sorted_indices(keys)) if(!hidden[k] && (found.size < 400)) found.push(kept[k]);
+  found
+}
+// Live addition to the word in front of the cursor; forced (Ctrl + Space) - and without a word.
+complete(i64 v, bool forced) {
+  c = cursor(v);
+  b = c;
+  ld = leads(v);
+  while((b > 0) && ident_byte(ld[b - 1])) b -= 1;
+  word = text_of(v, b, c);
+  number = (word.size > 0) && ((word[0] >= '0') && (word[0] <= '9'));
+  at = place_node(v, if(b < c) b else if(c > 0) c - 1 else c);
+  if(number || (given(at) && (code_kind(at) == ast.string))) return close_completion(v);
+  // after `.` - members of the value on the left (by its types in all instance); the list - immediately on the point
+  dot = (b > 0) && (lead(v, b - 1) == '.');
+  if(!dot && (!forced && (word.size == 0))) return close_completion(v);
+  pm = if(dot) module_before(v, b - 1) else code(); // geo.vec. entity module (named by way)
+  types = if(dot && !given(pm)) object_types(v, b - 1) else array{};
+  if(dot && (!given(pm) && (types.size == 0))) return close_completion(v);
+  near = array{};
+  if(given(pm)) entities(near, pm, 0) else near = if(dot) member_names(types) else context_names(at);
+  items = filtered(near, !dot, word);
+  // The only option that matches the typed one is to show nothing.
+  if((items.size == 0) || ((items.size == 1) && (items[0].name == word))) return close_completion(v);
+  show_completion(v, items, b);
+}
+
+// --- hints: guidance, design shape, signature ---
+// 
+// Tip - strings from AST and parsing (type for all instance, value in layer, error, ads with links),
+// not text. *Mine: * line composition.
+//
+struct line { str kind; str text; code node; i64 from; i64 to; }
+
+// prelude functions by name: do not change - the pointer is built once (names by ascending, sorting
+// stable - the same name in order of announcement), the name - by binary search
+prelude_fns = array{};
+prelude_fn_names = array{};
+prelude_fn_order = array{};
+prelude_indexed = false;
+prelude_declarations(str name) {
+  if(!prelude_indexed) {
+    names = array{};
+    for(f : code_items(prelude())) if(code_kind(f) == ast.function) {
+      ast.function{fname, _, _, _, _, _, _, _, _} = f;
+      prelude_fns.push(f);
+      names.push(fname);
+    }
+    for(k : sorted_indices(names)) {
+      prelude_fn_names.push(names[k]);
+      prelude_fn_order.push(k);
+    }
+    prelude_indexed = true;
+  }
+  found = array{};
+  k = lower_bound(prelude_fn_names, name);
+  while((k < prelude_fn_names.size) && (prelude_fn_names[k] == name)) {
+    found.push(prelude_fns[prelude_fn_order[k]]);
+    k += 1;
+  }
+  found
+}
+// Name announcements visible at: functions of its module (with internal), modules of its direct use (use is
+// not transitive, selective use k. {a, b} is only named; §9.1) and prelude; name is named by way
+// (geo.vec.norm) - only that module. ;
+//
+declarations(str name, at) {
+  found = array{};
+  qm = qualified_module(at);
+  if(given(qm)) {
+    functions_in(found, qm, name);
+    return found;
+  }
+  m = place_module(at);
+  functions_in(found, m, name);
+  for(u : used_modules(m, name)) functions_in(found, u, name);
+  for(f : prelude_declarations(name)) found.push(f);
+  found
+}
+place_module(at) => if(given(at)) code_module(at) else program();
+functions_in(found, m, str name) {
+  if(!given(m)) return 0;
+  for(f : code_items(m)) if(code_kind(f) == ast.function) {
+    ast.function{fname, _, _, _, _, _, _, _, _} = f;
+    if(fname == name) found.push(f);
+  }
+  0
+}
+// Direct use modules m, which give the name ("" - any")
+used_modules(m, str name) {
+  r = array{};
+  if(!given(m) || (code_kind(m) != ast.module)) return r;
+  for(u : code_items(m)) if(code_kind(u) == ast.use) {
+    ast.use{key, names} = u;
+    gives = (name == "") || (names.size == 0);
+    for(x : names) if(x == name) gives = true;
+    if(gives) {
+      um = module_of_key(key);
+      if(given(um)) r.push(um);
+    }
+  }
+  r
+}
+// The path of names (geo.vec) is a module; otherwise the code is empty.
+module_path(c) {
+  if(!given(c)) return "";
+  if(code_kind(c) == ast.name) return name_of(c);
+  inner = if(member_name(c) != "") module_path(member_object(c)) else "";
+  if(inner == "") "" else (inner + ".") + member_name(c)
+}
+// a.f, where a is the path of the module (geo.vec.norm): module; otherwise empty code
+qualified_module(c) {
+  if(!given(c) || (member_name(c) == "")) return code();
+  path = module_path(member_object(c));
+  if(path == "") code() else module_of_key(path)
+}
+// Module where declared (not program module - signature in lists)
+module_note(f) {
+  m = code_module(f);
+  if(!given(m) || in_prelude(f) || (code_id(m) == code_id(program()))) return "";
+  "модуль " + code_name(m)
+}
+// Selected parsing - first (order of others - as it was)
+chosen_first(fns, chosen) {
+  r = array{};
+  for(f : fns) if(has_code(chosen, f)) r.push(f);
+  for(f : fns) if(!has_code(chosen, f)) r.push(f);
+  r
+}
+declaration_lines(lines, str name, chosen, place) {
+  n = 0;
+  for(f : chosen_first(declarations(name, place), chosen)) if(n < 8) {
+    n += 1;
+    here = has_code(chosen, f);
+    at = if(here) "выбрана здесь" else if(in_prelude(f)) "прелюдия" else if(is_inner(f)) "внутренняя" else "";
+    if(module_note(f) != "") at = with_note(at, module_note(f));
+    lines.push(line{if(construction(f)) "форма" else "объявление", head_text(f) + (if(at == "") "" else "  — " + at), f, 0, 0});
+    for(l : note_lead(f)) if(l != "") lines.push(line{"комментарий", l, code(), 0, 0});
+  }
+  true
+}
+callee_of(c) => if(given(c) && (code_kind(c) == ast.call)) {
+  ast.call{f, _, _, _, _, _, _} = c;
+  f
+} else code();
+name_of(c) => if(given(c) && (code_kind(c) == ast.name)) {
+  ast.name{nm} = c;
+  nm
+} else "";
+on_hover(i64 id, n) {
+  v = view_of(id);
+  if(v < 0) no_view(id) else hover_at(v, n)
+}
+// pointing
+hover_at(i64 v, n) {
+  lines = array{};
+  if(given(n)) {
+    k = code_kind(n);
+    if(k == ast.hole) {
+      ast.hole{_, reason} = n;
+      lines.push(line{"дыра", reason, code(), 0, 0});
+    }
+    // type: the name-advertisement - according to all its mentions, otherwise - node
+    up = code_parent(n);
+    ts = "";
+    if(k == ast.parameter) {
+      ast.parameter{pn, _, _, _, _, _, _} = n;
+      ts = shown_name(n, pn);
+    } else if(k == ast.variable) {
+      ast.variable{vn, _, init, _, _, _, _, _} = n;
+      ts = if(given(init)) shown_node(init) else shown_name(n, vn);
+    } else if(has_types(n)) ts = shown_node(n);
+    else if(k == ast.name) ts = shown_name(n, name_of(n));
+    called = given(callee_of(up)) && (code_id(callee_of(up)) == code_id(n));
+    if((ts != "") && !called) lines.push(line{"тип", ts, code(), 0, 0});
+    lit = layer_literal(v, n);
+    if(lit != "") lines.push(line{"значение", lit, code(), 0, 0});
+    for(e : error_texts(v, n)) lines.push(line{"ошибка", e, code(), 0, 0});
+    // function or design name - ads with links (selected in instance - first)
+    name = "";
+    if(k == ast.function) {
+      ast.function{fname, _, _, _, _, _, _, _, _} = n;
+      name = fname;
+    } else if(k == ast.name) name = name_of(n);
+    else if((member_name(n) != "") && (given(up) && (code_kind(up) == ast.call))) name = member_name(n);
+    else if(k == ast.call) name = name_of(callee_of(n));
+    if(name != "") {
+      call = if(k == ast.call) n else if(called) up else code();
+      declaration_lines(lines, name, if(given(call)) call_targets(call) else array{}, if((k == ast.call) && given(callee_of(n))) callee_of(n) else n);
+    }
+  }
+  show_hover(v, n, lines);
+}
+// Signature string: current parameter arg - [from, to] at code points
+signature_line(f, str name, i64 arg) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  s = name + "(";
+  from = 0;
+  to = 0;
+  head = 0;
+  stop = false;
+  for(p : ps) if(!stop) {
+    ast.parameter{pn, pt, _, pack, clause, _, _} = p;
+    if(clause != "") stop = true; // Clauses - after the head
+    else {
+      if(head > 0) s = s + ", ";
+      one = if(given(pt) && (code_kind(pt) == ast.name)) type_text(pt) + " " else "";
+      if(param_mode(p) == "expr") one = "expr " + one;
+      one = one + pn;
+      if((head == arg) || (pack && (arg >= head))) {
+        from = code_points(s);
+        to = from + code_points(one);
+      }
+      s = s + one;
+      head += 1;
+    }
+  }
+  line{"сигнатура", s + ")", f, from, to}
+}
+// Hint set: cursor inside the brackets of the call - the signature with the current parameter; the word
+// in front of the cursor - the name of the design - its shape. Otherwise, hide it.
+send_hint(i64 v) {
+  lines = array{};
+  anchor = -1;
+  c = cursor(v);
+  b = c;
+  ld = leads(v);
+  while((b > 0) && ident_byte(ld[b - 1])) b -= 1;
+  word = text_of(v, b, c);
+  if((word.size > 0) && !((c < ld.size) && ident_byte(ld[c]))) {
+    for(f : declarations(word, place_node(v, b))) if(construction(f) && (lines.size < 6)) lines.push(line{"форма", head_text(f), f, 0, 0});
+    if(lines.size > 0) anchor = b;
+  }
+  // Call around the cursor: brackets of his arguments
+  n = if((lines.size == 0) && (c > 0)) place_node(v, c - 1) else code();
+  done = false;
+  while(given(n) && !done) {
+    callee = callee_of(n);
+    if(given(callee) && (code_kind(callee) == ast.name)) {
+      k = layout_of(v, n);
+      ck = layout_of(v, callee);
+      if((k < 0) || (ck < 0)) done = true;
+      else {
+        open = range_to(v, ck); // `(` immediately after the name
+        if((open < ld.size) && ((ld[open] == '(') && ((c > open) && (c < range_to(v, k))))) { // after `)` - no longer in brackets
+          ast.call{_, args, _, _, _, _, _} = n;
+          arg = 0; // current parameter - on arguments that ended before the cursor
+          for(x : args) {
+            ak = layout_of(v, x);
+            if((ak >= 0) && (range_to(v, ak) < c)) {
+              q = range_to(v, ak);
+              if(ld[lesser(q, ld.size - 1)] == ',') arg += 1;
+              else {
+                while((q < c) && (ld[q] == ' ')) q += 1;
+                if((q < c) && (ld[q] == ',')) arg += 1;
+              }
+            }
+          }
+          name = if(member_name(callee) != "") member_name(callee) else name_of(callee);
+          for(f : chosen_first(declarations(name, callee), call_targets(n))) if(lines.size < 6) lines.push(signature_line(f, name, arg));
+          if(lines.size > 0) anchor = range_from(v, ck);
+          done = true;
+        }
+      }
+    }
+    if(!done) n = code_parent(n);
+  }
+  if((lines.size == 0) && !hint_shown(v)) return 0;
+  show_hint(v, anchor, lines);
+}
+
+// --- AST inspector: what is and who is disassembled ---
+// 
+// 
+// *My:* Module element tree with seats in the parent (node field and recording or construction
+// parameter), by whom the node is disassembled, focus disclosure.
+struct inode { code node; i64 depth; str role; str kind; str text; str rule; code rule_at; str types; }
+// node rule: syntax recording or construction it invokes; children's places are its parameters (array
+// {ребёнок, параметр}); no rule is decl empty
+struct rule { code decl; str what; array places; }
+
+// node short text: name, literal, operator, cause of the hole
+own_text(n) {
+  k = code_kind(n);
+  if((k == ast.name) || ((k == ast.function) || ((k == ast.parameter) || (k == ast.variable)))) return code_name(n);
+  if(k == ast.operation) {
+    ast.operation{op, _, _} = n;
+    return op;
+  }
+  if((k == ast.int) || ((k == ast.float) || (k == ast.string))) return clip(print_node(n), 40);
+  if(k == ast.hole) {
+    ast.hole{t, _} = n;
+    return clip(t, 40);
+  }
+  if(k == ast.raw) {
+    ast.raw{_, _, t, _, _} = n;
+    return clip(t, 40);
+  }
+  ""
+}
+rule_for(n) {
+  rec = record_rule(n);
+  if(rec.size == 2) return rule{rec[0], "запись", rec[1]};
+  callee = callee_of(n);
+  if(!given(callee) || (code_kind(callee) != ast.name)) return rule{code(), "", array{}};
+  ast.call{_, args, words, _, _, _, _} = n;
+  for(f : chosen_first(declarations(name_of(callee), callee), call_targets(n))) if(construction(f)) {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    // arguments - parameters in order inside the head and each clause
+    clauses = array{};
+    used = array{};
+    places = array{};
+    for(i : range(args.size)) {
+      w = if(i < words.size) words[i] else "";
+      u = -1;
+      for(j : range(clauses.size)) if(clauses[j] == w) u = j;
+      if(u < 0) {
+        clauses.push(w);
+        used.push(0);
+        u = clauses.size - 1;
+      }
+      seen = 0;
+      matched = false;
+      for(pa : ps) if(!matched) {
+        ast.parameter{pn, _, _, pack, clause, _, _} = pa;
+        if(clause == w) {
+          skip = (seen < used[u]) && !pack;
+          seen += 1;
+          if(!skip) {
+            places.push(array{args[i], if(w != "") (w + ": ") + pn else pn});
+            if(!pack) used[u] = used[u] + 1;
+            matched = true;
+          }
+        }
+      }
+    }
+    return rule{f, "конструкция", places};
+  }
+  rule{code(), "", array{}}
+}
+place_of(r, c) {
+  p = "";
+  for(x : r.places) if(code_id(x[0]) == code_id(c)) p = x[1];
+  p
+}
+inspect_tree(found, n, i64 depth, str role) {
+  if(found.size >= 2000) return false;
+  r = rule_for(n);
+  rw = rewritten_by(n);
+  text_rule = "";
+  at = code();
+  if(given(rw) && (code_kind(rw) == ast.function)) {
+    text_rule = "переписан " + head_text(rw);
+    at = rw;
+  } else if(given(rw)) {
+    text_rule = "изменён ct-кодом";
+    at = rw;
+  } else if(given(r.decl)) {
+    text_rule = (r.what + " ") + head_text(r.decl);
+    at = r.decl;
+  } else if(code_kind(n) == ast.call) { // function call - selected in instance overload
+    ts = call_targets(n);
+    if(ts.size > 0) {
+      text_rule = "вызов " + head_text(ts[0]);
+      at = ts[0];
+    }
+  }
+  found.push(inode{n, depth, role, text(code_kind(n)), own_text(n), text_rule, at, shown_node(n)});
+  for(cr : child_roles(n)) {
+    p = place_of(r, cr[0]);
+    inspect_tree(found, cr[0], depth + 1, if((p == "") || (p == cr[1])) cr[1] else (cr[1] + " → ") + p);
+  }
+  true
+}
+// node focus inspector: the tree of its module element and the opening of the focus (or the nearest above
+// node with the rule)
+on_inspect(i64 id, focus) {
+  v = view_of(id);
+  if(v < 0) no_view(id) else inspect_at(v, focus)
+}
+inspect_at(i64 v, focus) {
+  if(!given(focus)) return show_inspect(v, code(), code(), array{}, array{});
+  // root - an element of the module (in the representation of the function - it)
+  top = view_root(v);
+  root = focus;
+  while(given(code_parent(root)) && ((code_id(root) != code_id(top)) && (code_kind(code_parent(root)) != ast.module))) root = code_parent(root);
+  found = array{};
+  inspect_tree(found, root, 0, "");
+  expand = array{};
+  n = focus;
+  done = false;
+  while(given(n) && !done) {
+    r = rule_for(n);
+    if(given(r.decl)) {
+      expand.push(line{r.what, head_text(r.decl), r.decl, 0, 0});
+      names = array{};
+      args = array{};
+      for(cr : child_roles(n)) {
+        p = place_of(r, cr[0]);
+        if(p != "") {
+          expand.push(line{"параметр", (p + " = ") + print_node(cr[0]), cr[0], 0, 0});
+          colon = find_text(p, ": ");
+          names.push(if(colon >= 0) text_from(p, colon + 2) else p);
+          args.push(cr[0]);
+        }
+      }
+      if(r.what == "запись") { // summation
+        parts = ""; // non-fields: free name of the body called - in the caller (O4), child_roles calls fields(…)
+        for(cr : child_roles(n)) parts = (((parts + (if(parts == "") "" else ", ")) + cr[1]) + ": ") + print_node(cr[0]);
+        expand.push(line{"итог", ((text(code_kind(n)) + "{") + parts) + "}", code(), 0, 0});
+      } else {
+        ast.function{_, _, _, body, _, _, _, _, _} = r.decl;
+        if(given(body)) expand.push(line{"раскрытие", print_with_args(body, names, args), code(), 0, 0}); // frame-up
+      }
+      done = true;
+    } else if(code_id(n) == code_id(root)) done = true;
+    else n = code_parent(n);
+  }
+  show_inspect(v, root, focus, found, expand);
+}
+
+// --- parsing facts - display: type, head of ad, child roles, errors on node ---
+// 
+// VM has facts (node types and values for instance, print layout, node fields, verification errors,
+// and node locations); what and how to show is here: .
+//
+
+// Type - two parts: runtime and compiltime: "i64 = 3", "f64 = 1.5 | i64 = 2", "i64 = 1 | 4". The value of
+// runtime in at least one instance of this type (or values greater than four) is only a type. There are no
+// meanings - node types by name.
+shown_facts(ns) {
+  groups = node_values(ns, 4);
+  if(groups.size == 0) return join_types(types_of_nodes(ns));
+  r = "";
+  for(g : groups) {
+    array{t, lits} = g;
+    one = t;
+    if(!has_text(lits, "") && (lits.size <= 4)) {
+      v = "";
+      for(j : sorted_indices(lits)) v = (v + (if(v == "") "" else " | ")) + lits[j];
+      one = (one + " = ") + v;
+    }
+    r = (r + (if(r == "") "" else " | ")) + one;
+  }
+  r
+}
+// Types of node ns (over all instance), without repetition
+types_of_nodes(ns) {
+  ts = array{};
+  for(n : ns) for(t : node_types(n)) if(!has_text(ts, t)) ts.push(t);
+  ts
+}
+// node facts of the name in the domain: all its mentions in the subtree (without nested
+// functions) and initializers `name = e`, `T name = e`.
+name_nodes(n, str name, found) {
+  k = code_kind(n);
+  if(k == ast.name) {
+    ast.name{nm} = n;
+    if(nm == name) found.push(n);
+  } else if(k == ast.operation) {
+    ast.operation{op, xs, _} = n;
+    if((op == "=") && ((xs.size == 2) && (name_of(xs[0]) == name))) found.push(xs[1]);
+  } else if(k == ast.variable) {
+    ast.variable{vn, _, init, _, _, _, _, _} = n;
+    if((vn == name) && given(init)) found.push(init);
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) name_nodes(c, name, found);
+  true
+}
+// Name area: nearest function or block of construction (lambda) upwards; no - program
+scope_of(n) {
+  x = code_parent(n);
+  while(given(x) && ((code_kind(x) != ast.function) && (code_kind(x) != ast.lambda))) x = code_parent(x);
+  if(given(x)) x else program()
+}
+// node name in the area of node n
+name_nodes_at(n, str name) {
+  ns = array{};
+  name_nodes(scope_of(n), name, ns);
+  ns
+}
+// node types (and values) and names in the node n region - for all instance; empty - unknown
+shown_node(n) => shown_facts(array{n});
+shown_name(n, str name) => shown_facts(name_nodes_at(n, name));
+// Name types in node n (all references)
+name_types(n, str name) => types_of_nodes(name_nodes_at(n, name));
+// Types of parameter k of the function f for all its instance (its mention in the body); observations in the
+// body are only for the executor during the test - it has layers (instance), other bodies do not bypass
+param_types(f, i64 k) {
+  ns = array{};
+  if(given(f) && ((code_kind(f) == ast.function) && (fn_layers(f).size > 0))) {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    if(k < ps.size) name_nodes(f, code_name(ps[k]), ns);
+  }
+  types_of_nodes(ns)
+}
+
+// The head of the ad is projection without a body: `when(c, expr yes) otherwise(expr no)`, `syntax
+// if (c) {then_} else {else_}`. The layout of the print is in VM; the head is pieces up to the body.
+head_text(f) {
+  lay = print_view(f, false, code(), -1, -1, -1, -1);
+  ast.function{_, _, _, body, _, _, _, _, _} = f;
+  b = code_id(body);
+  out = "";
+  ks = array{0}; // bypass stack: layout number and its next piece; top - top
+  ps = array{0};
+  top = 0;
+  stop = (lay.nodes.size == 0);
+  while(!stop && (top >= 0)) {
+    k = ks[top];
+    p = ps[top];
+    if(p >= lay.count[k]) top -= 1;
+    else {
+      ps[top] = p + 1;
+      j = lay.first[k] + p;
+      c = lay.pchild[j];
+      if(c < 0) out = out + slice_text(lay.ptext, lay.pbyte[j], lay.pbyte[j + 1]);
+      else if(c == b) stop = true;
+      else {
+        kc = index_in(lay.sorted, lay.order, c);
+        if(kc >= 0) {
+          top += 1;
+          if(top < ks.size) {
+            ks[top] = kc;
+            ps[top] = 0;
+          } else {
+            ks.push(kc);
+            ps.push(0);
+          }
+        }
+      }
+    }
+  }
+  while((out.size > 0) && ((out[out.size - 1] == ' ') || ((out[out.size - 1] == '=') || (out[out.size - 1] == '>')))) out = slice_text(out, 0, out.size - 1);
+  out
+}
+
+// construction: syntax recording or parameter-block, expression, clause (for, while, try) - syntax, not a
+// call through a point
+construction(c) {
+  if(!given(c) || (code_kind(c) != ast.function)) return false;
+  ast.function{_, ps, _, _, _, _, _, _, form} = c;
+  r = (form.size > 0);
+  for(p : ps) {
+    ast.parameter{_, _, _, _, clause, _, _} = p;
+    if((clause != "") || (param_mode(p) == "expr")) r = true;
+  }
+  r
+}
+
+// node children with field names are a type of node struct program (`fields`), fields are
+// `code_fields`: array {узел, "cond" | "args[1]"}
+child_roles(n) {
+  out = array{};
+  fs = fields(code_kind(n));
+  k = 0;
+  for(x : code_fields(n)) {
+    if(typeof(x) == code) {
+      if(given(x)) out.push(array{x, fs[k].name});
+    } else {
+      xs = codes_of(x);
+      for(j : range(xs.size)) if(given(xs[j])) out.push(array{xs[j], ((fs[k].name + "[") + text(j)) + "]"});
+    }
+    k += 1;
+  }
+  out
+}
+// node field list (otherwise empty)
+codes_of(array xs) {
+  out = array{};
+  for(e : xs) if(typeof(e) == code) out.push(e);
+  out
+}
+codes_of(x) => array{};
+
+// Check errors on node ns (view layout numbers; place in prelude is the first place of the program from
+// the track): array {узел, текст, from, to}
+errors_on(ns) {
+  out = array{};
+  if(check_errors() == 0) return out;
+  array{srcs, froms, tos} = node_spans(ns);
+  for(k : range(check_errors())) {
+    w = check_error_place(k, -1);
+    n = node_at(ns, srcs, froms, tos, w);
+    t = check_error_text(k, -1);
+    for(j : range(check_error_frames(k))) {
+      if(n < 0) n = node_at(ns, srcs, froms, tos, check_error_place(k, j));
+      t = (t + "\n  ") + check_error_text(k, j);
+    }
+    if(n >= 0) {
+      c = node_code(n);
+      r = raw_range(c, w);
+      out.push(array{c, t, r[0], r[1]});
+    }
+  }
+  out
+}
+// Node of ns, in the text of which lies the place w (lowest); -1 - no
+node_at(ns, srcs, froms, tos, w) {
+  array{ws, wb, we} = w;
+  best = -1;
+  size = 0;
+  for(k : range(ns.size)) if((srcs[k] == ws) && ((froms[k] <= wb) && (we <= tos[k]))) if((best < 0) || ((tos[k] - froms[k]) < size)) {
+    best = ns[k];
+    size = tos[k] - froms[k];
+  }
+  best
+}
+// The place of error inside the raw block (§4.4): its projection is the text as written, the positions of
+// the atoms are in this text, so the label indicates the block - the atom and the displacement in it
+// *My:* tag node - the block (unit projection and edits), the place - the code points [from, to] its
+// text; {0, 0} - the entire node.
+raw_range(c, w) {
+  if(code_kind(c) != ast.raw) return array{0, 0};
+  ast.raw{_, _, t, _, _} = c;
+  array{ss, sb, se} = node_spans(array{code_id(c)});
+  array{ws, wb, we} = w;
+  b = sb[0];
+  if((ws != ss[0]) || ((wb < b) || ((we < wb) || ((we - b) > t.size)))) return array{0, 0};
+  if((wb == b) && ((we - b) == t.size)) return array{0, 0};
+  from = code_points(slice_text(t, 0, wb - b));
+  to = code_points(slice_text(t, 0, we - b));
+  array{from, if(to > from) to else from + 1}
+}
+
+// Checking tags: types and errors on the spot (only affected instances are counted after each audit)
+// §10.1); node types - in all contexts of instances. Like in KDevelop: the error is in the place of use
+// with the Trace§13.4).
+//
+struct mark { code node; str kind; str text; i64 from; i64 to; }
+
+// Types by name: order of contexts - hashes; show by name
+join_types(ts) {
+  r = "";
+  for(k : sorted_indices(ts)) r = (r + (if(r == "") "" else " | ")) + ts[k];
+  r
+}
+// x = e: left-hand side, if name ("" - no)
+assign_target(n) => if(code_kind(n) == ast.operation) {
+  ast.operation{op, xs, _} = n;
+  if((op == "=") && ((xs.size == 2) && (code_kind(xs[0]) == ast.name))) xs[0] else code()
+} else code();
+type_marks(found, i64 v) {
+  for(n : view_nodes(v)) {
+    k = code_kind(n);
+    if(k == ast.parameter) {
+      ts = shown_name(n, code_name(n));
+      if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+    } else if(k == ast.variable) {
+      ast.variable{vn, _, init, _, _, _, _, _} = n;
+      ts = if(given(init)) shown_node(init) else shown_name(n, vn);
+      if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+    } else if(given(assign_target(n))) {
+      // x = e announces if the name is not yet available (author's decision: no auto); the ad has the
+      // type and value at that point (initializer), not the future meanings of the name (2026-10-13)
+      lhs = assign_target(n);
+      name = name_of(lhs);
+      known = false;
+      for(c : context_names(n)) if((c.name == name) && ((c.kind == "переменная") || (c.kind == "параметр"))) known = true;
+      if(!known) {
+        ast.operation{_, xs, _} = n;
+        ts = shown_node(xs[1]);
+        if(ts != "") found.push(mark{lhs, "type", ts, 0, 0});
+      }
+    }
+  }
+  true
+}
+enclosing_fn(n) {
+  x = code_parent(n);
+  while(given(x) && (code_kind(x) != ast.function)) x = code_parent(x);
+  x
+}
+// Name types in the layer: all its mentions in the subtree (without nested functions)
+layer_name_types(i64 v, n, str name, ts) {
+  if((code_kind(n) == ast.name) && (name_of(n) == name)) for(t : layer_types(v, n)) {
+    fresh = true;
+    for(x : ts) if(x == t) fresh = false;
+    if(fresh) ts.push(t);
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) layer_name_types(v, c, name, ts);
+  true
+}
+// Layer tags: types of ads in this context, known meanings of names not executed in it - muffle (top such
+// node)
+layer_marks(found, i64 v) {
+  f = view_root(v);
+  for(n : view_nodes(v)) {
+    k = code_kind(n);
+    up = code_parent(n);
+    if(k == ast.parameter) {
+      ts = array{};
+      layer_name_types(v, f, code_name(n), ts);
+      if(ts.size > 0) found.push(mark{n, "type", join_types(ts), 0, 0});
+    }
+    // meanings: names and conditions of forks (known condition - which branch lives)
+    cond = given(up) && ((code_kind(up) == ast.if) && {
+      ast.if{c, _, _} = up;
+      code_id(c) == code_id(n)
+    });
+    if(((k == ast.name) && (given(up) && (code_kind(up) != ast.call))) || cond) {
+      lit = layer_literal(v, n);
+      if(lit != "") found.push(mark{n, "value", lit, 0, 0});
+    }
+    // not performed in this context: the node of the body without observation, the parent with observation n
+    body = (code_id(n) != code_id(f)) && ((code_id(enclosing_fn(n)) == code_id(f)) && ((k != ast.parameter) && !(given(up) && (code_kind(up) == ast.parameter))));
+    if(body && (!layer_has(v, n) && ((code_id(up) == code_id(f)) || layer_has(v, up)))) found.push(mark{n, "dead", "не исполняется в этом контексте", 0, 0});
+  }
+  true
+}
+// Tabs of the layers of the function: “all” and contexts of its use
+send_layers(i64 v) => show_layers(v, layers_of(v));
+send_marks(i64 v) {
+  found = array{};
+  if(in_layer(v)) layer_marks(found, v) else type_marks(found, v);
+  for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
+  show_marks(v, found);
+  if(view_kind(v) == "fn") send_layers(v) else 0
+}
+
+// --- transition and "add in place" ---
+// 
+// 
+// 
+// F12 on call - overload selected in instance ("tracing"), all others and "add" for non-overload argument
+// types; Ctrl+P is the same for the typed signature. Added - the internal element of the module, opens in
+// the second panel.
+//
+
+// overload names visible at (module, its use, prelude), without syntax records
+overloads(str name, at) {
+  found = array{};
+  for(f : declarations(name, at)) if(!is_record(f)) found.push(f);
+  found
+}
+signature(f) {
+  ast.function{name, ps, _, _, _, _, _, _, _} = f;
+  s = name + "(";
+  for(k : range(ps.size)) {
+    ast.parameter{pn, pt, _, _, _, _, _} = ps[k];
+    if(k > 0) s = s + ", ";
+    if(given(pt) && (code_kind(pt) == ast.name)) s = (s + type_text(pt)) + " ";
+    s = s + pn;
+  }
+  s + ")"
+}
+// overload is suitable for types (parameter without type - for any)
+accepts(f, types) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  if(ps.size != types.size) return false;
+  r = true;
+  for(k : range(types.size)) {
+    ast.parameter{_, pt, _, _, _, _, _} = ps[k];
+    if(given(pt) && ((code_kind(pt) == ast.name) && (type_text(pt) != before(types[k], '<')))) r = false;
+  }
+  r
+}
+// Is it exactly typed for these types (all parameters with the type)
+exact(f, types) {
+  if(!accepts(f, types)) return false;
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  r = true;
+  for(p : ps) {
+    ast.parameter{_, pt, _, _, _, _, _} = p;
+    if(!given(pt)) r = false;
+  }
+  r
+}
+add_text(str name, types) {
+  s = name + "(";
+  for(k : range(types.size)) s = (s + (if(k > 0) ", " else "")) + types[k];
+  s + ")"
+}
+// note: selected here, internal, prelude
+with_note(str detail, str note) => if(detail == "") note else (detail + ", ") + note;
+// transition list; empty to say
+nav(i64 v, items, targets) => if(items.size == 0) report("переход: ничего не найдено") else show_nav(v, items, targets);
+// “Add” to the beginning of the list
+prepend(xs, x) {
+  r = array{x};
+  for(y : xs) r.push(y);
+  r
+}
+// F12: Calling in place of cursor - its overload
+goto_call(i64 v) {
+  at = if(cursor(v) < places(v)) cursor(v) else 0;
+  call = code();
+  for(k : array{at, if(at > 0) at - 1 else at}) {
+    n = if(given(call)) code() else place_node(v, k);
+    while(given(n) && !given(call)) {
+      callee = callee_of(n);
+      if(given(callee) && ((code_kind(callee) == ast.name) || (member_name(callee) != ""))) call = n;
+      n = code_parent(n);
+    }
+  }
+  if(!given(call)) return report("F12: курсор не на вызове функции");
+  ast.call{callee, given_args, _, _, _, _, _} = call;
+  args = array{};
+  name = name_of(callee);
+  if(code_kind(callee) != ast.name) { // a.f(b) f(a, b) (§4.5); geo.vec.norm(b) is the name of the module
+    name = member_name(callee);
+    if(!given(qualified_module(callee))) args.push(member_object(callee));
+  }
+  for(x : given_args) args.push(x);
+  chosen = call_targets(call);
+  items = array{};
+  targets = array{};
+  fns = chosen_first(overloads(name, callee), chosen);
+  for(f : fns) {
+    detail = if(has_code(chosen, f)) "выбрана здесь" else "";
+    if(is_inner(f)) detail = with_note(detail, "внутренняя");
+    if(in_prelude(f)) detail = with_note(detail, "прелюдия");
+    if(module_note(f) != "") detail = with_note(detail, module_note(f));
+    items.push(completion{signature(f), "перегрузка", detail, 0});
+    targets.push(array{f, ""});
+  }
+  // Argument types for all instances: combinations without suitable overload - "add"
+  combos = array{array{}};
+  for(x : args) {
+    ts = node_types(x);
+    if(ts.size == 0) return nav(v, items, targets); // Type of argument unknown - only transition
+    next = array{};
+    for(cmb : combos) for(t : ts) if(next.size < 8) {
+      one = cmb;
+      one.push(t);
+      next.push(one);
+    }
+    combos = next;
+  }
+  for(cmb : combos) {
+    fits = false;
+    for(f : fns) if(accepts(f, cmb)) fits = true;
+    if(!fits) {
+      items = prepend(items, completion{"добавить " + add_text(name, cmb), "добавить", "внутренняя перегрузка", 0});
+      targets = prepend(targets, array{code(), add_text(name, cmb)});
+    }
+  }
+  nav(v, items, targets);
+}
+trim(str s) {
+  from = 0;
+  to = s.size;
+  while((from < to) && (s[from] == ' ')) from += 1;
+  while((to > from) && (s[to - 1] == ' ')) to -= 1;
+  slice_text(s, from, to)
+}
+// Ctrl+P: “foo(i64, str)” or “foo” - overload and “add”
+on_goto(i64 id, str sig) {
+  v = view_of(id);
+  if(v < 0) no_view(id) else goto_sig(v, sig)
+}
+goto_sig(i64 v, str sig) {
+  finalize_views();
+  t = trim(sig);
+  open = find_text(t, "(");
+  name = trim(if(open >= 0) slice_text(t, 0, open) else t);
+  if(name == "") return report("переход: нужна сигнатура вида foo(i64)");
+  typed = open >= 0;
+  types = array{};
+  if(typed) {
+    close = -1;
+    for(k : range(t.size)) if(t[k] == ')') close = k;
+    inside = slice_text(t, open + 1, if(close > open) close else t.size);
+    from = 0;
+    while(from <= inside.size) {
+      comma = find_text(text_from(inside, from), ",");
+      to = if(comma >= 0) from + comma else inside.size;
+      part = trim(slice_text(inside, from, to));
+      if(part != "") types.push(part);
+      from = to + 1;
+    }
+  }
+  fns = overloads(name, views[v].root);
+  if(typed) { // accurate, then suitable, then others - the order inside - as it was
+    sorted = array{};
+    for(f : fns) if(exact(f, types)) sorted.push(f);
+    for(f : fns) if(!exact(f, types) && accepts(f, types)) sorted.push(f);
+    for(f : fns) if(!accepts(f, types)) sorted.push(f);
+    fns = sorted;
+  }
+  items = array{};
+  targets = array{};
+  for(f : fns) {
+    detail = if(typed && exact(f, types)) "точно" else if(typed && accepts(f, types)) "подходит" else "";
+    if(is_inner(f)) detail = with_note(detail, "внутренняя");
+    if(module_note(f) != "") detail = with_note(detail, module_note(f));
+    items.push(completion{signature(f), "перегрузка", detail, 0});
+    targets.push(array{f, ""});
+  }
+  exactly = false;
+  for(f : fns) if(exact(f, types)) exactly = true;
+  if(typed && !exactly) {
+    items = prepend(items, completion{"добавить " + add_text(name, types), "добавить", "внутренняя перегрузка", 0});
+    targets = prepend(targets, array{code(), add_text(name, types)});
+  }
+  nav(v, items, targets);
+}
+// Add the internal overload "foo(i64, str)": parameter names - as in overload of the same aricity,
+// otherwise a, b, c...; the body is an empty string to set
+add_overload(str sig) {
+  open = find_text(sig, "(");
+  name = slice_text(sig, 0, open);
+  inside = slice_text(sig, open + 1, sig.size - 1);
+  types = array{};
+  from = 0;
+  while(from <= inside.size) {
+    comma = find_text(text_from(inside, from), ",");
+    to = if(comma >= 0) from + comma else inside.size;
+    part = trim(slice_text(inside, from, to));
+    if(part != "") types.push(part);
+    from = to + 1;
+  }
+  names = array{};
+  for(f : overloads(name, program())) if(names.size == 0) {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    if(ps.size == types.size) for(p : ps) {
+      ast.parameter{pn, _, _, _, _, _, _} = p;
+      names.push(pn);
+    }
+  }
+  s = name + "(";
+  for(k : range(types.size)) s = (((s + (if(k > 0) ", " else "")) + before(types[k], '<')) + " ") + (if(k < names.size) names[k] else text_byte('a' + k));
+  add_inner(s + ") {\n\n}\n", sig);
+}
+// Item on the transition list: open a function or add a signature
+nav_accept(i64 v) {
+  k = selected(v);
+  f = nav_fn(v, k);
+  add = nav_add(v, k);
+  close_completion(v);
+  if(given(f)) open_fn(f) else add_overload(add);
+}
+
+// --- Debugger: Author's decision: the execution path (§13.2) is recorded at launch, steps -
+// forward and backward; VM does not stop. Built-in calls are normal steps.
+//
+//
+//
+//
+
+// instruction: block element or expression-body function (body-block is not a step, steps are its instructions)
+is_stmt(i64 k) {
+  n = trace_node(k);
+  up = code_parent(n);
+  if(code_kind(n) == ast.block) return false;
+  given(up) && ((code_kind(up) == ast.block) || ((code_kind(up) == ast.function) && {
+    ast.function{_, _, _, body, _, _, _, _, _} = up;
+    code_id(body) == code_id(n)
+  }))
+}
+// the following (or previous) instruction is no deeper than max_depth (-1 - any); no - remain
+next_stmt(i64 from, bool back, i64 max_depth) {
+  total = trace_size();
+  if(total == 0) return 0;
+  deep = (max_depth < 0);
+  if(!back) {
+    k = from;
+    while(k < total) {
+      if(is_stmt(k) && (deep || (trace_depth(k) <= max_depth))) return k;
+      k += 1;
+    }
+  } else {
+    k = from;
+    while(k >= 0) {
+      if(is_stmt(k) && (deep || (trace_depth(k) <= max_depth))) return k;
+      k -= 1;
+    }
+  }
+  lesser(from, total - 1)
+}
+// extra value icon: literal (value and so in the text), block, name of the called function
+quiet_value(n) {
+  k = code_kind(n);
+  if((k == ast.int) || ((k == ast.float) || ((k == ast.string) || (k == ast.block)))) return true;
+  up = code_parent(n);
+  given(callee_of(up)) && (code_id(callee_of(up)) == code_id(n))
+}
+step_to(i64 pos) {
+  set_trace_pos(pos);
+  total = trace_size();
+  if(total == 0) return show_trace(true, pos, 0, code(), array{}, trace_output(-1), trace_error());
+  node = trace_node(pos);
+  depth = trace_depth(pos);
+  // Stack: For each depth, a function of the last step of that depth
+  stack = array{};
+  want = depth;
+  k = pos;
+  while((want >= 1) && (k >= 0)) {
+    if(trace_depth(k) == want) {
+      f = enclosing_fn(trace_node(k));
+      stack.push(if(given(f)) code_name(f) else "?");
+      want -= 1;
+    } else k -= 1;
+  }
+  show_trace(true, pos, total, node, stack, trace_output(pos), trace_error());
+  // values of subexpressions of the current instruction (same depth) - icons
+  from = pos;
+  while((from > 0) && !(is_stmt(from - 1) && (trace_depth(from - 1) == depth))) from -= 1;
+  nodes = array{};
+  values = array{};
+  for(i : range((pos - from) + 1)) {
+    k2 = from + i;
+    val = trace_value(k2);
+    if((trace_depth(k2) == depth) && ((val != "") && (val != "()"))) {
+      n = trace_node(k2);
+      at = -1;
+      for(j : range(nodes.size)) if(code_id(nodes[j]) == code_id(n)) at = j;
+      if(at >= 0) values[at] = val else {
+        nodes.push(n);
+        values.push(val);
+      }
+    }
+  }
+  for(w : peer_views()) {
+    found = array{};
+    for(j : range(nodes.size)) if((layout_of(w, nodes[j]) >= 0) && !quiet_value(nodes[j])) found.push(mark{nodes[j], "value", values[j], 0, 0});
+    if(layout_of(w, node) >= 0) found.push(mark{node, "current", "", 0, 0});
+    show_marks(w, found);
+  }
+  true
+}
+// Debugger keys: true - processed
+debug_key(i64 v, str key, i64 mods) {
+  pos = trace_pos();
+  depth = if(trace_size() == 0) 0 else trace_depth(pos);
+  shift = (mods & 1) != 0;
+  if(key == "Escape") {
+    set_debugging(false);
+    show_trace(false, 0, 0, code(), array{}, "", "");
+    for(w : peer_views()) send_marks(w);
+    return true;
+  }
+  if(key == "F10") {
+    step_to(if(shift) next_stmt(if(pos > 0) pos - 1 else 0, true, depth) else next_stmt(pos + 1, false, depth));
+    return true;
+  }
+  if(key == "F11") {
+    step_to(if(shift) next_stmt(pos + 1, false, if(depth > 0) depth - 1 else 0) else next_stmt(pos + 1, false, -1));
+    return true;
+  }
+  if(key == "F4") { // cursor
+    at = place_node(v, cursor(v));
+    while(given(at) && (given(code_parent(at)) && (code_kind(code_parent(at)) != ast.block))) at = code_parent(at);
+    k = pos + 1;
+    while(k < trace_size()) {
+      if(code_id(trace_node(k)) == code_id(at)) {
+        step_to(k);
+        return true;
+      }
+      k += 1;
+    }
+    report("F4: эта инструкция дальше не исполняется");
+    return true;
+  }
+  false
+}
+// track recorded: step to the first instruction
+on_trace(i64 v) {
+  set_debugging(true);
+  set_trace_pos(0);
+  step_to(next_stmt(0, false, -1));
+}
+
+// --- commands: start, save, edit function, merge, layer, projection ---------------------------- launch
+// (F5) - accepted text: process in the same VM, the editor does not stand up
+// 
+on_run(str args, str input) {
+  finalize_views();
+  start_program(args, input);
+}
+// Execution of the launch - as the execution
+on_run_output(str text, bool ok, bool more, str state) => run_output(text, ok, more, state);
+// Shift+F5: Stop/Run
+on_stop() => if(program_running()) stop_program() else report("запуск: программа не исполняется");
+// run-off (F6)
+on_trace_run(i64 id, str args, str input) {
+  v = view_of(id);
+  finalize_views();
+  trace_program(args, input);
+  on_trace(v);
+}
+// .vishdb next to the program: stats.vish → stats.vishdb §3.1)
+on_save() {
+  finalize_views();
+  name = program_name();
+  save_program(if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb");
+}
+// function of editing the program: drafts - to the canon, edits - to the base, presentations - again
+apply_edit(str fn) {
+  finalize_everyone();
+  r = program_apply(fn);
+  if(starts_with(r, "применена")) refresh_all();
+  r
+}
+// Merge with a copy of the database (§9.4, tool module): The self-taken is in
+// the database; conflicts are before a human decision (the state of the
+// editor). ' - leaked, otherwise a mistake.
+merge_from(str path) {
+  v = version_open(path);
+  if(v < 0) return version_error();
+  merge_state = merge_versions(0, v);
+  version_close(v);
+  refresh_all();
+  send_merge(true);
+  ""
+}
+send_merge(bool with_taken) => send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts);
+// The conflict is resolved: their version (the base has changed - re-imagining) or mine; false - no such thing.
+take_version(str key, bool theirs) {
+  k = -1;
+  for(j : range(merge_state.conflicts.size)) if((k < 0) && (merge_state.conflicts[j].key == key)) k = j;
+  if(k < 0) return false;
+  c = merge_state.conflicts[k];
+  rest = array{};
+  for(j : range(merge_state.conflicts.size)) if(j != k) rest.push(merge_state.conflicts[j]);
+  merge_state.conflicts = rest;
+  if(theirs) {
+    take_theirs(0, -1, merge_state.base_items, c.id, c.their);
+    refresh_all();
+  }
+  send_merge(false);
+  true
+}
+// function of editing the program (author's decision 2026-10-17): edits - in the database
+on_apply(str fn) {
+  r = apply_edit(fn);
+  show_output(r, starts_with(r, "применена"));
+}
+// merging: the path relative to the program
+on_merge(str path) {
+  finalize_everyone();
+  full = path;
+  if(!starts_with(path, "/")) {
+    name = program_name();
+    slash = -1;
+    for(k : range(name.size)) if(name[k] == '/') slash = k;
+    if(slash >= 0) full = slice_text(name, 0, slash + 1) + path;
+  }
+  error = merge_from(full);
+  if(error != "") report("слияние: " + error) else 0
+}
+on_take(str key, bool theirs) {
+  finalize_everyone();
+  if(!take_version(key, theirs)) report("нет конфликта " + key) else 0
+}
+// Presentation layer of the function (context instance): tags - again
+on_layer(i64 id, str key) {
+  v = view_of(id);
+  if(v < 0) return report("слои — у представления функции");
+  if(view_kind(v) != "fn") return report("слои — у представления функции");
+  set_layer(v, key);
+  send_marks(v);
+}
+// projection presentation (§4.4):
+// 
+on_projection(i64 id, str key) {
+  v = view_of(id);
+  if(v < 0) return no_view(id);
+  finalize_views();
+  error = set_projection(v, key);
+  if(error != "") return report(error);
+  set_cursor(v, 0);
+  show_view(v);
+}
+// open the node: function - in the second panel, otherwise - cursor on it
+on_open(i64 id, n) {
+  v = view_of(id);
+  if(v < 0) return no_view(id);
+  finalize_views();
+  if(code_kind(n) == ast.function) return open_fn(n);
+  k = node_place(v, n);
+  if(k < 0) return report("узла нет в этом представлении");
+  move_to(v, k, false, false);
+}
+
+// --- cursor cursor to place t (shift - allocation stretches)
+//
+move_to(i64 v, i64 t, bool shift, bool keep_goal) {
+  if(shift) {
+    if(anchor(v) < 0) set_anchor(v, cursor(v));
+  } else set_anchor(v, -1);
+  set_cursor(v, lesser(t, end_of(v)));
+  if(!keep_goal) set_goal(v, -1);
+  cursor_moved(v);
+  send_hint(v);
+}
+// Motion key: new cursor position (-1 - no movement); ↑/↓ column remembered
+motion(i64 v, str key, i64 mods) {
+  ctrl = (mods & 2) != 0;
+  end = end_of(v);
+  array{s, e} = selection(v);
+  collapse = (anchor(v) >= 0) && ((mods & 1) == 0);
+  c = cursor(v);
+  if(key == "ArrowLeft") return if(collapse && !ctrl) s else if(ctrl) word_left(v, c) else if(c > 0) c - 1 else 0;
+  if(key == "ArrowRight") return if(collapse && !ctrl) e else if(ctrl) word_right(v, c) else lesser(c + 1, end);
+  if(key == "Home") {
+    if(ctrl) return 0;
+    ls = line_start(v, c);
+    fs = ls;
+    ld = leads(v);
+    while((fs < end) && (ld[fs] == ' ')) fs += 1;
+    return if(c == fs) ls else fs;
+  }
+  if(key == "End") return if(ctrl) end else line_end(v, c);
+  if(key == "ArrowUp") return vertical(v, -1, 1);
+  if(key == "ArrowDown") return vertical(v, 1, 1);
+  if(key == "PageUp") return vertical(v, -1, 30);
+  if(key == "PageDown") return vertical(v, 1, 30);
+  -1
+}
+vertical_key(str key) => (key == "ArrowUp") || ((key == "ArrowDown") || ((key == "PageUp") || (key == "PageDown")));
+
+// --- editing -------------------------------------------------------------------------------------------------
+// typing (letter, insert): replacesing; `}` in the indent - a level less
+type_text(i64 v, str t) {
+  array{s, e} = selection(v);
+  if((t == "}") && (s == e)) {
+    ls = line_start(v, s);
+    if((s > ls) && blank(v, ls, s)) return replace(v, ls, s, spaces(if((s - ls) >= 2) (s - ls) - 2 else 0) + "}", -1);
+  }
+  replace(v, s, e, t, -1);
+  if(code_points(t) == 1) complete(v, false);
+  send_hint(v);
+}
+// Enter: line translation with line indentation; after `{` - deeper, between `{` and `}` - two lines,
+// cursor - on the middle
+newline(i64 v) {
+  array{s, e} = selection(v);
+  ls = line_start(v, s);
+  ld = leads(v);
+  ind = 0;
+  while(((ls + ind) < s) && (ld[ls + ind] == ' ')) ind += 1;
+  b = s;
+  while((b > ls) && (ld[b - 1] == ' ')) b -= 1;
+  open = (b > ls) && (ld[b - 1] == '{');
+  f = e;
+  while(((f + 1) < ld.size) && (ld[f] == ' ')) f += 1;
+  close = open && (ld[f] == '}');
+  pad = spaces(ind + (if(open) 2 else 0));
+  if(close) return replace(v, s, f, ((("\n" + pad) + "\n") + spaces(ind)), 1 + pad.size);
+  replace(v, s, e, "\n" + pad, -1);
+}
+// Tab / Shift + Tab: indentation by 2 (without highlighting Tab - spaces to the next column of
+// indentation)
+indent(i64 v, bool out) {
+  array{s, e} = selection(v);
+  if(!out && (s == e)) return replace(v, s, s, spaces(2 - ((s - line_start(v, s)) % 2)), -1);
+  from = line_start(v, s);
+  to = line_end(v, if((e > s) && (lead(v, e - 1) == '\n')) e - 1 else e);
+  done = "";
+  k = from;
+  while(k <= to) { // line by line: [k, end of line]
+    le = line_end(v, k);
+    stop = if(le < to) le else to;
+    n = 0;
+    if(out) while((n < 2) && (((k + n) < stop) && (lead(v, k + n) == ' '))) n += 1;
+    pre = if(!out && (stop > k)) "  " else "";
+    done = (done + pre) + text_of(v, k + n, stop);
+    if(stop < to) done = done + "\n";
+    k = stop + 1;
+  }
+  replace(v, from, to, done, -1);
+}
+copy(i64 v, bool cut) {
+  array{s, e} = selection(v);
+  if(s == e) { // single-line
+    s = line_start(v, s);
+    e = lesser(line_end(v, e) + 1, end_of(v));
+  }
+  clipboard(text_of(v, s, e));
+  if(cut) replace(v, s, e, "", -1) else 0
+}
+// Backspace / Delete: highlight - delete; in indent - to the previous indent column; with Ctrl
+// - the word
+delete_at(i64 v, bool back, bool ctrl) {
+  array{s, e} = selection(v);
+  if(s != e) return replace(v, s, e, "", -1);
+  if(back && (s == 0)) return send_cursor(v);
+  if(!back && ((s + 1) >= places(v))) return send_cursor(v);
+  from = if(back) s - 1 else s;
+  to = if(back) s else s + 1;
+  if(back && !ctrl) {
+    ls = line_start(v, s);
+    if((s > ls) && blank(v, ls, s)) from = s - (if(((s - ls) % 2) == 1) 1 else 2);
+  }
+  if(ctrl) {
+    if(back) from = word_left(v, s) else to = word_right(v, s);
+  }
+  replace(v, from, to, "", -1);
+  if(back) complete(v, false);
+  send_hint(v);
+}
+
+// --- signal ---
+letter(str key, str lo, str up, str ru) => (key == lo) || ((key == up) || (key == ru));
+// key; mods: 1 Shift, 2 Ctrl, 4 Alt, 8 Meta
+on_key(i64 id, str key, i64 mods) {
+  v = view_of(id);
+  if(v < 0) no_view(id) else key_at(v, key, mods)
+}
+key_at(i64 v, str key, i64 mods) {
+  if(debugging() && debug_key(v, key, mods)) return true; // step keys, debugger
+  if(completing(v)) {
+    if((key == "ArrowDown") || (key == "ArrowUp")) {
+      n = completion_count(v);
+      return select_item(v, (selected(v) + (if(key == "ArrowDown") 1 else n - 1)) % n);
+    }
+    if((key == "Enter") && nav_list(v)) return nav_accept(v); // Transition list: Open or add
+    if(key == "Enter") { // Accept: the typed word is replaced by the selected name
+      name = completion_name(v, selected(v));
+      b = word_begin(v);
+      close_completion(v);
+      return replace(v, b, cursor(v), name, -1);
+    }
+    if(key == "Escape") return close_completion(v);
+  }
+  finalize_others(v); // the key to another representation - drafts of others to the canon
+  shift = (mods & 1) != 0;
+  ctrl = (mods & 2) != 0;
+  if((key == " ") && ctrl) return complete(v, true);
+  if(key == "F12") {
+    finalize(v);
+    return goto_call(v);
+  }
+  t = motion(v, key, mods);
+  if(t >= 0) return move_to(v, t, shift, vertical_key(key));
+  if(key == "Escape") { // remove; draft - to the canon; hint - to hide
+    close_completion(v);
+    set_anchor(v, -1);
+    if(draft_open(v)) finalize(v) else send_cursor(v);
+    return hide_hint(v);
+  }
+  if(ctrl && letter(key, "a", "A", "ф")) {
+    set_anchor(v, 0);
+    return move_to(v, end_of(v), true, false);
+  }
+  if(ctrl && letter(key, "c", "C", "с")) return copy(v, false);
+  if(ctrl && letter(key, "x", "X", "ч")) return copy(v, true);
+  if(ctrl && letter(key, "z", "Z", "я")) return undo(v, shift);
+  if(ctrl && letter(key, "y", "Y", "н")) return undo(v, true);
+  close_completion(v);
+  if((key == "Backspace") || (key == "Delete")) return delete_at(v, key == "Backspace", ctrl);
+  if(key == "Enter") return newline(v);
+  if(key == "Tab") return indent(v, shift);
+  if((code_points(key) == 1) && ((mods & 14) == 0)) return type_text(v, key);
+  report("клавиша не обработана: " + key);
+}
+// text input (insert, IME): the typing of the word is over
+on_input(i64 id, str text) {
+  v = view_of(id);
+  if(v < 0) return no_view(id);
+  finalize_others(v);
+  close_completion(v);
+  set_typing(v, false);
+  type_text(v, text);
+}
+// place of the client (knot, piece, displacement) - in the presentation; no - drafts of others to the canon and say
+client_place(i64 v, i64 n, i64 piece, i64 offset) {
+  t = place_at(v, n, piece, offset, false);
+  if(t < 0) {
+    finalize_others(v);
+    report(((((("нет места #" + text(n)) + "/") + text(piece)) + "/") + text(offset)));
+  }
+  t
+}
+on_select(i64 id, i64 n, i64 piece, i64 offset, i64 clicks) {
+  v = view_of(id);
+  if(v < 0) return no_view(id);
+  t = client_place(v, n, piece, offset);
+  if(t >= 0) select_at(v, t, clicks) else 0
+}
+// click: location t; clicks - 2 word, 3 line
+select_at(i64 v, i64 t, i64 clicks) {
+  finalize_others(v);
+  if(clicks == 2) {
+    from = t;
+    to = t;
+    ld = leads(v);
+    c = char_class(ld[t]);
+    while((from > 0) && (char_class(ld[from - 1]) == c)) from -= 1;
+    while(((to + 1) < ld.size) && (char_class(ld[to]) == c)) to += 1;
+    set_cursor(v, from);
+    return move_to(v, to, true, false);
+  }
+  if(clicks >= 3) {
+    set_cursor(v, line_start(v, t));
+    set_anchor(v, -1);
+    return move_to(v, lesser(line_end(v, t) + 1, end_of(v)), true, false);
+  }
+  move_to(v, t, true, false);
+}
+// index (transfer of the cursor without highlighting)
+on_pointer(i64 id, i64 n, i64 piece, i64 offset) {
+  v = view_of(id);
+  if(v < 0) return no_view(id);
+  t = client_place(v, n, piece, offset);
+  if(t < 0) return 0;
+  finalize_others(v);
+  move_to(v, t, false, false);
+}

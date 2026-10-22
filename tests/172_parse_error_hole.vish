@@ -1,0 +1,26 @@
+// out: 8080
+// out: живо
+// error: 172_parse_error_hole.vish:24:25: ошибка: исполнение неразобранного фрагмента: разбор блока: ожидалось целое
+// fmt-stable
+// fmt-has:   bad = config() { port = "восемь" };
+// Error parsing code - a hole with a cause in place of an atom, the rest of the text is intact:
+// 
+// parsing is lazy, in analysis: the block to which the execution did not reach does not
+// interfere with an error; it came to an error in the place of the atom. The alternative
+// gives up the failure that has gone farthest.
+struct server { i64 port; }
+
+config(expr body) {
+  syntax {r} => parse(r, map(server, {port: combine("port", "=", int() | as(0, word("auto")))}));
+  body
+}
+
+never() => config { port = };
+
+main() {
+  good = config { port = 8080 };
+  print(good.port);
+  print("живо");
+  bad = config { port = "восемь" };
+  print(bad.port);
+}

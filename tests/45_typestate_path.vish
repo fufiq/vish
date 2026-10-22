@@ -1,0 +1,20 @@
+// args: 2
+// out: 1
+// check-error: нет подходящей перегрузки read
+// check-error: require не выполнено
+// check-error: в пути [g: file{fd: 1, open: false}]
+// The state is different in branches - continuation is split (decision 2026-09-28):
+// an error is in the path where the file is closed, with this path in the track.
+struct file { i64 fd; ct bool open = true; }
+close(mut file f) { f.open = false; }
+read(file f) {
+  require(f.open);
+  f.fd
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  g = file{1};
+  if(n > 5) close(g);
+  print(read(g));
+}

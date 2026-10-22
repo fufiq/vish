@@ -1,0 +1,150 @@
+// out: 285
+// out: 10
+// out: 15
+// out: 11
+// out: 6
+// out: 10
+// out: 73
+// out: 10
+// jit-compiled: squares
+// jit-compiled: nested
+// jit-stats: генератор пишет наружу
+// jit-stats: потребитель пишет то, что читает генератор
+// jit-stats: генератор: close(s) — не последнее действие
+// jit-stats: for по потоку генератора — не в области spawn
+// jit-stats: переменную генератора меняют после spawn
+// jit-compiled: twice
+// machine
+// Генератор → цикл (шаг 2 плана, O11): пара
+// s = stream(…); spawn { W }; for(x : s) B компилируется без файбера — в месте
+// for исполняется W, где write(s, v) — это B с x = v: 
+// Свёртка —
+// только когда наблюдаемое не меняется; остальные случаи ниже — интерпретатор,
+// вывод тот же (раннер сверяет JIT с интерпретатором).
+gen_squares(s, n) {
+  for(i : range(n)) write(s, i * i);
+  close(s);
+}
+
+squares(n) {
+  s = stream(4);
+  spawn { gen_squares(s, n); }
+  t = 0;
+  for(x : s) t += x;
+  t
+}
+
+// generator within the cycle: its own flow and its own for each iteration
+nested(n) {
+  t = 0;
+  for(k : range(n)) {
+    s = stream(2);
+    spawn {
+      for(i : range(k)) write(s, i);
+      close(s);
+    }
+    for(x : s) t += x;
+  }
+  t
+}
+
+// The generator writes outward - the order W and B would be observable.
+leaks(n) {
+  last = 0;
+  s = stream(1);
+  spawn {
+    for(i : range(n)) {
+      last = i;
+      write(s, i);
+    }
+    close(s);
+  }
+  t = 0;
+  for(x : s) t += x + last;
+  t
+}
+
+// The user changes what the generator reads.
+shares(n) {
+  m = 1;
+  s = stream(1);
+  spawn {
+    for(i : range(n)) write(s, i * m);
+    close(s);
+  }
+  t = 0;
+  for(x : s) {
+    t += x;
+    m = 2;
+  }
+  t
+}
+
+// After close, the generator still works.
+late_close(n) {
+  s = stream(2);
+  spawn {
+    close_after(s, n);
+    u = n + 1; // After close - another work (its own variable)
+  }
+  t = 0;
+  for(x : s) t += x;
+  t
+}
+close_after(s, n) {
+  for(i : range(n)) write(s, i);
+  close(s);
+}
+
+// for in the branch, spawn - outside
+branch(n) {
+  s = stream(8);
+  spawn {
+    for(i : range(n)) write(s, i);
+    close(s);
+  }
+  t = 0;
+  if(n > 2) {
+    for(x : s) t += x;
+  }
+  t
+}
+
+// between spawn and for yield: fiber would have started earlier and read the old m
+early(n) {
+  m = 1;
+  s = stream(2);
+  spawn {
+    for(i : range(n)) write(s, i * m);
+    close(s);
+  }
+  yield();
+  m = 10;
+  t = 0;
+  for(x : s) t += x;
+  t
+}
+
+// The second for the same stream: it is already closed and empty.
+twice(n) {
+  s = stream(2);
+  spawn {
+    for(i : range(n)) write(s, i);
+    close(s);
+  }
+  t = 0;
+  for(x : s) t += x;
+  for(x : s) t += 100;
+  t
+}
+
+main() {
+  print(squares(10));
+  print(nested(5));
+  print(leaks(4));
+  print(shares(4));
+  print(late_close(4));
+  print(branch(5));
+  print(early(5));
+  print(twice(5));
+}

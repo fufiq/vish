@@ -1,0 +1,33 @@
+// out: 15
+// out: 1000
+// out: both(helper) => helper(1) + helper;
+// fmt-stable
+// store-roundtrip
+// machine
+// Имена в созданном коде (решение автора 2026-10-02): ast.name{"x"} — имя, его
+// связывает анализ в месте, куда узел попал: 
+//;
+// конкретная сущность — ссылка на объявление ref(f), не ловится именем места вставки:
+// 
+// Link printing is the current name of the target.
+helper(x) => x * 10;
+ct base = 1000;
+
+ct {
+  // The helper parameter obscures the function: the name is associated with the parameter, the link is associated with the function.
+  f = ast.function{"both", array{ast.parameter{"helper"}}};
+  f.body = ast.operation{"+", array{ast.call{ref(helper), array{ast.int{1}}}, ast.name{"helper"}}};
+  f.expr_body = true;
+  emit(f);
+  // reference to the ct variable of the module - its value, although the insert has its base
+  g = ast.function{"get_base", array{ast.parameter{"base"}}};
+  g.body = ast.reference{ref(base).target}; // ast.reference(Ad Node Number) is the same as ref(base)
+  g.expr_body = true;
+  emit(g);
+}
+
+main() {
+  print(both(5));
+  print(get_base(7));
+  print(code_text(code(both)));
+}

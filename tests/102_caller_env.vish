@@ -1,0 +1,42 @@
+// out: 3 7 8 8
+// out: 12.0
+// stdin: 1 2 3
+// machine
+// fmt-stable
+// store-roundtrip
+// Окружение вызова (O4): 
+// 
+// (Yarik)
+// 
+// The author’s solution is implicit: the free name of the body is searched lexically,
+// then among the functions and types of the module, then from the caller and further
+// along the chain of calls. My:* x = e announces his name (does not erase the name of
+// the caller); instance - to the place of the call.
+bump() {
+  a += 1;
+  tmp = a * 10;
+}
+
+total() => a + b;
+
+deeper() => total();
+
+scale(x) => x * k;
+
+acc(xs) {
+  for(i : range(xs.size)) s += scale(xs[i]);
+}
+
+main() {
+  a = 1;
+  tmp = 7;
+  bump();
+  bump();
+  b = 5;
+  print(a, tmp, total(), deeper());
+  xs = read_floats(stdin);
+  k = 2.0;
+  s = 0.0;
+  acc(xs);
+  print(s);
+}

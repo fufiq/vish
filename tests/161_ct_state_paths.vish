@@ -1,0 +1,24 @@
+// args: 2
+// machine
+// out: 30
+// check-error: чтение закрытого файла
+// check-error: закрыт здесь
+// check-error: в пути [f:
+// The state is different in the branches run-time -if - splitting (§5.5): the ct state is
+// part of the state of the value, like the ct field; the error is in the path where the file
+// is closed, with this path in the track. When executed, only the branch n > 5 is closed.
+struct fstate { bool open; code at; }
+
+close(mut fd) => set_ct_state(fd, fstate{false, call_site()});
+read(fd) {
+  s = ct_state(fd, fstate{true, code()});
+  require(s.open, "чтение закрытого файла", "закрыт здесь", s.at);
+  fd * 10
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  f = 3;
+  if(n > 5) close(f);
+  print(read(f));
+}

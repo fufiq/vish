@@ -32,7 +32,7 @@ export class Inspector {
     this.tree.className = 'tree';
     this.expand.className = 'expand';
     panel.replaceChildren(head, this.tree, this.expand);
-    this.label.className = 'tz-structure-label';
+    this.label.className = 'vish-structure-label';
     this.label.hidden = true;
     document.body.append(this.label);
   }

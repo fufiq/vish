@@ -1,0 +1,26 @@
+// args: 2
+// machine
+// machine-dump: 200
+// out: 30 -1
+// check: require_failed
+// check-lacks: ошибка
+// The condition requires is not known when compiling (ct-state "closed" and run-time-flag force)
+// - the check remains in runtime (§5.4): exclusion of require_failed with a user message;
+// parsing does not fall, in the level of static - run-time-check.
+struct fstate { bool open; code at; }
+
+close(mut fd) => set_ct_state(fd, fstate{false, call_site()});
+read(fd, bool force) {
+  s = ct_state(fd, fstate{true, code()});
+  require(s.open || force, "чтение закрытого файла", "закрыт здесь", s.at);
+  fd * 10
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  f = 3;
+  a = read(f, n > 100);
+  close(f);
+  b = try { read(f, n > 100) } catch(require_failed e) { -1 };
+  print(a, b);
+}

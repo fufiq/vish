@@ -3,7 +3,7 @@
 // Hot replacement: new calls - in a new version, started frames live in the old; editing struct
 // with living values - only with
 // migrate(T old).
-// program: live_process.tz
+// program: live_process.vish
 proc start
 // expect: процесс запущен
 proc step 60

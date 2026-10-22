@@ -1,0 +1,30 @@
+// out: 7 meters i64
+// out: 0.5 ratio
+// out: 5 3.0 5 2 2.0
+// out: 3.5 7.0
+// machine
+// fmt-stable
+// Свой тип над тем же представлением — отдельный тип, не тот же i64: 
+// 
+// 
+// The value is meters {5}, the representation is m.value; the tag has i64 {x} (as i64 y = x) and
+// x.value. Implicit transition is a function of the `f64 implicit(meters m)` program and is
+// resolved by fit_rule prelude: Author's Decision 2026-10-17.
+//
+struct meters { __int64 value; }
+struct ratio { __float64 value; }
+operator (meters a) + (meters b) => meters{a.value + b.value};
+f64 implicit(meters m) => f64(m.value);
+
+half(f64 x) => x / 2.0;
+
+main() {
+  m = meters{5} + meters{2};
+  print(m.value, typeof(m), typeof(m.value));
+  r = ratio{0.5};
+  print(r.value, typeof(r));
+  x = i64{5};
+  print(x, f64{3}, x.value, i64{2.0}, f64{2}.value);
+  f64 d = m;
+  print(half(m), d);
+}

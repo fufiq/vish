@@ -3,7 +3,7 @@
 // Live list:
 // 
 // ; nothing inserts itself. List status is in VM.
-// program: stats.tz
+// program: stats.vish
 open_view module
 // name set - list itself, prefix before subsequence
 pointer 1 @read_floats 0 0

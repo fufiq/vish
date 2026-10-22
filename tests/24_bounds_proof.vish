@@ -1,0 +1,56 @@
+// args: 3
+// out: 6 6 3 3
+// out: 9
+// machine
+// check: xs[i]
+// check: ys[k] (запись)
+// check-lacks: ws[i]
+// check-lacks: zs[j]
+// check-lacks: vs[i]
+// jit-compiled: sum
+// jit-compiled: second
+// The safe index cycle variable for(i: range(a.size)) is index a, border check is
+// removed by parsing and is visible in the check report. Not removed if the body
+// changes the index, replaces the entire array or indexes another array.
+//
+sum(xs) {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
+  s
+}
+
+// Entry into element is also proven
+twice(mut ys) {
+  for(k : range(ys.size)) ys[k] = ys[k] * 2;
+}
+
+// other array of the same length is not proven
+cross(xs, ws) {
+  s = 0;
+  for(i : range(xs.size)) s += ws[i];
+  s
+}
+
+// index changes in the body
+second(zs) {
+  s = 0;
+  for(j : range(zs.size)) { j = j + 0; s += zs[j]; }
+  s
+}
+
+// whole array replaced
+shrink(xs) {
+  vs = xs;
+  s = 0;
+  for(i : range(vs.size)) { s += vs[i]; vs = fill(9, 1); }
+  s
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  xs = fill(n, 2);
+  ys = fill(n, 1);
+  twice(ys);
+  print(sum(xs), cross(xs, xs), second(ys) / 2, shrink(xs) - 1);
+  print(sum(ys) + n);
+}

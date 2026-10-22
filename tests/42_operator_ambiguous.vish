@@ -1,0 +1,8 @@
+// error: цепочка операторов неоднозначна
+// Without priorities, a + b * c on numbers is parsed in two ways - both instance
+// ; brackets are needed.
+f(a, b, c) => a + b * c;
+
+main() {
+  print(f(1, 2, 3));
+}

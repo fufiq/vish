@@ -1,0 +1,15 @@
+// out: 3.5 3.5 2.25
+// machine
+// fmt-stable
+// jit-compiled: infix+
+// Numbers - tags, operations - ads by type (O15, M6 step 8):
+// 
+// In prelude i64 + f64 is not announced - the program announces its own
+// and receives mixed arithmetic (without it - test 07).
+operator (i64 a) + (f64 b) => f64(a) + b;
+operator (f64 a) + (i64 b) => a + f64(b);
+mix(i64 n, f64 x) => n + x;
+
+main() {
+  print(1 + 2.5, 2.5 + 1, mix(2, 0.25));
+}

@@ -1,0 +1,16 @@
+// Module for test 238 and scenario 239: control extensions for individual entity (§9.1 ) -
+// [[extension(own_only)]] for struct pt and syntax twice recording; other entity modules
+// (area) can be expanded.
+module geo.shapes;
+
+[[extension(own_only)]] struct pt {
+  i64 x;
+  i64 y;
+}
+
+[[extension(own_only)]] syntax twice {body} => {
+  body;
+  body;
+};
+
+area(pt p) => p.x * p.y;

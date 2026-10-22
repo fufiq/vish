@@ -4,7 +4,7 @@
 // take the former derivatives of node - (Q§7.4 *my: * node too). Prior to this, each round added
 // ~210 node and ~430 journal entries.
 //
-// program: db_growth.tz
+// program: db_growth.vish
 stats
 edit other
 other() => 7;

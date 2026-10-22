@@ -1,6 +1,6 @@
 // Editing function in the editor (Ctrl+Shift+R, §7.4): editing the program from the language to
 // the database, as a human edit; representing all customers - again.
-// program: program_edit.tz
+// program: program_edit.vish
 open_view module
 [2] open_view module
 apply refactor

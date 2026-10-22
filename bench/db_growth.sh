@@ -1,10 +1,10 @@
 #!/bin/sh
-# Measurement of base growth (test 217): N rounds in tz vm; prints base size after
-# each round and .tzdb size at the end.
+# Measurement of base growth (test 217): N rounds in vish vm; prints base size after
+# each round and .vishdb size at the end.
 # N=50 bench/db_growth .sh; FN=tune BODY="..." bench/db_growth .sh - editing another function
-TZ=${TZ:-out/tz}
+VISH=${VISH:-out/vish}
 N=${N:-20}
-PROG=${PROG:-tests/db_growth.tz}
+PROG=${PROG:-tests/db_growth.vish}
 FN=${FN:-other}
 BODY=${BODY:-"other() => 7;"}
 {
@@ -18,6 +18,6 @@ BODY=${BODY:-"other() => 7;"}
     echo stats
     i=$((i+1))
   done
-  echo "save out/db_growth.tzdb"
-} | $TZ vm $PROG | grep "база:"
-ls -l out/db_growth.tzdb | awk '{print "файл", $5}'
+  echo "save out/db_growth.vishdb"
+} | $VISH vm $PROG | grep "база:"
+ls -l out/db_growth.vishdb | awk '{print "файл", $5}'

@@ -1,6 +1,6 @@
 // Selective use in the editor (§9.1): use geo.vec. {v2, dot} ; - The addition offers only named
 // ones, as does parsing (norm2 not visible).
-// program: 97_use_selective.tz
+// program: 97_use_selective.vish
 open_view module
 pointer 1 @print:1 0 0
 key 1 d

@@ -4,7 +4,7 @@
 // order).
 //
 //
-// program: pressure.tz
+// program: pressure.vish
 proc start
 // expect: процесс запущен
 proc step 60

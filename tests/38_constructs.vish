@@ -1,0 +1,72 @@
+// args: 5
+// out: 8 15 1 0 2 10 20
+// out: 9
+// jit-compiled: sum_until
+// jit-compiled: nested
+// jit-compiled: first_neg
+// jit-compiled: safe_div
+// machine
+
+// fmt-stable
+// store-roundtrip
+// Конструкции библиотекой (расширения, шаг 2): for/while/try — прелюдия на
+// языке поверх ядра (if, loop/break/continue, throw, intercept). 
+// 
+// Your design with a clause and block is
+// declared the same as for.
+
+// its own design: head and clause, syntax of the call - from the announcement
+when(c, expr yes) otherwise(expr no) => if(c) yes else no;
+
+// its design with a block entering the name: repeat(i : n) { … }
+repeat(n, expr body) {
+  i = 0;
+  loop {
+    if(i >= n) break;
+    k = i;
+    i = i + 1;
+    body(k);
+  }
+}
+
+// break/continue in the body for - from the loop within for
+sum_until(xs, limit) {
+  s = 0;
+  for(x : xs) {
+    if(x < 0) continue;
+    s += x;
+    if(s > limit) break;
+  }
+  s
+}
+
+// The break only comes out of its cycle.
+nested(n) {
+  c = 0;
+  for(i : range(n)) for(j : range(n)) {
+    if(j > i) break;
+    c += 1;
+  }
+  c
+}
+
+// return from the block for - exit from the function that wrote the block
+first_neg(xs) {
+  for(i : range(xs.size)) if(xs[i] < 0) return i;
+  -1
+}
+
+safe_div(a, b) => try { a / b } catch(div_by_zero e) { 0 };
+
+choose(c) => when(c > 2) { 10 } otherwise { 20 };
+
+main() {
+  n = parse_int(args[1]).value;
+  xs = array{1, -2, 3, 4, 5};
+  print(sum_until(xs, 6), nested(n), first_neg(xs), safe_div(n, 0), safe_div(10, n), choose(n), choose(1));
+  t = 0;
+  repeat(i : n) t += i;
+  w = 0;
+  while(w < t) w += 3;
+  print(w - 3);
+}

@@ -1,0 +1,24 @@
+// error: изменение кода после его использования: ast.block уже разобран в каноническом порядке инстанцирования
+// error: использован здесь
+// check-error: изменение кода после его использования
+// To change the ct code instance can only code not yet disassembled in canonical order (§7.3):
+// otherwise the call to the place of change would be disassembled by the old code, and executed by
+// the new. My:* error, not two versions of the code (like the "after instantiation specialization"
+// in C++); you can loosen it later.
+//
+greet() {
+  print("тело");
+}
+
+instrument(f) {
+  ct {
+    b = f.body;
+    b.items = array{ast.call{ast.name{"print"}, array{ast.string{"вход"}}}, ...b.items};
+  }
+}
+
+main() {
+  greet();
+  instrument(code(greet));
+  greet();
+}

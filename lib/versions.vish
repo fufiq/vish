@@ -1,0 +1,249 @@
+// The base versions are diff and fusion in the language (§9.4; step 2 transfer tuling). The module is
+// built into the build; it is seen by the editor (use versions) and commands vish diff, vish merge.
+module versions;
+use tools;
+
+// Primitives: version of the database (VM) ------------------------------------------------------- version -
+// a copy of the database on the magazine .vishdb; number 0 - the base from which they work (editor's session
+// program), the vish team - empty. The common beginning of the two versions is their common base.
+
+// -1 - not opened (version_error - why)
+version_open(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(-1)));
+  return value(tools_host->open(std::string((a[0]).as<str_v>().view())));
+};
+version_error() => native "cpp" { return value(tools_host->error); };
+// Common base of versions a and b (root - root a)
+version_base(i64 a, i64 b) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(-1)));
+  return value(tools_host->base((a[0]).as<int64_t>(), (a[1]).as<int64_t>()));
+};
+// copy no longer needed
+version_close(i64 v) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  tools_host->close((a[0]).as<int64_t>());
+  return value(int64_t(0));
+};
+// Elements of the root module v (-1 - program module): array{number, text, internal, empty lines in front
+// of it, comments before it, comment at the end of the line}
+version_items(i64 v, i64 root) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(array_v::of({}));
+  return value(array_v::of(module_item_facts(*x->db, tools_host->module_of(*x, (a[1]).as<int64_t>()))));
+};
+// What is the element n version v: array {вид, имя, части, цель} : fn (parts - parameter types, " " -
+// without type), syntax (words form), struct, extend, extend_ref (goal - extensible function), var, other
+version_signature(i64 v, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  int64_t n = (a[1]).as<int64_t>();
+  if(!x || n < 0 || uint64_t(n) >= x->db->size()) return value(array_v::of({value(std::string("other")), value(std::string()), value(array_v::of({})), value(int64_t(-1))}));
+  return item_signature(*x->db, node_id(uint32_t(n)));
+};
+// Element of the module root version v - text, parsing according to the rules of its place (§4.4): mine -
+// replace it (node saves id), -1 - new after (-1 - at the end); layout - empty lines, internal, comments.
+// The result is the element number; I did not understand -1.
+version_put(i64 v, i64 root, i64 mine, str text, str name, i64 after, i64 blank, bool inner, lead, str tail) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(-1)));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(int64_t(-1));
+  node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>());
+  if(!m) return value(int64_t(-1));
+  auto num = [](value const & v) { return v.as<int64_t>() < 0 ? node_id{} : node_id(uint32_t(v.as<int64_t>())); };
+  node_note note;
+  for(uint32_t k = 0; k < (a[8]).as<array_v>().size(); ++k) note.lead.emplace_back((a[8]).as<array_v>().get(k).as<str_v>().view());
+  note.tail = std::string((a[9]).as<str_v>().view());
+  node_id got = put_item(*x->db, m, num(a[2]), std::string((a[3]).as<str_v>().view()), std::string((a[4]).as<str_v>().view()), num(a[5]), uint32_t((a[6]).as<int64_t>()), (a[7]).as<bool>(), std::move(note));
+  return value(got ? int64_t(got.value) : int64_t(-1));
+};
+// Remove element n of the root v module
+version_remove(i64 v, i64 root, i64 n) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(int64_t(0));
+  if(node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>()); m && (a[2]).as<int64_t>() >= 0) remove_item(*x->db, m, node_id(uint32_t((a[2]).as<int64_t>())));
+  return value(int64_t(0));
+};
+// journal version v - in the file .vishdb; "" - written, otherwise error
+version_save(i64 v, str path) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(std::string("нет версии"));
+  try {
+    save_db(*x->db, x->root, std::string((a[1]).as<str_v>().view()));
+  } catch(std::exception const & e) {
+    return value(std::string(e.what()));
+  }
+  return value(std::string());
+};
+
+// --- Base versions: Semantic Diff and Tripartite Merger (§9.4) ---
+//  
+// Live editing through VM does not give conflicts. Copies of the base
+// only diverge when the work was in two places.
+// 
+// 
+// The base is the versions and their elements; the decision (whose, what's taken, where's the conflict) is
+// here. Diff and fusion - by module elements: the function is recognized by name and signature, not by lines.
+
+// The module element in the version: who is it (id - node number, if the element was in the common database:
+// change of signature - editing the same element; otherwise - the key), as it is called (key), what it is
+// (text projection) and its layout: internal (§13.3), empty lines in front of it, comments, the neighbor in
+// front of it (after - its id): - the element is transferred with everything that it has.
+struct item { bool present; i64 node; str id; str key; str text; bool inner; i64 blank; array lead; str tail; str after; }
+no_item() => item{false, -1, "", "", "", false, 0, array{}, "", ""};
+
+// Key element: function - name and types of parameters, syntax - words of form recording, struct,
+// extensions, variable - name; other - the text itself.
+item_key(i64 v, i64 n, str shown) {
+  array{kind, name, parts, target} = version_signature(v, n);
+  if(kind == "syntax") {
+    k = "syntax";
+    for(p : parts) k = (k + " ") + p;
+    return k;
+  }
+  if(kind == "fn") {
+    k = name + "(";
+    for(j : range(parts.size)) k = (k + (if(j > 0) ", " else "")) + parts[j];
+    return k + ")";
+  }
+  if(kind == "struct") return "struct " + name;
+  if(kind == "extend_ref") return ("&" + item_key(v, target, "")) + " { … }";
+  if(kind == "extend") return name + " { … }";
+  if(kind == "var") return name;
+  shown
+}
+// Elements of the root module v (-1 is the program module); base_items is the number of the common base elements.
+module_items(i64 v, i64 root, base_items) {
+  found = array{};
+  prev = "";
+  for(x : version_items(v, root)) {
+    array{n, shown, inner, blank, lead, tail} = x;
+    first = item_key(v, n, shown);
+    key = first;
+    j = 2;
+    while(find_item(found, key).present) {
+      key = (first + " #") + text(j);
+      j += 1;
+    }
+    id = if(has_number(base_items, n)) "#" + text(n) else key;
+    found.push(item{true, n, id, key, shown, inner, blank, lead, tail, prev});
+    prev = id;
+  }
+  found
+}
+find_item(xs, str id) {
+  r = no_item();
+  for(x : xs) if(!r.present && (x.id == id)) r = x;
+  r
+}
+find_key(xs, str key) {
+  r = no_item();
+  for(x : xs) if(!r.present && (x.key == key)) r = x;
+  r
+}
+// What compares the merger: text and layout (there is no element - also state)
+same_state(item x, item y) {
+  if(x.present != y.present) return false;
+  if(!x.present) return true;
+  (x.text == y.text) && ((x.inner == y.inner) && ((x.blank == y.blank) && ((x.tail == y.tail) && same_lines(x.lead, y.lead))))
+}
+
+// Replace (or add or remove) the element id of the root module v with their element: text - parsing in place
+// of the element (§4.4), layout - as they have; new - after the same neighbor as them (no one - at the end).
+// The result is the element number (-1 - removed or not understood).
+take_theirs(i64 v, i64 root, base_items, str id, item theirs) {
+  items = module_items(v, root, base_items);
+  mine = find_item(items, id);
+  if(!theirs.present) {
+    if(mine.present) version_remove(v, root, mine.node);
+    return -1;
+  }
+  prev = find_item(items, theirs.after);
+  version_put(v, root, if(mine.present) mine.node else -1, theirs.text, id, if(prev.present) prev.node else -1, theirs.blank, theirs.inner, theirs.lead, theirs.tail)
+}
+
+// Conflict is both options for a person: the text of the common base, mine, them (there is no element in the
+// version) and their element with a layout - for "take them."
+struct conflict { str id; str key; str base; str mine; str theirs; item their; }
+struct merge_result { array taken; array conflicts; array base_items; }
+no_merge() => merge_result{array{}, array{}, array{}};
+
+// The three-way merging of their version into mine (mine changes on the spot): what is changed is taken by
+// themselves, and conflict is different in both.
+merge_versions(i64 mine, i64 theirs) {
+  bv = version_base(mine, theirs);
+  base_items = array{};
+  for(x : version_items(bv, -1)) base_items.push(x[0]);
+  b = module_items(bv, -1, base_items);
+  m = module_items(mine, -1, base_items);
+  t = module_items(theirs, -1, base_items);
+  version_close(bv);
+  ids = array{};
+  for(x : b) if(!has_text(ids, x.id)) ids.push(x.id);
+  for(x : m) if(!has_text(ids, x.id)) ids.push(x.id);
+  for(x : t) if(!has_text(ids, x.id)) ids.push(x.id);
+  r = no_merge();
+  r.base_items = base_items;
+  for(id : ids) {
+    bi = find_item(b, id);
+    mi = find_item(m, id);
+    ti = find_item(t, id);
+    name = if(mi.present) mi.key else if(ti.present) ti.key else bi.key;
+    if(!same_state(mi, ti) && !same_state(ti, bi)) { // They have changed or they have not changed.
+      if(same_state(mi, bi)) { // They are only changed by themselves.
+        take_theirs(mine, -1, base_items, id, ti);
+        r.taken.push(name);
+      } else r.conflicts.push(conflict{id, name, bi.text, mi.text, ti.text, ti});
+    }
+  }
+  r
+}
+
+// Bilateral diff: What is B different than A (by module elements).
+diff_versions(i64 a, i64 b) {
+  xa = module_items(a, -1, array{});
+  xb = module_items(b, -1, array{});
+  r = "";
+  for(x : xa) {
+    y = find_key(xb, x.key);
+    if(!y.present) r = r + (("- " + x.key) + "\n");
+    else if(y.text != x.text) r = r + ((((((("~ " + x.key) + "\n  было:  ") + x.text) + "\n  стало: ") + y.text) + "\n"));
+    else if(!same_state(x, y)) r = r + (("~ " + x.key) + " — раскладка (внутренний, пустые строки, комментарий)\n");
+  }
+  for(y : xb) if(!find_key(xa, y.key).present) r = r + (((("+ " + y.key) + "\n  ") + y.text) + "\n");
+  if(r == "") "без различий\n" else r
+}
+
+// --- commands vish: diff, merge (cli loads the module by key) ------------------------------------------------------- vish diff a.vishdb
+// b.vishdb - semantic diff of bases
+diff_files(str a, str b) {
+  va = version_open(a);
+  if(va < 0) return fail(version_error());
+  vb = version_open(b);
+  if(vb < 0) return fail(version_error());
+  write_out(diff_versions(va, vb));
+  0
+}
+// vish merge my.vishdb their.vishdb [total.vishdb] - tripartite merger; conflicts are my variant, code 1
+merge_files(str mine, str theirs, str result) {
+  mv = version_open(mine);
+  if(mv < 0) return fail(version_error());
+  tv = version_open(theirs);
+  if(tv < 0) return fail(version_error());
+  r = merge_versions(mv, tv);
+  for(k : r.taken) write_out(("взято у них: " + k) + "\n");
+  for(c : r.conflicts) write_out(((((((("конфликт: " + c.key) + "\n  база: ") + dash(c.base)) + "\n  мой:  ") + dash(c.mine)) + "\n  их:   ") + dash(c.theirs)) + "\n");
+  why = version_save(mv, result);
+  if(why != "") return fail(why);
+  write_out((("записано: " + result) + (if(r.conflicts.size == 0) "" else " (конфликты — мой вариант; слить руками)")) + "\n");
+  if(r.conflicts.size == 0) 0 else 1
+}
+dash(str s) => if(s == "") "—" else s;
+
+// entry points for cli: words after command
+diff_command(args) => if(args.size == 2) diff_files(args[0], args[1]) else 2;
+merge_command(args) => if(args.size >= 2) merge_files(args[0], args[1], if(args.size >= 3) args[2] else args[0]) else 2;

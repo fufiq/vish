@@ -2,7 +2,7 @@
 // 
 // Visible in place - its module, modules of its direct use (non-transitive) and prelude: guidance,
 // transition and addition know the functions of use geo.vec.
-// program: 95_modules.tz
+// program: 95_modules.vish
 open_view module
 // guidance: selected in instance - module function
 hover 1 @norm2:2

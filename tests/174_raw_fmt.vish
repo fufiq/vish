@@ -1,0 +1,40 @@
+// out: 6 x=1,y=2
+// fmt-stable
+// store-roundtrip
+// fmt-has: total = sum_of() {  1   2
+// fmt-has:     3 /* три */ };
+// fmt-has: pairs() { x=1 ,  y = 2 }
+// fmt-has:   syntax {r} => sum_parse(r);
+// machine
+// Текст сырого блока — как написан (§4.4): его разбирает код на языке, проекция его не
+// переписывает — пробелы, переводы строк, комментарии, склейки символов (`x=1`) остаются;
+// fmt∘fmt = fmt, база (.vishdb) хранит то же.
+sum_parse(r) {
+  ast.raw{_, items, _, _, _} = r;
+  e = ast.int{0};
+  for(a : items) e = ast.operation{"+", array{e, a}};
+  e
+}
+
+sum_of(expr body) {
+  syntax {r} => sum_parse(r);
+  body
+}
+
+// Pair name = number: gluing is visible at the symbol (ast.symbol.glued), here is not important
+pairs(expr body) {
+  syntax {r} => parse(r, repeated(seq(word(), "=", i64, repeated(","))));
+  body
+}
+
+show(xs) {
+  s = "";
+  for(p : xs) s = s + (if(s == "") "" else ",") + p[0] + "=" + text(p[2]);
+  s
+}
+
+main() {
+  total = sum_of {  1   2
+    3 /* три */ };
+  print(total, show(pairs { x=1 ,  y = 2 }));
+}

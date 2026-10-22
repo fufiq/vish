@@ -1,0 +1,12 @@
+// The program for the 65_editor_marks.wire script (itself a regular test).
+// machine
+// stdin: 1.5 2.5
+// out: 4
+// out: 2.25
+twice(x) => x * x;
+
+main() {
+  xs = read_floats(stdin);
+  print(twice(xs.size));
+  print(twice(xs[0]));
+}

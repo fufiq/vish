@@ -1,7 +1,7 @@
 // §14.4 with JIT (M1): edit dot in a running VM - the next run executes new machine
 // code. instance checks the revisions of the functions included in it and is
 // recompiled; no de-optimizations.
-// program: dot_edit.tz
+// program: dot_edit.vish
 stdin 1 2 3
 stdin 4 5 6
 run

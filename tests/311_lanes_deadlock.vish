@@ -1,0 +1,14 @@
+// Reciprocal locking of two bands (step 12.3b): the program waits for the process to respond, the process
+// waits for the flow to which no one writes. The background strip sleeps without requests and incoming -
+// the main sees this, the error - in the main at the waiting place, as in one lane.
+// machine
+// out: жду ответ
+// error: все файберы ждут друг друга (взаимная блокировка)
+relay(s, back) => write(back, read(s));
+main() {
+  s = stream();
+  back = stream();
+  p = process(relay, s, back);
+  print("жду ответ");
+  print(read(back));
+}

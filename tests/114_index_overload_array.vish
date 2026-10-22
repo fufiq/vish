@@ -1,0 +1,15 @@
+// out: 20 97 6
+// machine
+// jit-compiled: get
+// overload [] over the array of its code: the compiler in the language selects it as a
+// overload call and embeds it; index(a, i) is a primitive kernel. Modules-includes prelude
+// program module does not include - it is indexed by the kernel.
+//
+operator (array xs)[i64 k] => index(xs, k) * 10;
+get(array xs, i64 k) => xs[k];
+
+main() {
+  s = 0;
+  for(x : array{1, 2, 3}) s = s + x;
+  print(get(array{1, 2, 3}, 1), "ab"[0], s);
+}

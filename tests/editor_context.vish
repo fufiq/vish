@@ -1,0 +1,29 @@
+// The program for the 133_editor_context.wire script (itself a test: the form above its ad
+// is a hole, §4.4).
+// error: editor_context.vish:7:9: ошибка: ожидалось ';'
+// fmt-has: /* дыра: ожидалось ';' */ twice { n += 1; }
+early() {
+  n = 0;
+  twice { n += 1; }
+  n
+}
+
+syntax twice {body} => {
+  body;
+  body;
+};
+
+when(c, expr body) {
+  if(c) body;
+}
+
+count() {
+  n = 0;
+  twice { n += 2; }
+  when(n > 1) n += 10;
+  n
+}
+
+main() {
+  print(early(), count());
+}

@@ -1,0 +1,17 @@
+// The program for the 205_ct_instance_edit.session script (itself a regular test).
+// out: 300 15 7
+scale(i64 x) => x;
+shift(i64 x) => x;
+other() => 7;
+
+tune(f, op, k) => ct {
+  f.body = ast.operation{op, array{ast.name{"x"}, ast.int{k}}};
+};
+
+main() {
+  tune(code(scale), "*", 3);
+  tune(code(shift), "+", 5);
+  s = 0;
+  for(i : range(100)) s += scale(1);
+  print(s, shift(10), other());
+}

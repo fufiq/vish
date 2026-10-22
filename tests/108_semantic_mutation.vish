@@ -1,0 +1,27 @@
+// out: foo
+// out: bar
+// out: bar
+// machine
+// fmt-stable
+// store-roundtrip
+// Мутация семантики (§7.3): 
+// 
+// Reading the ct-variable outside the ct-code sees the value at the time of
+// execution in canonical order instantiation - in place, as ct e; the final value
+// was previously read.
+ct word = "foo";
+
+f() {
+  ct {
+    word = "bar";
+  }
+}
+
+print_foo_or_bar() => print(word);
+
+main() {
+  print_foo_or_bar();
+  f();
+  print_foo_or_bar();
+  print_foo_or_bar();
+}

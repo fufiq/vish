@@ -3,7 +3,7 @@
 // — Shift+F5.
 // grant: net
 // run: live
-// program: editor_wait_net.tz
+// program: editor_wait_net.vish
 open_view module
 run
 // expect: output text="слушаю\n" ok=true more=false state="running"

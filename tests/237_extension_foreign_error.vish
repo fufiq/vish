@@ -1,0 +1,11 @@
+// error: show: расширение сущности модуля geo.typed из модуля программы — только для типов своего модуля (same_module_types)
+// error: сущность объявлена здесь
+// §9.1: show(f64) programs do not use any type of program - same_module_types rejects; error
+// - on the ad.
+use geo.typed;
+
+show(f64 x) => 0;
+
+main() {
+  print(show(cell{1}));
+}

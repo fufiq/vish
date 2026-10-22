@@ -1,0 +1,27 @@
+// Insulation of submodules - both for type names and variable modules (tail of step 10):
+// 
+// The struct name (parameter type and variable, {…} name, sample, value-type) and the module
+// variable are visible if declared in its module, in prelude or in a module that is used directly.
+// The value of type goes through functions and without a name: x.v, print.
+//
+// machine
+// out: 15 7 cell{v: 15}
+// out: 3 true 7
+use geo.wrap;
+
+through() {
+  x = wrapped(8); // The value of the cell type is not necessary.
+  print(x.v, depth_of(), x);
+}
+
+main() {
+  through();
+  seen();
+}
+
+use geo.deep; // your use: geo.deep names are visible to the program module (out of place - parsing rules in place)
+seen() {
+  c = cell{3};
+  cell{v} = c;
+  print(v, typeof(c) == cell, depth);
+}

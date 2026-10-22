@@ -1,0 +1,12 @@
+// error: нарушено требование require; pick: out_of_bounds в строке
+// The requirement of staticity is not fulfilled - an error with a list of unproven.
+pick(xs, i) => xs[i];
+
+ct {
+  require(static_level(pick).checks == 0);
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  print(pick(array{1, 4}, n));
+}

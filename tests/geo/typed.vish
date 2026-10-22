@@ -1,0 +1,12 @@
+// Module for tests 236-237: [[extension(same_module_types)]] - an alien extension of its
+// entity - only for the types of its module (conditional test prelude, §9.1); its
+// extensions (show(i64) here) - you can.
+[[extension(same_module_types)]] module geo.typed;
+
+struct cell {
+  i64 v;
+}
+
+show(cell c) => c.v;
+
+show(i64 n) => n + 100;

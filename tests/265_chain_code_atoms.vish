@@ -1,0 +1,19 @@
+// out: 42 7
+// out: true false
+// machine
+// Цепочка без скобок с атомами над кодом: 
+//  
+// The brute force takes the types of atoms in the sampler, where the values of the environment are
+// erased to the type; the code is a reference to the node, run-time is not part, it is not an
+// erased node. It was `code_kind(c) != ast.int || code_text(c) != "7000"`, which means “quote.”
+[[transform]] shrink(c) {
+  if(code_kind(c) != ast.int || code_text(c) != "7000") return;
+  ast.int{7}
+}
+
+is_call_of(c, str name) => code_kind(c) == ast.call && code_name(c) == name;
+
+main() {
+  print(42, 7000);
+  print(ct { is_call_of(code(print(1)), "print") }, ct { is_call_of(code(1), "print") });
+}

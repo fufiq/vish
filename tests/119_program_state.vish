@@ -1,0 +1,19 @@
+// out: 1 [10] note{n: 1, text: запуск 1}
+// out2: 2 [10, 20] note{n: 2, text: запуск 2}
+// machine
+// machine-dump: 10
+// machine-dump: 40
+// Program state (§12.2): [[state]] x = e is the root in the non-volatile level, the file holds
+// VM (the program has no paths), the pages are at the same addresses; the second run sees the
+// values of the first.
+//.
+struct note { i64 n; str text; }
+[[state]] runs = 0;
+[[state]] log = array{};
+[[state]] last = note{0, "нет"};
+main() {
+  runs = runs + 1;
+  log.push(runs * 10);
+  last = note{runs, "запуск " + text(runs)};
+  print(runs, log, last);
+}

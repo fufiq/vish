@@ -1,0 +1,4 @@
+// Test submodule 292-293: geo.outer uses it, program does not.
+module geo.inner;
+
+sq(i64 x) => x * x;

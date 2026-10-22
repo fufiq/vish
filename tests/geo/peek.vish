@@ -1,0 +1,4 @@
+// Test module 248: does not connect geo.secret - does not see its variables.
+module geo.peek;
+
+peek() => hidden_k;

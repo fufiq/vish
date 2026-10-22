@@ -1,0 +1,6 @@
+// 220 print scope test module (geo.print key): kernel node recording is a module element;
+// use geo.print; brings it to both parsing and print (§4.4, print records by scope).
+//
+module geo.print;
+
+syntax forever {body} => ast.loop{body};

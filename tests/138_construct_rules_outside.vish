@@ -1,0 +1,29 @@
+// error: 138_construct_rules_outside.vish:23:9: ошибка: нет оператора «~»
+// error: 138_construct_rules_outside.vish:24:10: ошибка: ожидалось ';'
+// fmt-has: /* дыра: нет оператора «~» */ x = 1 ~ 2;
+// fmt-has: /* дыра: ожидалось ';' */ python { 1 }
+// The rules of the body of the structure are only in its blocks (§4.4): outside the `~` block is
+// not declared, python (body structure cpp) outside the cpp blocks is not a construction; inside
+// the body of the structure itself, its rules are from the announcement to the end of the body.
+//.
+sqlish(expr body) {
+  operator (a) ~ (b) => (a * 10) + b;
+  body
+}
+
+cpp(expr body) {
+  python(expr b) => {
+    b
+  };
+  body
+}
+
+main() {
+  r = sqlish { 1 ~ 2 };
+  x = 1 ~ 2;
+  python { 1 }
+  cpp {
+    python { 2 }
+  };
+  print(r);
+}

@@ -1,0 +1,39 @@
+// stdin: 1 2 3
+// out: 3 начало на оси y 23
+// out: 3
+// out: -1.0
+// machine
+// machine-dump: 60
+// fmt-stable
+// store-roundtrip
+// check: 86_local_overloads.vish:34 unpack_failed
+// check-lacks: 86_local_overloads.vish:31 unpack_failed
+// Comparison with the sample is overload :
+// 
+// 
+// 
+// The local functions of one name in a block are a set of overloads over the block
+// environment; choice by value; all are cut off by the value - the exception of
+// unpack_failed(). parsing: array {} and array {x, ...xs} cover any length - len(xs)
+// without run-time - validation; two(xs) - with it.
+//
+struct point { i64 x; i64 y; }
+
+main() {
+  k = 10;
+  len(array{}) => 0;
+  len(array{x, ...xs}) => 1 + len(xs);
+  shape(point{(0), (0)}) => "начало";
+  shape(point{(0), y}) => "на оси y";
+  shape(point{x, y}) => (x * k) + y;
+  print(len(array{5, 6, 7}), shape(point{0, 0}), shape(point{0, 3}), shape(point{2, 3}));
+  xs = read_floats(stdin);
+  print(len(xs));
+  r = try {
+    two(array{a, b}) => a + b;
+    two(xs)
+  } catch(unpack_failed e) {
+    -1.0
+  };
+  print(r);
+}

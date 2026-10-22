@@ -1,10 +1,10 @@
 // Протокол редактора (M5, §13.1): VM — единственное состояние, клиент шлёт
 // управляющие сигналы и рисует то, что пришло. 
 // Сообщения идут через настоящий сокет и
-// io_uring; текст представления сверяется с проекцией (tz fmt) автоматически.
-// program: editor_text.tz
+// io_uring; текст представления сверяется с проекцией (vish fmt) автоматически.
+// program: editor_text.vish
 hello 6
-// expect: hello version=6 program="editor_text.tz"
+// expect: hello version=6 program="editor_text.vish"
 hello 7
 // expect: error text="версия протокола 7 не поддерживается (VM: 6)"
 open_view grid

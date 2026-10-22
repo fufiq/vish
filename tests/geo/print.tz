@@ -1,6 +1,0 @@
-// Модуль для теста 220_print_scope (ключ geo.print): запись узла ядра — элемент
-// модуля; use geo.print; приносит её и в разбор, и в печать (§4.4, записи печати
-// по области видимости).
-module geo.print;
-
-syntax forever {body} => ast.loop{body};

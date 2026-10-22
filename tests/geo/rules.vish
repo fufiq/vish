@@ -1,0 +1,19 @@
+// Module with Extension Control (own_only) and parsing rules - for tests 214-216: syntax record,
+// its operator, rule-of-body design, chain without [[associative]].
+[[extension(own_only)]] module geo.rules;
+
+syntax twice {body} => {
+  body;
+  body;
+};
+
+operator (a) <+> (b) => (a * 10) + b;
+
+// body operator operates in frame { … } call location blocks (§4.4)
+frame(expr body) {
+  operator (a) <~> (b) => a - b;
+  body
+}
+
+// a - b - c: y "-" has no [[associative]] in the context of a module definition
+diff3(i64 a, i64 b, i64 c) => a - b - c;

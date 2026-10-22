@@ -1,0 +1,19 @@
+// error: 180_inside_before_run.vish:17:3: ошибка: commit существует только внутри блоков transaction
+// check-error: commit существует только внутри блоков transaction
+// machine
+// [[inside(g)]] — хук разбора на языке (inside прелюдии, §12.1): проверка до
+// исполнения. vish run, раннер и машина процессов сначала разбирают программу; ошибка
+// хука останавливает запуск — «до» не печатается, хотя вызов commit — после print.
+//.
+[[inside(transaction)]] commit(mut log) { log += 1; }
+
+transaction(expr body) {
+  body;
+}
+
+main() {
+  log = 0;
+  print("до");
+  commit(log);
+  print(log);
+}

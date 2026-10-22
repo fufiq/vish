@@ -4,7 +4,7 @@
 //.
 // run: live
 // quantum: 5000
-// program: editor_live.tz
+// program: editor_live.vish
 open_view module
 run
 wait 3

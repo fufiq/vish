@@ -1,0 +1,36 @@
+// out: rgb{r: 255, g: 128, b: 0}
+// out: rgb{r: 1, g: 2, b: 3}
+// out: 7 8
+// machine
+// fmt-stable
+// store-roundtrip
+// Библиотека разбора (§4.4) с анонимным литералом — запись автора о mecha: 
+// 
+// 
+// 
+// 
+// The order parsing is the order of writing the literal, the result is the struct field by name.
+// My input is the block atoms (not symbols), so instead of hex(digits), they are whole.
+//
+struct rgb { i64 r; i64 g; i64 b; }
+
+chan(str n) => combine(n, "=", int(false));
+
+color(expr body) {
+  syntax {r} => parse(r, combine("#", map(rgb, {r: int(false), g: int(false), b: int(false)})) | map(rgb, {g: chan("g"), r: chan("r"), b: chan("b")}));
+  body
+}
+
+struct size { i64 w; i64 h; }
+
+sized(expr body) {
+  syntax {r} => parse(r, map(size, {w: i64, h: combine("x", i64)}));
+  body
+}
+
+main() {
+  print(color { # 255 128 0 });
+  print(color { g = 2 r = 1 b = 3 });
+  sz = sized { 7 x 8 };
+  print(sz.w, sz.h);
+}

@@ -1,0 +1,37 @@
+// host resources in the process machine and process transfer (step 12.1): the VM machine executes
+// files, network, and processes as an interpreter (tests 55, 56, 58 and machine). host descriptors are
+// not part of the process.
+// - not in the dump. Restored in another VM process sees them closed external side (user solution
+// 2026-10-19): read - end of stream, write - exclusion closed_stream, send - false. Opened after
+// transfer - again resource host.
+//
+// machine
+// grant: fs
+// machine-dump: 300
+// out: записано 40
+// out: прочитано: да
+// out: заново открыт
+// dump-out: файл закрыт внешней стороной: запись в закрытый поток
+// dump-out: прочитано: нет
+// dump-out: заново открыт
+main() {
+  src = open("tests/307_host_resume.vish");
+  f = create("out/host_resume.txt");
+  n = 0;
+  try {
+    for(i : range(40)) {
+      write(f, "x");
+      n += 1;
+    }
+    close(f);
+    print("записано", n);
+  } catch(closed_stream e) {
+    print("файл закрыт внешней стороной:", e.message);
+  }
+  k = 0;
+  for(chunk : src) k += chunk.size;
+  print("прочитано:", if(k > 0) "да" else "нет");
+  g = open("out/host_resume.txt"); // How much time to register before the transfer is a matter of the outside
+  for(chunk : g) {}
+  print("заново открыт");
+}

@@ -1,5 +1,5 @@
 // Reactivity (§10.1): editing functions only recalculates dependent instance.
-// program: stats.tz
+// program: stats.vish
 check
 // expect: пересчитано 5 экземпл. (sq, sum_sq, f64, mean, main)
 check

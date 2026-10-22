@@ -1,0 +1,91 @@
+// instance on SIMD bands:
+// 
+// 
+// 
+// Body for range, which touches only its element (y[i] = ... of x[i], immutable scalars, literals),
+// machine code executes width() instance at a time (the context of the goal lanes: SSE2 / NEON), the
+// residue and error of borders - the usual cycle: the output is the same as the interpreter, up to the
+// bit. Convolution (s +=...) is a dependent chain, not instance: scalar. Branch instance - mask:
+//
+//:
+// обе стороны посчитаны (эффектов у них нет), выбор — по маске сравнения (NaN — как у одного).
+// jit-stats: axpy(f64, array<f64>, array<f64>) →
+// jit-stats: компилятор языка, циклов по полосам: 1
+// jit-stats: pick(array<f64>, array<i64>, array<i64>, array<i64>) →
+// out: 2.75 2.05 2.75 2.75 2.75
+// out: 1 1 13 0 13 15 21
+// out: поймал out_of_bounds: 3.0 3.0 3.0 3.0 3.0
+// out: 2.25 0.010000000000000002 2.25
+// out: 12.0
+// out: 1 4 9 16 25
+// out: 0.0 2.0 0.0 0.0 3.5
+// out: -1.0 0.5 2.0 1.0 -0.25
+// out: 1.5 -2.0 -0.0 0.0 -3.5
+// out: 7 2 27 4 45
+axpy(f64 a, x, y) {
+  for(i : range(x.size)) y[i] = (a * x[i]) + y[i];
+}
+mix(a, b, c) {
+  for(i : range(c.size)) c[i] = (a[i] + b[i]) ^ 5;
+}
+twice(n, x, y) {
+  for(i : range(n)) y[i] = x[i] * 2.0;
+}
+square(xs) {
+  for(i : range(xs.size)) xs[i] = xs[i] * xs[i];
+}
+dot(x, y) { // Convolution - scalar (order of rounding)
+  s = 0.0;
+  for(i : range(x.size)) s += x[i] * y[i];
+  s
+}
+squares(xs) { // i64 * no stripes - scalar
+  for(i : range(xs.size)) xs[i] = xs[i] * xs[i];
+}
+relu(x, y) {
+  for(i : range(x.size)) y[i] = if(x[i] > 0.0) x[i] else 0.0;
+}
+clamp(f64 lo, f64 hi, x) {
+  for(i : range(x.size)) x[i] = if(x[i] < lo) lo else if(x[i] > hi) hi else x[i];
+}
+neg(x, y) {
+  for(i : range(x.size)) y[i] = -x[i];
+}
+pick(x, a, b, c) {
+  for(i : range(x.size)) c[i] = if(x[i] != x[i]) 7 else if(x[i] >= 1.0) a[i] else (b[i] - a[i]);
+}
+main() {
+  xs = fill(5, 1.5);
+  ys = fill(5, 2.0);
+  xs[1] = 0.1;
+  axpy(0.5, xs, ys);
+  print(ys[0], ys[1], ys[2], ys[3], ys[4]);
+  a = array{1, 2, 3, 4, 5, 6, 7};
+  b = array{3, 2, 5, 1, 3, 4, 9};
+  c = fill(7, 0);
+  mix(a, b, c);
+  print(c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+  zs = fill(5, 0.0);
+  try { twice(args.size * 7, fill(5, 1.5), zs); } catch(out_of_bounds e) { print("поймал out_of_bounds:", zs[0], zs[1], zs[2], zs[3], zs[4]); }
+  sq = array{1.5, 0.1, 1.5};
+  square(sq);
+  print(sq[0], sq[1], sq[2]);
+  print(dot(fill(4, 1.5), fill(4, 2.0)));
+  ns = array{1, 2, 3, 4, 5};
+  squares(ns);
+  print(ns[0], ns[1], ns[2], ns[3], ns[4]);
+  xs = array{-1.5, 2.0, 0.0, -0.0, 3.5};
+  rs = fill(5, 9.0);
+  relu(xs, rs);
+  print(rs[0], rs[1], rs[2], rs[3], rs[4]);
+  cl = array{-3.0, 0.5, 5.0, 1.0, -0.25};
+  clamp(-1.0, 2.0, cl);
+  print(cl[0], cl[1], cl[2], cl[3], cl[4]);
+  ng = fill(5, 0.0);
+  neg(xs, ng);
+  print(ng[0], ng[1], ng[2], ng[3], ng[4]);
+  ws = array{0.0 / 0.0, 2.0, 0.5, 1.0, -1.0};
+  cs = fill(5, 0);
+  pick(ws, array{1, 2, 3, 4, 5}, array{10, 20, 30, 40, 50}, cs);
+  print(cs[0], cs[1], cs[2], cs[3], cs[4]);
+}

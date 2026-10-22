@@ -1,0 +1,32 @@
+// error: незакрытая скобка
+// error: непарная скобка
+// fmt-stable
+// fmt-has: /* дыра: незакрытая скобка */ if(1) {
+// fmt-has:   b = 2;
+// fmt-has: /* дыра: незакрытая скобка */ x = (1 + 2;
+// fmt-has:   y = 3;
+// fmt-has: /* дыра: незакрытая скобка */ g() {
+// fmt-has: /* дыра: непарная скобка */ ) + 1;
+// fmt-has: after() => 2;
+// Unpaired brackets (§4.1): the unclosed opener closes by indentation - a line with
+// indentation no more than that of the opening line; the closed one is a hole with
+// a cause, then parsing goes as usual: Excessive closing is a hole ("a() { } }",
+// ibid.).
+//
+f() {
+  if(1) {
+    a = 1;
+  b=2;
+}
+
+p() {
+  x = (1 + 2;
+  y=3;
+}
+
+g() {
+  z = 1;
+
+k() => 3 ) + 1;
+
+after()=>2;

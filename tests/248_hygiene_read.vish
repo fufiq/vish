@@ -1,0 +1,12 @@
+// error: переменная hidden_k объявлена в модуле geo.secret, а use его здесь нет
+// Hygiene - Visibility and Reading
+// 
+// The variable of the geo.secret module is visible to its code and those who connected it;
+// geo.peek does not connect it - hidden_k is not visible to it, even if the program connected
+// both (was: peek() read 7). Recording is the same (test 241).
+use geo.secret;
+use geo.peek;
+
+main() {
+  print(hidden_k, peek());
+}

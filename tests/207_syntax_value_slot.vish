@@ -1,0 +1,35 @@
+// out: point{x: 2, y: 2} point{x: 1, y: 2}
+// out: point{x: 1, y: 2} {x: 5} {}
+// out: 7 1
+// machine
+// fmt-stable
+// store-roundtrip
+// fmt-has: syntax either (c) {a} or {b} => if(c) a else b;
+// fmt-has:   } or {}, either(true) 1 or 2);
+// Slot value in the syntax record (§4.4): {[[value]] x} is a block or expression like {x}, but
+// `{}` It is an empty literature, a type from a place.§4.3). Its kernel node record (leave {}
+// - ast.return with literary) and form-call (pick ... or {} - literal as the code of the
+// caller, type - from the place where the value will appear). *Mine: * Slot mark. Print: the
+// form-call body - code as written (if, not ast.if{...}) `;` The instructions with the
+// argument block at the end of the block are not lost.
+//
+struct point { i64 x = 1; i64 y = 2; }
+
+syntax leave {[[value]] v}; => ast.return{v};
+syntax pick (c) {[[value]] a} or {[[value]] b} => {
+  if(c) a else b
+};
+syntax either (c) {a} or {b} => if(c) a else b;
+
+point corner(i64 n) {
+  if(n > 0) leave {x: n, y: n};
+  leave {};
+}
+
+main() {
+  print(corner(2), corner(0));
+  point p = pick(false) {x: 5} or {};
+  q = pick(true) {x: 5} or {};
+  print(p, q, pick(false) {x: 5} or {});
+  print(pick(true) { a = 3; a + 4 } or {}, either(true) 1 or 2);
+}

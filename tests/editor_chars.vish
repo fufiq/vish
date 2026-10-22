@@ -1,0 +1,12 @@
+// out: rgb{r: 255, g: 0, b: 170}
+// Program for the 213_editor_chars.wire scenario: symbols inside an atom (§4.4).
+struct rgb { i64 r; i64 g; i64 b; }
+
+color(expr body) {
+  syntax {r} => parse(r, combine('#', map(rgb, {r: hex(2), g: hex(2), b: hex(2)})));
+  body
+}
+
+main() {
+  print(color {#ff00aa});
+}

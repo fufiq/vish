@@ -1,0 +1,5 @@
+// error: оператор + не определён для i64 и f64
+// Strict numbers: without implicit i64 -> f64 (§5.8).
+main() {
+  x = 1 + 2.0;
+}

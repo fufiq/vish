@@ -1,0 +1,60 @@
+// out: 0
+// out: нет /x 404
+// out: -1
+// out: хттп 405 http
+// out: -2
+// out: хттп 500 http
+// out: -2
+// out: http not_found
+// out: код 404
+// out: -9
+// machine
+// fmt-stable
+// store-roundtrip
+// Иерархия типов (O18): 
+// 
+//;
+// 
+// struct e: base - base fields first; catch(база) catches heirs; base parameter takes heir
+// (level below exact); base sample unpacks heir My:* VM errors are heirs to vm_error.
+//
+struct http { i64 code; }
+
+struct method_error : http { str method; }
+
+struct not_found : method_error { str path; }
+
+describe(http e) => "http";
+
+describe(not_found e) => "not_found";
+
+fetch(i64 k) {
+  if(k == 1) throw not_found{404, "GET", "/x"};
+  if(k == 2) throw method_error{405, "PUT"};
+  if(k == 3) throw http{500};
+  k
+}
+
+main() {
+  for(k : range(4)) {
+    r = try {
+      fetch(k)
+    } catch(not_found e) {
+      print("нет", e.path, e.code);
+      -1
+    } catch(http e) {
+      print("хттп", e.code, describe(e));
+      -2
+    };
+    print(r);
+  }
+  print(describe(method_error{400, "GET"}), describe(not_found{404, "GET", "/"}));
+  if(http{c} = not_found{404, "GET", "/y"}) print("код", c);
+  v = try {
+    xs = array{1};
+    xs[3]
+  } catch(vm_error e) {
+    -9
+  };
+  print(v);
+}

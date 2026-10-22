@@ -3,7 +3,7 @@
 // derivative, editing it invalidates:
 // 
 // The block text is as written.
-// program: editor_raw.tz
+// program: editor_raw.vish
 open_view module
 run
 // expect: output text="16\n" ok=true

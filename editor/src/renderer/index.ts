@@ -332,7 +332,7 @@ function openGoto(mode: GotoMode = 'goto'): void {
     mode === 'goto'
       ? 'перейти или добавить: foo(i64)'
       : mode === 'merge'
-        ? 'слить с базой: путь.tzdb'
+        ? 'слить с базой: путь.vishdb'
         : mode === 'apply'
           ? 'применить функцию правки программы: имя (code_rename, code_replace…)'
           : 'проекция: ключ модуля записей (пусто — по умолчанию)';
@@ -515,7 +515,7 @@ for (const pane of [app, side]) {
       .composedPath()
       .filter(
         (x): x is Element =>
-          x instanceof Element && x.classList.contains('tz-node'),
+          x instanceof Element && x.classList.contains('vish-node'),
       )
       .reverse();
     const inner = path.at(-1);

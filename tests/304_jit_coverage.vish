@@ -1,0 +1,44 @@
+// JIT coating (tail of step 10). Strings - bytes (§4.0 ): s.size and s[k] in machine code -
+// length and bytes by displacements of VM, s[k] - with border verification (out_of_bounds , like
+// the interpreter); parse_int prelude - too. Anonymous literal {…} at the place of the result or
+// T x = {…} is a type of place struct (§4.3): the literal computes VM and leads to it. The
+// operator declared in the block is a local function: it is built into its operations. Where this
+// is not, an interpreter with a cause.
+//
+// args: 12a3
+// jit-compiled: digits
+// jit-compiled: at
+// jit-compiled: origin
+// jit-compiled: moved
+// jit-compiled: minus3
+// machine
+// out: 3 12 -1
+// out: 49 -2
+// out: 51
+// out: point{x: 0, y: 0} point{x: 5, y: 1}
+// out: 5
+struct point { i64 x; i64 y; }
+digits(str s) {
+  n = 0;
+  for(k : range(s.size)) if((s[k] >= '0') && (s[k] <= '9')) n += 1;
+  n
+}
+at(str s, i64 k) => try { s[k] } catch(out_of_bounds e) { -2 };
+point origin() => {x: 0, y: 0};
+moved(i64 d) {
+  point p = {y: 1, x: d}; // field by name: the order of the literal is not the order of the struct
+  print((p.x * 10) + p.y);
+  p
+}
+minus3(i64 a, i64 b, i64 c) {
+  [[associative]] operator (i64 x) - (i64 y) => sub(x, y);
+  a - b - c
+}
+
+main() {
+  s = args[1];
+  print(digits(s), parse_int("12").value, if(parse_int(s).ok) 1 else -1);
+  print(at(s, 0), at(s, 9));
+  print(origin(), moved(5));
+  print(minus3(10, 3, 2));
+}

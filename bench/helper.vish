@@ -1,0 +1,12 @@
+// Hot cycle assistant: Embedding (by default) against a real call.
+sq(x) => (x * 3) + 1
+
+sumsq(n) {
+  s = 0;
+  for(i : range(n)) s += sq(i);
+  s
+}
+
+main() {
+  print(sumsq(parse_int(args[1]).value));
+}

@@ -1,0 +1,6 @@
+// Test module 298-299 (isolation of name types and variable modules)
+module geo.deep;
+
+struct cell { i64 v; }
+ct depth = 7;
+make_cell(i64 v) => cell{v};

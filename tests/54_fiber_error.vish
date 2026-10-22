@@ -1,0 +1,15 @@
+// out: 1
+// error: индекс 5 вне границ массива размера 1
+// machine
+// machine-dump: 30
+// The uncaught exception completes its fiber (§8.3); the rest are running, the
+// program ends with its tray.
+main() {
+  s = stream();
+  spawn {
+    a = array{1};
+    print(a[5]);
+  }
+  spawn { write(s, 1); }
+  print(read(s));
+}

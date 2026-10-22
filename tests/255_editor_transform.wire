@@ -2,7 +2,7 @@
 // calls the rule; editing the transformer rolls back its changes ( ), pause -
 // rewrites the new rule.
 //
-// program: editor_transform.tz
+// program: editor_transform.vish
 open_view module
 // expect:   a = 21 * 2;
 // expect:   b = 5 * 2;

@@ -1,0 +1,4 @@
+// error: оператор + не определён для i32 и i64
+// i32 and i64 are different types: you cannot mix without your operator.
+//).
+main() { print(i32(1) + 1); }

@@ -42,13 +42,13 @@ export class ViewElement {
   ) {
     for (const n of data.nodes) this.nodes.set(n.id, n);
     this.root = this.#build(data.root);
-    this.caret.className = 'tz-caret';
-    this.popup.className = 'tz-complete';
+    this.caret.className = 'vish-caret';
+    this.popup.className = 'vish-complete';
     this.popup.hidden = true;
-    this.selectionLayer.className = 'tz-selection';
-    this.tip.className = 'tz-tip';
+    this.selectionLayer.className = 'vish-selection';
+    this.tip.className = 'vish-tip';
     this.tip.hidden = true;
-    this.hint.className = 'tz-tip tz-hint';
+    this.hint.className = 'vish-tip vish-hint';
     this.hint.hidden = true;
     host.replaceChildren(...this.#chrome(this.root));
   }
@@ -289,7 +289,7 @@ export class ViewElement {
     );
     const registry = (globalThis.CSS as typeof CSS | undefined)?.highlights;
     if (registry) {
-      registry.set('tz-error', new Highlight(...this.errorRanges));
+      registry.set('vish-error', new Highlight(...this.errorRanges));
       for (const m of d.marks)
         if (m.kind === 'error' && m.to > m.from)
           this.byId.get(m.node)?.setAttribute('error-range', '');

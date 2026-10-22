@@ -2,7 +2,7 @@
 // block (the unit projection and edits), from / to are the code points of its text, as written:
 // atom and displacement in it (parse_error_in), excess from the stop place. The block is
 // redefining itself, id the same.
-// program: editor_chars.tz
+// program: editor_chars.vish
 open_view module
 // let: blk @{#ff
 pointer 1 @{#ff 0 4

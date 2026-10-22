@@ -1,0 +1,36 @@
+// Implicit parameters:
+// 
+// 
+//  
+// implicit x - last parameters: they are not written in the call, the argument is the name x at the place
+// of the call (lexically, then in the callers - the environment of the call); written explicitly -
+// ordinary. The database is an array of users, the “pointer” is a narrow index u16.
+// fmt-stable
+// fmt-has: name(u16 id, implicit users) => users[i64(id)].name;
+// jit-compiled: total_age
+// machine
+// out: Аня 31
+// out: Боря
+// out: 2 Вера
+// out: 58
+// out: Гоша
+struct user { str name; i64 age; }
+name(u16 id, implicit users) => users[i64(id)].name;
+age(u16 id, implicit users) => users[i64(id)].age;
+older(u16 a, u16 b, implicit users) => if(age(a) > age(b)) a else b; // And then there is the caller.
+total_age(i64 n, implicit array users) {
+  s = 0;
+  for(i : range(n)) s += users[i].age;
+  s
+}
+main() {
+  users = array{user{"Аня", 31}, user{"Боря", 27}};
+  id = u16(0);
+  print(name(id), age(id));
+  print(name(older(u16(1), u16(0)) + u16(1)));
+  more = array{user{"Вера", 40}, user{"Гоша", 12}};
+  print(more.size, name(u16(0), more)); // clearly another base
+  print(total_age(2));
+  users = more; // The user name at the call site, as it became
+  print(name(u16(1)));
+}

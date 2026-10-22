@@ -1,0 +1,50 @@
+// The resources of the process are only given:
+// 
+// 
+// The background process itself does not open files and the network: there is no file, the network -
+// without devices (the connection is immediately closed). Gives the program - transmits the open
+// stream; takes - closes (the process sees the end). The program (monopoly) was launched by the author
+// - its resources are given to them.
+//
+// machine
+// grant: fs
+// out: дали файл: да
+// out: сам открыть: нет файла
+// out: сеть: close сеть процессу не дана
+// out: команда 1
+// out: команда 2
+// out: забрали
+// out: конец
+side(given, cmds, to) {
+  k = 0;
+  for(chunk : given) k += chunk.size;
+  write(to, "дали файл: " + (if(k > 0) "да" else "нет"));
+  try {
+    open("tests/315_resources_given.vish");
+    write(to, "сам открыть: открыл");
+  } catch(io_error e) {
+    write(to, "сам открыть: нет файла");
+  }
+  c = connect("127.0.0.1", 9);
+  e = read(c);
+  write(to, "сеть: " + e.kind + " " + e.data);
+  for(x : cmds) write(to, "команда " + text(x));
+  write(to, "забрали");
+}
+main() {
+  given = open("tests/315_resources_given.vish");
+  cmds = stream();
+  to = stream();
+  p = process(side, given, cmds, to);
+  print(read(to));
+  print(read(to));
+  print(read(to));
+  write(cmds, 1);
+  write(cmds, 2);
+  print(read(to));
+  print(read(to));
+  close(cmds);
+  print(read(to));
+  wait(p);
+  print("конец");
+}

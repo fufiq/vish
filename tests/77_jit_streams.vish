@@ -1,0 +1,43 @@
+// out: 10
+// out: 2.0
+// error: запись в закрытый поток
+// jit-compiled: sum
+// jit-compiled: push_all
+// jit-compiled: avg
+// Machine code flow operations (step 1 of the plan): write/read - VM call, fiber is
+// parked right on its stack, the code around it remains machine: Flow element type is
+// from parsing of the entire program at the site of creation. The VM error inside the
+// operation comes out of the machine code tagged like an interpreter.
+//
+//
+sum(s) {
+  t = 0;
+  for(x : s) t += x;
+  t
+}
+
+push_all(s, n) {
+  for(i : range(n)) write(s, i);
+  close(s);
+}
+
+avg(s) {
+  t = 0.0;
+  k = 0;
+  for(x : s) {
+    t += x;
+    k += 1;
+  }
+  t / f64(k)
+}
+
+main() {
+  s = stream(2);
+  spawn { push_all(s, 5); }
+  print(sum(s));
+  f = stream();
+  spawn { write(f, 1.5); write(f, 2.5); close(f); }
+  print(avg(f));
+  yield();
+  push_all(s, 1);
+}

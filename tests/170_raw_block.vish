@@ -1,0 +1,41 @@
+// out: 16
+// out: 11
+// out: sum: 0 + 1 + 2 + 3 + x
+// machine
+// fmt-stable
+// store-roundtrip
+// jit-stats: вызов sum_of: правила тела для блоков конструкции — интерпретатор
+// parsing code: the body of the structure declares the parsing rule of its `syntax {r} =>
+// f(r);` block - the call block is stored raw (atoms and sub-blocks with positions - phase 1),
+// f on the language makes it node when analyzed, lazily, like a template.
+//
+// 
+// The result is the usual code at the block location: the names are at the caller.
+sum_parse(r) {
+  ast.raw{_, items, _, _, _} = r;
+  e = ast.int{0};
+  for(a : items) e = ast.operation{"+", array{e, a}};
+  e
+}
+
+sum_of(expr body) {
+  syntax {r} => sum_parse(r);
+  body
+}
+
+// The block code is the result of parsing : code(body) for the construction is it, not raw text
+shown(expr body) {
+  syntax {r} => sum_parse(r);
+  print("sum:", code_text(code(body)));
+}
+
+twice(i64 x) => sum_of { x x };
+
+main() {
+  x = 10;
+  print(sum_of { 1 2 3 x });
+  print(twice(5) + sum_of {
+    1   // Comment and layout - how written
+  } + sum_of { });
+  shown { 1 2 3 x }
+}

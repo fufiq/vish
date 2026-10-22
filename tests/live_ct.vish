@@ -1,0 +1,15 @@
+// out: 10 3
+// out: 10 3
+// out: 10 3
+// Programme of session 302 (live process: ct post edit, layout and field types).
+struct cell { i64 v; }
+ct k = 1;
+f() => k * 10; // ct-variable by place: canonically earlier than later - 1
+later() => ct { k = 5; };
+main() {
+  c = cell{3};
+  for(i : range(3)) {
+    print(f(), c.v);
+    later();
+  }
+}

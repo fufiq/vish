@@ -1,0 +1,16 @@
+// args: 42
+// out: 42
+// machine
+// check: p = рт i64
+// check: try(expr)  ×1
+// The try result type is derived in all ways: return(caller) r and r.value.
+try(expr e) {
+  r = e;
+  if(r.is_err()) return(caller) r;
+  r.value
+}
+
+main() {
+  p = try(parse_int(args[1]));
+  print(p);
+}

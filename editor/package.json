@@ -1,5 +1,5 @@
 {
-  "name": "tsaryaz-editor",
+  "name": "vish-editor",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -8,7 +8,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "schema": "../out/tz schema > src/protocol/schema.json",
+    "schema": "../out/vish schema > src/protocol/schema.json",
     "test": "vitest",
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit",

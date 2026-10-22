@@ -1,0 +1,13 @@
+[[service]] module svc.keys;
+// VM Test Service 312 - 314 (step 12.4): The secret store is one on the VM; the program and its processes
+// hold key descriptors, not bytes. The descriptor from another VM (process moved) is unknown here: the
+// state of the service is that VM, not the process.
+
+struct key { i64 id; }
+secrets = array{"-"};
+make_key(str secret) {
+  secrets.push(secret);
+  key{secrets.size - 1}
+}
+seal(key k, str msg) => if(is_index(k.id, secrets) && (k.id > 0)) msg + "/" + text(secrets[k.id].size) else msg + "/неизвестный ключ";
+keys_count() => secrets.size - 1;

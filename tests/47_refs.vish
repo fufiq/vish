@@ -1,0 +1,38 @@
+// args: 4
+// out: 10 5 4 10
+// out: 4 4 2
+// out: 20 1
+// fmt-stable
+// store-roundtrip
+// machine
+// machine-dump: 40
+// machine-dump: 90
+// References and supports (§12.1, M2c): "dangerous-safe" is allowed - several
+// variable alias, writing to other elements, changing the value of the element
+// 
+//.
+inc(x) { x += 1; }
+
+// two variable aliases per array - ok
+swap_ends(mut a, mut b) {
+  t = a[0];
+  a[0] = b[b.size - 1];
+  b[b.size - 1] = t;
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  v = array{1, 2, 3};
+  &e = v[0];     // link, support - buffer v
+  v[1] = 5;           // The other element is the same buffer.
+  e = 10;             // linkage
+  inc(v[2]);          // element in the variable parameter - reference, not copy
+  print(v[0], v[1], v[2], e);
+  push(v, n);         // Growth: The buffer can move
+  &f = v[3];     // New link after push
+  w = array{1, 2};
+  swap_ends(w, w);
+  print(v.size, f, w[0]);
+  f = 20;             // f taken after push - valid
+  print(v[3], w[1]);
+}

@@ -4,7 +4,7 @@
 // and the hole of the result (test 231).
 //
 //
-// program: editor_chars.tz
+// program: editor_chars.vish
 open_view module
 run
 // expect: output text="rgb{r: 255, g: 0, b: 170}\n" ok=true

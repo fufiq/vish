@@ -1,0 +1,46 @@
+// out: 7 21 9 1 2.5 12
+// machine
+// fmt-stable
+// store-roundtrip
+// Вложенные вставки получают правила обеих: 
+// 
+// The python declared in the cpp body is the construction of cpp blocks only; the
+// python block rule over the cpp block rules is a redefinition (ibid.).
+//
+sqlish(expr body) {
+  operator (a) ~ (b) => (a * 10) + b;
+  body
+}
+
+cpp(expr body) {
+  operator (a) @ (b) => (a * 2) + b;
+  python(expr b) => {
+    operator (a) $ (b) => a * b;
+    b
+  };
+  body
+}
+
+// overload design: the rules of the blocks - the union of their bodies (which is chosen
+// - decide the types in instantiation)
+gen(i64 x, expr body) {
+  operator (a) |> (b) => a - b;
+  body
+}
+gen(f64 x, expr body) {
+  syntax half (v) => v / 2.0;
+  body
+}
+
+main() {
+  a = cpp { 2 @ 3 };
+  b = cpp { python { (2 @ 3) $ 3 } };
+  c = cpp {
+    operator (a) @ (b) => a + b; // Block rule over cpp rule
+    python { (2 @ 1) $ 3 }
+  };
+  d = gen(1) { 4 |> 3 };
+  e = gen(2.0) { half (5.0) };
+  f = sqlish { cpp { 1 ~ 2 } }; // the cpp block inside the sqlish block - the rules of both
+  print(a, b, c, d, e, f);
+}

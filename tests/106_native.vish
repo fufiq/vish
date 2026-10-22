@@ -1,0 +1,15 @@
+// out: 97 10 true
+// out: 00ff 3.14 42
+// machine
+// fmt-stable
+// store-roundtrip
+// native "cpp" { … } (§3.3): 
+// 
+// text_fixed is a C++ body in prelude assembled in VM (vish native, build.sh); text_hex
+// and parse_int are already in the language on top of the primitive text_byte (M6). The
+// symbol 'c' is a byte (i64), as s[k].
+main() {
+  s = "a";
+  print('a', '\n', s[0] == 'a');
+  print(text_hex(255, 4), text_fixed(3.14159, 2), parse_int("42").value);
+}

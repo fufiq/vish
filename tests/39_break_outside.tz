@@ -1,7 +1,0 @@
-// out: 1
-// error: break/continue вне цикла
-// break — второй путь выхода, его ловит loop; вне цикла его ловить некому.
-main() {
-  print(1);
-  break;
-}

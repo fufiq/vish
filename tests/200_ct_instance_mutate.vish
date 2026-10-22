@@ -1,0 +1,51 @@
+// out: вход в greet
+// out: тело
+// out: вход в sum
+// out: 7
+// out: point{x: 1, y: 2, tag: 0}
+// check: изменения кода ct-кодом экземпляров (элаборация):
+// fmt-stable
+// store-roundtrip
+// machine
+// machine-dump: 40
+// fmt-ct-has: print("вход в greet");
+// fmt-ct-has: struct point { i64 x; i64 y; i64 tag = 0; }
+// Changing the code by ct code instance (§7.4): ct { } in the body of the function is executed at
+// instantiation - once per instance (call location) in canonical order (§7.3) - and can change
+// node as a ct module.
+// 
+// 
+// 
+// Changes are made by elaboration (parsing of the main program);
+// execution is the result.
+greet() {
+  print("тело");
+}
+
+sum(a, b) {
+  a + b
+}
+
+struct point { i64 x; i64 y; }
+
+// Each call is its instance, its ct
+instrument(f) {
+  ct {
+    b = f.body;
+    b.items = array{ast.call{ast.name{"print"}, array{ast.string{"вход в " + code_name(f)}}}, ...b.items};
+  }
+}
+
+// ct-функция: тело — ct-код
+add_field(s, name) => ct {
+  s.items = array{...s.items, ast.variable{name, ast.name{"i64"}, ast.int{0}}};
+};
+
+main() {
+  instrument(code(greet));
+  instrument(code(sum));
+  add_field(code(point), "tag");
+  greet();
+  print(sum(3, 4));
+  print(point{1, 2});
+}

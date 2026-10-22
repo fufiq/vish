@@ -2,7 +2,7 @@
 // one step); the adopted edit (draft closed) - by editing back: the elements are the same, the
 // text of the unit - as before the editing; repetition - the same (*my*: history - edits,
 // journal is not rewritten). The element changed after the edit - rejection.
-// program: editor_text.tz
+// program: editor_text.vish
 open_view module
 pointer 1 @привет 0 7
 key 1 x

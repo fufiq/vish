@@ -2,7 +2,7 @@
 // {[[value]] value};` - `{}` in the slot value - empty literal (ast.construct), not an empty
 // block (ast.block).
 //.
-// program: editor_return.tz
+// program: editor_return.vish
 open_view module
 pointer 1 @return 0 7
 key 1 Delete

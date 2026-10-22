@@ -1,0 +1,20 @@
+// The program for the 256_program_edit.session script (itself a regular test).
+// out: 9 4
+// out: 7
+sq(x) => x * x;
+
+main() {
+  a = sq(3);
+  b = sq(2);
+  print(a, b);
+  debug = 7;
+  print(debug);
+}
+
+// Editing function: sq → square everywhere, debugging printing out
+refactor() {
+  code_rename(code(sq), "square");
+  body = code_items(code(main))[0];
+  for(s : code_items(body))
+    if(code_text(s) == "print(debug)") code_remove(s);
+}

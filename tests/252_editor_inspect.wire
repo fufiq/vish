@@ -5,7 +5,7 @@
 // its body with the arguments set up.
 // 
 //.
-// program: editor_inspect.tz
+// program: editor_inspect.vish
 open_view module
 // the ad is the type and value at this moment, not future: k = 0, later k + = 1
 // expect: kind="type" text="i64 = 0"

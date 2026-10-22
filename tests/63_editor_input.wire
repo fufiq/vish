@@ -4,7 +4,7 @@
 //  
 // Канон — при уходе из элемента. Изменение получают все клиенты —
 // состояние одно; элемент в чужом черновике не правится.
-// program: editor_text.tz
+// program: editor_text.vish
 open_view module
 [2] open_view module
 [2] pointer 1 @print 0 2

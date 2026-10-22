@@ -1,0 +1,39 @@
+// error: 235_extension_check_error.vish:16:1: ошибка: infix<+>: перегрузка только для типов с полем x
+// error: оператор объявлен здесь
+// Its extension check (§9.1) rejects overload: w has no x field - error parsing on the
+// extension announcement (not on the call and not in the check), the mark is on the
+// entity announcement.
+[[extension(has_x)]] operator (a) <+> (b) => a + b;
+
+struct pt {
+  i64 x;
+}
+struct w {
+  i64 v;
+}
+operator (pt a) <+> (pt b) => pt{a.x + b.x};
+
+operator (w a) <+> (w b) => w{a.v + b.v};
+
+has_x(ext, entity) {
+  ok = true;
+  if(code_kind(ext) == ast.function) {
+    ast.function{_, params, _, _, _, _, _, _, _} = ext;
+    for(p : params) {
+      ast.parameter{_, t, _, _, _, _, _} = p;
+      if(given(t)) {
+        if(!has_field(type_of_code(t), "x")) ok = false;
+      }
+    }
+  }
+  require(ok, code_name(entity) + ": перегрузка только для типов с полем x", "оператор объявлен здесь", entity);
+}
+has_field(T, str name) {
+  found = false;
+  for(f : fields(T)) if(f.name == name) found = true;
+  found
+}
+
+main() {
+  print((pt{1} <+> pt{2}).x);
+}

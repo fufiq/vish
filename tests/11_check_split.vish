@@ -1,0 +1,17 @@
+// out: 0
+// machine
+// check: w → 2 продолжения: array<f64> | array<i64>
+// check: dot(рт array<f64>, рт array<f64>)   [w: array<f64>]
+// check: dot(рт array<i64>, рт array<i64>)   [w: array<i64>]
+// branch by run-time - condition with different types of branches: continuation is
+// cloned by type (foo => [T0 => bar, T1 => bar]), variant is not created.
+dot(a, b) {
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
+  s
+}
+
+main() {
+  w = if(args.size > 1) read_floats(stdin) else range(args.size);
+  print(dot(w, w));
+}

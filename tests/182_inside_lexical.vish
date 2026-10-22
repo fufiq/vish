@@ -1,0 +1,18 @@
+// error: 182_inside_lexical.vish:12:19: ошибка: commit существует только внутри блоков transaction
+// machine
+// Место — по тексту, не по исполнению: функция, вызванная из блока transaction, —
+// не блок transaction (граница — объявление функции). Ошибка — разбор, до запуска.
+[[inside(transaction)]] commit(mut log) { log += 1; }
+
+transaction(expr body) {
+  body;
+}
+
+// commit in the body of a function, not in a block
+helper(mut log) { commit(log); }
+
+main() {
+  log = 0;
+  transaction { helper(log); }
+  print(log);
+}

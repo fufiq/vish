@@ -1,6 +1,6 @@
 // @vitest-environment node Reconciliation with live VM: the scheme is fresh, the TS
-// types match it, messages through real `tz serve` give text equal to projection `tz
-// fmt`.
+// types match it, messages through real `vish serve` give text equal to projection
+// `vish fmt`.
 import { spawn, execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
@@ -17,13 +17,13 @@ import {
 } from './messages';
 
 const root = join(import.meta.dirname, '../../..');
-const tz = join(root, 'out/tz');
-const program = join(root, 'tests/editor_text.tz');
+const vish = join(root, 'out/vish');
+const program = join(root, 'tests/editor_text.vish');
 
 describe('живая VM', () => {
-  it('schema.json совпадает с `tz schema`', () => {
+  it('schema.json совпадает с `vish schema`', () => {
     const live: unknown = JSON.parse(
-      execFileSync(tz, ['schema'], { encoding: 'utf8' }),
+      execFileSync(vish, ['schema'], { encoding: 'utf8' }),
     );
     const file: unknown = JSON.parse(
       readFileSync(join(import.meta.dirname, 'schema.json'), 'utf8'),
@@ -76,8 +76,8 @@ describe('живая VM', () => {
   });
 
   it('hello, представление и курсор через сокет', async () => {
-    const sock = join(mkdtempSync(join(tmpdir(), 'tz-')), 's');
-    const vm = spawn(tz, ['serve', program, sock], { stdio: 'ignore' });
+    const sock = join(mkdtempSync(join(tmpdir(), 'vish-')), 's');
+    const vm = spawn(vish, ['serve', program, sock], { stdio: 'ignore' });
     try {
       for (let i = 0; i < 50; ++i) {
         await new Promise((r) => setTimeout(r, 20));
@@ -135,7 +135,7 @@ describe('живая VM', () => {
         decor?.type === 's_decor' && decor.marks.map((m) => m.kind),
       ).toContain('type');
       expect(projectionText(view)).toBe(
-        execFileSync(tz, ['fmt', program], { encoding: 'utf8' }),
+        execFileSync(vish, ['fmt', program], { encoding: 'utf8' }),
       );
       // input at the end of the first line: draft - text as typed (`y=2;`), leaving
       // the element (Escape) - canonical `y = 2;` in the block
@@ -188,12 +188,12 @@ describe('живая VM', () => {
     }
   });
 
-  it('запуск и сохранение: F5 — текущее состояние, Ctrl+S — .tzdb, которую понимает tz run', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'tz-'));
-    const prog = join(dir, 'p.tz');
-    copyFileSync(join(root, 'tests/editor_overloads.tz'), prog);
+  it('запуск и сохранение: F5 — текущее состояние, Ctrl+S — .vishdb, которую понимает vish run', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const prog = join(dir, 'p.vish');
+    copyFileSync(join(root, 'tests/editor_overloads.vish'), prog);
     const sock = join(dir, 's');
-    const vm = spawn(tz, ['serve', prog, sock], { stdio: 'ignore' });
+    const vm = spawn(vish, ['serve', prog, sock], { stdio: 'ignore' });
     try {
       for (let i = 0; i < 50 && !existsSync(sock); ++i) {
         await new Promise((r) => setTimeout(r, 20));
@@ -224,7 +224,7 @@ describe('живая VM', () => {
       });
       expect(await wait('s_saved')).toMatchObject({ path: `${prog}db` });
       c.end();
-      const rerun = execFileSync(tz, ['run', `${prog}db`], {
+      const rerun = execFileSync(vish, ['run', `${prog}db`], {
         input: '1.5 2',
         encoding: 'utf8',
       });
@@ -235,32 +235,32 @@ describe('живая VM', () => {
   });
 
   it('версии: трёхстороннее слияние копий базы — CLI и редактор', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'tz-'));
-    const prog = join(dir, 'p.tz');
-    copyFileSync(join(root, 'tests/editor_overloads.tz'), prog);
+    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const prog = join(dir, 'p.vish');
+    copyFileSync(join(root, 'tests/editor_overloads.vish'), prog);
     // Two copies diverge: “me” - area(i64) and main, “them” - area(f64) and main.
     const vmEdit = (script: string) =>
-      execFileSync(tz, ['vm', prog], {
+      execFileSync(vish, ['vm', prog], {
         input: script,
         encoding: 'utf8',
         cwd: dir,
       });
     vmEdit(
-      'edit main\nmain() {\n  xs = read_floats(stdin);\n  print(area(xs.size));\n}\n.\nsave mine.tzdb\n',
+      'edit main\nmain() {\n  xs = read_floats(stdin);\n  print(area(xs.size));\n}\n.\nsave mine.vishdb\n',
     );
     vmEdit(
-      'edit main\nmain() {\n  xs = read_floats(stdin);\n  print(area(xs[0]));\n}\n.\nsave theirs.tzdb\n',
+      'edit main\nmain() {\n  xs = read_floats(stdin);\n  print(area(xs[0]));\n}\n.\nsave theirs.vishdb\n',
     );
     // CLI: conflict in main - code 1, my version
     let cli = '';
     try {
       execFileSync(
-        tz,
+        vish,
         [
           'merge',
-          join(dir, 'mine.tzdb'),
-          join(dir, 'theirs.tzdb'),
-          join(dir, 'out.tzdb'),
+          join(dir, 'mine.vishdb'),
+          join(dir, 'theirs.vishdb'),
+          join(dir, 'out.vishdb'),
         ],
         { encoding: 'utf8' },
       );
@@ -270,7 +270,7 @@ describe('живая VM', () => {
     expect(cli).toContain('конфликт: main()');
     // Editor: VM merger, conflict - both options; "take them"
     const sock = join(dir, 's');
-    const vm = spawn(tz, ['serve', join(dir, 'mine.tzdb'), sock], {
+    const vm = spawn(vish, ['serve', join(dir, 'mine.vishdb'), sock], {
       stdio: 'ignore',
     });
     try {
@@ -297,7 +297,7 @@ describe('живая VM', () => {
       c.write(encodeClient({ type: 'c_hello', version: schema.version }));
       c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
       c.write(
-        encodeClient({ type: 'c_merge', path: join(dir, 'theirs.tzdb') }),
+        encodeClient({ type: 'c_merge', path: join(dir, 'theirs.vishdb') }),
       );
       const merge = await wait((m) => m.type === 's_merge');
       expect(merge).toMatchObject({ conflicts: [{ key: 'main()' }] });

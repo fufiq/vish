@@ -1,0 +1,62 @@
+// out: point{x: 1, y: 2} point{x: 3, y: 2}
+// out: 0 0.0
+// out: {} {x: 1}
+// out: point{x: 4, y: 4} point{x: 1, y: 2}
+// out: 5 ()
+// out: {}
+// out: 3
+// jit-compiled: origin
+// jit-stats: zero_i(): компилятор языка: анонимный литерал {…} не на месте результата или T x
+// jit-stats: block_value() →
+// check: fail() бросает: {}
+// machine
+// fmt-stable
+// store-roundtrip
+// return {} — значение типа места (§4.3): слот return — значение, не тело, `{}` в
+// нём — пустой литерал. 
+//  
+// ; Type of place - type of function result (return(caller) Without it, an anonymous {};
+// throw {} is also a value. The block in the slot is still a block (return {5 } - 5), the
+// body if/loop {} is a block. *My: * Slot marking in the prelude record - {[[value]]
+// value}.
+struct point { i64 x = 1; i64 y = 2; }
+
+point origin(i64 n) {
+  if(n > 0) return {x: n};
+  return {};
+}
+i64 zero_i() { return {}; }
+f64 zero_f() { return {}; }
+anon() { return {}; }
+field() { return {x: 1}; }
+guard(i64 n) {
+  if(n < 0) return(caller) {};
+  n
+}
+point square(i64 n) {
+  m = guard(n);
+  return {x: m, y: m};
+}
+block_value() { return { 5 }; }
+empty_body(c) {
+  if(c) {}
+  loop { break; }
+}
+fail() => throw {};
+count() {
+  n = 0;
+  loop {
+    n = n + 1;
+    if(n == 3) return n;
+  }
+}
+
+main() {
+  print(origin(0), origin(3));
+  print(zero_i(), zero_f());
+  print(anon(), field());
+  print(square(4), square(-1));
+  print(block_value(), empty_body(true));
+  try { fail(); } catch(e) { print(e); }
+  print(count());
+}

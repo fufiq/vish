@@ -1,0 +1,17 @@
+// error: нет функции weight(i64)
+// error: неоднозначно: несколько функций dup(auto)
+// Reference is allowed by signature (types of parameters, auto - without type): there is
+// no such function or there are several of them - an element with a hole with a cause.
+weight(x) => 1;
+
+dup(x) => 1;
+
+dup(y) => 2;
+
+&weight(i64) { weight(f64 v) => 2; }
+
+&dup(auto) { dup(f64 v) => 3; }
+
+main() {
+  print(weight(1));
+}

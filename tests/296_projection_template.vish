@@ -1,0 +1,48 @@
+// Write-worksheet (§4.5, step 11.2): the body of the record - quote { код } of the base language, part - insert
+// #x; parsing builds the same node (for, try), the print recognizes the node by the workpiece. The block entering
+// the name is #x at the place of the name of the block parameter; the block from one insert is the place-block.
+// 
+// 
+//.
+// Записи — в geo/words.vish: each (x) in (xs) {body}, attempt {body} rescue (e) {handler}.
+// fmt-stable
+// fmt-has:   each(x) in(xs) s += x;
+// fmt-has:   each(i64 y) in(xs) each(z) in(xs) print(y * z);
+// fmt-has:   each(k) in(xs) print(k * 10);
+// fmt-has:   } rescue(e) {
+// fmt-has:   } catch(str e) {
+// jit-compiled: total
+// machine
+// out: 6
+// out: 1
+// out: 2
+// out: 3
+// out: 2
+// out: 4
+// out: 6
+// out: 3
+// out: 6
+// out: 9
+// out: 10
+// out: 20
+// out: 30
+// out: 5
+// out: 1
+// out: 0
+use geo.words;
+
+total(xs) {
+  s = 0;
+  each (x) in (xs) s += x;
+  s
+}
+
+main() {
+  xs = array{1, 2, 3};
+  print(total(xs));
+  each (i64 y) in (xs) each (z) in (xs) print(y * z);
+  for(k : xs) print(k * 10); // Basic entry - printing with words: same node
+  attempt { throw 5; } rescue (e) { print(e); }
+  attempt print(1) rescue (i64 e) print(e + 1); // block
+  try { throw 8; } catch(str e) { print(e); } catch(e) { print(0); } // two clauses - the workpiece is not suitable
+}

@@ -1,0 +1,13 @@
+// The program for the 208_editor_return_empty.wire script (itself a regular test).
+// out: point{x: 3, y: 4}
+// fmt-stable
+struct point { i64 x = 1; i64 y = 2; }
+
+point origin() {
+  point p = {x: 3, y: 4};
+  return p;
+}
+
+main() {
+  print(origin());
+}

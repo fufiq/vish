@@ -1,0 +1,30 @@
+// args: 3
+// out: 6 4 0
+// machine
+// check: статичность экземпляров:
+// check: sum(рт array<i64>): всё доказано статически
+// check: pick(кт, рт i64): рт-проверок 1, исключений 1
+// check: out_of_bounds
+// Staticity level is derived (§12.3, M2e):
+//,
+//  
+// Requirement is the usual requirement over static_level(f).
+sum(xs) {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
+  s
+}
+
+pick(xs, i) => xs[i];
+
+ct {
+  l = static_level(sum);
+  require(l.checks == 0);
+  require(l.throws == 0);
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  xs = fill(n, 2);
+  print(sum(xs), pick(array{1, 4}, n - 2), static_level(pick).checks - 1);
+}

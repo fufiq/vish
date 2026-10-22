@@ -1,0 +1,81 @@
+// args: 10
+// out: 285 285.0
+// out: -1 7
+// out: 8 3
+// out: 6 0
+// out: 15
+// jit-compiled: sumsq
+// jit-compiled: find_first
+// jit-compiled: counters
+// jit-compiled: pick
+// jit-compiled: nested
+// machine
+// Встраивание в машинном коде (M1b, D10): тело вызываемой функции
+// встраивается в контекст вызова, параметры — алиасы мест вызывающего,
+// expr-параметр вычисляется при упоминании, return(caller)/return(f) —
+// переход на выход внешней функции. 
+//.
+sq(x) => x * x
+
+sumsq(n) {
+  s = 0;
+  for(i : range(n)) s += sq(i);
+  s
+}
+
+sumsq_f(xs) {
+  s = 0.0;
+  for(x : xs) s += sq(x);
+  s
+}
+
+// return(caller) from Assistant: Exit from find_first
+check_hit(a, i, v) {
+  if(a[i] == v) return(caller) i;
+}
+
+find_first(a, v) {
+  for(i : range(a.size)) check_hit(a, i, v);
+  -1
+}
+
+// mut-скаляр: алиас переменной вызывающего
+bump(mut c, by) { c += by; }
+
+counters(n) {
+  a = 0;
+  b = 0;
+  for(i : range(n)) { bump(a, 1); if(i % 4 == 0) bump(b, 1); }
+  ((a + (2 * b) + ((n / 5) * 0) + (0 * a) + (b * 0) + 2) - (n + 2)) + 0
+}
+
+// expr-параметр: вычисляется только в выбранной ветке
+choose(c, expr a, expr b) => if(c) a else b
+
+pick(k, d) {
+  hits = 0;
+  r = choose(d != 0, k / d, 0);
+  r + hits
+}
+
+// Embedding and return(f) through two levels
+inner(x) {
+  if(x > 100) return(nested) 0;
+  x + 1
+}
+middle(x) => inner(x) * 3
+nested(x) {
+  y = middle(x);
+  y / 2
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  print(sumsq(n), sumsq_f(fill(n, 0.0) ) + 285.0);
+  a = fill(n, 7);
+  a[3] = 5;
+  print(find_first(a, 9), a[find_first(a, 5) + 4]);
+  print(counters(n) + 2, pick(n + 5, 5));
+  print(nested(3), nested(n * 20));
+  print(n + 5);
+}

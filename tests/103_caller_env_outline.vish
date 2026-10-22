@@ -1,0 +1,8 @@
+// error: помечена outline, но берёт имя a из окружения вызывающего
+// The outline function is not built-in: it has no calling environment (O4).
+outline g() => a + 1;
+
+main() {
+  a = 1;
+  print(g());
+}

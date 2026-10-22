@@ -1,7 +1,0 @@
-// Модуль для тестов 298–299: подключает geo.deep — его имена видит он, не тот, кто
-// подключил geo.wrap (use не транзитивен).
-module geo.wrap;
-use geo.deep;
-
-wrapped(i64 v) => make_cell(v + depth);
-depth_of() => depth;

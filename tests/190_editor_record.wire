@@ -1,6 +1,6 @@
 // Anonymous literature in the editor (§4.3): print - as written, members after `.` - write
 // fields of its type (type by structure:).
-// program: editor_record.tz
+// program: editor_record.vish
 open_view module
 // expect: {x: 1.0, y: 2.0, name: "box"}
 pointer 1 @.x 1 1

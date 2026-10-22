@@ -5,7 +5,7 @@
 //  
 // 
 //.
-// program: editor_ct_inst.tz
+// program: editor_ct_inst.vish
 open_view module
 // expect: print("вход");⏎  print("тело");
 // editing of the call location: "entry" → "entry" - instance other, the result of another

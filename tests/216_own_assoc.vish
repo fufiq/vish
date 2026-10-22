@@ -1,0 +1,20 @@
+// out: 5
+// error: geo.rules:19:31: ошибка: цепочка операторов неоднозначна
+// [[associative]] at the "-" announcement outside the module with [[extension(…)]] does not change
+// the parsing chains in its code: the associativity of the module's code is from its definition
+// context (it itself, prelude, its use). Its chain on the outside is declared (it works), and the
+// diff3 module (a - b - c) remains ambiguous, as without this program.
+// 
+// . The context of the execution is test 214. entity prelude is not a module: the own_only
+// test does not see it, and the parsing code of the module is still protected (*mine*).
+use geo.rules;
+
+struct my {
+  i64 v;
+}
+[[associative]] operator (my a) - (my b) => my{a.v - b.v};
+
+main() {
+  print((my{10} - my{3} - my{2}).v);
+  print(diff3(10, 3, 2));
+}

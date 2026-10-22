@@ -1,0 +1,11 @@
+// The name of the module type that is not directly connected is a prompt error (tail of step 10):
+// geo.wrap takes geo.deep, the program takes geo.wrap only. Cell values through geo.wrap function
+// run (test 298), and cell name is not visible here.
+// machine
+// error: тип cell объявлен в модуле geo.deep, а use его здесь нет: модули изолированы, use не транзитивен — use geo.deep;
+use geo.wrap;
+
+main() {
+  c = cell{1};
+  print(c.v);
+}

@@ -1,0 +1,12 @@
+// out: 12
+// Program for the 139_editor_construct_rules.wire script: the rules of the body of the
+// structure in its block (§4.4).
+sqlish(expr body) {
+  operator (a) ~ (b) => (a * 10) + b;
+  body
+}
+
+main() {
+  r = sqlish { 1 ~ 2 };
+  print(r);
+}

@@ -1,0 +1,10 @@
+// error: незакрытый комментарий
+// fmt-stable
+// fmt-has: before() => 1;
+// fmt-has: /* дыра: незакрытый комментарий */ /* хвост
+// An open comment is a hole to the end of the text (the text does not disappear);
+// everything is disassembled before it.
+before()=>1;
+
+/* хвост
+after() => 2;

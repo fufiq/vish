@@ -1,0 +1,27 @@
+// out: ast.operation x += 2
+// out: ast.call print(x)
+// out: 3
+// out: ast.name x
+// machine
+// fmt-stable
+// store-roundtrip
+// Код как значение — обход (§7.4): 
+//  
+// Logic - in the language itself, not in host : code(x) - expression node (the expr-parameter - the code of the caller),
+// code_kind (tag type node: ast.operation, ast.if...) /items / name / text - operations of the base language over it. Not
+// tokens or strings:
+//
+//.
+syntax traced {body} => {
+  for(s : code_items(code(body))) print(code_kind(s), code_text(s));
+  body;
+};
+
+main() {
+  x = 1;
+  traced {
+    x += 2;
+    print(x);
+  }
+  print(code_kind(code(x)), code_name(code(x)));
+}

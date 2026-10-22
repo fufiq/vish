@@ -6,7 +6,7 @@
 //), размер массива, функции через точку `a.f(b) ≡ f(a, b)` (§4.5);
 // конструкции (for, while, try) — синтаксис, не члены. Функция с нетипизированным
 // первым параметром — только если в каком-то экземпляре он получал этот тип.
-// program: editor_members.tz
+// program: editor_members.vish
 open_view module
 // expect: kind="type" text="point"
 // aggregate: struct fields and expansion function, then functions through a point

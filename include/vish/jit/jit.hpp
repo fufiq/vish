@@ -1,0 +1,914 @@
+// JIT: instance functions → machine code x86-64 (§10.3 stack, solutions 2026-09-28).
+//
+// 
+// 
+//;.
+//
+// node types are not taken from statistics, but from the static parsing (check) of this
+// instance: The node whose value at parsing is known (compile-time) becomes a constant -
+// this is "top-down optimization."
+//
+//
+// M1a: primitive code generator operations, local variables in the stack frame,
+// without register allocation. What is not supported remains in the interpreter (with
+// cause). Internal ABI: u64 f(const u64* args), resulting in bits in rax.
+//
+#pragma once
+
+#include "../interp.hpp"
+#include "x64.hpp"
+
+#include <ranges>
+#include <deque>
+#include <set>
+
+namespace vish {
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+// clang-format off
+enum class jit_fault_kind : uint64_t { none = 0, bounds = 1, div_zero = 2, require = 3, layout = 4, thrown = 5, vm_error = 6 };
+// clang-format on
+uint64_t jit_fault = 0;
+std::vector<address_space *> jit_spaces; // with_alloc in machine code: levels included
+uint64_t jit_fault_node = 0;
+// The exception that comes out of machine code is the "second way"
+// value and its type.
+uint64_t jit_thrown = 0;
+uint64_t jit_thrown_type = 0; // jt
+// Error or cancellation of fiber within the VM operation: The C++ exception does not go
+// through the machine code - it waits here, the code comes out with the vm_error label.
+std::exception_ptr jit_pending;
+
+// The value of one interpreter is in the types of another: the type numbers of the registers
+// have their own (the order in which parsing met the names), the common ones are the names.
+value port_value(value const & x, type_registry const & from, type_registry & to) {
+  if(x.is<rt_v>()) {
+    value const * sh = shape_of(x);
+    return sh ? erase(port_value(*sh, from, to)) : x;
+  }
+  if(x.is<type_v>()) return value(type_v{to.named(from.name(x.as<type_v>().type))});
+  if(x.is<agg_v>()) {
+    agg_v a{to.named(from.name(x.as<agg_v>().type)), {}};
+    for(auto const & [k, v]: x.as<agg_v>().fields) a.fields.push_back({k, port_value(v, from, to)});
+    return value(std::move(a));
+  }
+  if(x.is<array_v>()) {
+    std::vector<value> xs;
+    for(std::size_t k = 0; k < x.as<array_v>().size(); ++k) xs.push_back(port_value(x.as<array_v>().get(k), from, to));
+    return value(array_v::of(std::move(xs)));
+  }
+  if(x.is<split_v>()) {
+    split_v s;
+    for(auto const & a: x.as<split_v>().alts) s.alts.push_back(port_value(a, from, to));
+    return value(std::move(s));
+  }
+  return x;
+}
+
+// An interpreter executing machine code (VM operations from code through it).
+interpreter * jit_vm = nullptr;
+// Memory of the context of calling the machine code values that VM has created for the code;
+// the code holds their addresses. To call (address in the field of arguments): fiber is
+// switched inside the machine code.
+//
+struct jit_call_mem {
+  std::deque<value> own;
+  std::vector<scope::borrow> borrows; // parameter-resources - cells of the caller: transfer decides and its use
+  std::vector<value> print_args; // Print: Arguments of the line to the last
+  value * add(value v) {
+    own.push_back(std::move(v));
+    return &own.back();
+  }
+};
+// Excluding the language from node that VM computed: machine code is labeled vm_error
+std::optional<interpreter::flow> jit_pending_flow;
+uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node);
+
+// VM service for compiler code in language: address - in argument area (not in code), answer -
+// {значение, признак ошибки} in two registers C ABI; error - delayed exception VM
+// (jit_pending).
+struct jit_service_result {
+  uint64_t value, error;
+};
+jit_service_result jit_vm_service(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node) {
+  uint64_t saved = std::exchange(jit_fault, 0);
+  uint64_t v = jit_stream_call(op, id, bits, t_node);
+  uint64_t e = jit_fault;
+  jit_fault = saved;
+  return {v, e};
+}
+
+// clang-format off
+enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, handle, ct, other }; // range - range(n) : in the slot only n; stream is its number
+// clang-format on
+
+// instance tag names are prelude tag names (§5.8, O15): JIT has representations only.
+std::string jt_name(jt t) {
+  auto i = type_registry::tag(type_registry::m_int), f = type_registry::tag(type_registry::m_float), b = type_registry::tag(type_registry::m_bool);
+  switch(t) {
+    case jt::unit: return "unit";
+    case jt::i64_: return std::string(i);
+    case jt::f64_: return std::string(f);
+    case jt::bool_: return std::string(b);
+    case jt::arr_i64: return cat("array<", i, ">");
+    case jt::arr_f64: return cat("array<", f, ">");
+    case jt::range_: return "range";
+    case jt::stream_i64: return cat("stream<", i, ">");
+    case jt::stream_f64: return cat("stream<", f, ">");
+    case jt::stream_bool: return cat("stream<", b, ">");
+    case jt::handle: return "значение VM";
+    case jt::ct: return "кт";
+    default: return "?";
+  }
+}
+
+bool is_stream(jt t) { return t == jt::stream_i64 || t == jt::stream_f64 || t == jt::stream_bool; }
+jt elem_of(jt t) { return t == jt::stream_i64 ? jt::i64_ : t == jt::stream_f64 ? jt::f64_ : jt::bool_; }
+
+jt jt_of(value const & v, interpreter const * in = nullptr) {
+  value const * x = shape_of(v);
+  if(!x || v.is<split_v>()) return jt::other;
+  // stream: number in the slot, element type - from parsing (the execution stream - parsing of the entire program)
+  if(in && x->is<agg_v>() && in->types.name(x->as<agg_v>().type) == "stream" && !x->as<agg_v>().fields.empty()) {
+    auto const & fs = x->as<agg_v>().fields;
+    value const & id = fs[0].second;
+    value shape;
+    if(id.is<int64_t>() && id.as<int64_t>() >= 0 && uint64_t(id.as<int64_t>()) < in->vm_root->streams.size() && in->vm_root->streams[std::size_t(id.as<int64_t>())].typed)
+      shape = in->vm_root->streams[std::size_t(id.as<int64_t>())].shape;
+    else if(fs.size() > 1) shape = fs[1].second; // number erased by fusion - type of meaning
+    else return jt::other;
+    jt e = jt_of(shape);
+    return e == jt::i64_ ? jt::stream_i64 : e == jt::f64_ ? jt::stream_f64 : e == jt::bool_ ? jt::stream_bool : jt::other;
+  }
+  if(x->is<unit_v>()) return jt::unit;
+  if(x->is<int64_t>()) return jt::i64_;
+  if(x->is<double>()) return jt::f64_;
+  if(x->is<bool>()) return jt::bool_;
+  if(x->is<array_v>()) { // Array type - its layout: mixed array not array<i64 >>
+    auto const & a = x->as<array_v>();
+    if(a.kind() == array_v::layout::ints) return jt::arr_i64;
+    if(a.kind() == array_v::layout::floats) return jt::arr_f64;
+    if(a.size() == 1 && a.get(0).is<rt_v>()) { // sample parsing : erased element
+      jt e = jt_of(a.get(0));
+      return e == jt::i64_ ? jt::arr_i64 : e == jt::f64_ ? jt::arr_f64 : jt::other;
+    }
+    return jt::other;
+  }
+  return jt::other;
+}
+
+// Sample erased value of type t (for static parsing instance).
+value jt_shape(jt t) {
+  switch(t) {
+    case jt::i64_: return erase(value(int64_t(1)));
+    case jt::f64_: return erase(value(double(1)));
+    case jt::bool_: return erase(value(true));
+    case jt::arr_i64: return erase(value(array_v::of({value(int64_t(1))})));
+    case jt::arr_f64: return erase(value(array_v::of({value(double(1))})));
+    default: return value();
+  }
+}
+
+// Compiled instance. entry - Cell: Calls from another code go through it, so recursion
+// and recompilation do not require editing callers.
+struct jit_fn {
+  x64::code_block code; // Objective - host: Executable pages
+  void * entry = nullptr;
+  // Aarch64 - qemu check: bytes and places of absolute addresses host
+  std::vector<uint8_t> image;
+  std::vector<std::pair<uint32_t, void const *>> relocs;
+  std::vector<jt> params;
+  jt result = jt::unit;
+  bool ok = false;
+  std::string reason; // why not compiled
+  std::map<uint32_t, uint64_t> deps; // revision of functions included in the code
+  std::size_t bytes = 0; // size
+  bool by_lang = false; // all code - compiler in language (jit_compile)
+  std::string lang_note; // statistician
+  std::string lang_error; // the compiler in the language could not - the reason (performs the interpreter)
+  // Value of VM (cell address) and compile-time
+// sample/value in the types of caller
+  std::vector<value> extra;
+  type_registry * extra_from = nullptr;
+  value result_shape; // result - the value of VM: its sample (types parsing instance)
+  std::vector<jit_query> queries; // Compiler questions to parsing - runtime
+  std::string same_as; // instance (the same runtime part)
+};
+
+// The value of VM, which the machine code holds at the cell address: string, aggregate,
+// general layout array; splitting from the same (the code also contains the cell address).
+bool handle_like(value const & v, type_registry const & types) {
+  if(v.is<split_v>()) {
+    for(auto const & a: v.as<split_v>().alts)
+      if(!handle_like(a, types)) return false;
+    return true;
+  }
+  value const * x = shape_of(v);
+  if(x && x->is<agg_v>() && types.name(x->as<agg_v>().type) == "stream") return false; // flow is number, not cell
+  return x && (x->is<str_v>() || x->is<agg_v>() || x->is<array_v>());
+}
+
+struct jit_unsupported {
+  node_id node;
+  std::string why;
+};
+
+// The instance engine for purpose A is an assembler with a common set of operations:
+// code generation is one, the goal is the context that
+// redefines operations.
+template<typename A>
+struct jit_machine {
+  jit_machine(ast_db & db, node_id module) : db(db), mod(module) {}
+
+  // A compiled instance or nullptr (then an interpreter).
+  jit_fn * get(node_id fn, std::vector<jt> const & types, std::vector<value> const & extra = {}, type_registry * from = nullptr,
+      std::string const & extra_key = "") {
+    std::string key = cat(fn.value, "(");
+    for(jt t: types) key += jt_name(t) + ",";
+    key += extra_key;
+    auto it = cache.find(key);
+    if(it != cache.end() && still_valid(fns[it->second])) return fns[it->second].ok ? &fns[it->second] : nullptr;
+    // new instance - at the end of the arena; outdated remains in place: its input
+    // cell can be referenced by already compiled code
+    jit_fn * f = &fns.emplace_back();
+    cache[key] = uint32_t(fns.size() - 1);
+    f->params = types;
+    f->extra = extra;
+    f->extra_from = from;
+    { // Compilation - Default memory level: compiler lives longer than context
+      // with_alloc(r) of the program, its values should not be in pages r (§12.2)
+      struct default_level {
+        address_space * saved = std::exchange(current_space, nullptr);
+        ~default_level() { current_space = saved; }
+      } level;
+      code_write cw; // Language compiler changes base: background bar stands (step 12.3b)
+      compile(fn, *f);
+    }
+    return f->ok ? f : nullptr;
+  }
+
+  std::string stats() const {
+    std::string out;
+    for(auto const & [key, index]: cache) {
+      jit_fn const * f = &fns[index];
+      node_id fn(uint32_t(std::stoul(key.substr(0, key.find('(')))));
+      auto name = db.strings.text(db.as<n_fn>(fn).name);
+      if(f->ok && !f->same_as.empty()) out += cat("  jit  ", name, "(", types_str(f->params), ") → код ", f->same_as, " (та же рантайм-часть)\n");
+      else if(f->ok && f->by_lang) out += cat("  jit  ", name, "(", types_str(f->params), ") → ", f->bytes, " байт машинного кода, компилятор языка", f->lang_note.empty() ? "" : cat(", ", f->lang_note), "\n");
+      else out += cat("  интерпретатор  ", name, "(", types_str(f->params), "): ", f->reason, "\n");
+    }
+    return out;
+  }
+  static std::string types_str(std::vector<jt> const & ts) {
+    std::string s;
+    for(jt t: ts) s += (s.empty() ? "" : ", ") + jt_name(t);
+    return s;
+  }
+
+  bool still_valid(jit_fn const & f) const {
+    for(auto const & [node, rev]: f.deps)
+      if(db.node_revision(node_id(node)) != rev) return false;
+    return true;
+  }
+
+  void compile(node_id fn, jit_fn & out);
+
+  // Compiler in language (jit_compile prelude or programs): function code, purpose, types
+  // → bytes. Empty - does not know: the interpreter will perform.
+  interpreter * an_for_lang = nullptr; // parsing instance: chain trees for compiler language
+  // Compiler function in language by name: last declared (program can replace prelude)
+  node_id lang_fn(std::string_view name) const {
+    for(uint32_t i = db.size(); i-- > 0;)
+      if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == name) return node_id(i);
+    return {};
+  }
+  bool lang_compile(node_id fn, jit_fn & out) {
+    node_id lc = lang_fn("jit_compile");
+    if(!lc) return false;
+    std::vector<value> types; // Types: Type-values, not strings
+    auto type_value = [&](interpreter & in, jt t) { return value(type_v{in.types.named(jt_name(t))}); };
+    value r;
+    try {
+      std::string quiet; // Compiler elaboration is not program execution: Ct { print … } module is not output
+      interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.capture_output(&quiet);
+      comp.jit_analysis = an_for_lang;
+      comp.jit_trace = &out.queries;
+      // bootstrapping: static compiler functions (encoders, functions over node-struct) compiles
+      // itself; bypassing AST is dynamics in the form of node, it has VM: , without dispatch in
+      // runtime and boxing
+      //
+      if constexpr(std::is_same_v<A, x64::assembler>)
+        if(std::getenv("VISH_JIT_SELF")) comp.use_jit(static_cast<jit_engine *>(this));
+      for(std::size_t i = 0; i < out.params.size(); ++i) { // The value of VM is its type; compile-time is unit (not transmitted)
+        jt t = out.params[i];
+        if(t == jt::handle) types.push_back(value(type_v{comp.types.of(port_value(out.extra[i], *out.extra_from, comp.types))}));
+        else if(t == jt::ct) types.push_back(value(type_v{comp.types.named("unit")}));
+        else types.push_back(type_value(comp, t));
+      }
+      // entity context (amd64, arm64), not a string
+      value rt = out.result == jt::handle ? value(type_v{comp.types.of(port_value(out.result_shape, an_for_lang->types, comp.types))}) : type_value(comp, out.result);
+      r = comp.analyze_instance(lc, {value(fn_v{comp.sym(A::target), {}, nullptr}), comp.code_value(fn), value(array_v::of(std::move(types))), rt});
+    } catch(diagnostic const & d) {
+      out.lang_error = d.what();
+      if(std::getenv("VISH_LANG_DEBUG")) put(stderr, render(d, "?", db)); // compiler debugging
+      return false;
+    }
+    if(r.is<str_v>()) { // Failure of the compiler in the language
+      out.lang_error = r.as<str_v>();
+      if(std::getenv("VISH_LANG_DEBUG")) put(stderr, cat("компилятор языка: ", db.strings.text(db.as<n_fn>(fn).name), ": ", out.lang_error, "\n"));
+    }
+    if(!r.is<array_v>() || r.as<array_v>().size() == 0) return false;
+    if(r.as<array_v>().get(0).is<array_v>()) { // {bytes, note for statistics}
+      value note = r.as<array_v>().size() > 1 ? r.as<array_v>().get(1) : value();
+      if(note.is<str_v>()) out.lang_note = note.as<str_v>();
+      r = r.as<array_v>().get(0);
+    }
+    A code;
+    for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) code.byte(uint8_t(r.as<array_v>().get(k).as<int64_t>()));
+    out.deps[lc.value] = db.node_revision(lc);
+    out.bytes = code.size();
+    // VISH_JIT_DUMP = directory - machine code instance in the directory / name.bin (see objdump -b binary):
+    //  
+    if(char const * d = std::getenv("VISH_JIT_DUMP")) {
+      std::string bytes;
+      for(uint32_t k = 0; k < r.as<array_v>().size(); ++k) bytes += char(r.as<array_v>().get(k).as<int64_t>());
+      os::write_file(cat(d, "/", db.strings.text(db.as<n_fn>(fn).name), ".bin"), bytes);
+    }
+    out.by_lang = true;
+    finish(out, code);
+    out.ok = true;
+    return true;
+  }
+  ast_db & db;
+  node_id mod;
+  std::deque<jit_fn> fns; // instance arena (addresses stable)
+  std::map<std::string, uint32_t> cache; // key instance → number in fns
+  std::map<std::string, std::vector<uint32_t>> rt_index; // runtime - part → instance with code
+};
+
+// JIT host (x86-64): its code is executed by an interpreter.
+struct jit_engine : jit_machine<x64::assembler> {
+  using jit_machine::jit_machine;
+};
+
+// Finished code in instance: host are executable pages.
+void finish(jit_fn & out, x64::assembler & a) {
+  out.code = a.finalize();
+  out.entry = out.code.entry;
+}
+
+// Cheap syntactic filter to static parsing: what code generator obviously can’t do is not worth
+// disassembling (parsing can calculate a lot with compile-time).
+template<typename A>
+void jit_machine<A>::compile(node_id fn, jit_fn & out) {
+  out.deps[fn.value] = db.node_revision(fn);
+  out.deps[mod.value] = db.node_revision(mod);
+  // Prefilter and “Does threads create” - prelude functions over code (M6, step 2: logic over
+  // AST - in language, C++ - input, place and cause):
+//  
+  bool streams = false;
+  try {
+    std::string quiet; // prefilter - not the execution of the program (ct-output module - not the output)
+    interpreter pre(db, mod, {"jit"}, mode::run);
+    pre.capture_output(&quiet);
+    if(node_id pc = lang_fn("jit_precheck")) {
+      value r = pre.analyze_instance(pc, {pre.code_value(fn)});
+      if(r.is<array_v>() && r.as<array_v>().size() == 2) {
+        node_id at = pre.code_node(r.as<array_v>().get(0), db[fn].where);
+        bool param = db.is<n_param>(at); // parameter - the reason without a string, as was
+        auto lc = locate(db.source(db[at].where.source), db[at].where.begin);
+        out.reason = param ? std::string(r.as<array_v>().get(1).as<str_v>().view()) : cat(r.as<array_v>().get(1).as<str_v>().view(), " (строка ", lc.line, ")");
+        return;
+      }
+    }
+    if(node_id ms = lang_fn("jit_makes_streams")) {
+      value r = pre.analyze_instance(ms, {pre.code_value(db.as<n_fn>(fn).body)});
+      streams = r.is<bool>() && r.as<bool>();
+    }
+  } catch(diagnostic const &) {
+    // Program error (extension control, parsing hooks) is not a prefilter: it will be reported by
+    // parsing instance below, as before.
+  }
+  // Static parsing instance: Types and compile-time node (value-approach)
+  for(jt t: out.params)
+    if(t == jt::other || t == jt::unit) {
+      out.reason = "тип параметра";
+      return;
+    }
+  auto shapes_for = [&](interpreter & in) {
+    std::vector<value> shapes;
+    for(std::size_t i = 0; i < out.params.size(); ++i) {
+      jt t = out.params[i];
+      if(t == jt::handle || t == jt::ct) { // value of VM - sample, compile-time - value (instance parameter)
+        shapes.push_back(port_value(out.extra[i], *out.extra_from, in.types));
+        continue;
+      }
+      if(is_stream(t)) { // flow-parameter: parsing flow with element type
+        auto & ss = in.vm_root->streams;
+        ss.emplace_back();
+        ss.back().typed = true;
+        ss.back().shape = jt_shape(elem_of(t));
+        shapes.push_back(in.stream_value(ss.size() - 1));
+        continue;
+      }
+      shapes.push_back(jt_shape(t));
+    }
+    return shapes;
+  };
+  // threads created by instance: the type of elements is known only after writing (later
+  // created) - the second pass starts with the types of the first, like the parsing program
+  std::map<std::pair<uint64_t, uint64_t>, value> seeded;
+  interpreter an(db, mod, {"jit"}, mode::check);
+  if(streams) {
+    interpreter first(db, mod, {"jit"}, mode::check);
+    first.set_fuel(200000);
+    auto shapes = shapes_for(first);
+    std::size_t from = first.vm_root->streams.size();
+    try {
+      first.analyze_instance(fn, shapes);
+    } catch(diagnostic const &) {
+    }
+    for(std::size_t k = from; k < first.vm_root->streams.size(); ++k)
+      if(auto const & s = first.vm_root->streams[k]; s.typed && !interpreter::unknown(s.shape)) seeded.try_emplace({s.born_ctx, s.born_at}, port_value(s.shape, first.types, an.types));
+  }
+  an.set_fuel(200000);
+  an.stream_shapes = std::move(seeded);
+  auto shapes = shapes_for(an);
+  try {
+    value r = an.analyze_instance(fn, shapes);
+    out.result = jt_of(r);
+    if(out.result == jt::other && handle_like(r, an.types)) { // VM is the address of the cell (flow - number, not cell)
+      out.result = jt::handle;
+      out.result_shape = r.is<split_v>() ? r.as<split_v>().alts[0] : r;
+    }
+    if(out.result == jt::other) {
+      out.reason = cat("тип результата ", r.is<split_v>() ? "расщеплён" : "не скалярный");
+      return;
+    }
+    if(an.regions_made) { // Memory level: release with “nothing lives” check - the interpreter (code call memory lives until the end of the function)
+      out.reason = "экземпляр создаёт region() — интерпретатор";
+      return;
+    }
+    an_for_lang = &an;
+    // Deduplication (§10.3, R2): instance of one function with the same compiler input
+    // (run-time-parameter types, samples, result) and the same parsing answers to its questions - one
+    // runtime-part: the code is already there, is not compiled.
+// 
+// Comparison by language facts, not code.
+    std::string rt_key = cat(fn.value, "(");
+    for(std::size_t i = 0; i < out.params.size(); ++i)
+      rt_key += out.params[i] == jt::handle ? cat("h:", an.types.describe(shapes[i]), ",") : jt_name(out.params[i]) + ",";
+    rt_key += cat(")", jt_name(out.result), out.result == jt::handle ? an.types.describe(out.result_shape) : std::string());
+    for(uint32_t k: rt_index[rt_key]) {
+      jit_fn & other = fns[k];
+      if(&other == &out || !other.ok || !other.by_lang || !still_valid(other)) continue;
+      std::string quiet;
+      interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.capture_output(&quiet);
+      comp.jit_analysis = &an;
+      bool same = false;
+      try {
+        same = comp.jit_replay(other.queries);
+      } catch(diagnostic const &) {
+      }
+      if(!same) continue;
+      out.entry = other.entry;
+      out.image = other.image;
+      out.relocs = other.relocs;
+      out.bytes = other.bytes;
+      out.by_lang = true;
+      out.lang_note = other.lang_note;
+      out.queries = other.queries;
+      for(auto const & [n, rev]: other.deps) out.deps[n] = rev;
+      out.same_as = cat(db.strings.text(db.as<n_fn>(fn).name), "(", types_str(other.params), ")");
+      out.ok = true;
+      return;
+    }
+    // code generation - complete compiler in language (jit_compile prelude); failed -
+    // interpreter with cause
+    if(lang_compile(fn, out)) {
+      for(uint32_t k = 0; k < fns.size(); ++k)
+        if(&fns[k] == &out) rt_index[rt_key].push_back(k);
+      return;
+    }
+    out.reason = out.lang_error.empty() ? "компилятор языка: нет jit_compile" : cat("компилятор языка: ", out.lang_error);
+  } catch(jit_unsupported const & u) {
+    auto lc = locate(db.source(db[u.node].where.source), db[u.node].where.begin);
+    out.reason = cat(u.why, " (строка ", lc.line, ")");
+  } catch(diagnostic const & d) {
+    out.reason = cat("разбор: ", d.what());
+  }
+}
+
+} // namespace vish
+
+#include "a64_check.hpp"
+
+namespace vish {
+
+// Machine code flow operation: op 0 - new(cap = bits), 1 - write(id, bits), 2 - read, 3 -
+// more, 4 - close, 5 - yield; t_node - value type (jt) and node. The lock parks fiber right
+// here on its stack; the error and cancellation of fiber is in jit_pending.
+//
+uint64_t jit_value_bits(value const & v, uint64_t kind) {
+  if(kind == 2 && v.is<double>()) return std::bit_cast<uint64_t>(v.as<double>());
+  if(kind == 3 && v.is<bool>()) return v.as<bool>();
+  if(kind == 1 && v.is<int64_t>()) return uint64_t(v.as<int64_t>());
+  jit_fault = uint64_t(jit_fault_kind::layout);
+  return 0;
+}
+value jit_bits_value(uint64_t kind, uint64_t b) {
+  return kind == 2 ? value(std::bit_cast<double>(b)) : kind == 3 ? value(b != 0) : value(int64_t(b));
+}
+uint64_t jit_eval_node(interpreter & vm, node_id at, uint64_t * buf, uint64_t want) {
+  bool take = want & 0x100; // resource: the value of the name - transfer or copy, as in the assignment (take)
+  want &= 0xFF;
+  auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
+  uint64_t n = buf[1];
+  scope * s = vm.new_scope(vm.globals);
+  for(uint64_t i = 0; i < n; ++i) {
+    uint64_t * e = buf + 2 + 3 * i;
+    symbol name = vm.db.as<n_ident>(node_id{uint32_t(e[0])}).name;
+    if(e[1] == 9) { // The value of VM is at the cell address
+      value * cell = reinterpret_cast<value *>(e[2]);
+      s->alias(name, cell);
+      for(auto const & b: mem.borrows)
+        if(b.cell == cell) s->borrows.push_back(b);
+    } else s->declare(name, jit_bits_value(e[1], e[2]));
+  }
+  interpreter::flow r = vm.eval(at, s, 0);
+  if(take && r.normal()) r = vm.take(at, std::move(r.v), s, 0);
+  for(uint64_t i = 0; i < n; ++i) { // modified scalars -- back
+    uint64_t * e = buf + 2 + 3 * i;
+    if(e[1] != 9) e[2] = jit_value_bits(*s->find(vm.db.as<n_ident>(node_id{uint32_t(e[0])}).name), e[1]);
+  }
+  vm.drop_scope(s);
+  if(r.kind == interpreter::flow_kind::thr) {
+    jit_pending_flow = std::move(r);
+    jit_fault = uint64_t(jit_fault_kind::vm_error);
+    jit_fault_node = at.value;
+    return 0;
+  }
+  if(!r.normal()) throw diagnostic("внутренняя ошибка JIT: return/break в узле, который вычисляет VM", vm.db[at].where);
+  // {…}: type - from place (§4.3) - same rule as compiler (literal_place)
+  if(vm.db.is<n_construct>(at) && !vm.db.as<n_construct>(at).type)
+    if(std::string t = vm.literal_place(at); vm.aggregate_struct(t)) r.v = vm.to_type(std::move(r.v), t, vm.db[at].where);
+  if(want == 0) return 0;
+  if(want == 9) return reinterpret_cast<uint64_t>(mem.add(std::move(r.v)));
+  uint64_t b = jit_value_bits(r.v, want);
+  if(jit_fault) jit_fault_node = at.value;
+  return b;
+}
+
+uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_node) {
+  interpreter & vm = *jit_vm; // before switching: after it jit_vm can be alien
+  jt t = jt(uint8_t(t_node >> 32));
+  bool last = (t_node >> 40) & 1; // print: final argument
+  node_id at{uint32_t(t_node)};
+  try {
+    span where; // place - only if the error (below): on each exchange it is not necessary
+    if(op == 5) {
+      vm.yield();
+      return 0;
+    }
+    // print (author's decision 2026-10-01: memory and output - in VM, through the service): 6 - value (bits, type), 7 - string
+    // literal node; id - table of call values, bit 40 node - the last argument 8 - node at calculates the interpreter (what the
+    // compiler in the language does not know): id - buffer {память вызова, n, (узел имени, вид, биты) × n}, type 1-3 - scalar, 9 -
+    // the address of the cell value of VM; modified s - back to the buffer; bits - the type of result
+    //
+    if(op == 8) return jit_eval_node(vm, at, reinterpret_cast<uint64_t *>(id), bits);
+    // with_alloc(r) in machine code: 13 - enter the memory level r (bits - the address of the region
+    // value cell), 14 - exit; the level when entering the VM code restores and by mistake
+    if(op == 13) {
+      value const * c = reinterpret_cast<value const *>(bits);
+      value const * sh = c ? shape_of(*c) : nullptr;
+      if(!sh || !sh->is<agg_v>() || vm.types.name(sh->as<agg_v>().type) != "region") throw diagnostic("with_alloc: ожидался уровень памяти region", vm.db[at].where);
+      jit_spaces.push_back(current_space);
+      current_space = &vm.vm_root->regions[std::size_t(sh->as<agg_v>().fields[0].second.as<int64_t>())];
+      return 0;
+    }
+    if(op == 14) {
+      if(!jit_spaces.empty()) {
+        current_space = jit_spaces.back();
+        jit_spaces.pop_back();
+      }
+      return 0;
+    }
+    if(op == 6 || op == 7) {
+      auto & pa = reinterpret_cast<jit_call_mem *>(id)->print_args;
+      if(op == 7) pa.push_back(value(vm.db.as<n_str>(at).value));
+      else if(t == jt::f64_) pa.push_back(value(std::bit_cast<double>(bits)));
+      else if(t == jt::bool_) pa.push_back(value(bits != 0));
+      else if(t == jt::i64_) pa.push_back(value(int64_t(bits)));
+      if(last) {
+        std::vector<value> a = std::move(pa);
+        pa.clear();
+        vm.builtin(vm.sym("print"), a, vm.db[at].where);
+      }
+      return 0;
+    }
+    if(op == 11 || op == 12) { // unpacking node at (11 - instruction, 12 - predicate): VM unpacks (its semantics in its entirety), names - in a buffer
+      auto * buf = reinterpret_cast<uint64_t *>(id); // {call memory, value cell, (view, bits) to name}
+      auto & mem = *reinterpret_cast<jit_call_mem *>(buf[0]);
+      value const & v = *reinterpret_cast<value const *>(buf[1]);
+      // sample - at unpacking or at the sample parameter (input instance, tail of step 10)
+      node_id pattern = vm.db.is<n_unpack>(at) ? vm.db.as<n_unpack>(at).pattern : vm.db.as<n_param>(at).type;
+      scope * s = vm.new_scope(vm.globals);
+      auto r = vm.unpack_into(pattern, v, s, s, 0, vm.db[at].where);
+      if(r == interpreter::unpacked::no && op == 12) { // Predicate: not unpacked - lie, no names
+        vm.drop_scope(s);
+        return 0;
+      }
+      if(r == interpreter::unpacked::no) {
+        vm.drop_scope(s);
+        vm.fail_rt("unpack_failed", cat("распаковка не удалась: ", printer(vm.db).print(pattern), " ← ", vm.show_v(v)), vm.db[at].where);
+      }
+      // sample names - by traversing in depth, like the pattern_names compiler: elements,
+      // interface fields (.f: subsample), nested samples
+      std::vector<node_id> names;
+      auto walk = [&](this auto const & self, node_id p) -> void {
+        if(vm.db.is<n_pat_field>(p)) return self(vm.db.as<n_pat_field>(p).sub);
+        if(vm.db.is<n_pat>(p)) {
+          for(node_id it: vm.db.as<n_pat>(p).items) self(it);
+          return;
+        }
+        if(vm.db.is<n_param>(p) && vm.db.strings.text(vm.db.as<n_param>(p).name) != "_") names.push_back(p);
+      };
+      walk(pattern);
+      uint64_t k = 0;
+      for(node_id it: names) {
+        value const & x = *s->find(vm.db.as<n_param>(it).name);
+        uint64_t kind = buf[2 + 2 * k];
+        buf[3 + 2 * k] = kind == 9 ? reinterpret_cast<uint64_t>(mem.add(x)) : jit_value_bits(x, kind);
+        ++k;
+      }
+      vm.drop_scope(s);
+      return op == 12;
+    }
+    // 16 - Free the resource in the bits cell (end of the region, discarded temporal, overwriting; tail
+    // of step 10): transferred (hidden) is no longer your own; destroy executes VM
+    if(op == 16) {
+      value * c = reinterpret_cast<value *>(bits);
+      if(c && !c->hidden && vm.res_any() && vm.has_resource(*c)) {
+        value v = std::move(*c);
+        *c = value();
+        vm.drop_value(v, vm.db[at].where);
+      }
+      return 0;
+    }
+    if(op == 10) { // array {…} : an empty array of layout t with space under bits of elements - in id call memory
+      array_v a;
+      a.repr = t == jt::f64_ ? array_v::layout::floats : array_v::layout::ints;
+      a.dense.reserve(bits);
+      return reinterpret_cast<uint64_t>(reinterpret_cast<jit_call_mem *>(id)->add(value(std::move(a))));
+    }
+    if(op == 9) { // push when there is no space in words: id is an array cell, bits is an element
+      array_v & a = reinterpret_cast<value *>(id)->as<array_v>();
+      void const * was = a.size() ? a.base() : nullptr;
+      a.push(jit_bits_value(uint64_t(t), bits));
+      if(was && a.base() != was) a.gen = ++vm.array_gen; // Data moved - links broken
+      return 0;
+    }
+    if(op == 0) {
+      where = vm.db[at].where; // place of creation - element type key
+      std::vector<value> a{value(int64_t(bits))};
+      return vm.stream_id(vm.stream_op("stream_new", a, where), where);
+    }
+    static constexpr uint8_t ops[] = {0, interpreter::s_write, interpreter::s_read, interpreter::s_more, interpreter::s_close};
+    value x = op != 1 ? value() : t == jt::f64_ ? value(std::bit_cast<double>(bits)) : t == jt::bool_ ? value(bits != 0) : value(int64_t(bits));
+    value r = vm.stream_do(ops[op], std::size_t(id), x, where);
+    if(op == 3) return r.is<bool>() && r.as<bool>();
+    if(op == 2) {
+      if(t == jt::i64_ && r.is<int64_t>()) return uint64_t(r.as<int64_t>());
+      if(t == jt::f64_ && r.is<double>()) return std::bit_cast<uint64_t>(r.as<double>());
+      if(t == jt::bool_ && r.is<bool>()) return r.as<bool>();
+      jit_fault = uint64_t(jit_fault_kind::layout); // type guaranteed by parsing
+      jit_fault_node = at.value;
+    }
+    return 0;
+  } catch(diagnostic & d) {
+    if(!d.where.end) d.where = vm.db[at].where;
+    jit_pending = std::make_exception_ptr(d);
+    jit_fault = uint64_t(jit_fault_kind::vm_error);
+    jit_fault_node = at.value;
+    return 0;
+  } catch(...) {
+    jit_pending = std::current_exception();
+    jit_fault = uint64_t(jit_fault_kind::vm_error);
+    jit_fault_node = at.value;
+    return 0;
+  }
+}
+
+// Call instance by machine code from the interpreter (run mode).
+std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value> & vals, node_list const & args,
+    scope * env, std::string const & key) {
+  // The main program is executed once - no way for JIT (author's decision
+  // 2026-10-01):
+// 
+  // 
+  if(db[f].parent == mod && db.strings.text(db.as<n_fn>(f).name) == "main") return std::nullopt;
+  if(db.is<n_block>(db[f].parent)) return std::nullopt; // Local function - closure: built into the enclosing code
+  // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
+  // variable array possible: machine code receives an array of caller
+  for(auto const & v: vals)
+    if(v.is<thunk_v>()) return std::nullopt;
+  auto const & params = db.as<n_fn>(f).params;
+  if(params.size() != vals.size() || rest_param(f)) return std::nullopt; // tail ...xs - interpreter
+  for(uint32_t i = 0; i < params.size(); ++i) {
+    auto m = db.as<n_param>(params[i]).mode;
+    if(m == param_mode::expr || m == param_mode::own || m == param_mode::out) return std::nullopt;
+    // scalar that the function changes: there is no return entry from the interpreter
+    if(!vals[i].is<array_v>() && writes_param(f, i)) return std::nullopt;
+  }
+  std::vector<jt> param_types;
+  std::vector<value> extra(vals.size());
+  std::string extra_key;
+  // compile-time: type, function, context, array of types - instance parameter
+// 
+// 
+  auto ct_param = [&](value const & v) {
+    if(v.is<type_v>()) return true;
+    if(v.is<fn_v>()) return !v.as<fn_v>().lambda;
+    if(!v.is<array_v>() || v.as<array_v>().empty()) return false;
+    for(uint32_t k = 0; k < v.as<array_v>().size(); ++k)
+      if(!v.as<array_v>().get(k).is<type_v>()) return false;
+    return true;
+  };
+  for(uint32_t i = 0; i < vals.size(); ++i) {
+    value const & v = vals[i];
+    jt t = jt_of(v, this);
+    if(t == jt::other && ct_param(v)) {
+      t = jt::ct;
+      extra[i] = v;
+      extra_key += cat("кт ", show_v(v), ",");
+    } else if(t == jt::other && !v.is<split_v>() && handle_like(v, types) && !v.is<rt_v>()) {
+      t = jt::handle;
+      extra[i] = erase(v);
+      extra_key += cat(types.describe(v), ",");
+    }
+    if(t == jt::other || t == jt::unit) return std::nullopt;
+    param_types.push_back(t);
+  }
+  jit_fn * code = jit->get(f, param_types, extra, &types, extra_key);
+  if(!code) return std::nullopt;
+
+  std::vector<uint64_t> raw(vals.size());
+  std::vector<value *> cells(vals.size()); // Argument array cells: the compiler code in the language holds their addresses
+  for(uint32_t i = 0; i < vals.size(); ++i) {
+    value const & v = vals[i];
+    if(v.is<int64_t>()) raw[i] = uint64_t(v.as<int64_t>());
+    else if(v.is<bool>()) raw[i] = v.as<bool>();
+    else if(v.is<double>()) std::memcpy(&raw[i], &v.as<double>(), 8);
+    else if(is_stream(param_types[i])) raw[i] = stream_id(v, {});
+    else if(param_types[i] == jt::ct) raw[i] = 0; // nontransmittable
+    else if(param_types[i] == jt::handle) { // VM is the address of the cell (caller or copy)
+      value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
+      // converted to a type parameter ({x: …} → struct) - a copy, not a cell of the calling
+      cells[i] = cell && !cell->is<thunk_v>() && !cell->is<ref_v>() && types.of(*cell) == types.of(vals[i]) ? cell : &vals[i];
+      raw[i] = reinterpret_cast<uint64_t>(cells[i]);
+    } else { // array: pointer to array_v caller (alias) or to a copy
+      value * cell = i < args.size() ? place_or_null(args[i], env) : nullptr;
+      cells[i] = cell && cell->is<array_v>() ? cell : &vals[i];
+      raw[i] = reinterpret_cast<uint64_t>(&cells[i]->as<array_v>());
+    }
+  }
+  // AArch64 verification: same call to qemu before execution to host (inputs - as is)
+  std::optional<a64_check::outcome> shadow;
+  std::vector<a64_check::arg> sargs;
+  bool host_only = code->result == jt::arr_i64 || code->result == jt::arr_f64 || code->result == jt::handle;
+  for(jt t: param_types) host_only = host_only || t == jt::handle || t == jt::ct;
+  if(a64 && !host_only && a64->calls[key]++ < 3) { // array-result is the address of the cell host : qemu does not compare
+    bool ok = true;
+    for(uint32_t i = 0; i < vals.size() && ok; ++i) {
+      a64_check::arg a;
+      if(param_types[i] == jt::arr_i64 || param_types[i] == jt::arr_f64) {
+        auto const * arr = reinterpret_cast<array_v const *>(raw[i]);
+        a.array = true;
+        for(uint32_t j = 0; j < i && a.same_as < 0; ++j)
+          if(raw[j] == raw[i] && (param_types[j] == jt::arr_i64 || param_types[j] == jt::arr_f64)) a.same_as = int(j);
+        for(uint32_t k = 0; k < arr->size() && ok; ++k) {
+          value e = arr->get(k);
+          if(e.is<int64_t>()) a.items.push_back(uint64_t(e.as<int64_t>()));
+          else if(e.is<double>()) a.items.push_back(std::bit_cast<uint64_t>(e.as<double>()));
+          else ok = false;
+        }
+      } else a.bits = raw[i];
+      sargs.push_back(std::move(a));
+    }
+    if(ok) shadow = a64->run(f, param_types, sargs);
+  }
+  jit_fault = 0;
+  // The nested input (VM service calculates the node → compilation → the compiler in the language with
+  // its interpreter executes its machine code) rearranges jit_vm; the output is the same, otherwise the
+  // next service call from the external code takes the interpreter, which no longer exists.
+  struct restore_vm {
+    interpreter * outer;
+    address_space * space;
+    std::size_t spaces;
+    ~restore_vm() {
+      jit_vm = outer;
+      current_space = space; // with_alloc interrupted by an error is the previous level
+      jit_spaces.resize(spaces);
+    }
+  } restore{std::exchange(jit_vm, this), current_space, jit_spaces.size()};
+  auto entry =reinterpret_cast<uint64_t (*)(uint64_t const *)>(code->entry);
+  uint64_t bits;
+  jit_call_mem mem;
+  if(res_any()) // parameter-resource - cell of the caller (alias): transfer from it solves and calls, as in the interpreter
+    for(uint32_t i = 0; i < vals.size() && i < args.size(); ++i)
+      if(param_types[i] == jt::handle && cells[i] != &vals[i] && has_resource(*cells[i])) mem.borrows.push_back({cells[i], args[i], env});
+  if(code->by_lang) { // Compiler code in language: array - cell address (data and size code reads from it), behind the arguments - error slots
+    std::vector<uint64_t> area;
+    for(uint32_t i = 0; i < vals.size(); ++i) {
+      if(param_types[i] == jt::arr_i64 || param_types[i] == jt::arr_f64) {
+        value * c = cells[i];
+        if(array_v const * b = c->as<array_v>().borrowed) c = cell_of(b); // loan
+        array_v const & arr = c->as<array_v>();
+        auto want = param_types[i] == jt::arr_i64 ? array_v::layout::ints : array_v::layout::floats;
+        if(!arr.empty() && arr.kind() != want) throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[f].where);
+        area.push_back(reinterpret_cast<uint64_t>(c));
+      } else if(param_types[i] != jt::ct) area.push_back(raw[i]);
+    }
+    std::size_t fault_at = area.size();
+    area.insert(area.end(), 4, 0); // type of error, node, thrown value, its type
+    area.push_back(reinterpret_cast<uint64_t>(&jit_vm_service)); // VM service (streams, print, node)
+    area.push_back(reinterpret_cast<uint64_t>(&mem)); // memory
+    area.push_back(reinterpret_cast<uint64_t>(&array_gen)); // Buffer generation counter (push machine code)
+    bits = entry(area.data());
+    jit_fault = area[fault_at]; // Error - from slots given by VM (not the host address in the code)
+    jit_fault_node = area[fault_at + 1];
+    jit_thrown = area[fault_at + 2];
+    jit_thrown_type = area[fault_at + 3];
+  } else bits = entry(raw.data());
+  auto fault = jit_fault_kind(jit_fault);
+  if(fault != jit_fault_kind::none && res_any()) // Error: Free your call memory resources (like the bootstrapping interpreter) in reverse order
+    for(auto it = mem.own.rbegin(); it != mem.own.rend(); ++it)
+      if(!it->hidden && has_resource(*it)) {
+        value v = std::move(*it);
+        *it = value();
+        drop_value(v, db[f].where);
+      }
+  if(shadow) a64->compare(*shadow, sargs, raw, code->result, bits, cat(db.strings.text(db.as<n_fn>(f).name), "(", jit_engine::types_str(param_types), ")"));
+  if(fault == jit_fault_kind::vm_error && jit_pending_flow) { // Excluding the language from node computed by VM
+    jit_fault = 0;
+    flow r = std::move(*jit_pending_flow);
+    jit_pending_flow.reset();
+    return r;
+  }
+  if(fault == jit_fault_kind::vm_error) { // Error/Cancellation within the VM operation
+    jit_fault = 0;
+    std::rethrow_exception(std::exchange(jit_pending, nullptr));
+  }
+  // No Deoptimizations: Type - Contract for the entire program
+// The mismatch is a VM error.
+  if(fault == jit_fault_kind::thrown) { // Exception by the second way - catches the interpreter
+    node_id at{uint32_t(jit_fault_node)};
+    jit_fault = 0;
+    jt ty = jt(jit_thrown_type);
+    value v = ty == jt::f64_ ? value(std::bit_cast<double>(jit_thrown)) : ty == jt::bool_ ? value(jit_thrown != 0)
+                                                                                          : value(int64_t(jit_thrown));
+    throw_stack = stack;
+    return flow{flow_kind::thr, std::move(v), at.value};
+  }
+  if(fault != jit_fault_kind::none) {
+    node_id at{uint32_t(jit_fault_node)};
+    jit_fault = 0;
+    // The compiler code on the language puts the index and size in the words of the value - the message as the interpreter
+    if(fault == jit_fault_kind::bounds && code->by_lang)
+      fail_rt("out_of_bounds", cat("индекс ", int64_t(jit_thrown), " вне границ массива размера ", jit_thrown_type), db[at].where);
+    if(fault == jit_fault_kind::layout)
+      throw diagnostic("внутренняя ошибка JIT: раскладка массива не совпала с типом экземпляра", db[at].where);
+    char const * what = fault == jit_fault_kind::bounds ? "индекс вне границ массива (машинный код)"
+        : fault == jit_fault_kind::div_zero             ? "деление на ноль (машинный код)"
+        : db.is_assume(at)                              ? "нарушено предположение assume (машинный код)"
+                                                        : "нарушено требование require (машинный код)";
+    char const * type = fault == jit_fault_kind::bounds ? "out_of_bounds" : fault == jit_fault_kind::div_zero ? "div_by_zero"
+                                                                                                              : "require_failed";
+    fail_rt(type, what, db[at].where);
+  }
+  // field to variable parameter: the machine code changed the copy - in the caller field (as in invoke)
+  for(uint32_t i = 0; i < vals.size() && i < args.size(); ++i)
+    if(cells[i] == &vals[i] && db.is_member(args[i]) && writes_param(f, i)) {
+      flow w = assign(args[i], "=", vals[i], env, 0, db[args[i]].where);
+      if(!w.normal()) fail("запись поля-аргумента после вызова не завершилась", db[args[i]].where);
+    }
+  emit({report_event::instance, key, {}, {}, {}, {}});
+  switch(code->result) {
+    case jt::i64_: return ok(value(int64_t(bits)));
+    case jt::bool_: return ok(value(bits != 0));
+    case jt::f64_: {
+      double x;
+      std::memcpy(&x, &bits, 8);
+      return ok(value(x));
+    }
+    case jt::arr_i64:
+    case jt::arr_f64:
+    case jt::handle: return ok(*reinterpret_cast<value const *>(bits)); // VM is the address of the cell (argument or call memory)
+    default: return ok(value());
+  }
+}
+
+} // namespace vish

@@ -1,0 +1,16 @@
+// Test module 131 context rules (geo.forms key): write forms - module announcements; use
+// geo.forms; bring them into context at the use point (module - inclusion, §9.1).
+module geo.forms;
+
+syntax twice {body} => {
+  body;
+  body;
+};
+
+operator (a) +* (b) => (a * b) + a;
+
+thrice(expr body) {
+  body;
+  body;
+  body;
+}

@@ -1,0 +1,47 @@
+// Repression (step 12.2):
+// 
+// Therefore, not the signal, but the cooperative care at a safe point (reverse edge of the cycle, call)
+// when the quantum is over and the others are ready. Only background processes (process(f, …)) are
+// replaced, without JIT: Monopoly - the program itself and its fiber - is never replaced (author's
+// decision 2026-10-19): A and B - fiber of the background process (its band - its stream host, step
+// 12.3b), their cycles alternate; C and D - fiber programs, go in turn as a whole. The quantum here is
+// 150 iterations (quantum:, deterministically), the default is 10 ms.
+//
+//
+// quantum: 150
+// machine
+// out: A 0
+// out: A 100
+// out: B 0
+// out: B 100
+// out: A 200
+// out: B 200
+// out: C 0
+// out: C 100
+// out: C 200
+// out: D 0
+// out: D 100
+// out: D 200
+// out: конец
+busy(str name, i64 n) {
+  s = 0;
+  for(i : range(n)) {
+    s += i;
+    if((i % 100) == 0) print(name, i);
+  }
+}
+// background process: A and B are its fiber, in the queue of its bands in order; the quantum alternates them
+two(done) {
+  spawn { busy("A", 300); write(done, 1); }
+  spawn { busy("B", 300); write(done, 1); }
+  read(done);
+  read(done);
+}
+main() {
+  p = process(two, stream());
+  wait(p);
+  spawn { busy("C", 300); }
+  spawn { busy("D", 300); }
+  yield(); // C and D - in whole, in turn: the monopoly is not replaced
+  print("конец");
+}

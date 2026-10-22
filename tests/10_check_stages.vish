@@ -1,0 +1,23 @@
+// stdin: 1 2 3
+// out: 32.0
+// out: 14.0
+// machine
+// check: u = кт [1.0, 2.0, 3.0]
+// check: xs = рт array<f64>
+// check: dot  ×1
+// check: dot(рт array<f64>, рт array<f64>)  ×1
+// Value Approach: Known folds into compile-time, run-time gives instance over runtime-part.
+dot(a, b) {
+  require(a.size == b.size);
+  s = zero(typeof(a[0]));
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
+  s
+}
+
+main() {
+  u = array{1.0, 2.0, 3.0};
+  v = array{4.0, 5.0, 6.0};
+  print(dot(u, v));
+  xs = read_floats(stdin);
+  print(dot(xs, xs));
+}

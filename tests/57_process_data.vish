@@ -1,0 +1,10 @@
+// machine
+// error: в поток — только данные
+// Between processes (and through threads) there is only data: the circuit holds the
+// areas of its process - alias - to someone else’s memory (§9.2).
+main() {
+  s = stream();
+  k = 3;
+  f = (x) => x + k;
+  write(s, f);
+}

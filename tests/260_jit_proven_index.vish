@@ -1,0 +1,45 @@
+// args: 4
+// out: 10 5
+// out: out_of_bounds
+// out: 3
+// check: 260_jit_proven_index.vish:15 xs[i]
+// check-lacks: ys[i]
+// jit-compiled: total
+// jit-compiled: cross
+// jit-compiled: grow
+// The index proved by parsing instance (range(xs.size) - xs indices), machine code takes without
+// checking the boundaries; unproven (ys[i] for i from range(xs.size)) - with verification, the error
+// is the same; the array that grows in the cycle (push), the proof removes.
+total(xs) {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
+  s
+}
+
+cross(xs, ys) {
+  s = 0;
+  for(i : range(xs.size)) s += ys[i];
+  s
+}
+
+grow(xs) {
+  s = 0;
+  for(i : range(xs.size)) {
+    xs.push(i);
+    s += xs[i];
+  }
+  s
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  xs = fill(n, 0);
+  for(i : range(n)) xs[i] = i + 1;
+  print(total(xs), cross(fill(n - 1, 1), xs) - 1);
+  try {
+    cross(xs, fill(n - 2, 1));
+  } catch(out_of_bounds e) {
+    print("out_of_bounds");
+  }
+  print(grow(fill(n - 1, 1)));
+}

@@ -1,0 +1,19 @@
+// The program for the 203_editor_ct_instance.wire script (itself a regular test).
+// out: вход
+// out: тело
+// fmt-ct-has: print("вход");
+greet() {
+  print("тело");
+}
+
+instrument(f, s) {
+  ct {
+    b = f.body;
+    b.items = array{ast.call{ast.name{"print"}, array{ast.string{s}}}, ...b.items};
+  }
+}
+
+main() {
+  instrument(code(greet), "вход");
+  greet();
+}

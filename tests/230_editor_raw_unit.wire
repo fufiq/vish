@@ -8,7 +8,7 @@
 // The cursor in the block is stable: the projection block is the text as written. The draft
 // element (author's decision 2026-10-12) is disassembled in its entirety, but the update is
 // the narrowest: id node is preserved, only the block has changed.
-// program: editor_raw.tz
+// program: editor_raw.vish
 open_view module
 [2] open_view module
 run

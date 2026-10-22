@@ -1,0 +1,16 @@
+// error: 238_extension_field_error.vish:10:1: ошибка: pt: расширять сущности модуля geo.shapes можно только в нём (own_only)
+// Control for individual entity (§9.1): [[extension(own_only)]] for struct pt module
+// geo.shapes - the field added by the extension pt { … } outside the module is rejected on
+// the extension announcement. area of the same module without control - its overload is its
+// type passes (error - only pt).
+use geo.shapes;
+
+area(i64 n) => n;
+
+pt {
+  i64 z;
+}
+
+main() {
+  print(area(pt{2, 3}), area(4));
+}

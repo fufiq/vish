@@ -1,0 +1,21 @@
+// The program is resourced by the author (step 12 debt):
+// 
+// Not a dump, not a dump. Without vish run -grant fs,net (here - without grant:) the program has no
+// files and network: no file, the connection is immediately closed; granted(вид) - is given now.
+//
+// machine
+// out: fs дана: false
+// out: нет файла
+// out: сеть: close сеть программе не дана
+main() {
+  print("fs дана:", granted("fs"));
+  try {
+    open("tests/317_not_granted.vish");
+    print("открыл");
+  } catch(io_error e) {
+    print("нет файла");
+  }
+  c = connect("127.0.0.1", 9);
+  e = read(c);
+  print("сеть:", e.kind, e.data);
+}

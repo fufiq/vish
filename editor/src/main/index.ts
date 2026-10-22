@@ -3,9 +3,9 @@
 //
 //
 // Connect, otherwise start: the editor connects to the socket; if the VM is not there
-// and the program is set, it raises the `tz serve <программа> <сокет>` itself (and
+// and the program is set, it raises the `vish serve <программа> <сокет>` itself (and
 // extinguishes when it exits). Several editors can be connected to one VM.
-// electron-vite dev -- --program ../tests/stats.tz [--socket path]
+// electron-vite dev -- --program ../tests/stats.vish [--socket path]
 import { spawn, type ChildProcess } from 'node:child_process';
 import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -17,9 +17,9 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-const socketPath = arg('socket') ?? join(tmpdir(), 'tz-editor.sock');
+const socketPath = arg('socket') ?? join(tmpdir(), 'vish-editor.sock');
 const program = arg('program');
-const tzBin = process.env.TZ_BIN ?? join(app.getAppPath(), '../out/tz');
+const vishBin = process.env.VISH_BIN ?? join(app.getAppPath(), '../out/vish');
 
 let vm: ChildProcess | undefined;
 let socket: Socket | undefined;
@@ -51,8 +51,8 @@ async function connectVm(): Promise<Socket> {
     const code = (e as NodeJS.ErrnoException).code;
     if (!program || (code !== 'ENOENT' && code !== 'ECONNREFUSED')) throw e;
   }
-  status(`запуск VM: ${tzBin} serve ${program} ${socketPath}`);
-  vm = spawn(tzBin, ['serve', program, socketPath], {
+  status(`запуск VM: ${vishBin} serve ${program} ${socketPath}`);
+  vm = spawn(vishBin, ['serve', program, socketPath], {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
   for (let i = 0; i < 100; ++i) {

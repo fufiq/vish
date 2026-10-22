@@ -1,0 +1,11 @@
+// error: outline
+// The outline function is not inline, so return(caller) is forbidden.
+outline try(expr e) {
+  r = e;
+  if(r.is_err()) return(caller) r;
+  r.value
+}
+
+main() {
+  x = try(parse_int("1"));
+}

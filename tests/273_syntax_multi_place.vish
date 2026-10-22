@@ -1,0 +1,20 @@
+// out: 12 10 0 10
+// machine
+// fmt-stable
+// store-roundtrip
+// fmt-has: syntax clamp3 (x, lo, hi) => clamp(x, lo, hi);
+// Multiple places in the same syntax brackets: (a, b) - each of its places; forms with
+// different number of places - overload. It was: only (x) and list (xs, ...) - a double form
+// required a word between places.
+//
+struct ast.pair { code first; code second; }
+syntax pair (a, b) => ast.pair{a, b};
+ast.pair { eval(a, b) => (a * 10) + b; }
+
+syntax clamp3 (x, lo, hi) => clamp(x, lo, hi);
+syntax clamp3 (x) => clamp(x, 0, 10);
+clamp(i64 x, i64 lo, i64 hi) => if(x < lo) lo else if(x > hi) hi else x;
+
+main() {
+  print(pair (1, 2), clamp3 (15, 0, 10), clamp3 (-1, 0, 10), clamp3 (42));
+}

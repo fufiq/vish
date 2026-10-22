@@ -1,0 +1,11 @@
+// Service descriptor outside (step 12.4): - Descriptor fields are read only by the service (you can not
+// create it outside, test 314; service status names are not visible).
+// machine
+// out: ключ есть
+// error: дескриптор key сервиса svc.keys: читать поля — только в сервисе
+use svc.keys;
+main() {
+  k = make_key("тайна");
+  print("ключ есть");
+  print(k.id);
+}

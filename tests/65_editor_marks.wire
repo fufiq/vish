@@ -4,7 +4,7 @@
 // 
 // Error - in place, with a track
 // instantiation (§13.4).
-// program: editor_poly.tz
+// program: editor_poly.vish
 open_view module
 // twice is called from i64 and f64 - both types
 // expect: kind="type" text="f64 | i64"

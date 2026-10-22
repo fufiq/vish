@@ -1,0 +1,19 @@
+// Too deep recursion (not in the tail) is the exclusion of stack_overflow, not the fall of VM: "no UB"
+// (R20). VM looks at how much execution stack is left (the stream and fiber has its own), and on the last
+// megabytes it gives a language error - it is caught like any VM error. Depth is a property of the engine
+// (machine code spends the stack differently, the host stack machine does not need), so there is no
+// reconciliation with them. The track of the same frames - one line (×N).
+// no-jit
+// out: поймал: stack_overflow
+// out: в файбере: stack_overflow
+// out: живы
+sum(i64 n) => if(n == 0) 0 else n + sum(n - 1);
+main() {
+  try { print(sum(args.size * 1000000)); } catch(stack_overflow e) { print("поймал: stack_overflow"); }
+  s = stream();
+  spawn {
+    try { write(s, sum(args.size * 1000000)); } catch(vm_error e) { write(s, -1); }
+  }
+  if(read(s) < 0) print("в файбере: stack_overflow");
+  print("живы");
+}

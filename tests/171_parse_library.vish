@@ -1,0 +1,55 @@
+// out: example.org 8080 true
+// out: localhost -1 false
+// out: 3 5.5
+// out: point{x: 1, y: 2} point{x: -3, y: 4}
+// machine
+// fmt-stable
+// store-roundtrip
+// Библиотека разбора прелюдии (§4.4) — (критика mecha): 
+// 
+// 
+// 
+// Type - parser type (i64, str, bool), string - literal configuration,
+// | - alternative, map(T, {поле: парсер, …}) - aggregate by field names (anonymous
+// literature - ibid.), as - the value of the successful.
+struct server { str host; i64 port; bool tls; }
+
+server_p() => map(server, {
+  host: combine("host", "=", str),
+  tls: combine("tls", "=", bool),
+  port: combine("port", "=", int() | as(-1, word("auto")))
+});
+
+config(expr body) {
+  syntax {r} => parse(r, server_p());
+  body
+}
+
+struct point { i64 x; i64 y; }
+
+// points: (x, y) ..., the subblock is disassembled entirely inside (within)
+points(expr body) {
+  syntax {r} => parse(r, repeated(within("(", map(point, {x: i64, y: combine(",", i64)}))));
+  body
+}
+
+// number with config: int(false) - without a sign, f64 - integer or fractional
+pair(expr body) {
+  syntax {r} => parse(r, seq(int(false), f64));
+  body
+}
+
+main() {
+  s = config { host = "example.org" tls = true port = 8080 };
+  print(s.host, s.port, s.tls);
+  t = config {
+    host = "localhost"
+    tls = false
+    port = auto
+  };
+  print(t.host, t.port, t.tls);
+  p = pair { 3 5.5 };
+  print(p[0], p[1]);
+  ps = points { (1, 2) (-3, 4) };
+  print(ps[0], ps[1]);
+}

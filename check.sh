@@ -1,10 +1,10 @@
 #!/bin/sh
 # Complete check before the committ: three assemblies - simultaneously (code generation each -
 # on the cores, -flto=auto), tests of the mode - immediately upon the readiness of its assembly.
-#   ./check.sh          — release, debug (со сверкой вклейки TZ_SPLICE_CHECK), asan + --a64, TZ_JIT_SELF, проекция, редактор
+# ./check.sh - release, debug (with VISH_SPLICE_CHECK sticker reconciliation), asan + --a64, VISH_JIT_SELF, projection, editor
 # ./check.sh Quick - Release only and its tests
-# ./check.sh full - as without a key, plus TZ_JIT_SELF under asan (≈7.5 min) Exit code
-# 0 - all green. Logs - out/check/. Working out/tz - release.
+# ./check.sh full - as without a key, plus VISH_JIT_SELF under asan (≈7.5 min) Exit code
+# 0 - all green. Logs - out/check/. Workout/vish - release.
 cd "$(dirname "$0")"
 L=out/check
 mkdir -p $L
@@ -20,24 +20,24 @@ suite() { # имя лог бинарь аргументы…
   echo "$n: $(tail -1 "$l") (код $c)" > $L/r_$n
 }
 mode() { # режим: сборка → тесты; release — ещё --a64 и самокомпиляция (full: и asan)
-  m=$1 b=out/tz-$1
+  m=$1 b=out/vish-$1
   if ! OUT=$b ./build.sh "$m" > $L/b_$m.log 2>&1; then
     echo "$m: сборка упала (код $?, $L/b_$m.log)" > $L/r_$m
     return
   fi
   if [ "$m" = asan ] && [ "$FULL" = 1 ]; then # full: самокомпиляция и под asan (≈5 мин) — стек VM, не хоста
-    TZ_JIT_SELF=1 suite self_asan $L/t_self_asan.log $b test tests &
+    VISH_JIT_SELF=1 suite self_asan $L/t_self_asan.log $b test tests &
   fi
   if [ "$m" = debug ]; then # вклейка черновика редактора сверяется с полной печатью на каждой клавише
-    TZ_SPLICE_CHECK=1 suite "$m" $L/t_$m.log $b test tests
+    VISH_SPLICE_CHECK=1 suite "$m" $L/t_$m.log $b test tests
   else
     suite "$m" $L/t_$m.log $b test tests
   fi
   wait
   if [ "$m" = release ]; then
-    cp $b out/tz
+    cp $b out/vish
     suite a64 $L/t_a64.log $b test tests --a64 &
-    TZ_JIT_SELF=1 suite self $L/t_self.log $b test tests &
+    VISH_JIT_SELF=1 suite self $L/t_self.log $b test tests &
     suite projection $L/t_projection.log $b test tests --projection geo.words & # второй язык: тот же АСТ (§4.5)
     if [ -d editor/node_modules ]; then
       $b schema > editor/src/protocol/schema.json

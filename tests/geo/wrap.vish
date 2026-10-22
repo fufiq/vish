@@ -1,0 +1,7 @@
+// Test module 298-299: connects geo.deep - he sees his names, not the one who connected
+// geo.wrap (use is not transitive).
+module geo.wrap;
+use geo.deep;
+
+wrapped(i64 v) => make_cell(v + depth);
+depth_of() => depth;

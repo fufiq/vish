@@ -5,7 +5,7 @@
 // 
 // Elaboration - by pausing the set (idle), as well as checking. The
 // client text is checked with projection after each response.
-// program: editor_ct.tz
+// program: editor_ct.vish
 open_view module
 // expect: struct point { i64 x; i64 y; i64 z = 7; }
 // 7 → 8 - The mutation is rolled back and made anew

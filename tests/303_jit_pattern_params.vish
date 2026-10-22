@@ -1,0 +1,26 @@
+// Sample parameters in machine code (tail of step 10): VM selects the candidate by value
+// 
+// The names instance get by decompressing the value of the parameter at the input - the same
+// VM service as the sample instruction = the value (its whole semantics). Recursion by
+// pattern - each call again selects a candidate (array {} - end).
+// jit-compiled: sum
+// jit-compiled: head
+// jit-compiled: len2
+// jit-compiled: swap_sum
+// machine
+// out: 15 9 0
+// out: 25.0 7
+struct point { f64 x; f64 y; }
+
+sum(array{}) => 0;
+sum(array{x, ...xs}) => x + sum(xs);
+head(array{x, ...xs}) => x;
+head(array{}) => 0;
+len2({x: a, y: b}) => (a * a) + (b * b);
+swap_sum(array{a, array{b, c}}) => a + b + c; // nested
+
+main() {
+  xs = array{1, 2, 3, 4, 5};
+  print(sum(xs), head(array{9, 8}), head(array{}));
+  print(len2(point{3.0, 4.0}), swap_sum(array{1, array{2, 4}}));
+}

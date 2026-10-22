@@ -2,7 +2,7 @@
 // 
 // proc grant fs - granted("fs") is true, files are opened; proc revoke fs - open files are closed by the
 // external side, the program sees the end.
-// program: grants.tz
+// program: grants.vish
 proc start
 // expect: процесс запущен
 proc step 300

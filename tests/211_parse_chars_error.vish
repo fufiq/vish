@@ -1,0 +1,44 @@
+// out: rgb{r: 18, g: 52, b: 86}
+// out: 1234 4 ожидалась цифра по основанию 16
+// out: zz56 0 ожидалась цифра по основанию 16
+// out: g 0 лишнее: ожидался конец блока
+// out: ff0g12 3 ожидалась цифра по основанию 16
+// out: x 0 ожидался символ @
+// out: 0 0 ожидалось имя
+// error: 211_parse_chars_error.vish:43:20: ошибка: исполнение неразобранного фрагмента: разбор блока: ожидалась цифра по основанию 16
+// fmt-stable
+// Ошибка разбора символов — дыра на месте внутри атома: 
+// parse отдаёт parse_error_in{атом, причина,
+// смещение}: смещение от начала атома — место в тексте (ff0g12 — на «g», строка 43 столбец
+// 20, а не весь атом); конец слова раньше цифр — сразу за последним символом; 12zz56 —
+// атомы 12 и zz56 вплотную, место — начало zz56; ff0g12 — одно имя, место — «g» (3). Своё
+// правило видит неудачу значением (здесь — строка вместо агрегата).
+struct rgb { i64 r; i64 g; i64 b; }
+
+plain(expr body) {
+  syntax {r} => parse(r, map(rgb, {r: hex(2), g: hex(2), b: hex(2)}));
+  body
+}
+
+// Failure - meaning: atom text, displacement, cause
+explain(parse_error_in e) => code_text(e.at) + " " + text(e.offset) + " " + e.why;
+explain(v) => "ok";
+why_plain(expr body) {
+  syntax {r} => explain(parse(r, map(rgb, {r: hex(2), g: hex(2), b: hex(2)})));
+  body
+}
+why_tagged(expr body) {
+  syntax {r} => explain(parse(r, combine('@', word())));
+  body
+}
+
+main() {
+  print(plain { 123456 });
+  print(why_plain { 1234 });
+  print(why_plain { 12zz56 });
+  print(why_plain { 12345g });
+  print(why_plain { ff0g12 });
+  print(why_tagged { x });
+  print(why_tagged { @0 });
+  print(plain { ff0g12 });
+}

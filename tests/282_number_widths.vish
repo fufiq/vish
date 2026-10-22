@@ -1,0 +1,18 @@
+// out: -2147483648 -56 44 251 -32768
+// out: 0 18446744073709551615 9223372036854775807 true
+// out: 2 4095 0.30000001192092896 0.3333333432674408
+// out: -5 250.0
+// machine
+// Числа других ширин — код прелюдии над __int64 / __float64 (§5.8): 
+// 
+// ; Overflow - in its width (module), u64 - unsigned comparison, division and writing, f32 -
+// rounding to single accuracy (primitive of the f32 round core); mix with i64 - only explicitly
+// (i32(x)). print takes text(T) of its type.
+//
+main() {
+  a = i32(2147483647);
+  print(a + i32(1), i8(200), u8(300), u8(5) - u8(10), i16(-32768) / i16(-1));
+  print(u32(4294967295) + u32(1), u64(0 - 1), u64(0 - 1) / u64(2), u64(0 - 1) > u64(1));
+  print(i32(1) << i32(33), u16(65535) >> u16(4), f32(0.1) + f32(0.2), f32(1.0) / f32(3.0));
+  print(i64(i32(-5)), f64(u8(250)));
+}

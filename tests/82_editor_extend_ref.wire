@@ -1,7 +1,7 @@
 // Extension to the link in the editor (M5): the link is to the node of the function, not to the name:
 //.
 // Переименовали цель — расширение следует за ней, его проекция обновляется.
-// program: editor_extend.tz
+// program: editor_extend.vish
 open_view module
 pointer 1 @measure( 0 0
 key 1 b

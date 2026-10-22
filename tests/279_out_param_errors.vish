@@ -1,0 +1,10 @@
+// args: 1
+// out: 1
+// check-error: out-параметр p не записан в одном из путей к выходу из функции
+// out-parameter is not written on all paths - error parsing
+//.
+half(i64 k, out p) { if(k > 0) p = 1; }
+main() {
+  half(parse_int(args[1]).value, z);
+  print(z);
+}

@@ -2,7 +2,7 @@
 // order: parsing of the program again, the results - in memory of the process (was: the new body
 // read ct k with the final elaboration value - 500 instead of 100). Struct layout - names and
 // types of fields: i64 v → f64 v - old layout, you need migrate(cell old).
-// program: live_ct.tz
+// program: live_ct.vish
 proc start
 // expect: процесс запущен
 proc step 40

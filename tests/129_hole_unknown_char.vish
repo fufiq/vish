@@ -1,0 +1,18 @@
+// error: неизвестный символ '`'
+// error: неизвестный символ '``'
+// fmt-stable
+// fmt-has: /* дыра: неизвестный символ '`' */ x = 1 ` 2;
+// fmt-has: /* дыра: неизвестный символ '``' */ ``;
+// fmt-has:   y = 3;
+// fmt-has: after() => 2;
+// The unknown symbol is a hole only in its instructions, the rest of the text is disassembled:
+// 
+// A row of coming unknowns is one hole.
+f() {
+  x = 1 ` 2;
+  y=3;
+}
+
+``;
+
+after()=>2;

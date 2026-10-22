@@ -1,0 +1,36 @@
+// out: 42 20
+// out: 42 9
+// out: true 2
+// jit-compiled: f
+// machine
+// fmt-stable
+// store-roundtrip
+// fmt-has: syntax twice (x) => ast.twice{x};
+// fmt-ct-has:   print(a * 2, 5 * 2 * 2);
+// Type node - program announcement (author's decision 2026-10-17:
+//). 
+//:
+// struct ast.twice { code x; } — вид узла; запись syntax строит его при разборе, его
+// смысл — раскрытие трансформатором в известные узлы: 
+//.
+struct ast.twice { code x; }
+syntax twice (x) => ast.twice{x};
+[[transform]] lower_twice(ast.twice t) => ast.operation{"*", array{t.x, ast.int{2}}};
+
+// two fields, sample of species, view in condition
+struct ast.pair { code first; code second; }
+syntax pair (a) with (b) => ast.pair{a, b};
+[[transform]] lower_pair(ast.pair p) {
+  ast.pair{x, y} = p;
+  if(code_kind(x) == ast.int) return ast.operation{"+", array{x, y}};
+  ast.operation{"-", array{p.first, p.second}}
+}
+
+f(i64 n) => pair (n) with (1);
+
+main() {
+  a = 21;
+  print(twice (a), twice (twice (5)));
+  print(pair (40) with (2), f(10));
+  print(ct { code_kind(ast.pair{ast.int{1}, ast.int{2}}) == ast.pair }, ct { code_items(ast.twice{ast.int{3}}).size + 1 });
+}

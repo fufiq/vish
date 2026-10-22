@@ -1,0 +1,48 @@
+// out: 1 2 30 4
+// out: 3 20 10
+// out: 7 8
+// machine
+// fmt-stable
+// Модели указателей: 
+// 
+// Push - the effect of the group "relocate"; whether it breaks the link - decides the support model.
+// pin(xs) is an infinite vector (its own range of addresses): growth is not moving, the link is alive.
+// Its model of “I-I” (does not break anything:) - the program takes responsibility explicitly; the
+// execution remains the test of the implementation generation.
+pinned_ref() {
+  xs = array{1, 2, 3};
+  pin(xs);
+  &e = xs[2];
+  xs.push(4);
+  e = 30;
+  print(xs[0], xs[1], xs[2], xs[3]);
+}
+// your operation declares the effect of relocate (like a push), but the data does not move: in
+// the default model - parsing error, in the I-I model - you can
+[[relocates(xs)]] swap_ends(mut xs) {
+  t = xs[0];
+  xs[0] = xs[xs.size - 1];
+  xs[xs.size - 1] = t;
+}
+ya_ya() => pointer_model{"я-я", array{}};
+own_model() {
+  ys = array{10, 20, 3};
+  with_model(ys, ya_ya());
+  &f = ys[1];
+  swap_ends(ys);
+  print(ys[0], f, ys[2]);
+}
+// its own effect group: "compact" breaks links only in the model that names it (test 290); default model
+// doesn't know it
+[[effect(xs, "compact")]] squeeze(mut xs) {}
+own_effect() {
+  zs = array{7, 8};
+  &g = zs[1];
+  squeeze(zs);
+  print(zs[0], g);
+}
+main() {
+  pinned_ref();
+  own_model();
+  own_effect();
+}

@@ -1,0 +1,5 @@
+// 292-293 Test Module: Uses geo.inner, not for the user.
+module geo.outer;
+use geo.inner;
+
+norm(i64 x, i64 y) => sq(x) + sq(y);

@@ -1,0 +1,190 @@
+// out: 56 9 -1 3628800 false true false
+// out: 34 2.5 -1.0 true
+// out: 10 3.0 [3.0, 6.0] 3 4
+// out: -1 -2
+// out: 10 11.0 30 4 32
+// out: 6765 1024.0 18 ()
+// out: -1 -2
+// out: 4 -1 4 -21 105 7 5 -9
+// out: 43 3
+// jit-compiled: sq
+// jit-compiled: mx
+// jit-compiled: fact
+// jit-compiled: both
+// jit-compiled: poly
+// jit-compiled: avg
+// jit-compiled: total
+// jit-compiled: scale
+// jit-compiled: at
+// jit-compiled: dv
+// jit-compiled: sum_for
+// jit-compiled: dot_for
+// jit-compiled: each
+// jit-compiled: cnt
+// jit-compiled: hyp
+// jit-compiled: fib
+// jit-compiled: pw
+// jit-compiled: sumto
+// jit-compiled: show
+// jit-compiled: over
+// jit-compiled: dz
+// jit-compiled: sdiv
+// jit-compiled: pick
+// jit-compiled: mid
+// jit-compiled: outer
+// jit-compiled: at_or
+// jit-stats: компилятор языка, исключений переходом: 1
+// jit-stats: fact(i64) → 
+// jit-stats: компилятор языка
+// machine
+// fmt-stable
+// store-roundtrip
+// Компилятор на языке (§10.4, шаг к раскрутке): 
+// 
+// jit_compile prelude - gluing to vish: bypasses AST (code_field), distributes frame slots
+// and tags, glues bytes code generator target (codegen). JIT executes its code; it can’t -
+// glue in C++. Testing AArch64 in qemu runs these bytes. Arrays and traps: VM gives the
+// argument area ({данные, размер} for the array) and error slots behind it - there are no
+// host addresses in the code (author's decision). semantic inlining: node and overload give
+// parsing instance (jit_type), return in the block from the function that wrote the block.
+// Recursion is a real challenge to yourself (call at its beginning, the area of arguments is
+// in the frame), the error caused is transferred to your slots. try/catch/throw: catch is
+// selected when compiling by type - switching VM error to try - too; uncaught - to area
+// slots.
+//
+//
+sq(i64 x) => x * (x + 1);
+
+mx(i64 a, i64 b) => if(a > b) a else b;
+
+fact(i64 n) => {
+  r = 1;
+  k = n;
+  loop {
+    if(k <= 1) break;
+    r *= k;
+    k -= 1;
+  }
+  r
+}
+
+both(i64 a, i64 b) => (a > 0) && ((b > 0) || (a == b));
+
+// Tree chooses parsing (no priority, [[associative]] one tree)
+poly(i64 x) => (x * x) + (x * 2) + 1 + x;
+
+avg(f64 a, f64 b, i64 n) => {
+  s = (a + b) / 2.0;
+  if(n < 0) -s else s
+}
+
+total(xs) => {
+  s = 0;
+  i = 0;
+  loop {
+    if(i >= xs.size) break;
+    s += xs[i];
+    i += 1;
+  }
+  s
+}
+
+scale(ys, f64 k) => {
+  i = 0;
+  loop {
+    if(i >= ys.size) break;
+    ys[i] = ys[i] * k;
+    i += 1;
+  }
+  ys[0]
+}
+
+at(xs, i64 k) => xs[k];
+
+dv(i64 a, i64 b) => a / b;
+
+pos(i64 x) => {
+  require(x > 0);
+  x
+}
+
+sum_for(xs) => {
+  s = 0;
+  for(i : range(xs.size)) s += xs[i];
+  s
+}
+
+dot_for(a, b) => {
+  s = 0.0;
+  for(i : range(a.size)) s = s + (a[i] * b[i]);
+  s
+}
+
+each(xs) => {
+  s = 0;
+  for(x : xs) s += x * x;
+  s
+}
+
+cnt(i64 n) => {
+  k = 0;
+  i = 0;
+  while(i < n) {
+    if((i % 3) == 0) k += 1;
+    i += 1;
+  }
+  k
+}
+
+hyp(i64 a, i64 b) => sq(a) + sq(b);
+
+fib(i64 n) => if(n < 2) n else fib(n - 1) + fib(n - 2);
+
+pw(f64 x, i64 k) => if(k == 0) 1.0 else x * pw(x, k - 1);
+
+sumto(xs, i64 i) => if(i >= xs.size) 0 else xs[i] + sumto(xs, i + 1);
+
+show(i64 x) => {
+  y = x + 1;
+}
+
+over(xs, i64 i) => if(i > xs.size) 0 else xs[i] + over(xs, i + 1);
+
+dz(i64 n) => if(n == 0) 1 / n else dz(n - 1) + 1;
+
+sdiv(i64 a, i64 b) => try { a / b } catch(div_by_zero e) { -1 };
+
+pick(i64 x) => try {
+  if(x < 0) throw x * 10;
+  x + 1
+} catch(i64 v) { v - 1 };
+
+mid(i64 x) => try { 100 + (if(x > 0) x else throw 7.5) } catch(f64 v) { i64(v) };
+
+outer(i64 x) => {
+  if(x == 0) throw 42;
+  x
+}
+
+at_or(xs, i64 k) => try { xs[k] } catch(out_of_bounds e) { 0 - k };
+
+main() {
+  print(sq(7), mx(3, 9), mx(-1, -5), fact(10), both(1, 0), both(1, 2), both(-1, 5));
+  print(poly(4) + 5, avg(2.0, 3.0, 1), avg(0.5, 1.5, -1), (avg(1.0, 1.0, 1) == 1.0) && ((0.1 + 0.2) != 0.3));
+  a = array{1, 2, 3, 4};
+  b = array{1.0, 2.0};
+  print(total(a), scale(b, 3.0), b, at(a, 2), dv(9, 2));
+  r = try { at(a, 7) } catch(out_of_bounds e) { -1 };
+  q = try { dv(1, 0) } catch(div_by_zero e) { -2 };
+  print(r, q);
+  xs = array{1, 2, 3, 4};
+  print(sum_for(xs), dot_for(array{1.0, 2.0}, array{3.0, 4.0}), each(xs), cnt(10), hyp(3, 4));
+  ys = array{5, 6, 7};
+  print(fib(20), pw(2.0, 10), sumto(ys, 0), show(3));
+  r2 = try { over(ys, 0) } catch(out_of_bounds e) { -1 };
+  q2 = try { dz(5) } catch(div_by_zero e) { -2 };
+  print(r2, q2);
+  print(sdiv(9, 2), sdiv(1, 0), pick(3), pick(-2), mid(5), mid(-1), at_or(array{4, 5}, 1), at_or(array{4, 5}, 9));
+  r3 = try { outer(0) } catch(i64 v) { v + 1 };
+  print(r3, outer(3));
+}

@@ -1,0 +1,7 @@
+// error: все файберы ждут друг друга (взаимная блокировка)
+// Mutual locking is a program error with a waiting place track.
+main() {
+  s = stream();
+  spawn { print(read(s)); }
+  print(read(s));
+}

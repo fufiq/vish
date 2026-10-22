@@ -1,0 +1,26 @@
+// out: 3 4
+// out: [0, 1, 4, 9]
+// out: [0, 1]
+// machine
+// fmt-stable
+// out-параметр — место результата у вызывающего (§6.2, R13): 
+// 
+// 
+// The name of the argument is the place: no in the caller is declared, the former value goes
+// away; the function builds the value in place; it is impossible to read before writing, it is
+// written to the exit on all paths (test 279).
+struct point { i64 x; i64 y; }
+make(i64 k, out p) { p = point{k, k + 1}; }
+fill_sq(i64 n, out xs) {
+  xs = array{};
+  for(i : range(n)) xs.push(i * i);
+}
+main() {
+  make(3, q);
+  print(q.x, q.y);
+  fill_sq(4, ys);
+  print(ys);
+  ys.push(100);
+  fill_sq(2, ys);
+  print(ys);
+}

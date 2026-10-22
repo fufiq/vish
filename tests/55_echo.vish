@@ -1,0 +1,40 @@
+// machine
+// grant: net
+// out: ответ 0: ping 0
+// out: ответ 1: ping 1
+// out: ответ 2: ping 2
+// out: сервер: соединений 3, закрыто 3
+// Echo server (§8.3, criterion M3)
+// 
+//;
+//  listen — один поток событий по всем соединениям, send — в исходящий
+// поток; под ними io_uring (мультишот accept/recv, кольцо буферов ядра).
+serve(net, n) {
+  opened = 0;
+  closed = 0;
+  for(e : net) {
+    if(e.kind == "open") opened += 1;
+    if(e.kind == "data") send(net, e.peer, e.data);
+    if(e.kind == "close") {
+      closed += 1;
+      if(closed == n) break;
+    }
+  }
+  print("сервер: соединений " + text(opened) + ", закрыто " + text(closed));
+}
+
+main() {
+  net = listen(0);
+  p = port(net);
+  spawn { serve(net, 3); }
+  for(i : range(3)) {
+    c = connect("127.0.0.1", p);
+    send(c, "ping " + text(i));
+    for(e : c)
+      if(e.kind == "data") {
+        print("ответ " + text(i) + ": " + e.data);
+        break;
+      }
+    close(c);
+  }
+}

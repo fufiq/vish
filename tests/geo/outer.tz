@@ -1,5 +1,0 @@
-// Модуль для тестов 292–293: использует geo.inner — сам, не для того, кто использует его.
-module geo.outer;
-use geo.inner;
-
-norm(i64 x, i64 y) => sq(x) + sq(y);

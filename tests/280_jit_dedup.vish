@@ -1,0 +1,17 @@
+// out: 27
+// jit-stats: jit  scale(кт, i64) → код scale(кт, i64) (та же рантайм-часть)
+// jit-stats: jit  twice_of(кт, i64) → код twice_of(кт, i64) (та же рантайм-часть)
+// machine
+// Дедупликация экземпляров (R2, §10.3): 
+// 
+//  
+// Comparison: the same compiler input and the same parsing answers to its questions (jit_type,
+// jit_const...) - the code is already there, the second compilation is not. scale(i64…) and
+// scale(f64…) are one runtime part, scale(str…) is another branch.
+scale(type t, i64 n) => if((t == i64) || (t == f64)) n * 2 else n;
+twice_of(type t, i64 n) => n + n;
+main() {
+  s = 0;
+  for(i : range(3)) s += scale(i64, i) + scale(f64, i) + scale(str, i) + twice_of(bool, i) + twice_of(i64, i);
+  print(s);
+}

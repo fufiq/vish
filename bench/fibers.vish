@@ -1,0 +1,74 @@
+// Measurement of switching fiber (2026-09-29): args[1]: 1 - ping-pong through two streams of capacity 1
+// (each exchange - two switches), 2 - manufacturer → consumer through the flow of capacity 16
+// (generator: VM can turn into a cycle, O11), 3 - the same without fiber (standard for convolution), 4 -
+// ping-pong in n/200 pairs of fiber (n exchanges of everything): switching in a circle through all
+// stacks. Cycles are in their functions: they are taken by the JIT, the spawn with a closure remains the
+// interpreter.
+//
+echo(a, b) {
+  for(x : a) write(b, x + 1);
+  close(b);
+}
+
+drive(a, b, n) {
+  s = 0;
+  for(i : range(n)) {
+    write(a, i);
+    s += read(b);
+  }
+  close(a);
+  s
+}
+
+ping(n) {
+  a = stream(1);
+  b = stream(1);
+  spawn { echo(a, b); }
+  drive(a, b, n)
+}
+
+fill(s, n) {
+  for(i : range(n)) write(s, i * 2);
+  close(s);
+}
+
+total(s) {
+  t = 0;
+  for(x : s) t += x;
+  t
+}
+
+produce(n) {
+  s = stream(16);
+  spawn { fill(s, n); }
+  total(s)
+}
+
+direct(n) {
+  t = 0;
+  for(i : range(n)) t += i * 2;
+  t
+}
+
+pairs(n) {
+  k = n / 200; // runtime: parsing doesn't really scroll the cycle
+  done = stream(k);
+  for(p : range(k)) {
+    a = stream(1);
+    b = stream(1);
+    spawn { echo(a, b); }
+    spawn { write(done, drive(a, b, n / k)); }
+  }
+  t = 0;
+  for(p : range(k)) t += read(done);
+  t
+}
+
+main() {
+  mode = parse_int(args[1]).value;
+  n = parse_int(args[2]).value;
+  if(mode == 1) print(ping(n));
+  if(mode == 2) print(produce(n));
+  if(mode == 3) print(direct(n));
+  if(mode == 4) print(pairs(n));
+}

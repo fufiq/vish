@@ -1,0 +1,9 @@
+// error: уровень памяти освобождается, а в нём живут значения (1)
+// Value from the region would outlive it (the result of the with_alloc body goes out) - a mistake with the
+// trice, not hanging memory. Assigning an external name in the body is a copy of its memory, not a leak. The
+// inputs are from args: otherwise, the call is curtailed at parsing and there is no region in execution.
+leak(i64 n) {
+  r = region();
+  with_alloc(r) { array{n, 2, 3} }
+}
+main() { print(leak(args.size)); }

@@ -1,0 +1,28 @@
+// out: 15 17
+// out: 3
+// machine
+// Лямбда переживает свою область: окружение захватывается и остаётся в арене
+// интерпретатора, остальные области возвращаются в арену на выходе 
+//.
+adder(base) {
+  k = base + 1;
+  (x) => x + k
+}
+
+counter() {
+  n = 0;
+  inc = (by) => { n += by; n };
+  inc(1);
+  inc(2);
+  n
+}
+
+main() {
+  f = adder(4);
+  g = adder(6);
+  // Between creation and challenge - many other areas (arena reuse)
+  s = 0;
+  for(i : range(100)) { t = i * 2; s += t; }
+  print(f(10), g(10));
+  print(counter());
+}

@@ -1,5 +1,0 @@
-// Модуль с контролем расширений для теста 96_own_only: [[extension(own_only)]] —
-// его сущности расширяются только в нём (проверка own_only прелюдии, §9.1).
-[[extension(own_only)]] module geo.own;
-
-area(f64 w, f64 h) => w * h;

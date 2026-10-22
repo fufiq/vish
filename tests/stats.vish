@@ -1,0 +1,24 @@
+// The program for the 20_reactive.session script (itself a regular test).
+// machine
+// stdin: 1 2 3 4
+// out: 30.0
+// out: 2.5
+sq(x) => x * x;
+
+sum_sq(xs) {
+  s = 0.0;
+  for(x : xs) s = s + sq(x);
+  s
+}
+
+mean(xs) {
+  s = 0.0;
+  for(x : xs) s = s + x;
+  s / f64(xs.size)
+}
+
+main() {
+  xs = read_floats(stdin);
+  print(sum_sq(xs));
+  print(mean(xs));
+}

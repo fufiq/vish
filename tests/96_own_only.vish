@@ -1,0 +1,12 @@
+// error: area: расширять сущности модуля geo.own можно только в нём (own_only)
+// [[extension(own_only)]] module k; - prelude own_only check prohibits other people's
+// extensions of entity module (§9.1): overload area outside geo.own - parsing error on its
+// announcement. own_only is the most stringent test.
+//
+use geo.own;
+
+area(i64 w, i64 h) => w * h;
+
+main() {
+  print(area(2.0, 3.0));
+}

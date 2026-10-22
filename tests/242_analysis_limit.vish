@@ -1,0 +1,19 @@
+// out: 4950
+// check-error: цикл не сошёлся при статическом разборе
+// Thresholds of static parsing - function on language (analysis_limit, M6 step 7): the
+// program announces its - VM takes the last announced. A cycle with 100 known iterations at
+// the threshold of 50 is parsing error; execution as it was.
+// 
+//;
+//.
+analysis_limit(what) => if(what == "loop_known") 50 else if(what == "loop_types") 8 else if(what == "recursion_widen") 16 else 2000;
+
+main() {
+  s = 0;
+  i = 0;
+  while(i < 100) {
+    s = s + i;
+    i = i + 1;
+  }
+  print(s);
+}

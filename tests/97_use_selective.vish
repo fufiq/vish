@@ -1,0 +1,11 @@
+// out: 11.0
+// error: norm2
+// use geo.vec. {v2, dot} ; - only named module ads: norm2 is not visible.
+use geo.vec.{v2, dot};
+
+main() {
+  a = v2{1.0, 2.0};
+  b = v2{3.0, 4.0};
+  print(dot(a, b));
+  print(norm2(a));
+}

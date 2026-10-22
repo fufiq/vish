@@ -1,0 +1,52 @@
+// out: 42 15 105
+// out: 1001 6
+// out: i64: 1 f64: 2.5
+// out: if(a) 1 else 2
+// out: 22 23
+// fmt-stable
+// store-roundtrip
+// check: изменения кода ct-кодом экземпляров (элаборация):
+// fmt-ct-has: describe(i64 v) => "i64: " + text(v);
+// machine
+// База из журнала после элабораций, взявших прежние производные узлы (§7.4, тест 217):
+// разбор (check), запуск и JIT элаборируют программу каждый своим
+// интерпретатором — узлы n_X{…}, вставки #x (quote), ссылки ref(f), порождённое ct-кодом
+// модуля и экземпляра, деревья цепочек — те же узлы, достройка взятых заново — без
+// журнала, если итог тот же. Сохранённая после этого база (.vishdb) — та же проекция и тот
+// же вывод.
+helper(x) => x + 1;
+make_adder(name_n) => quote { add_n(x) => x + #name_n; };
+
+ct {
+  k = 40 + 2;
+  emit(quote { answer() => #k; });
+  emit(make_adder(5));
+  big = 100;
+  emit(quote { add_big(x) => add_n(x) + #big; });
+  f = ast.function{"via_ref", array{ast.parameter{"helper"}}};
+  f.body = ast.operation{"+", array{ast.call{ref(helper), array{ast.int{1000}}}, ast.name{"helper"}}};
+  f.expr_body = true;
+  emit(f);
+}
+
+note(x) {
+  ct {
+    t = text(typeof(x));
+    f = ast.function{"describe", array{ast.parameter{"v", ast.name{t}}}};
+    f.body = ast.operation{"+", array{ast.string{t + ": "}, ast.call{ast.name{"text"}, array{ast.name{"v"}}}}};
+    f.expr_body = true;
+    emit(f);
+  }
+}
+
+main() {
+  note(1);
+  note(2.5);
+  print(answer(), add_n(10), add_big(0));
+  print(via_ref(0), 1 + 2 + 3);
+  print(describe(1), describe(2.5));
+  c = ast.if{ast.name{"a"}, ast.int{1}, ast.int{2}}; // node at launch - derivative
+  print(code_text(c));
+  a = 20;
+  print(a + 2, a + 2 + 1);
+}

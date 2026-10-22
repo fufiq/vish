@@ -1,0 +1,27 @@
+// out: 15
+// out: 5
+// machine
+// fmt-stable
+// store-roundtrip
+// jit-stats: jit  sum3(значение VM, f64, значение VM)
+// Extension of a specific function by reference to its node (M5, §5.4):
+// 
+// 
+// 
+// weight(auto) is a reference to weight(x), not weight(i64, i64); overload inside is
+// overload of its entity (author's decision 2026-09-30), the choice is the usual
+// specificity.
+struct point { i64 x; i64 y; }
+
+weight(x) => 1;
+
+weight(i64 a, i64 b) => a + b;
+
+&weight(auto) { weight(point p) => p.x * p.y; weight(f64 v) => 2; }
+
+sum3(a, b, c) => weight(a) + weight(b) + weight(c);
+
+main() {
+  print(sum3(point{3, 4}, 1.5, "s"));
+  print(weight(2, 3));
+}

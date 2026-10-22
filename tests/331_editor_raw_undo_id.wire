@@ -2,7 +2,7 @@
 // second subblock changes only its node - subblock first, the call block outside and the rest do not
 // correct (graft: the same view - the node is intact):
 //.
-// program: 173_raw_sub_blocks.tz
+// program: 173_raw_sub_blocks.vish
 open_view module
 // let: blk @print(1
 idle

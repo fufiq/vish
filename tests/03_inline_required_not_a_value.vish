@@ -1,0 +1,11 @@
+// error: использует семантику инлайна
+// A function with an expr parameter / return(caller) cannot be a value (§6.1).
+try(expr e) {
+  r = e;
+  if(r.is_err()) return(caller) r;
+  r.value
+}
+
+main() {
+  t = try;
+}

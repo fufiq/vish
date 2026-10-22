@@ -3,7 +3,7 @@
 // 2026-10-12: set - as in a conventional editor). The empty lines of the draft are as
 // typed; the canon stores them with a layout in AST (blank for the block and module):
 // the execution does not see them, projection prints.
-// program: editor_text.tz
+// program: editor_text.vish
 open_view module
 // at the end of the line - a new line below with a line indentation, the cursor on it
 pointer 1 @привет 0 0

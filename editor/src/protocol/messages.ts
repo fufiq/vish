@@ -1,7 +1,7 @@
-// Protocol messages in TS types. The source of truth is the include/tz/proto.hpp
-// aggregates; the schema (schema.json) is derived from them by the `tz schema`
-// command, these types repeat it to check the editor's code (the
-// messages.test.ts test compares the fields with the live schema).
+// Protocol messages in TS types. The source of truth is the include/vish/proto.hpp
+// aggregates; the schema (schema.json) is derived from them by the `vish schema`
+// command, these types repeat it to check the editor's code (the messages.test.ts
+// test compares the fields with the live schema).
 import schemaJson from './schema.json';
 import { decode, frame, type Schema, type Value } from './codec';
 
@@ -60,7 +60,7 @@ export interface Run {
 export interface Stop {
   type: 'c_stop';
 }
-// Save (Ctrl+S): journal base in .tzdb next to the program.
+// Save (Ctrl+S): journal base in .vishdb next to the program.
 export interface Save {
   type: 'c_save';
 }
@@ -70,7 +70,7 @@ export interface Trace {
   stdin_text: string;
   args: string;
 }
-// Merge with another copy of the database (the path to .tzdb) and resolve the conflict.
+// Merge with another copy of the database (the path to .vishdb) and resolve the conflict.
 export interface Merge {
   type: 'c_merge';
   path: string;
@@ -364,7 +364,7 @@ export function decodeServer(body: Uint8Array): ServerMsg {
   return decode(schema, schema.server, body) as unknown as ServerMsg;
 }
 
-// The projection text collected from node pieces is the same as `tz fmt`.
+// The projection text collected from node pieces is the same as `vish fmt`.
 export function projectionText(view: View): string {
   const byId = new Map(view.nodes.map((n) => [n.id, n]));
   const text = (id: NodeId): string =>

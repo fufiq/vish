@@ -1,0 +1,27 @@
+// out: жду файловую систему
+// out: не дали
+// machine
+// Программа сессии 318 (ресурсы даёт автор на ходу); сама по себе — без ресурсов.
+wait_fs() {
+  for(i : range(20000)) {
+    if(granted("fs")) return true;
+    yield();
+  }
+  false
+}
+main() {
+  print("жду файловую систему");
+  if(!wait_fs()) {
+    print("не дали");
+    return;
+  }
+  f = open("tests/grants.vish");
+  for(chunk : f) {
+    print("кусок", chunk.size > 0);
+    loop {
+      if(!granted("fs")) break;
+      yield();
+    }
+  }
+  print("поток закрыт: забрали");
+}

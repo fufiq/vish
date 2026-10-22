@@ -1,0 +1,43 @@
+// args: 3
+// out: 3 1 closed
+// out: 7 2
+// fmt-stable
+// store-roundtrip
+// machine
+// Typestate (§5.6, M2b): 
+// ct-field of the unit - the state during compilation; operations change it,
+// require checks. Own and hide - the name disappears
+//
+//.
+struct file { i64 fd; ct bool open = true; }
+
+close(mut file f) { f.open = false; }
+read(file f) {
+  require(f.open);
+  f.fd
+}
+state(file f) => if(f.open) "open" else "closed";
+
+struct msg { i64 id; }
+send(own msg m) => m.id;
+
+// hide self: after calling the caller variable is hidden
+consume(mut msg m) {
+  id = m.id;
+  hide m;
+  id
+}
+
+main() {
+  n = parse_int(args[1]).value;
+  f = file{n};
+  r = read(f);
+  close(f);
+  g = file{1};
+  if(n > 5) close(g);   // state g - along the branch: continuation split
+  print(r, g.fd, state(f));
+  m = msg{7};
+  k = send(m);
+  q = msg{2};
+  print(k, consume(q));
+}

@@ -18,8 +18,8 @@ export interface NodeMarks {
 
 export const badgeSheet = new CSSStyleSheet();
 badgeSheet.replaceSync(`
-  .badge { color: var(--tz-type, gray); font-size: 0.85em; margin-left: 1px; }
-  .badge.value { color: var(--tz-value, gray); }
+  .badge { color: var(--vish-type, gray); font-size: 0.85em; margin-left: 1px; }
+  .badge.value { color: var(--vish-value, gray); }
 `);
 
 // An AST node as a DOM element: DOM is a direct projection AST (smisl architecture).
@@ -73,7 +73,7 @@ export abstract class ASTNode extends HTMLElement {
   readonly #texts = new Map<number, Text>();
 
   connectedCallback(): void {
-    this.classList.add('tz-node');
+    this.classList.add('vish-node');
   }
 
   // Show the pieces; child(id) is a child element.

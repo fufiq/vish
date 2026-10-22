@@ -2,7 +2,7 @@
 // [[extension(own_only)]] (recording twice the module geo.shapes) - check error mark on the
 // extension announcement; renaming in your word - new entity program, not extension: no tag.
 //
-// program: editor_extension.tz
+// program: editor_extension.vish
 open_view module
 // expect: kind="error" text="twice: расширять сущности модуля geo.shapes можно только в нём (own_only)
 // expect: kind="n_fn" pieces=["syntax twice {body} again => "

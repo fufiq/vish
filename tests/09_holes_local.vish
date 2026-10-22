@@ -1,0 +1,8 @@
+// error: ожидалось выражение
+// The parsing error is a local hole; the rest of the module is disassembled.
+ok(a) => a + 1;
+bad(x) {
+  y = (x + ;
+  x
+}
+main() { print(ok(1)); }

@@ -1,0 +1,20 @@
+// out: point{x: 7, y: 40.0, on: true}
+// out: 7
+// machine
+// jit-compiled: move
+// struct - layout in memory (§12.2): aggregate fields - in VM pages, the field number is static
+// (the order of the type fields); machine code reads and writes the i64/f64 offset field, which
+// informs VM. bool and the nonscalar field - while the VM.
+struct point { i64 x; f64 y; bool on; }
+move(i64 n) {
+  p = point{1, 2.5, true};
+  for(i : range(n)) {
+    p.x = p.x + i;
+    p.y = p.y * 2.0;
+  }
+  print(p);
+  p.x
+}
+main() {
+  print(move(4));
+}

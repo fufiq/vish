@@ -4,7 +4,7 @@ import { ASTNode, badgeSheet } from './ast_node';
 const sheet = new CSSStyleSheet();
 sheet.replaceSync(`
   :host { display: inline; white-space: pre; }
-  .syntax { color: var(--tz-syntax, inherit); }
+  .syntax { color: var(--vish-syntax, inherit); }
 `);
 
 // Common element node (§4.5, step 11.4): the view of node to the client is not important - the

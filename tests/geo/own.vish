@@ -1,0 +1,5 @@
+// The extension control module for the 96 own only: [[extension(own_only)]] test - its
+// entity expands only in it (own_only prelude test, §9.1 test).
+[[extension(own_only)]] module geo.own;
+
+area(f64 w, f64 h) => w * h;

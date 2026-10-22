@@ -1,0 +1,17 @@
+// error: незакрытая строка
+// error: незакрытый символ
+// fmt-stable
+// fmt-has: /* дыра: незакрытая строка */ s = "abc;
+// fmt-has: /* дыра: незакрытый символ */ c = 'x;
+// fmt-has:   y = 3;
+// fmt-has: after() => 2;
+// An unclosed line (symbol) is a hole to the end of a line of text: the line does
+// not go through the translation of a line, the following lines are disassembled.
+//.
+f() {
+  s = "abc;
+  c = 'x;
+  y=3;
+}
+
+after()=>2;

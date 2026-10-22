@@ -1,7 +1,7 @@
 // Broken brackets of the raw block - editing rises to the external unit (line), as in the
 // blocks; fixed - the block is again itself a unit.
 //
-// program: editor_chars.tz
+// program: editor_chars.vish
 open_view module
 pointer 1 @{#ff 0 4
 key 1 (

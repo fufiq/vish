@@ -1,0 +1,18 @@
+// out: 0
+// error: 194_empty_literal_errors.vish:17:9: ошибка: нет перегрузки len2 для этих значений
+// error: кандидат len2({x: a, y: b}): аргумент 1 не распаковывается в {x: a, y: b}
+// check-error: не распаковывается в {x: a, y: b}
+// {} becomes only that which has a default value (struct with default fields, i64, f64 - as
+// zero(T)); the {x: a, y: b} pattern parameter does not fit the aggregate without the y
+// field - there is no overload (rather than an inversion error).
+struct strict { i64 a; }
+struct opt { i64 a = 0; }
+
+len2({x: a, y: b}) => (a * a) + (b * b);
+use_opt(opt o) => o.a;
+
+main() {
+  print(use_opt({}));
+  // strict s = {} ; - error: field a is not specified
+  print(len2({x: 1}));
+}

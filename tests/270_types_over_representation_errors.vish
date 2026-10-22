@@ -1,0 +1,9 @@
+// error: оператор + не определён для meters и i64
+// Your type does not become a representation itself: m + 1 without operator (meters) + (i64)
+//.
+struct meters { __int64 value; }
+operator (meters a) + (meters b) => meters{a.value + b.value};
+main() {
+  m = meters{5};
+  print(m + 1);
+}

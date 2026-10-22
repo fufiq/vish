@@ -4,29 +4,29 @@
 # ./build.sh debug - debugging, contracts are checked
 # ./build.sh asan - debugging + AddressSanitizer/UBSan
 #
-# The primitives of the native "cpp" { … } from libraries (§3.3) VM compiles into
-# itself: the collected tz takes them out in out/native.hpp (`tz native`); if the
-# title changes, the second build.
+# Primitives native "cpp" { … } from libraries (§3.3) VM compiles: assembled vish takes
+# them out in out/native.hpp (`vish native`); if the title has changed - a second
+# build.
 set -e
 cd "$(dirname "$0")"
 
 CXX=${CXX:-g++-16}
-OUT=${OUT:-out/tz} # свой выход — сборки режимов параллельно (full.sh)
+OUT=${OUT:-out/vish} # свой выход — сборки режимов параллельно (full.sh)
 # -flto=auto: the same TU and one command, but code generation (80 - 90% of the time) GCC
 # cuts to pieces and runs through all cores: release 89 → 39 s, asan 190 → 63 s.
 FLAGS="-std=c++26 -freflection -fcontracts -flto=auto -Iinclude -Iout -Wall -Wextra -Wno-unused-parameter ${EXTRA:-}"
 mkdir -p out
-[ -f out/native.hpp ] || printf '#pragma once\nnamespace tz {\nstd::span<native_entry const> native_table() { return {}; }\n}\n' > out/native.hpp
+[ -f out/native.hpp ] || printf '#pragma once\nnamespace vish {\nstd::span<native_entry const> native_table() { return {}; }\n}\n' > out/native.hpp
 
 build() {
     case "$1" in
-        release) $CXX $FLAGS -O2 -DNDEBUG -fcontract-evaluation-semantic=ignore src/tz.cpp -o "$OUT" -luring ;;
-        debug)   $CXX $FLAGS -O0 -g src/tz.cpp -o "$OUT" -luring ;;
+        release) $CXX $FLAGS -O2 -DNDEBUG -fcontract-evaluation-semantic=ignore src/vish.cpp -o "$OUT" -luring ;;
+        debug)   $CXX $FLAGS -O0 -g src/vish.cpp -o "$OUT" -luring ;;
         # -fno-var-tracking: local places at -O1 for gdb are not built - 113 → 63 with build (GCC
         # is quadratic on huge functions); lines in ASan reports remain, debug mode
         #
 # 
-        asan)    $CXX $FLAGS -O1 -g -fno-var-tracking -fsanitize=address,undefined src/tz.cpp -o "$OUT" -luring ;;
+        asan)    $CXX $FLAGS -O1 -g -fno-var-tracking -fsanitize=address,undefined src/vish.cpp -o "$OUT" -luring ;;
         *) echo "неизвестный режим: $1" >&2; exit 2 ;;
     esac
 }
@@ -39,7 +39,7 @@ build "$mode"
 rc=0
 tmp=out/native.hpp.$$ # замена переименованием — соседняя сборка не прочтёт половину
 cp out/native.hpp "$tmp"
-"$OUT" native "$tmp" lib/tools.tz lib/versions.tz lib/tests.tz lib/cli.tz lib/editor.tz || rc=$?
+"$OUT" native "$tmp" lib/tools.vish lib/versions.vish lib/tests.vish lib/cli.vish lib/editor.vish || rc=$?
 if [ $rc = 3 ]; then
     mv "$tmp" out/native.hpp
 else

@@ -1,0 +1,14 @@
+// The program for the 72_editor_layers.wire script (itself a regular test).
+// machine
+// stdin: 3
+// out: 0.0
+// out: 9.0
+scale(x) {
+  if(x > 2.0) x * x else 0.0
+}
+
+main() {
+  xs = read_floats(stdin);
+  print(scale(1.5));
+  print(scale(xs[0]));
+}

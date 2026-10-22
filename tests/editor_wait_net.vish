@@ -1,0 +1,9 @@
+// Program for 325_editor_run_host.wire: Waits for connections that do not exist. She is without
+// resources ("0 devices"): the network gives her a script.
+// out: слушаю
+// error: взаимная блокировка
+main() {
+  net = listen(0);
+  print("слушаю");
+  for(e : net) print(e.kind);
+}

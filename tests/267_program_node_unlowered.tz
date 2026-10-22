@@ -1,6 +1,0 @@
-// error: узел ast.pair не раскрыт
-// Вид узла программы без раскрытия — понятная ошибка на месте узла: смысл вида
-// задаёт раскрытие ([[transform]]), своего исполнения у него пока нет.
-struct ast.pair { code first; code second; }
-syntax pair (a) with (b) => ast.pair{a, b};
-main() { print(pair (1) with (2)); }

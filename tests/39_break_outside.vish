@@ -1,0 +1,7 @@
+// out: 1
+// error: break/continue вне цикла
+// Break is the second way out, it is caught by the loop; there is no one to catch it outside the cycle.
+main() {
+  print(1);
+  break;
+}

@@ -1,0 +1,11 @@
+// out: 2
+// error: индекс 3 вне границ
+// jit-compiled: at
+// An error in machine code is the same diagnostics as the interpreter (place is a node).
+at(xs, i) => xs[i];
+
+main() {
+  xs = array{1, 2, 3};
+  print(at(xs, 1));
+  print(at(xs, 3));
+}

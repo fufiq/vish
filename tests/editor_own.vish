@@ -1,0 +1,12 @@
+// error: editor_own.vish:9:3: ошибка: twice: расширять сущности модуля geo.rules можно только в нём (own_only)
+// Program for the 215_editor_own_rules.wire script (in itself an error test): the parsing
+// rule in the block with the word write module with [[extension(own_only)]] is the new
+// overload of its entity; the error is on the ad, like the overload function (§9.1).
+use geo.rules;
+
+main() {
+  n = 0;
+  syntax twice {body} again => { body; };
+  twice { n += 1; }
+  print(n);
+}

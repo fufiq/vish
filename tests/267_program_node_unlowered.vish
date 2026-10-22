@@ -1,0 +1,6 @@
+// error: узел ast.pair не раскрыт
+// The type of node program without disclosure is an understandable error in place of node: the
+// meaning of the form is set by disclosure ([[transform]]), it does not yet have its execution.
+struct ast.pair { code first; code second; }
+syntax pair (a) with (b) => ast.pair{a, b};
+main() { print(pair (1) with (2)); }

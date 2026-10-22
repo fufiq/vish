@@ -1,0 +1,12 @@
+// error: editor_extension.vish:9:3: ошибка: twice: расширять сущности модуля geo.shapes можно только в нём (own_only)
+// Program for the 239_editor_extension.wire script (in itself - an error test): a syntax
+// record with the word twice in the block - an extension of the record of the geo.shapes
+// module, which has [[extension(own_only)]]; an error - on the extension announcement (§9.1).
+use geo.shapes;
+
+main() {
+  n = 0;
+  syntax twice {body} again => { body; };
+  twice { n += 1; }
+  print(n, area(pt{2, 3}));
+}

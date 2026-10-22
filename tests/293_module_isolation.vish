@@ -1,0 +1,10 @@
+// error: функция sq объявлена в модуле geo.inner, а use его здесь нет: модули изолированы, use не транзитивен
+// out: 25
+// Insulation of sub-modules:
+//  
+// geo.outer uses geo.inner for itself: its sq program is not visible.
+use geo.outer;
+main() {
+  print(norm(3, 4));
+  print(sq(5));
+}
