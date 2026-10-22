@@ -1,0 +1,35 @@
+// out: 1000 5 7
+// out: 9 [9, 20, 30, 40]
+// out: out_of_bounds
+// machine
+// Ссылка — место хранения, а не адрес (§12.1): 
+// 
+// ; By default, the growth of the array (data travels many times) and the replacement of the entire array do
+// not break the link - the same index; the element is no longer out_of_bounds. The program selects the model
+// (tests 48, 290).
+grow(n) {
+  xs = array{0, 5, 0};
+  &e = xs[1];
+  for(i : range(n)) xs.push(i);
+  &f = xs[2];
+  f = 7;
+  print(xs.size, e, xs[2]);
+}
+replace() {
+  ys = array{1, 2, 3};
+  &e = ys[0];
+  ys = array{10, 20, 30, 40};
+  e = 9;
+  print(e, ys);
+}
+shrink() {
+  zs = array{1, 2, 3};
+  &e = zs[2];
+  zs = array{1};
+  try { print(e); } catch(x) { print(typeof(x)); }
+}
+main() {
+  grow(args.size * 997);
+  replace();
+  shrink();
+}

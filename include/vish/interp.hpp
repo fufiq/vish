@@ -5299,12 +5299,11 @@ struct interpreter {
   //
   //
 //  
-// The link is tied to a support - an array buffer. Meaning of verification
-  // parsing is the code prelude over the ct state (hacks below): the support is the ct
-  // state of the array, the link remembers it when taking, the use checks requires;
-  // “dangerous-dangerous” is the parsing error with the track. When executed - VM buffer
-  // generation: obsolete link - exception of invalidated_alias. Recording in other
-  // elements and values of elements - "dangerous-safe", allowed.
+// The link is tied to the support - the array. What breaks the link - the effects that
+  // announced the model of the reference pointer (prelude, hooks parsing over the ct-state;
+  // "dangerous-dangerous" - error parsing with a track). By default, nothing: the link is a place (base
+  // and index), the transfer of VM memory is not visible to it; when executed, only borders (there is no
+  // element - out_of_bounds).
 
   // Array or erased array (including all splitting paths).
   bool array_like(value const & v) const {
@@ -5332,7 +5331,6 @@ struct interpreter {
     if(!checking()) {
       if(!cell->is<array_v>()) return std::nullopt;
       r.index = checked_index(*cell, idx, where);
-      r.gen = cell->as<array_v>().gen;
       return value(r);
     }
     if(!array_like(*cell)) return std::nullopt;
@@ -5366,16 +5364,15 @@ struct interpreter {
   // --- link-path (§12.1, tail of step 10)
   // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // (§12.1, D13). root
-  // - Variable cell, steps - field and element (buffer generation when taking); the place is searched anew with
-  // each call - to hang nothing, like the field in the variable parameter (§6.2): the field of the replaced
-  // aggregate - the field of the new, the element of the moved buffer - "dangerous-dangerous" invalidated_alias
-  // . * My: * up to three steps (without a heap: steps - in the link itself); parsing follows hooks for the
-  // support-variable first step, supports inside (b.xs, g[1]) - generation of execution.
-  static ref_step step_of(ref_v const & r, uint32_t k) { return k == 0 ? ref_step{r.index, r.gen, r.field, r.rt_index} : r.rest[k - 1]; }
+  // - a variable cell, steps - a field and an element; a place is searched for anew at each call - there
+  // is nothing like a field in a variable parameter (§6.2): the field of the replaced aggregate - the
+  // field of a new one, the element of the grown or replaced array - the same index; there is no element -
+  // out_of_bounds . * My: * up to three steps (without a heap: steps - in the reference itself); parsing
+  // follows with hooks the support-variable first step.
+  static ref_step step_of(ref_v const & r, uint32_t k) { return k == 0 ? ref_step{r.index, r.field, r.rt_index} : r.rest[k - 1]; }
   static void set_step(ref_v & r, uint32_t k, ref_step const & s) {
     if(k == 0) {
       r.index = s.index;
-      r.gen = s.gen;
       r.field = s.field;
       r.rt_index = s.rt_index;
     } else {
@@ -5417,7 +5414,6 @@ struct interpreter {
           value const & box = n ? *path_place(r, n, where) : *r.cell;
           if(!box.is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(box), " — не массив"), where);
           st.index = checked_index(box, fi.v, where);
-          st.gen = box.as<array_v>().gen;
           set_step(r, n++, st);
           continue;
         }
@@ -5438,8 +5434,8 @@ struct interpreter {
     }
     return value(r);
   }
-  // Place cell after the first n steps (execution): the element is a cell of the common array; the
-  // buffer is changed - invalidated_alias. soft - parsing: no cell (run-time - value) - empty.
+  // Place cell after the first n steps (execution): an element is a common array cell (indicated in the
+  // current data). soft - parsing: No cell (run-time) is empty.
   value * path_place(ref_v const & r, uint32_t n, span where, bool soft = false) {
     value * c = r.cell;
     for(uint32_t k = 0; k < n; ++k) {
@@ -5458,8 +5454,7 @@ struct interpreter {
         continue;
       }
       if(soft && (st.rt_index || !c->is<array_v>())) return nullptr;
-      if(!checking() && (!c->is<array_v>() || c->as<array_v>().gen != st.gen))
-        fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+      if(!checking() && !c->is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(*c), " — не массив"), where);
       uint32_t i = checked_index(*c, value(st.index), where);
       value * e = c->as<array_v>().generic_cell(i);
       if(!e) {
@@ -5480,7 +5475,6 @@ struct interpreter {
         symbol f = st.field;
         cur = lift(cur, [&](value const & o) { return member(o, f, where); });
       } else if(!st.rt_index && cur.is<array_v>()) {
-        if(!checking() && cur.as<array_v>().gen != st.gen) fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
         value e = cur.as<array_v>().get(checked_index(cur, value(st.index), where));
         cur = std::move(e);
       } else cur = lift(cur, [&](value const & a) { return element_type(a, where); });
@@ -5496,7 +5490,7 @@ struct interpreter {
     ref_step last = step_of(r, n - 1);
     if(last.field) return *path_place(r, n, where);
     value * box = path_place(r, n - 1, where);
-    if(!box->is<array_v>() || box->as<array_v>().gen != last.gen) fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+    if(!box->is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(*box), " — не массив"), where);
     return box->as<array_v>().get(checked_index(*box, value(last.index), where));
   }
   flow path_assign(ref_v const & r, std::string_view op, value const & rhs, span where) {
@@ -5526,8 +5520,7 @@ struct interpreter {
 
   void ref_valid(ref_v const & r, span where) {
     if(checking()) return hook_ref_used(r, where);
-    if(!r.cell->is<array_v>() || r.cell->as<array_v>().gen != r.gen)
-      fail_rt("invalidated_alias", "ссылка на элемент использована после инвалидации опоры", where);
+    if(!r.cell->is<array_v>()) fail(cat("ссылка на элемент: ", types.describe(*r.cell), " — не массив"), where);
   }
 
   value deref(ref_v const & r, span where) {
@@ -5545,7 +5538,7 @@ struct interpreter {
     value res = op == "=" ? rhs : binary(op.substr(0, 1), cur, rhs, where);
     if(!r.rt_index && r.cell->is<array_v>()) {
       if(!checking() || (res.known() && cur.known())) {
-        r.cell->as<array_v>().set(uint32_t(r.index), res);
+        r.cell->as<array_v>().set(checked_index(*r.cell, value(r.index), where), res); // could be replaced by shorter
         return ok();
       }
     }
@@ -5599,12 +5592,7 @@ struct interpreter {
     }
     if(!checking()) {
       if(!cell->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
-      array_v & a = cell->as<array_v>();
-      void const * was = a.size() ? a.base() : nullptr;
-      a.push(x);
-      // 
-// a generation, only if the data has moved
-      if(was && a.base() != was) a.gen = ++array_gen;
+      cell->as<array_v>().push(x); // data transfer links are not visible: they are the place (base and index)
       return ok();
     }
     book.written(cell, true);
@@ -7095,7 +7083,6 @@ struct interpreter {
     }
     *target = std::move(result);
     if(pinned) pin(*target, {}, where); // The ct field remains a state during compilation
-    if(target->is<array_v>() && db.is<n_ident>(lhs)) target->as<array_v>().gen = ++array_gen; // New buffer - old links are invalid
     return ok();
   }
 
@@ -8344,12 +8331,11 @@ struct interpreter {
       // The field (path on behalf) in the variable parameter is the alias of the place by:
 // Place is searched for at each address - a replaced unit
       // gives a field of new
-// ), crossed the buffer along the way - invalidated_alias ( ).
-// Without a copy at the entrance and recording on
-      // Get out. Invariable is also alias : ,; parsing has a value (it does not change - the same
-      // thing is observed until the source is changed in another way). *My:* path up to three steps,
-      // as in &e = p.x, with a place at execution (aggregate fields, simple indexes - arg_place);
-      // otherwise - a copy and a record at the output.
+// ), the element of the increased array is the same index, no it is out_of_bounds.
+      // No copy at the entrance and no recording at the exit. Invariable is also alias : ,; parsing
+      // has a value (it does not change - the same thing is observed until the source is changed in
+      // another way). *My:* path up to three steps, as in &e = p.x, with a place at execution
+      // (aggregate fields, simple indexes - arg_place); otherwise - a copy and a record at the output.
       //
       if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && p.mode != param_mode::out && (db.is_member(args[i]) || db.is_index(args[i])) && path_fits(args[i], env) && (checking() ? writes_param(f, i) : arg_place(args[i], env) != nullptr))
         if(auto r = path_ref(args[i], env, 0, args[i])) {
@@ -9050,7 +9036,7 @@ struct interpreter {
       }();
       return value(array_v::of({value(off[0]), value(off[1])}));
     }
-    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().gen)), value(int64_t(array_layout().items_n))}));
+    if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().items_n))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {
       observation const * o = jit_analysis ? jit_analysis->observed(code_node(a[0], where), uint64_t(a[1].as<int64_t>())) : nullptr;
@@ -9582,7 +9568,6 @@ struct interpreter {
   std::vector<node_id> emitted; // announcements generated by emit (vish fmt --ct)
   std::vector<override_rec> overrides;
   uint32_t override_depth = 0;
-  uint64_t array_gen = 0; // generation of array buffers (performance)
   std::set<uint32_t> user_ops; // operators declared code (not built-in primitive)
   std::set<uint32_t> local_ops; // operators declared in blocks (local functions)
   std::vector<std::array<symbol, 3>> op_entities; // entity: prefix, infix, postfix

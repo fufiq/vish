@@ -72,7 +72,6 @@ struct array_v {
     repr = src.repr;
     items = src.items;
     dense = src.dense;
-    gen = src.gen;
     shape_known = src.shape_known;
     borrowed = nullptr;
     return *this;
@@ -120,7 +119,6 @@ struct array_v {
   // dense i64/f64 - words in VM pages (pages.hpp): the growing array does not move
   words dense;
   array_v const * borrowed = nullptr;
-  uint64_t gen = 0; // Buffer generation: changes when moving and replacing (element references, §12.1)
   bool pinned = false; // pin(xs): Data in its range of addresses, their growth does not move
   // form of elements of the general layout: 0 - not counted, 1 - one (array), 2 - different (tuple).
   // Array type - for each call (choice overload, instance): without it - bypassing all elements, and
@@ -211,24 +209,23 @@ struct split_v {
   std::vector<value> alts;
 };
 
-// Step of the link path after the first (§12.1, tail of step 10): the array element is the index and
-// the buffer generation when taking, the aggregate field is the name.
+// The step of the link path after the first (§12.1, tail of step 10): the array element is the
+// index, the aggregate field is the name.
 struct ref_step {
   int64_t index = 0;
-  uint64_t gen = 0;
   symbol field; // field; empty - element
   bool rt_index = false; // parsing: The index is known only in runtime
 };
 
 // Reference to place (§12.1): the root is a variable cell, the path is up to three steps: the element
-// (the support is an array buffer, when reading - checking the generation or version of the cell in
-// parsing) and the field (the support is an aggregate). &e = v[i] is one step-element; &e = p.x, &f =
-// ps[i].y, &e = r[k] from the link r is a path; the place is searched anew at each call - there is
-// nothing to hang. It lives only in the auto and parameter variable.
+// and the field. ;- reference is a base and an index, not an address: the place is searched again with
+// each call, the VM memory transition is not visible to it ( ). &e = v[i] is one step-element; &e =
+// p.x, &f = ps[i].y, &e = r[k] from the link r is a path. It lives only in the auto and parameter
+// variable.
+//
 struct ref_v { // The order of the fields is tight: the value size does not grow (more - in array_v).
   value * cell = nullptr;
   int64_t index = 0; // first step: element
-  uint64_t gen = 0; // buffer generation (performance)
   uint32_t born = 0; // node where (+1) is taken
   symbol name; // The name of the array-support: hooks parsing get its place
   uint32_t memo = 0; // parsing: what the link remembered when taking (ref_taken), the number in ct_states +1
@@ -591,7 +588,7 @@ field_list::~field_list() { clear(); }
 // Dense array in the cell value: data offsets and size - machine code reads them from memory
 // (§12.2, without copies); cell array - loan indicates the array in the cell.
 struct array_offsets {
-  uint64_t data, size, cap, gen, items_n, in_value;
+  uint64_t data, size, cap, items_n, in_value;
 };
 array_offsets const & array_layout() {
   static array_offsets o = [] {
@@ -599,7 +596,7 @@ array_offsets const & array_layout() {
     auto const * b = reinterpret_cast<char const *>(&v);
     auto const & a = v.as<array_v>();
     return array_offsets{uint64_t(reinterpret_cast<char const *>(&a.dense.data) - b), uint64_t(reinterpret_cast<char const *>(&a.dense.n) - b),
-        uint64_t(reinterpret_cast<char const *>(&a.dense.cap) - b), uint64_t(reinterpret_cast<char const *>(&a.gen) - b),
+        uint64_t(reinterpret_cast<char const *>(&a.dense.cap) - b),
         uint64_t(reinterpret_cast<char const *>(&a.items.n) - b), uint64_t(reinterpret_cast<char const *>(&a) - b)};
   }();
   return o;

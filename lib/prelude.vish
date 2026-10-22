@@ -162,32 +162,38 @@ for(xs, expr body) {
 //
 try(expr body) catch(expr... handlers) => intercept(body, handlers);
 
-// push(xs, x) - Array growth: the “relocate” effect - the buffer can move. Whether it breaks
-// the links - decides the model of the pointer support (below). Semantics is an attribute of
-// the library.
+// push(xs, x) - Array growth: the “relocate” effect - the buffer can move. Whether
+// it breaks links, decides the model of the reference pointer (below): by default,
+// no ( ).
+//
 [[relocates(xs)]] push(mut xs, x) => append(xs, x);
 
 // Reference supports (§12.1) - code analysis in the language: ct-state + require.
 // 
 // 
-// The support is the ct state of the array: the buffer generation and where it changed; the link
-// remembers the generation and where it was taken. Hooks parsing (my): the kernel in parsing
-// causes ref_taken when taking &e = xs[i] (and the element in the variable parameter), ref_used
+// The support is the ct state of the array: the generation of effects that break links, and where it
+// changed; the link remembers the generation and where it is taken. Hooks parsing (my): the kernel in
+// parsing causes ref_taken when taking &e = xs[i] (and the element in the variable parameter), ref_used
 // when each use; [[g(…)]] in the function where g is a function is the hook of its call. In the
-// executable code they are not: when executed, the link checks the VM buffer generation
-// (invalidated_alias).
+// executable code they are not: when executing, the link is the place (base and index), the transfer of
+// VM memory is not visible to it; there is no element - out_of_bounds.
+//
 //
 // Indicator models:
 // 
 // 
 // The operation on the support announces the effect group ([[effect(xs, "relocate")]] or its attribute
-// function, as relocates); the model - which groups break the link. The model - at the support
-// (ct-state), sets the program: with_model(xs, m); pin(xs) - data in its range of addresses, their
-// growth does not move - a model without relocate. Replacing the entire array is another buffer: breaks
-// with any model.
+// function, as relocates); the model - which groups break the link. Model - at the support (ct-state),
+// the program specifies: with_model(xs, m). By default, the link is the base and the index, the growth
+// and replacement of the array does not completely break it; they call the model that the program
+// chose. pin(xs) is data in its address range (for host addresses).
+//
+//
 struct pointer_model { str name; array breaks; }
-// default implementation
-model_moving() => pointer_model{"moving", array{"relocate"}};
+// by default:
+model_stable() => pointer_model{"stable", array{}};
+// at the choice of the program: a link - like a cherry pointer in a buffer, growth and replacement of it break
+model_moving() => pointer_model{"moving", array{"relocate", "replace"}};
 // Infinite vector: addresses, data does not move
 model_pinned() => pointer_model{"pinned", array{}};
 breaks(pointer_model m, str e) {
@@ -197,7 +203,7 @@ breaks(pointer_model m, str e) {
 }
 struct ref_anchor { i64 gen; code at; pointer_model model; }
 // gen-1 - references to it were not taken or the array was completely replaced
-anchor_of(xs) => ct_state(xs, ref_anchor{-1, code(), model_moving()});
+anchor_of(xs) => ct_state(xs, ref_anchor{-1, code(), model_stable()});
 // the effect of group e over the support: breaks links if the support model does not tolerate it
 effect(mut xs, str e) {
   a = anchor_of(xs);
@@ -213,9 +219,11 @@ ref_taken(mut xs) {
   if(a.gen < 0) set_ct_state(xs, ref_anchor{0, call_site(), a.model});
   ref_anchor{anchor_of(xs).gen, call_site(), a.model}
 }
-ref_used(xs, ref_anchor r) => require(anchor_of(xs).gen == r.gen,
+// entire array replaced (backbone again, gen-1) - the effect of "replace": breaks if it is called the
+// model from which the link was taken
+ref_used(xs, ref_anchor r) => require(if(anchor_of(xs).gen < 0) !breaks(r.model, "replace") else anchor_of(xs).gen == r.gen,
   "ссылка на элемент использована после инвалидации опоры (опасное-опасное)",
-  "ссылка взята здесь", r.at, "опора инвалидирована здесь", anchor_of(xs).at);
+  "ссылка взята здесь", r.at, "опора инвалидирована здесь", if(anchor_of(xs).gen < 0) r.at else anchor_of(xs).at);
 
 // [[inside(g)]] f(…) - entity exists only in the blocks of the g structure.
 // 
@@ -1390,7 +1398,7 @@ jit_compile(cg, f, types, type result) {
   why = "";
   // array - the address of the VM value cell; the data and size code reads from it at the time of
   // circulation (§12.2: memory - at VM, without copies in the frame): offsets tell VM
-  array{a_data, a_size, a_cap, a_gen, a_items_n} = jit_layout(); // size of the overall layout - a_items_n
+  array{a_data, a_size, a_cap, a_items_n} = jit_layout(); // size of the overall layout - a_items_n
   array{s_data, s_len} = jit_str_layout(); // string - bytes in words and length (32 bits)
   // aggregate - fields in the cell memory by type field number: field data, step, scalar in the field
   array{ag_data, ag_stride, ag_scalar} = jit_agg_layout();
@@ -3310,7 +3318,7 @@ jit_compile(cg, f, types, type result) {
     if(gen_sub) bad("рекурсивный вызов функции из её локальной функции");
     ws = 0;
     ws = xs.size; // array - cell address (one word)
-    w = ws + 7; // + error (4), VM service, call memory, generation counter
+    w = ws + 6; // + Error (4), VM service, call memory
     k0 = alloc(w);
     area(i64 j) => off((k0 + w) - (1 + j));
     j = 0;
@@ -3334,7 +3342,7 @@ jit_compile(cg, f, types, type result) {
     }
     put_bytes(cg.load_const(acc, 0));
     put_bytes(cg.store(frame, area(ws), acc));
-    for(q : range(3)) { // VM service, call memory, generation counter - from their field
+    for(q : range(2)) { // VM service, call memory - from your field
       put_bytes(slot_ld(acc, args_slot));
       put_bytes(cg.load(acc, acc, 8 * ((ap + 4) + q)));
       put_bytes(cg.store(frame, area((ws + 4) + q), acc));

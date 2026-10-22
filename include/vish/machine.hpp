@@ -39,8 +39,6 @@ struct m_type {
 };
 struct m_arr {
   m_list<mval> items;
-  uint64_t gen = 0; // Buffer generation: relocation and replacement - new (links to elements, §12.1)
-  bool pinned = false; // pin(xs): model without moving
 };
 struct m_agg {
   type_id type;
@@ -62,14 +60,13 @@ struct m_thunk {
   uint64_t ctx = 0; // context
   uint32_t rules = m_none; // structure block: area of her body with rules (operator, syntax...)
 };
-// Parameter - alias of the caller's place (author's decision): area and slot. alias
-// is a place by number: a variable (scope, slot) or an element of its array (index
-// and buffer generation when taking: reference &e = v[i], §12.1).
+// Parameter - alias of the caller's place (author's decision): area and slot. alias is a place by
+// number: a variable (scope, slot) or an element of its array (index: link &e = v[i], §12.1) is a
+// base and an index, not an address: the growth and replacement of an array do not break the link.
 struct m_alias {
   uint32_t scope = m_none;
   uint32_t slot = 0;
   uint32_t index = m_none;
-  uint64_t gen = 0;
   uint32_t field = m_none; // variable aggregate field: b.xs to variable parameter (§6.2)
   // link-path (§12.1, tail of step 10): &e = p.x, &f = ps[i].y, &e = r[k] from the link - the steps
   // lie in the area where the link is declared (live with it), from the variable (scope, slot)
@@ -77,10 +74,9 @@ struct m_alias {
   uint16_t path_at = 0;
   uint8_t path_n = 0;
 };
-// Step of the link path: field (number in aggregate) or element (index and buffer generation when taking).
+// Step of the link path: field (number in aggregate) or element (index).
 struct m_step {
   uint32_t at = 0;
-  uint64_t gen = 0;
   bool field = false;
 };
 struct mval {
@@ -255,7 +251,6 @@ struct m_state {
   m_list<m_stream> streams;
   bool deadlock = false; // Everyone is waiting for each other: the mistake will be the main one.
   uint32_t handoff_run = 0; // direct
-  uint64_t array_gen = 0; // array-buffering
   m_list<m_ct> ct_memo; // Canonical order ct: results of parsing of the entire program
   m_list<symbol> ct_vars; // ct-variable module (change - only ct-code)
   m_list<m_entity> entities; // entity Body Area Functions for entity .f(…)
@@ -272,7 +267,7 @@ struct m_state {
 
 // Process dump header: everything except level pages.
 struct dump_head {
-  std::string magic = "VISHPROC09";
+  std::string magic = "VISHPROC10"; // 10: No Buffer Generations (link - Base and Index)
   std::string name;
   uint32_t root = 0;
   std::vector<journal_entry> journal;
@@ -506,8 +501,8 @@ struct process_machine {
     if(c->is<m_alias>()) c = &follow(c->as<m_alias>());
     return *c;
   }
-  // Cell alias; reference element - if the support (buffer) has not changed, otherwise
-  // a "dangerous-dangerous" exception to invalidated_alias, as with the interpreter.
+  // alias Cell: A place is searched anew with each reference (base and index) like an
+  // interpreter; no element is out_of_bounds.
   mval & follow(m_alias al) {
     mval * c = &st.scopes[al.scope].vars[al.slot].v;
     if(c->is<m_alias>()) c = &follow(c->as<m_alias>());
@@ -524,11 +519,7 @@ struct process_machine {
           c = &c->as<m_agg>().fields[s.at].v;
           continue;
         }
-        if(!c->is<m_arr>() || c->as<m_arr>().gen != s.gen) {
-          diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
-          d.type = "invalidated_alias";
-          throw d;
-        }
+        if(!c->is<m_arr>()) throw diagnostic(cat("ссылка на элемент: ", describe(*c), " — не массив"), here());
         auto & xs = c->as<m_arr>().items;
         if(s.at >= xs.size()) out_of_bounds(s.at, xs.size(), here());
         c = &xs[s.at];
@@ -536,11 +527,7 @@ struct process_machine {
       return *c;
     }
     if(al.index != m_none) { // element (then, if any, its field: cl[c].xs)
-      if(!c->is<m_arr>() || c->as<m_arr>().gen != al.gen) {
-        diagnostic d("ссылка на элемент использована после инвалидации опоры", here(), diag_kind::runtime);
-        d.type = "invalidated_alias";
-        throw d;
-      }
+      if(!c->is<m_arr>()) throw diagnostic(cat("ссылка на элемент: ", describe(*c), " — не массив"), here());
       auto & xs = c->as<m_arr>().items;
       if(al.index >= xs.size()) out_of_bounds(al.index, xs.size(), here());
       c = &xs[al.index];
@@ -2488,7 +2475,6 @@ struct process_machine {
       if(p.scope == st.globals && std::ranges::contains(st.ct_vars, name) && !in_ct())
         throw diagnostic("ct-переменная меняется только кодом при компиляции (ct { … })", db[n].where);
       mval & c = cell(p);
-      bool whole = !st.scopes[p.scope].vars[p.slot].v.is<m_alias>() || st.scopes[p.scope].vars[p.slot].v.as<m_alias>().index == m_none;
       if(op == "=" && is_record(rhs)) rhs = to_type(std::move(rhs), place_type(c), db[n].where); // Struct holds it, {x: …} becomes it.
       if(op == "=" && st.res_on && !var_of(p).hidden && has_res(c)) { // Overwrite - the old resource is released
         mval old = std::move(c);
@@ -2498,7 +2484,6 @@ struct process_machine {
       if(op == "=") var_of(p).hidden = 0;
       mval & c2 = cell(p);
       c2 = op == "=" ? std::move(rhs) : primitive(prim_of(op), {c2, rhs}, db[n].where);
-      if(whole && c2.is<m_arr>()) c2.as<m_arr>().gen = ++st.array_gen; // New buffer - old links are invalid
       return finish(mval{m_unit{}});
     }
     if(db.is_index(lhs) && db.is<n_ident>(db.index_of(lhs).object)) { // xs[i] = e
@@ -2898,22 +2883,17 @@ struct process_machine {
       mval const & xs = ref_of(fib().vals[t.base + 1]);
       if(i.is<int64_t>() && xs.is<m_arr>()) return finish(mval{i.as<int64_t>() >= 0 && uint64_t(i.as<int64_t>()) < xs.as<m_arr>().items.size()});
     }
-    if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: link of the car - cell and number, moving them does not break
-      mval & xs = follow(fib().vals[t.base].as<m_alias>());
-      if(!xs.is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
-      xs.as<m_arr>().pinned = true;
+    if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: the machine does not have host addresses - links and so base and index
+      if(!follow(fib().vals[t.base].as<m_alias>()).is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
       return finish(mval{m_unit{}});
     }
     if(helper.str(name) == "append" && t.a == 2 && fib().vals[t.base].is<m_alias>()) { // push: the place of the caller grows (before the name of the arguments - without a copy of the array)
       m_alias al = fib().vals[t.base].as<m_alias>();
       mval & xs = follow(al);
       if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
-      auto & items = xs.as<m_arr>().items;
-      void const * was = items.empty() ? nullptr : items.data();
       mval x = deref(fib().vals[t.base + 1]);
       if(st.res_on) take_from(call_args(n)[1], x, t.scope); // resource in an array - transfer or copy, as in the assignment
-      items.push_back(std::move(x));
-      if(was && items.data() != was && !xs.as<m_arr>().pinned) xs.as<m_arr>().gen = ++st.array_gen; // Data moved - links broken
+      xs.as<m_arr>().items.push_back(std::move(x)); // data transfer links are not visible
       return finish(mval{m_unit{}});
     }
     std::vector<mval> a;
@@ -3292,7 +3272,7 @@ struct process_machine {
     auto size = arr.as<m_arr>().items.size();
     if(k < 0 || uint64_t(k) >= size) out_of_bounds(k, size, db[t.node].where);
     if(al.index != m_none) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where); // interpreter-like
-    finish(mval{m_alias{al.scope, al.slot, uint32_t(k), arr.as<m_arr>().gen}});
+    finish(mval{m_alias{al.scope, al.slot, uint32_t(k)}});
   }
   // The root of the place is the variable that the link itself (r[k] from &r = ...): then this is the path.
   bool ref_root(node_id x, uint32_t scope) {
@@ -3344,8 +3324,8 @@ struct process_machine {
       if(r.path_scope != m_none)
         for(uint32_t k = 0; k < r.path_n; ++k) steps.push_back(st.scopes[r.path_scope].steps[r.path_at + k]);
       else {
-        if(r.index != m_none) steps.push_back({r.index, r.gen, false});
-        if(r.field != m_none) steps.push_back({r.field, 0, true}); // field
+        if(r.index != m_none) steps.push_back({r.index, false});
+        if(r.field != m_none) steps.push_back({r.field, true}); // field
       }
     }
     uint32_t next = 0;
@@ -3368,7 +3348,7 @@ struct process_machine {
         uint32_t k = 0;
         while(k < fs.size() && fs[k].name != f) ++k;
         if(k == fs.size()) throw diagnostic(cat("у значения ", describe(*agg), " нет поля ", helper.str(f)), db[c].where);
-        steps.push_back({k, 0, true});
+        steps.push_back({k, true});
       } else {
         mval i = deref(fib().vals[t.base + next++]);
         if(t.a && (!box.is<m_arr>() || !i.is<int64_t>())) return as_value(t); // line element n
@@ -3376,7 +3356,7 @@ struct process_machine {
         int64_t k = i.as<int64_t>();
         auto size = box.as<m_arr>().items.size();
         if(k < 0 || uint64_t(k) >= size) out_of_bounds(k, size, db[c].where);
-        steps.push_back({uint32_t(k), box.as<m_arr>().gen, false});
+        steps.push_back({uint32_t(k), false});
       }
       if(steps.size() > 3) throw diagnostic("ссылка — не глубже трёх шагов (поле, элемент)", db[t.node].where);
     }
@@ -3768,7 +3748,7 @@ struct restored_process {
   explicit restored_process(std::string_view bytes, int fd = -1) {
     reader r(bytes);
     dump_head h = r.get<dump_head>();
-    if(h.magic != "VISHPROC09" && h.magic != "TZPROC09") // TZPROC09 - before renaming the language
+    if(h.magic != "VISHPROC10")
       throw diagnostic("не дамп процесса vish", {});
     db.replay(h.journal);
     m.emplace(db, node_id(h.root), h.name, bytes, fd);

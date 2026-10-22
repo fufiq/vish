@@ -1,12 +1,13 @@
-// The link-path is based on the buffer of the array of the first step (§12.1): push it disables
-// - use after - "dangerous-dangerous", error parsing in the way (hooks support, like y &e =
-// v[i]). In the performance - only if the data has moved (generation).
+// The link-path relies on the first step array (§12.1): in a model where push breaks links
+// (with_model, model_moving), use after push is "dangerous-dangerous", error parsing in the way
+// (support hooks like y&e = v[i]). Execution - place (base and index): no move is visible.
 // check-error: ссылка на элемент использована после инвалидации опоры
 // check-error: опора инвалидирована здесь
 // out: 4
 struct point { i64 x; i64 y; }
 main() {
   ps = array{point{1, 2}, point{3, 4}};
+  with_model(ps, model_moving());
   &f = ps[1].y;
   ps.push(point{5, 6});
   print(f);
