@@ -8346,10 +8346,12 @@ struct interpreter {
       // gives a field of new
 // ), crossed the buffer along the way - invalidated_alias ( ).
 // Without a copy at the entrance and recording on
-      // Get out. *My:* path up to three steps, as in &e = p.x, with a place at execution (aggregate
-      // fields, simple indexes - arg_place); otherwise - a copy and a record at the output. An immutable
-      // parameter is a value: a link would see the caller changing the source in a different way.
-      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && p.mode != param_mode::out && (db.is_member(args[i]) || db.is_index(args[i])) && path_fits(args[i], env) && writes_param(f, i) && (checking() || arg_place(args[i], env)))
+      // Get out. Invariable is also alias : ,; parsing has a value (it does not change - the same
+      // thing is observed until the source is changed in another way). *My:* path up to three steps,
+      // as in &e = p.x, with a place at execution (aggregate fields, simple indexes - arg_place);
+      // otherwise - a copy and a record at the output.
+      //
+      if(f && i < args.size() && p.mode != param_mode::expr && p.mode != param_mode::own && p.mode != param_mode::out && (db.is_member(args[i]) || db.is_index(args[i])) && path_fits(args[i], env) && (checking() ? writes_param(f, i) : arg_place(args[i], env) != nullptr))
         if(auto r = path_ref(args[i], env, 0, args[i])) {
           value const * at = checking() ? nullptr : path_place(r->as<ref_v>(), 1 + r->as<ref_v>().more, db[args[i]].where, true);
           if(checking() || (at && types.of(*at) == types.of(vals[i]))) {

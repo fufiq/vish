@@ -757,10 +757,10 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
 
   std::vector<uint64_t> raw(vals.size());
   std::vector<value *> cells(vals.size()); // Argument array cells: the compiler code in the language holds their addresses
-  // Path-argument (field, element) - in place, if the root is local and no longer occurs in any argument:
-  // otherwise the called will replace the aggregate or move the buffer (f(b.xs, b)), while the machine code
-  // holds the address. Such a path to a variable parameter is an interpreter (link-path with a generation,
-  // §6.2); to an immutable one is a copy (loan too).
+  // Path-argument (field, element) - in place, if the root is local. The root of another argument (f(b.xs,
+  // b)) is the interpreter: the called will replace the aggregate or move the buffer as long as the
+  // machine code holds the address, and the copy would not see the change through alias (§6.2). The root
+  // is a variable module or reference: variable to the interpreter, immutable to the copy (loan, too).
   auto root_of = [&](node_id x) {
     while(db.is_member(x) || db.is_index(x)) x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
     return db.is<n_ident>(x) ? db.as<n_ident>(x).name : symbol{};
@@ -770,7 +770,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     if(!db.is_member(args[i]) && !db.is_index(args[i])) continue;
     symbol r = root_of(args[i]);
     for(uint32_t j = 0; j < args.size(); ++j)
-      if(j != i && r.valid() && root_of(args[j]) == r) in_place[i] = false;
+      if(j != i && r.valid() && root_of(args[j]) == r) return std::nullopt; // alias of the same root - the copy has the wrong
     if(!arg_place(args[i], env, true)) in_place[i] = false;
     if(!in_place[i] && writes_param(f, i)) return std::nullopt;
     if(!in_place[i] && vals[i].is<array_v>() && vals[i].as<array_v>().borrowed) vals[i] = value(array_v(vals[i].as<array_v>()));

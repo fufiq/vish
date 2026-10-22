@@ -1657,8 +1657,10 @@ jit_compile(cg, f, types, type result) {
     else faults.push(array{l, -2, to[0].label, depth - to[0].depth}); // VM error in try - transition to catch
     l
   };
-  // Circumstance of the caller: records above its top - to the side, then back
-  in_view(i64 t, i64 b, i64 c, i64 rt, g) => {
+  // Caller environment: records above its top - to the side, then back parameters - alias (often env
+  // recording fields that g() will overwrite): values - at the beginning
+  in_view(i64 t0, i64 b, i64 c, i64 rt, g) => {
+    i64 t = t0;
     saved = array{};
     for(i : range(top - t)) saved.push(env[t + i]);
     old_top = top;

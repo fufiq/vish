@@ -1,17 +1,22 @@
 // out: [[1, 4], [2, 3]] [1, 9, 10] 7 [2]
 // out: [100] 0 [7, 8]
 // out: поймано invalidated_alias
+// out: 1 7 [2] [2, 5]
 // machine
 // Поле в изменяемый параметр — ссылка-путь на место (§6.2, §12.1): место ищется при каждом
 // обращении. Агрегат, заменённый целиком, — поле нового: 
 // буфер по пути переехал —
 // invalidated_alias.
+// Неизменяемый параметр — тоже алиас: 
+//  — изменение источника другим путём видно (show).
 struct inner { array ys; i64 k; }
 struct outer { inner in; array zs; }
 add(xs, x) { xs.push(x); }
 bump(k) { k = k + 1; }
 replace_then_add(o, xs) { o = outer{inner{array{100}, 0}, array{7}}; xs.push(8); }
 grow_then(xs, gs) { gs.push(array{0}); xs.push(1); }
+show(k, ys, o) { k0 = k; n0 = ys.size; o.n = 7; o.zs.push(5); print(k0, k, if(n0 == 1) array{2} else ys, ys); }
+struct holder { i64 n; array zs; }
 main() {
   t = array{array{1}, array{2}};
   t[1].push(3);
@@ -27,4 +32,6 @@ main() {
   print(b.in.ys, b.in.k, b.zs);
   g = array{array{1}};
   try { grow_then(g[0], g); print("не поймано"); } catch(e) { print("поймано", typeof(e)); }
+  h = holder{args.size, array{2}};
+  show(h.n, h.zs, h);
 }

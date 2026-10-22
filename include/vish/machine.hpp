@@ -1816,7 +1816,7 @@ struct process_machine {
         break;
       }
       mval a = std::move(args[i]);
-      if(a.is<m_alias>() && a.as<m_alias>().index != m_none && (p.mode == param_mode::own || !helper.writes_param(chosen, i))) a = deref(a);
+      if(a.is<m_alias>() && (a.as<m_alias>().index != m_none || a.as<m_alias>().field != m_none || a.as<m_alias>().path_scope != m_none) && p.mode == param_mode::own) a = deref(a);
       if(p.mode == param_mode::own && a.is<m_alias>()) { // movement: the meaning goes away, the name of the caller is hidden (scalar - copy)
         m_alias al = a.as<m_alias>();
         a = deref(a);
@@ -2824,17 +2824,19 @@ struct process_machine {
         if(i >= ps.size() || db.as<n_param>(ps[i]).mode != param_mode::out) out_everywhere = false;
       }
       if(out_everywhere && find(t.scope, db.as<n_ident>(args[i]).name).scope == m_none) declare(t.scope, db.as<n_ident>(args[i]).name, mval{m_unit{}});
-      // array element to variable parameter - reference to element, not copy
-      bool writes = false;
+      // an array element in a variable parameter - a reference to the element, not a
+      // copy of the place - alias and in an immutable parameter:
+// 
+      bool aliased = !fns.empty();
       for(node_id f: fns) {
         auto const & ps = db.as<n_fn>(f).params;
-        writes = writes || (i < ps.size() && db.as<n_param>(ps[i]).mode != param_mode::expr && db.as<n_param>(ps[i]).mode != param_mode::own && helper.writes_param(f, i));
+        aliased = aliased && i < ps.size() && db.as<n_param>(ps[i]).mode != param_mode::expr && db.as<n_param>(ps[i]).mode != param_mode::own;
       }
-      if(writes && elem_place(db, args[i])) return push_elem_ref(args[i], t.scope, t.frame);
-      if(writes && field_alias(args[i], t.scope)) continue; // variable field - alias by field number
-      // A deeper path (a.b.c, cl[c].xs.ys) is a link-path like &e = ...:
-// Steps - in the area of calling to the end of the challenge
-      if(writes && (db.is_member(args[i]) || db.is_index(args[i])) && path_arg(args[i], t.scope)) return push_path_ref(args[i], t.scope, t.frame);
+      if(aliased && elem_place(db, args[i])) return push_elem_ref(args[i], t.scope, t.frame, true);
+      if(aliased && field_alias(args[i], t.scope)) continue; // variable field - alias by field number
+      // path deeper (a.b.c, cl[c].xs.ys) - link-path, like &e = ...; steps - in the area of calling to the
+      // end; not place (xs.size, line element) - value n
+      if(aliased && (db.is_member(args[i]) || db.is_index(args[i])) && path_arg(args[i], t.scope)) return push_path_ref(args[i], t.scope, t.frame, true);
       return push_eval(args[i], t.scope, t.frame); // the value (or alias of the place) on the stack
     }
     if(t.phase != 2) { // link-path steps of arguments are removed after the call (the cycle does not accumulate)
@@ -3263,9 +3265,10 @@ struct process_machine {
   }
 
   // v[i] as location: reference to a variable array element (alias with buffer generation).
-  void push_elem_ref(node_id n, uint32_t scope, uint32_t frame) {
+  void push_elem_ref(node_id n, uint32_t scope, uint32_t frame, bool arg = false) {
     auto & f = fib();
     f.tasks.push_back(m_task{m_elem_ref, n, 0, scope, frame, uint32_t(f.vals.size())});
+    f.tasks.back().a = arg; // Argument: not place, meaning n
     if(f.tasks.size() > 1) f.tasks.back().ctx = f.tasks[f.tasks.size() - 2].ctx;
   }
   void elem_ref_step() {
@@ -3283,6 +3286,7 @@ struct process_machine {
     m_alias al{p.scope, p.slot};
     if(st.scopes[p.scope].vars[p.slot].v.is<m_alias>()) al = st.scopes[p.scope].vars[p.slot].v.as<m_alias>();
     mval & arr = follow(al);
+    if(t.a && (!arr.is<m_arr>() || !i.is<int64_t>() || al.index != m_none)) return as_value(t); // Argument Not Place (Element of a Line) n
     if(!arr.is<m_arr>() || !i.is<int64_t>()) throw diagnostic("auto& — ссылка на переменную или элемент массива переменной", db[t.node].where);
     int64_t k = i.as<int64_t>();
     auto size = arr.as<m_arr>().items.size();
@@ -3301,10 +3305,18 @@ struct process_machine {
   }
   // Link-to-path (§12.1, tail of step 10): chain indexes take turns (phases), then steps to the area
   // where the link is declared; like an interpreter, up to three steps.
-  void push_path_ref(node_id n, uint32_t scope, uint32_t frame) {
+  void push_path_ref(node_id n, uint32_t scope, uint32_t frame, bool arg = false) {
     auto & f = fib();
     f.tasks.push_back(m_task{m_path_ref, n, 0, scope, frame, uint32_t(f.vals.size())});
+    f.tasks.back().a = arg; // Argument: not place, meaning n
     if(f.tasks.size() > 1) f.tasks.back().ctx = f.tasks[f.tasks.size() - 2].ctx;
+  }
+  // A link-argument whose path does not belong: the problem becomes the calculation of the value of node
+  void as_value(m_task & t) {
+    fib().vals.resize(t.base);
+    t.kind = m_eval;
+    t.phase = 0;
+    t.a = 0;
   }
   void path_ref_step() {
     m_task & t = top();
@@ -3350,6 +3362,7 @@ struct process_machine {
         symbol f = db.member_of(c).name;
         mval * agg = &box;
         if(agg->is<m_agg>() && is_shared_v(*agg)) agg = &slot_of(*agg).v;
+        if(t.a && (!agg->is<m_agg>() || std::ranges::none_of(agg->as<m_agg>().fields, [&](auto const & x) { return x.name == f; }))) return as_value(t); // xs.size - value n
         if(!agg->is<m_agg>()) throw diagnostic(cat("у значения ", describe(*agg), " нет поля ", helper.str(f)), db[c].where);
         auto const & fs = agg->as<m_agg>().fields;
         uint32_t k = 0;
@@ -3358,6 +3371,7 @@ struct process_machine {
         steps.push_back({k, 0, true});
       } else {
         mval i = deref(fib().vals[t.base + next++]);
+        if(t.a && (!box.is<m_arr>() || !i.is<int64_t>())) return as_value(t); // line element n
         if(!box.is<m_arr>() || !i.is<int64_t>()) throw diagnostic(cat("ссылка на элемент: ", describe(box), " — не массив"), db[c].where);
         int64_t k = i.as<int64_t>();
         auto size = box.as<m_arr>().items.size();
