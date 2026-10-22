@@ -211,14 +211,66 @@ fail(str why) {
   1
 }
 
-// --- VM session: commands by rows (vish vm, scripts .session, vish apply) ------------------------------ edit
+// --- VM session: commands by rows (vish vm, scripts .session, vish apply) ---------------------------- edit
 // function - operation on the base, check recalculates only the affected (§10.1). Line - command and words;
-// body edit - to the line "..." The commands themselves have VM (session.hpp); the error is text with a place.
+// body edit - to the line "..." VM (session.hpp) has a command base: parsing, execution, database editing,
+// live process, data (numbers, program output, text error with place). Solutions - what to replace with
+// editing, struct and migrate in a live process, which editing function to apply - and command texts - here
+// (user solution 2026-10-22):
 //
-vm_check(i64 s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
+// 
+//.
+
+// Elements of the root module v (-1 - program module): array{number, text, internal, empty lines in front
+// of it, comments before it, comment at the end of the line}
+version_items(i64 v, i64 root) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  if(!x) return value(array_v::of({}));
+  return value(array_v::of(module_item_facts(*x->db, tools_host->module_of(*x, (a[1]).as<int64_t>()))));
+};
+// Root element numbers of version v (without text)
+version_nodes(i64 v, i64 root) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({value(int64_t(0))})));
+  std::vector<value> out;
+  if(auto * x = tools_host->at((a[0]).as<int64_t>()))
+    if(node_id m = tools_host->module_of(*x, (a[1]).as<int64_t>()))
+      for(node_id n: x->db->as<n_module>(m).items) out.push_back(value(int64_t(n.value)));
+  return value(array_v::of(std::move(out)));
+};
+// What is the element n version v: array {вид, имя, части, цель} : fn (parts - parameter types, " " -
+// without type), syntax (words form), struct, extend, extend_ref (goal - extensible function), var, other
+version_signature(i64 v, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto * x = tools_host->at((a[0]).as<int64_t>());
+  int64_t n = (a[1]).as<int64_t>();
+  if(!x || n < 0 || uint64_t(n) >= x->db->size()) return value(array_v::of({value(std::string("other")), value(std::string()), value(array_v::of({})), value(int64_t(-1))}));
+  return item_signature(*x->db, node_id(uint32_t(n)));
+};
+
+// session base s - version: its elements and signatures - like copies
+vm_version(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
   auto & x = tools_host->session((a[0]).as<int64_t>());
-  return value(x.guarded([&] { return x.check(); }));
+  return value(tools_host->adopt(x.db, x.root));
+};
+// after the rounds command there are no shot views of node won (a long session does not save them)
+vm_sweep(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  tools_host->session((a[0]).as<int64_t>()).db.sweep_retired();
+  return value(int64_t(0));
+};
+// check: array{ошибка, пересчитано экземпляров (-1 — сам check не прошёл: ошибка — всё), их имена,
+// cache
+vm_check_facts(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  try {
+    auto f = x.check();
+    return value(array_v::of({value(f.error), value(int64_t(f.recomputed)), strings_value(f.names), value(int64_t(f.hits))}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(render(d, x.name, x.db)), value(int64_t(-1)), strings_value({}), value(int64_t(0))}));
+  }
 };
 vm_report(i64 s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
@@ -256,49 +308,79 @@ vm_fmt(i64 s) => native "cpp" {
   auto & x = tools_host->session((a[0]).as<int64_t>());
   return value(x.guarded([&] { return printer(x.db).print(x.root); }));
 };
-vm_edit(i64 s, str fn, str body) => native "cpp" {
+// parsing the text of editing according to the rules of the place at (-1 - the entire module, §4.4):
+// array{mistakes in the text, elements of the disassembled}; label - the name of the edit in the messages
+vm_parse_at(i64 s, i64 at, str label, str text) => native "cpp" {
   for(auto & v: a)
-    if(!v.known()) return erase(value(std::string()));
+    if(!v.known()) return erase(value(array_v::of({})));
   auto & x = tools_host->session((a[0]).as<int64_t>());
-  std::string fn((a[1]).as<str_v>().view()), body((a[2]).as<str_v>().view());
-  return value(x.guarded([&] { return x.edit(fn, body); }));
+  int64_t at = (a[1]).as<int64_t>();
+  auto [errs, items] = x.parse_at(at < 0 ? node_id{} : node_id(uint32_t(at)), std::string((a[2]).as<str_v>().view()), std::string((a[3]).as<str_v>().view()));
+  std::vector<value> ns;
+  for(node_id n: items) ns.push_back(value(int64_t(n.value)));
+  return value(array_v::of({value(errs), value(array_v::of(std::move(ns)))}));
 };
-vm_apply(i64 s, str fn) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+// Element Old Becomes Fresh (id old saved): Base revision
+vm_replace(i64 s, i64 old, i64 fresh) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(int64_t(0)));
   auto & x = tools_host->session((a[0]).as<int64_t>());
-  std::string fn((a[1]).as<str_v>().view());
-  return value(x.guarded([&] { return x.apply(fn); }));
+  return value(int64_t(x.replace_item(node_id(uint32_t((a[1]).as<int64_t>())), node_id(uint32_t((a[2]).as<int64_t>())))));
 };
+// elements of the program module - this list (one edit of the base): revision of the base
+vm_set_items(i64 s, xs) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  std::vector<node_id> items;
+  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) items.push_back(node_id(uint32_t((a[1]).as<array_v>().get(k).as<int64_t>())));
+  x.set_items(std::move(items));
+  return value(int64_t(x.db.revision));
+};
+// Program editing function f (§7.4): array {правок, ошибка}
+vm_apply_fn(i64 s, i64 f) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  try {
+    return value(array_v::of({value(int64_t(x.apply(node_id(uint32_t((a[1]).as<int64_t>()))))), value(std::string())}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(int64_t(0)), value(render(d, x.name, x.db))}));
+  }
+};
+// journal database - in the file .vishdb: "" - written, otherwise the error
 vm_save(i64 s, str path) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
   auto & x = tools_host->session((a[0]).as<int64_t>());
   std::string path((a[1]).as<str_v>().view());
-  return value(x.guarded([&] {
+  try {
     save_db(x.db, x.root, path);
-    return cat("сохранено: ", path, "\n");
-  }));
+  } catch(diagnostic const & d) {
+    return value(render(d, x.name, x.db));
+  }
+  return value(std::string());
 };
-vm_stats(i64 s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
+// stats: array{узлов, записей журнала, байт .vishdb, узлов и записей при прошлом stats (0 — не было)}
+vm_stats_facts(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto r = tools_host->session((a[0]).as<int64_t>()).stats();
+  std::vector<value> out;
+  for(uint64_t k: r) out.push_back(value(int64_t(k)));
+  return value(array_v::of(std::move(out)));
+};
+// journal → new base: array{projection same, output run here, there, nodes in the new}
+vm_roundtrip_facts(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
   auto & x = tools_host->session((a[0]).as<int64_t>());
-  return value(x.guarded([&] { return x.stats(); }));
+  auto f = x.roundtrip();
+  return value(array_v::of({value(f.same_projection), value(f.here), value(f.there), value(int64_t(f.nodes))}));
 };
-vm_roundtrip(i64 s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  auto & x = tools_host->session((a[0]).as<int64_t>());
-  return value(x.guarded([&] { return x.roundtrip(); }));
-};
-// living process of the machine (§9.3): whether there is; run; steps (n < 0 - to the end); where; resource
-// give or take; pressure; complete; expression sample in clone (fork)
+// living process of the machine (§9.3): is there; is there (is and is not completed); start ("" - started,
+// otherwise error); steps (n < 0 - to the end); where; resource to give or take; pressure (processors);
+// complete; expression test in clone (fork) living process of the machine (§9.3): whether; run; steps (n <
+// 0 - to the end); where; resource to give or take; pressure; complete; expression test in clone (fork)
+//
 vm_proc_live(i64 s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
   return value(tools_host->session((a[0]).as<int64_t>()).proc != nullptr);
-};
-vm_proc_start(i64 s, args) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  auto & x = tools_host->session((a[0]).as<int64_t>());
-  auto args = strings_of(a[1]);
-  return value(x.guarded([&] { return x.proc_start(args); }));
 };
 vm_proc_step(i64 s, i64 n) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
@@ -311,26 +393,46 @@ vm_proc_where(i64 s) => native "cpp" {
   auto & x = tools_host->session((a[0]).as<int64_t>());
   return value(x.guarded([&] { return x.proc->where_now(); }));
 };
+vm_proc_alive(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  return value(x.proc != nullptr && !x.proc->st.done);
+};
+vm_proc_start(i64 s, args) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  auto args = strings_of(a[1]);
+  try {
+    x.proc_start(args);
+  } catch(diagnostic const & d) {
+    return value(render(d, x.name, x.db));
+  }
+  return value(std::string());
+};
 vm_proc_grant(i64 s, str what, bool give) => native "cpp" {
   for(auto & v: a)
     if(!v.known()) return erase(value(std::string()));
   auto & x = tools_host->session((a[0]).as<int64_t>());
-  std::string what((a[1]).as<str_v>().view());
-  bool give = (a[2]).as<bool>();
-  return value(x.guarded([&] { return x.proc_grant(what, give); }));
+  try {
+    x.proc_grant(std::string((a[1]).as<str_v>().view()), (a[2]).as<bool>());
+  } catch(diagnostic const & d) {
+    return value(render(d, x.name, x.db));
+  }
+  return value(std::string());
 };
 vm_proc_pressure(i64 s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
   auto & x = tools_host->session((a[0]).as<int64_t>());
-  return value(x.guarded([&] { return x.proc_pressure(); }));
+  try {
+    return value(array_v::of({value(int64_t(x.proc_pressure())), value(std::string())}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(int64_t(0)), value(render(d, x.name, x.db))}));
+  }
 };
 vm_proc_stop(i64 s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  auto & x = tools_host->session((a[0]).as<int64_t>());
-  return value(x.guarded([&] {
-    x.proc.reset();
-    return std::string("процесс завершён\n");
-  }));
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  tools_host->session((a[0]).as<int64_t>()).proc.reset();
+  return value(int64_t(0));
 };
 vm_proc_call(i64 s, str expr) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
@@ -338,6 +440,52 @@ vm_proc_call(i64 s, str expr) => native "cpp" {
   std::string expr((a[1]).as<str_v>().view());
   return value(x.guarded([&] { return x.probe(expr); }));
 };
+// Editing in a live process (hot replacement, §9.3): ct of the new code - in place ("" - recalculated,
+// otherwise error); new overload - process assistant; overload name - again; values of struct n of the old
+// layout (fields n - new); transfer them through migrate fn: array {перенесено, ошибка}.
+vm_proc_refresh(i64 s) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  try {
+    x.proc->refresh_ct();
+  } catch(diagnostic const & d) {
+    return value(render(d, x.name, x.db));
+  }
+  return value(std::string());
+};
+vm_proc_register(i64 s, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  x.proc->helper.register_item(node_id(uint32_t((a[1]).as<int64_t>())));
+  return value(int64_t(0));
+};
+vm_proc_clear(i64 s, str name) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  x.proc->helper.functions[x.db.strings.intern((a[1]).as<str_v>().view())].clear();
+  return value(int64_t(0));
+};
+vm_proc_stale(i64 s, i64 n) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  node_id n(uint32_t((a[1]).as<int64_t>()));
+  auto t = x.proc->helper.types.named(std::string(x.db.strings.text(x.db.as<n_extend>(n).name)));
+  return value(int64_t(x.proc->stale_values(t, struct_fields(x.db, n))));
+};
+vm_proc_migrate(i64 s, i64 n, i64 fn) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(array_v::of({})));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  node_id n(uint32_t((a[1]).as<int64_t>()));
+  int64_t f = (a[2]).as<int64_t>();
+  try {
+    auto t = x.proc->helper.types.named(std::string(x.db.strings.text(x.db.as<n_extend>(n).name)));
+    return value(array_v::of({value(int64_t(x.proc->migrate_values(t, struct_fields(x.db, n), f < 0 ? node_id{} : node_id(uint32_t(f))))), value(std::string())}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(int64_t(0)), value(render(d, x.name, x.db))}));
+  }
+};
+
 // k-word
 words_from(xs, i64 k) {
   r = array{};
@@ -346,35 +494,184 @@ words_from(xs, i64 k) {
 }
 // Session command s line: conclusion
 vm_command(i64 s, str line, str body) {
+  out = run_vm_command(s, line, body);
+  vm_sweep(s);
+  out
+}
+run_vm_command(i64 s, str line, str body) {
   ws = words_of(line);
   cmd = if(ws.size > 0) ws[0] else "";
   args = words_from(ws, 1);
-  if(cmd == "check") return vm_check(s);
+  if(cmd == "check") return check_command(s);
   if(cmd == "stdin") return vm_stdin(s, if(line.size > 6) text_from(line, 6) else "");
   if(cmd == "report") return vm_report(s);
   if(cmd == "jit") return vm_jit(s);
   if(cmd == "run") return vm_run(s, args);
   if(cmd == "residual") return vm_residual(s, args);
   if(cmd == "fmt") return vm_fmt(s);
-  if((cmd == "edit") && (args.size == 1)) return vm_edit(s, args[0], body);
-  if((cmd == "apply") && (args.size == 1)) return vm_apply(s, args[0]);
-  if(cmd == "stats") return vm_stats(s);
-  if(cmd == "roundtrip") return vm_roundtrip(s);
+  if((cmd == "edit") && (args.size == 1)) return edit_command(s, args[0], body);
+  if((cmd == "apply") && (args.size == 1)) return apply_command(s, args[0]);
+  if(cmd == "stats") return stats_command(s);
+  if(cmd == "roundtrip") return roundtrip_command(s);
   if(cmd == "proc") return proc_command(s, args, line);
-  if((cmd == "save") && (args.size == 1)) return vm_save(s, args[0]);
+  if((cmd == "save") && (args.size == 1)) return save_command(s, args[0]);
   ("неизвестная команда: " + line) + "\n"
+}
+// comma names ("" - no)
+joined(xs) {
+  r = "";
+  for(x : xs) r = if(r == "") x else (r + ", ") + x;
+  r
+}
+check_command(i64 s) {
+  array{error, count, names, hits} = vm_check_facts(s);
+  if(count < 0) return error;
+  shown = joined(names);
+  error + ((((((("check: пересчитано " + text(count)) + " экземпл. (") + (if(shown == "") "—" else shown)) + "), из кэша ") + text(hits)) + "\n"))
+}
+// Base size and growth from the past stats: edits grow the base to disassemble text, while elaboration,
+// parsing recalculation and new interpreters with the same result do not (test 217)
+stats_command(i64 s) {
+  array{nodes, entries, bytes, was_nodes, was_entries} = vm_stats_facts(s);
+  out = ((((((("база: узлов " + text(nodes)) + ", журнал ") + text(entries)) + ", vishdb ") + text(bytes)) + " байт") + "\n");
+  if(was_nodes > 0) out = out + ((((("рост: узлов +" + text(nodes - was_nodes)) + ", журнал +") + text(entries - was_entries)) + "\n"));
+  out
+}
+// journal → new base (as .vishdb): same projection and same run output (tests 218, 219)
+roundtrip_command(i64 s) {
+  array{same, here, there, nodes} = vm_roundtrip_facts(s);
+  out = if(same) "" else "roundtrip: проекция отличается\n";
+  if(here != there) out = out + (((("roundtrip: вывод отличается: " + in_quotes(there)) + " против ") + in_quotes(here)) + "\n");
+  if(out == "") (("roundtrip: совпадает (узлов " + text(nodes)) + ")\n") else out
+}
+save_command(i64 s, str path) {
+  e = vm_save(s, path);
+  if(e != "") e else (("сохранено: " + path) + "\n")
+}
+// Version v is a name function (not a syntax form)
+is_fn_named(i64 v, i64 n, str name) {
+  array{kind, nm, parts, target} = version_signature(v, n);
+  (kind == "fn") && (nm == name)
+}
+// element n of version v - migrate(tn old)
+takes_migrate(i64 v, i64 n, str tn) {
+  array{kind, nm, parts, target} = version_signature(v, n);
+  (kind == "fn") && ((nm == "migrate") && ((parts.size == 1) && (parts[0] == tn)))
+}
+// The function of editing the program (code_replace, code_rename, code_remove, code_insert; §7.4): edits -
+// to the base, as human editing. Take the function fn without parameters (the last one in the module).
+apply_command(i64 s, str fn) {
+  v = vm_version(s);
+  f = -1;
+  for(n : version_nodes(v, -1)) {
+    array{kind, nm, parts, target} = version_signature(v, n);
+    if((kind == "fn") && ((nm == fn) && (parts.size == 0))) f = n;
+  }
+  if(f < 0) return (("нет функции правки " + fn) + "() без параметров") + "\n";
+  array{count, error} = vm_apply_fn(s, f);
+  if(error != "") error else (((("применена " + fn) + ": правок ") + text(count)) + "\n")
+}
+// Editing the element fn with the body text: function - replaces the first function with this name (the node retains the
+// id: ссылки и экземпляры остаются) или добавляется в модуль (меняет набор перегрузок); struct — в
+// edit_struct: The text is disassembled by the rules of the function location (§4.4; new, the entire
+// module). With a live process - a hot replacement: new calls - in a new version, started frames live in the
+// old, ct new body - in place (§9.3). .
+//
+edit_command(i64 s, str fn, str body) {
+  v = vm_version(s);
+  items = version_nodes(v, -1);
+  at = -1;
+  for(n : items) if((at < 0) && is_fn_named(v, n, fn)) at = n;
+  array{errors, got} = vm_parse_at(s, at, fn, body);
+  if(errors != "") return errors + "правка отклонена\n";
+  for(n : got) {
+    array{kind, nm, parts, target} = version_signature(v, n);
+    if((kind == "struct") && (nm == fn)) return edit_struct(s, v, items, n, got);
+  }
+  fresh = -1;
+  for(n : got) if(is_fn_named(v, n, fn)) fresh = n;
+  if(fresh < 0) return (("в тексте правки нет функции " + fn) + "\n");
+  if(at >= 0) {
+    revision = vm_replace(s, at, fresh);
+    if(vm_proc_alive(s)) {
+      e = vm_proc_refresh(s);
+      if(e != "") return e;
+    }
+    return ((((("функция " + fn) + " заменена (узел #") + text(at)) + ", ревизия ") + text(revision)) + ")\n";
+  }
+  items.push(fresh);
+  vm_set_items(s, items);
+  if(vm_proc_live(s)) vm_proc_register(s, fresh); // Living process sees new overload
+  if(vm_proc_alive(s)) {
+    e = vm_proc_refresh(s);
+    if(e != "") return e;
+  }
+  ("функция " + fn) + " добавлена\n"
+}
+// Edit struct: node saves id, fields new. The living values of the old layout are via migrate(T old)
+// from the same text (the former migrate of the same type is replaced); no, the edit is rejected. .
+//
+//
+edit_struct(i64 s, i64 v, items, i64 fresh, got) {
+  tn = version_signature(v, fresh)[1];
+  item = -1;
+  for(n : items) {
+    array{kind, nm, parts, target} = version_signature(v, n);
+    if((kind == "struct") && (nm == tn)) item = n;
+  }
+  if(item < 0) return (("нет struct " + tn) + "\n");
+  mig = -1;
+  for(n : got) if(takes_migrate(v, n, tn)) mig = n;
+  alive = vm_proc_alive(s);
+  stale = if(alive) vm_proc_stale(s, fresh) else 0;
+  if((stale > 0) && (mig < 0))
+    return ((((((((("правка отклонена: живой процесс держит значений " + tn) + " старой раскладки: ") + text(stale)) + " — нужна migrate(") + tn) + " old) => ") + tn) + "{…} в том же тексте (или proc stop)") + "\n");
+  vm_replace(s, item, fresh);
+  kept = array{};
+  for(n : items) if((mig < 0) || !takes_migrate(v, n, tn)) kept.push(n);
+  if(mig >= 0) kept.push(mig);
+  revision = vm_set_items(s, kept);
+  out = ((((("struct " + tn) + " заменена (узел #") + text(item)) + ", ревизия ") + text(revision)) + ")\n";
+  if(!alive) return out;
+  if(mig >= 0) { // overload migrate in the assistant - as in the module
+    vm_proc_clear(s, "migrate");
+    for(n : kept) if(is_fn_named(v, n, "migrate")) vm_proc_register(s, n);
+  }
+  if(stale > 0) {
+    array{moved, error} = vm_proc_migrate(s, item, mig);
+    if(error != "") return error;
+    out = out + (("перенесено migrate: " + text(moved)) + "\n");
+  }
+  out
 }
 // proc...: living process of the machine (§9.3)
 proc_command(i64 s, args, str line) {
   sub = if(args.size > 0) args[0] else "";
-  if(sub == "start") return vm_proc_start(s, words_from(args, 1));
+  if(sub == "start") {
+    e = vm_proc_start(s, words_from(args, 1));
+    if(e != "") return e;
+    return "процесс запущен\n";
+  }
   if(!vm_proc_live(s)) return "нет живого процесса: proc start\n";
   if((sub == "step") || (sub == "run")) return vm_proc_step(s, if(sub == "run") -1 else (if(args.size > 1) number_of(args[1]) else 1));
   if(sub == "where") return vm_proc_where(s);
-  if(((sub == "grant") || (sub == "revoke")) && (args.size == 2)) return vm_proc_grant(s, args[1], sub == "grant");
-  if(sub == "pressure") return vm_proc_pressure(s);
-  if(sub == "stop") return vm_proc_stop(s);
-  if(sub == "call") return vm_proc_call(s, text_from(line, find_text(line, "call") + 4));
+  if(((sub == "grant") || (sub == "revoke")) && (args.size == 2)) { // "You give."
+    e = vm_proc_grant(s, args[1], sub == "grant");
+    if(e != "") return e;
+    return ((if(sub == "grant") "дано: " else "забрано: ") + args[1]) + "\n";
+  }
+  if(sub == "pressure") { //  
+    array{handlers, error} = vm_proc_pressure(s);
+    if(error != "") return error;
+    return ("давление: обработчиков " + text(handlers)) + "\n";
+  }
+  if(sub == "stop") {
+    vm_proc_stop(s);
+    return "процесс завершён\n";
+  }
+  if(sub == "call") {
+    if(!vm_proc_alive(s)) return "процесс завершён: пробовать нечего\n";
+    return vm_proc_call(s, text_from(line, find_text(line, "call") + 4));
+  }
   "proc: start, step N, run, where, call <выражение>, pressure, grant/revoke fs|net, stop\n"
 }
-

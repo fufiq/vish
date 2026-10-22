@@ -1353,16 +1353,6 @@ struct editor_server {
       if(m.value < session.db.size() && session.db.is<n_module>(m)) out.push_back(m);
     return out;
   }
-  // struct n layout of db base: names and types of fields
-  static std::vector<process_machine::field_decl> struct_fields(ast_db const & db, node_id n) {
-    std::vector<process_machine::field_decl> fields;
-    for(node_id x: db.as<n_extend>(n).items)
-      if(db.is<n_var>(x)) {
-        node_id ty = db.as<n_var>(x).type;
-        fields.push_back({db.as<n_var>(x).name, ty && db.is<n_ident>(ty) ? std::string(db.strings.text(db.as<n_ident>(ty).name)) : std::string()});
-      }
-    return fields;
-  }
   // Struct n (session bases) of the old layout in a living process
   uint64_t live_stale(node_id n) {
     if(!live || !live->m || !session.db.is_struct(n)) return 0;
@@ -1376,26 +1366,18 @@ struct editor_server {
   void live_register(node_id n) {
     if(live && live->m) live->m->helper.register_item(n);
   }
-  // The struct tn values of the old layout - through the migrate(tn old) process (§9.3);' - are transferred.
-  std::string live_migrate(std::string const & tn) {
+  // overload name for the process assistant - again (they are set by the language: live_register).
+  void live_clear(std::string const & name) {
+    if(live && live->m) live->m->helper.functions[live->db.strings.intern(name)].clear();
+  }
+  // The struct item values of the old layout process base - via migrate fn (§9.3); which item and fn - decides
+  // the language (sync_program).' - are transferred, otherwise why not.
+  std::string live_migrate(node_id item, node_id fn) {
     if(!live || !live->m) return "";
     live_run & r = *live;
     process_machine & m = *r.m;
-    symbol mig = r.db.strings.intern("migrate");
-    m.helper.functions[mig].clear(); // overload migrate in the assistant - as in the module
-    node_id fn, item;
-    for(node_id x: r.db.as<n_module>(r.root).items) {
-      if(r.db.is<n_fn>(x) && r.db.as<n_fn>(x).name == mig) {
-        m.helper.register_item(x);
-        auto const & ps = r.db.as<n_fn>(x).params;
-        node_id ty = ps.size() == 1 ? r.db.as<n_param>(ps[0]).type : node_id{};
-        if(ty && r.db.is<n_ident>(ty) && r.db.strings.text(r.db.as<n_ident>(ty).name) == tn) fn = x;
-      }
-      if(r.db.is_struct(x) && r.db.strings.text(r.db.as<n_extend>(x).name) == tn) item = x;
-    }
-    if(!item) return "";
     try {
-      m.migrate_values(m.helper.types.named(tn), struct_fields(r.db, item), fn);
+      m.migrate_values(m.helper.types.named(std::string(r.db.strings.text(r.db.as<n_extend>(item).name))), struct_fields(r.db, item), fn);
     } catch(diagnostic const & d) {
       return d.what();
     }

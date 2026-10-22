@@ -172,6 +172,7 @@ struct cli_host {
     node_id f = tools_host->fn(fn);
     if(!f) throw diagnostic(cat("нет функции ", key, ".", fn), {});
     interpreter vm(db, m, {}, mode::run);
+    vm.detached = true; // Tuling code program does not touch (like the code of the editor): elaboration - nested
     return int(vm.analyze_instance(f, {strings_value(args)}).as<int64_t>());
   }
   // VM for Editor: Protocol on Unix Socket - Forever
@@ -220,6 +221,11 @@ int run_cli(int argc, char ** argv) {
     std::vector<value> args;
     for(int i = 1; i < argc; ++i) args.push_back(value(std::string(argv[i])));
     interpreter vm(db, ctx.module, {}, mode::run);
+    // The program does not touch the tuning code (like the editor code, server.hpp): its elaboration is nested, does
+    // not roll back ct program mutations and does not declare the result to be valid. Otherwise, the prelude
+    // assistant, led by the tuling code after editing (chain selection), announced the elaboration of the base of the
+    // program operating without parsing - the start after edit fell on the instance ct code (test 218 via vish vm).
+    vm.detached = true;
     try {
       return int(vm.analyze_instance(f, {value(array_v::of(std::move(args)))}).as<int64_t>());
     } catch(diagnostic const & d) {

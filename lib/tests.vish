@@ -188,10 +188,6 @@ scn_journal(i64 h) => native "cpp" {
   for(int64_t c: counts) cs.push_back(value(c));
   return value(array_v::of({value(n), strings_value(names), value(array_v::of(std::move(cs))), value(text)}));
 };
-scn_roundtrip(i64 h) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  return value(tests_host->scene((a[0]).as<int64_t>()).session->roundtrip());
-};
 scn_wait(i64 h, i64 n) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
   tests_host->scene((a[0]).as<int64_t>()).wait((a[1]).as<int64_t>());
@@ -1110,7 +1106,7 @@ run_scenario(str path) {
       by = "";
       for(k : range(kinds.size)) by = (((by + (if(by == "") "" else ", ")) + kinds[k]) + " ") + text(counts[k]);
       last = (((((("журнал: +" + text(n)) + " записей (") + by) + "), текст импортов +") + text(bytes)) + " байт\n");
-    } else if(wire && (l == "roundtrip")) last = scn_roundtrip(h);
+    } else if(wire && (l == "roundtrip")) last = roundtrip_command(scn_session(h)); // like vish vm
     else if(wire && ((l == "wait") || starts_with(l, "wait "))) { // launch: quanta to end (wait N - N quanta) or to wait for host
       scn_wait(h, if(l == "wait") -1 else number_of(text_from(l, 5)));
       last = collect(h, cl, 0, tab);

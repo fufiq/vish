@@ -4,13 +4,13 @@
 // the next check recalculates only instance, depending on the changed, the next run goes to
 // the new version.
 //
-// Session commands (`vish vm`, scripts .session, `vish apply`) are in rows; their parsing and order are in
-// the language: check, report, stdin <line>, run [arguments], jit, residual [arguments], fmt, edit
-// <function> (body - up to a line from a single point), <function>, <path.vishdb>, stats, starttrip, proc
-// [arg...] | step N | run | round <revoke> | grante>> Here are the commands themselves: parsing,
-// execution, base editing, live machine process. editing in a live process is a hot replacement: new calls
-// to a new version, started frames live in the old one; editing struct with living values of the old
-// layout - only with migrate(T old) in the same text.
+// Session commands (`vish vm`, scripts .session, `vish apply`) - in rows; their parsing, decisions and
+// texts - in check, report, stdin <line>, run [arguments], jit, residual [arguments], fmt, edit <function>
+// (body - up to a line from one point), <function>, save <path.vishdb>, stats, applytrip, proc start
+// [arg...] | step N | run | where | calle | grante | Here is the command base: parsing, execution, base
+// editing, live machine process; data (numbers, program texts and errors) - language. What to replace with
+// editing, struct and migrate in a live process, which editing function to apply - decides the language.
+//
 //
 //
 #pragma once
@@ -25,6 +25,17 @@
 #include "views.hpp"
 
 namespace vish {
+
+// struct n layout of the db base: names and types of fields (living process compares with its values)
+std::vector<process_machine::field_decl> struct_fields(ast_db const & db, node_id n) {
+  std::vector<process_machine::field_decl> fields;
+  for(node_id x: db.as<n_extend>(n).items)
+    if(db.is<n_var>(x)) {
+      node_id ty = db.as<n_var>(x).type;
+      fields.push_back({db.as<n_var>(x).name, ty && db.is<n_ident>(ty) ? std::string(db.strings.text(db.as<n_ident>(ty).name)) : std::string()});
+    }
+  return fields;
+}
 
 struct vm_session {
   vm_session(ast_db & db, node_id root, std::string name) : db(db), root(root), name(std::move(name)) {}
@@ -41,7 +52,13 @@ struct vm_session {
     db.sweep_retired();
     return out;
   }
-  std::string check() {
+  // Reactive check: error (text with place), recalculated instance (their names), from cache.
+  struct check_facts {
+    std::string error;
+    uint32_t recomputed = 0, hits = 0;
+    std::vector<std::string> names;
+  };
+  check_facts check() {
     cache.hits = cache.recomputed = 0;
     cache.recomputed_names.clear();
     interpreter vm(db, root, {name}, mode::check, std::nullopt, &cache);
@@ -58,26 +75,30 @@ struct vm_session {
     call_targets = vm.resolved_calls;
     layers = vm.layers;
     last_report = vm.report(name, db.source(db[root].where.source));
-    std::string names;
-    for(auto & n: cache.recomputed_names) names += (names.empty() ? "" : ", ") + n;
-    return err + cat("check: пересчитано ", cache.recomputed, " экземпл. (", names.empty() ? "—" : names, "), из кэша ", cache.hits, "\n");
+    return {err, cache.recomputed, cache.hits, {cache.recomputed_names.begin(), cache.recomputed_names.end()}};
   }
 
-  // Base size and growth from the past stats: edits grow the base to disassemble text, while
-  // elaboration, parsing recalculation and new interpreters with the same result do not (test 217)
-  std::string stats() {
+  // Base size and growth from the past stats: edits grow the base on disassembled text, and
+  // elaboration, recounting parsing and new interpreters with the same result - no (test 217)
+  // (node, journal records, byte .vishdb, past node and entries - 0 if stats were not)
+  std::array<uint64_t, 5> stats() {
     writer w;
     auto entries = db.journal();
     for(auto const & e: entries) w.put(e);
-    std::string out = cat("база: узлов ", db.size(), ", журнал ", entries.size(), ", vishdb ", w.bytes.size(), " байт\n");
-    if(seen_size) out += cat("рост: узлов +", db.size() - seen_size, ", журнал +", entries.size() - seen_log, "\n");
+    std::array<uint64_t, 5> r{db.size(), entries.size(), w.bytes.size(), seen_size, seen_log};
     seen_size = db.size();
     seen_log = entries.size();
-    return out;
+    return r;
   }
 
-  // journal → new base (as .vishdb): same projection and same run output (tests 218, 219)
-  std::string roundtrip() {
+  // journal → new base (like .vishdb): same projection, run output here and there, node in new (tests
+  // 218, 219)
+  struct roundtrip_facts {
+    bool same_projection;
+    std::string here, there;
+    uint64_t nodes;
+  };
+  roundtrip_facts roundtrip() {
     writer w;
     for(auto const & e: db.journal()) w.put(e);
     reader r(w.bytes);
@@ -85,8 +106,7 @@ struct vm_session {
     while(!r.at_end()) entries.push_back(r.get<journal_entry>());
     ast_db db2;
     db2.replay(entries);
-    std::string out;
-    if(printer(db).print(root) != printer(db2).print(root)) out += "roundtrip: проекция отличается\n";
+    bool same = printer(db).print(root) == printer(db2).print(root);
     std::string a = run({}), b;
     interpreter vm(db2, root, {name}, mode::run, interpreter::known_inputs{stdin_lines});
     vm.capture_output(&b);
@@ -95,8 +115,7 @@ struct vm_session {
     } catch(diagnostic const & d) {
       b += render(d, name, db2);
     }
-    if(a != b) out += cat("roundtrip: вывод отличается: ", in_quotes(b), " против ", in_quotes(a), "\n");
-    return out.empty() ? cat("roundtrip: совпадает (узлов ", db2.size(), ")\n") : out;
+    return {same, std::move(a), std::move(b), db2.size()};
   }
 
   std::string run(std::vector<std::string> const & args) {
@@ -153,29 +172,21 @@ struct vm_session {
     return err + residual_view(db, vm).print(root);
   }
 
-  // Function correction: the text is disassembled into the base (new import), the node of
-  // the old function is replaced with new content - id and all references to the function
-  // are saved. Apply the editing function of the program (code_replace, code_rename,
-  // code_remove, code_insert): edits - to the database as human editing (§7.4).
-  std::string apply(std::string const & fn_name) {
-    node_id f;
-    for(node_id item: db.as<n_module>(root).items)
-      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name && db.as<n_fn>(item).params.empty()) f = item;
-    if(!f) return cat("нет функции правки ", fn_name, "() без параметров\n");
+  // The function of editing the program f (code_replace, code_rename, code_remove, code_insert): edits -
+  // to the base as human editing (§7.4). The result is the number of edits.
+  uint32_t apply(node_id f) {
     interpreter vm(db, root, {name}, mode::run);
     uint32_t n = vm.apply_edit(f);
     db.link_parents(root);
-    return cat("применена ", fn_name, ": правок ", n, "\n");
+    return n;
   }
-
   // --- living ---
-  std::string proc_start(std::vector<std::string> const & args) {
+  void proc_start(std::vector<std::string> const & args) {
     proc.reset();
     proc_out.clear();
     proc = std::make_unique<process_machine>(db, root, name);
     proc->captured = &proc_out;
     proc->start(args, stdin_lines);
-    return cat("процесс запущен\n");
   }
   // n steps (~0 - to the end), output from the last time and where
   std::string proc_step(uint64_t n) {
@@ -189,14 +200,11 @@ struct vm_session {
     return out + proc->where_now();
   }
   // "You give": resource on the move
-  std::string proc_grant(std::string const & what, bool give) {
-    proc->grant(what, give);
-    return cat(give ? "дано: " : "забрано: ", what, "\n");
-  }
-  // external management:
-  std::string proc_pressure() {
+  void proc_grant(std::string const & what, bool give) { proc->grant(what, give); }
+  // external management; result - processors
+  std::size_t proc_pressure() {
     proc->pressure();
-    return cat("давление: обработчиков ", proc->st.pressure.size(), "\n");
+    return proc->st.pressure.size();
   }
 
   // Sample - in a clone: fork host copies the VM as a whole (pages - a copy when writing), the clone disassembles
@@ -204,7 +212,6 @@ struct vm_session {
 // 
 //.
   std::string probe(std::string const & text) {
-    if(proc->st.done) return "процесс завершён: пробовать нечего\n";
     int fd[2];
     if(pipe(fd) != 0) return "проба: нет канала\n";
     std::fflush(stdout);
@@ -246,92 +253,33 @@ struct vm_session {
     return r;
   }
 
-  std::string edit(std::string const & fn_name, std::string const & text) {
-    parser p(db, text, cat("<правка ", fn_name, " #", ++edits, ">"));
-    node_id at; // parsing rules of the function location (§4.4): announced before it; new - the entire module
-    for(node_id item: db.as<n_module>(root).items)
-      if(!at && db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) at = item;
+  // Editing is the primitives of the base; what to replace, struct and migrate in a live process is decided
+  // by the language (lib/tools.vish, edit_command). Edit text - parsing according to the rules of place at
+  // (§4.4; empty - declared throughout the module): errors parsing text and elements of the disassembled.
+  std::pair<std::string, std::vector<node_id>> parse_at(node_id at, std::string const & label, std::string const & text) {
+    parser p(db, text, cat("<правка ", label, " #", ++edits, ">"));
     p.place(root, at);
     node_id snippet = p.parse_module();
-    auto errs = p.errors();
-    if(!errs.empty()) {
-      std::string out;
-      for(auto & e: errs) out += render(e, cat("правка ", fn_name), db);
-      return out + "правка отклонена\n";
-    }
-    for(node_id item: db.as<n_module>(snippet).items)
-      if(db.is_struct(item) && db.strings.text(db.as<n_extend>(item).name) == fn_name) return edit_struct(item, snippet);
-    node_id fresh;
-    for(node_id item: db.as<n_module>(snippet).items)
-      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) fresh = item;
-    if(!fresh) return cat("в тексте правки нет функции ", fn_name, "\n");
-
-    for(node_id item: db.as<n_module>(root).items)
-      if(db.is<n_fn>(item) && db.strings.text(db.as<n_fn>(item).name) == fn_name) {
-        db.replace(item, db[fresh].kind);
-        db.adopt_notes(fresh, item); // Commentary on the new text - the preserved id
-        db.link_parents(root);
-        if(proc && !proc->st.done) proc->refresh_ct(); // ct new body - in place in canonical order
-        return cat("функция ", fn_name, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
-      }
-    // No new function was added to the module (changes the set of overloads)
-    auto m = db.as<n_module>(root);
-    m.items.push_back(fresh);
-    db.replace(root, m);
-    db.link_parents(root);
-    if(proc) proc->helper.register_item(fresh); // Living process sees new overload
-    if(proc && !proc->st.done) proc->refresh_ct();
-    return cat("функция ", fn_name, " добавлена\n");
+    std::string errs;
+    for(auto & e: p.errors()) errs += render(e, cat("правка ", label), db);
+    if(!errs.empty()) return {errs, {}};
+    auto const & items = db.as<n_module>(snippet).items;
+    return {errs, {items.begin(), items.end()}};
   }
-
-  // Edit struct: node saves id, fields new. The living values of the old layout are via
-  // migrate(T old) from the same text (§9.3); no, editing rejected:
-//.
-  std::string edit_struct(node_id fresh, node_id snippet) {
-    symbol type_name = db.as<n_extend>(fresh).name;
-    std::string tn(db.strings.text(type_name));
-    node_id item;
-    for(node_id x: db.as<n_module>(root).items)
-      if(db.is_struct(x) && db.as<n_extend>(x).name == type_name) item = x;
-    if(!item) return cat("нет struct ", tn, "\n");
-    std::vector<process_machine::field_decl> fields; // layout - names and types of fields
-    for(node_id x: db.as<n_extend>(fresh).items)
-      if(db.is<n_var>(x)) {
-        node_id ty = db.as<n_var>(x).type;
-        fields.push_back({db.as<n_var>(x).name, ty && db.is<n_ident>(ty) ? std::string(db.strings.text(db.as<n_ident>(ty).name)) : std::string()});
-      }
-    auto takes = [&](node_id f) {
-      auto const & fn = db.as<n_fn>(f);
-      if(db.strings.text(fn.name) != "migrate" || fn.params.size() != 1) return false;
-      node_id t = db.as<n_param>(fn.params[0]).type;
-      return t && db.is<n_ident>(t) && db.as<n_ident>(t).name == type_name;
-    };
-    node_id mig;
-    for(node_id x: db.as<n_module>(snippet).items)
-      if(db.is<n_fn>(x) && takes(x)) mig = x;
-    type_id t = proc ? proc->helper.types.named(tn) : type_id{};
-    uint64_t stale = proc && !proc->st.done ? proc->stale_values(t, fields) : 0;
-    if(stale && !mig)
-      return cat("правка отклонена: живой процесс держит значений ", tn, " старой раскладки: ", stale,
-        " — нужна migrate(", tn, " old) => ", tn, "{…} в том же тексте (или proc stop)\n");
-    db.replace(item, db[fresh].kind);
-    db.adopt_notes(fresh, item);
+  // The old element becomes fresh: id old and the references to it are saved, the comments of the new text
+  // are in it. The result is a base audit.
+  uint64_t replace_item(node_id old, node_id fresh) {
+    db.replace(old, db[fresh].kind);
+    db.adopt_notes(fresh, old);
+    db.link_parents(root);
+    return db.revision;
+  }
+  // elements of the program module - this list (one edit of the base)
+  void set_items(std::vector<node_id> items) {
     auto m = db.as<n_module>(root);
-    if(mig) { // The previous migrate of the same type is replaced
-      std::erase_if(m.items, [&](node_id x) { return db.is<n_fn>(x) && takes(x); });
-      m.items.push_back(mig);
-    }
+    m.items = std::move(items);
     db.replace(root, m);
     db.link_parents(root);
-    std::string out = cat("struct ", tn, " заменена (узел #", item.value, ", ревизия ", db.revision, ")\n");
-    if(!proc || proc->st.done) return out;
-    if(mig) { // overload migrate in the assistant - as in the module
-      proc->helper.functions[db.as<n_fn>(mig).name].clear();
-      for(node_id x: db.as<n_module>(root).items)
-        if(db.is<n_fn>(x) && db.as<n_fn>(x).name == db.as<n_fn>(mig).name) proc->helper.register_item(x);
-    }
-    if(stale) out += cat("перенесено migrate: ", proc->migrate_values(t, fields, mig), "\n");
-    return out;
   }
 
   ast_db & db;

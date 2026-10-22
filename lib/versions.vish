@@ -24,26 +24,11 @@ version_close(i64 v) => native "cpp" {
   tools_host->close((a[0]).as<int64_t>());
   return value(int64_t(0));
 };
-// Elements of the root module v (-1 - program module): array{number, text, internal, empty lines in front
-// of it, comments before it, comment at the end of the line}
-version_items(i64 v, i64 root) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  if(!x) return value(array_v::of({}));
-  return value(array_v::of(module_item_facts(*x->db, tools_host->module_of(*x, (a[1]).as<int64_t>()))));
-};
-// What is the element n version v: array {вид, имя, части, цель} : fn (parts - parameter types, " " -
-// without type), syntax (words form), struct, extend, extend_ref (goal - extensible function), var, other
-version_signature(i64 v, i64 n) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
-  auto * x = tools_host->at((a[0]).as<int64_t>());
-  int64_t n = (a[1]).as<int64_t>();
-  if(!x || n < 0 || uint64_t(n) >= x->db->size()) return value(array_v::of({value(std::string("other")), value(std::string()), value(array_v::of({})), value(int64_t(-1))}));
-  return item_signature(*x->db, node_id(uint32_t(n)));
-};
-// Element of the module root version v - text, parsing according to the rules of its place (§4.4): mine -
-// replace it (node saves id), -1 - new after (-1 - at the end); layout - empty lines, internal, comments.
-// The result is the element number; I did not understand -1.
+// Elements of the version module and what element (version_items, version_signature) is in the tool module:
+// they are needed and sessions (edited). Element of the module root version v - text, parsing according to
+// the rules of its place (§4.4): mine - replace it (node saves id), -1 - new after (-1 - at the end); layout
+// - empty lines, internal, comments. The result is the element number; I did not understand -1.
+//
 version_put(i64 v, i64 root, i64 mine, str text, str name, i64 after, i64 blank, bool inner, lead, str tail) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(-1)));
