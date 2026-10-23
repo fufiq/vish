@@ -778,6 +778,12 @@ spawn(expr body) => fiber_start(body);
 //
 //
 on_pressure(expr body) => pressure_handler(body);
+// A bounded FIFO queue between fibers, cap slots (16 by default). write moves a value
+// in and blocks while every slot is taken, until a reader frees one; read takes the
+// oldest value and blocks while the stream is empty. Nothing is dropped or overwritten.
+// Any fiber holding s may both write and read. close ends the stream: for(x : s) and
+// more(s) finish once it is closed and empty; writing to it, or reading it empty, throws
+// closed_stream. Fibers waiting on each other with no one left to run — deadlock.
 stream() => stream_new(16);
 stream(i64 cap) => stream_new(cap);
 stream(type t) => stream_type(t); // Flow type - function over types: stream(i64)
