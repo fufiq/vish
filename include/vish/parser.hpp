@@ -794,15 +794,29 @@ struct parser {
   // (up to `;` at this level of brackets or to the end of the nearest group).
   node_id recover_statement(auto && f) {
     uint32_t start_tok = pos;
+    uint32_t unfinished_saved = std::exchange(unfinished_at, ~uint32_t{0});
     try {
       node_id r = f();
-      // draft: the instruction ended with an empty `;` end of the line - not written, the hole
-      if(pos > start_tok + 1 && toks[pos - 1].err != ~uint32_t{0} && toks[pos - 1].kind == tok::op && toks[pos - 1].where.begin == toks[pos - 1].where.end) {
+      uint32_t inner = std::exchange(unfinished_at, unfinished_saved);
+      // Draft: the instruction ended with an empty `;` at the end of the line - not completed. The
+      // hole is just the innermost instruction that ate this `;` (body for without brackets):
+      // 
+// The disassembled title remains node.
+      if(pos > start_tok + 1 && synthetic_semi(toks[pos - 1])) {
         uint32_t start = toks[start_tok].where.begin, end = toks[pos - 2].where.end;
-        return db.add(n_hole{std::string(src.substr(start, end - start)), diags[toks[pos - 1].err].what()}, {start, end});
+        n_hole h{"", diags[toks[pos - 1].err].what()};
+        if(inner != ~uint32_t{0} && inner > start)
+          if(node_id n = node_at(r, {inner, end})) {
+            h.text = std::string(src.substr(inner, end - inner));
+            db.replace(n, std::move(h));
+            return r;
+          }
+        h.text = std::string(src.substr(start, end - start));
+        return db.add(std::move(h), {start, end});
       }
       return r;
     } catch(diagnostic const & d) {
+      unfinished_at = unfinished_saved;
       uint32_t start = toks[start_tok].where.begin;
       pos = start_tok;
       skip_to_statement_end();
@@ -1384,10 +1398,33 @@ struct parser {
     return db.add(std::move(b), {start, toks[pos - 1].where.end});
   }
 
-  // Instructions. Assigns last_was_value_ , if it is an expression without `;` . return,
-  // break, continue, hide, try_compile - syntax prelude (§4.4 ): disassembled as
-  // expressions, the record with `;` itself ends the instruction.
+  // Instructions. last_was_value_, if it is an expression without `;` . return, break,
+  // continue, hide, try_compile entries syntax prelude (§4.4 ): disassembled as
+  // expressions, the entry with `;` itself ends the instruction. Empty `;`, put in a
+  // draft at the end of an unwritten line.
+  bool synthetic_semi(token const & t) const {
+    return t.err != ~uint32_t{0} && t.kind == tok::op && t.where.begin == t.where.end;
+  }
+
+  // Node subtree r with a place w (external matching); no - empty.
+  node_id node_at(node_id r, span w) const {
+    if(db[r].where.begin == w.begin && db[r].where.end == w.end) return r;
+    node_id found{};
+    db.for_each_child(r, [&](node_id c) {
+      if(!found && db[c].where.begin <= w.begin && w.end <= db[c].where.end) found = node_at(c, w);
+    });
+    return found;
+  }
+
+  // Instructions; the first (most internal) to eat an empty `;` draft remembers the beginning.
   node_id statement() {
+    uint32_t begin = here().where.begin, p0 = pos;
+    node_id r = statement_body();
+    if(unfinished_at == ~uint32_t{0} && pos > p0 + 1 && synthetic_semi(toks[pos - 1])) unfinished_at = begin;
+    return r;
+  }
+
+  node_id statement_body() {
     last_was_value = false;
 
     // operator and syntax in the block - the rules of its block (and the blocks of the structure in the body of which)
@@ -2636,6 +2673,7 @@ struct parser {
   bool last_was_value = false;
   uint32_t statement_head = ~uint32_t{0}; // starting-point
   bool tail_statement = false; // The tail of the design - the instruction, she finished the instruction
+  uint32_t unfinished_at = ~uint32_t{0}; // Draft: the beginning of an internal instruction that ate an empty `;`
   struct op_forms {
     bool prefix = false, infix = false, postfix = false;
   };

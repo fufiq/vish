@@ -87,6 +87,18 @@ key 1 ;
 // expect-not: n_hole
 key 1 Escape
 // expect: x = 1;⏎  y = 2;⏎  print(s);
+// Unwritten body for without brackets - a hole only body: the title is disassembled and
+// remains node
+pointer 1 @y 0 0
+key 1 End
+key 1 Enter
+input 1 for(i\s:\srange(2))\sz=3
+// expect: y = 2;⏎  for(i : range(2)) z=3⏎  print(s);
+// expect: kind="n_hole" pieces=["z=3"] note="инструкция не дописана: нет ';' в конце строки"
+key 1 ;
+// expect-not: n_hole
+key 1 Escape
+// expect: y = 2;⏎  for(i : range(2)) z = 3;⏎  print(s);
 // Canon and journal: playback - the same projection and the same conclusion (draft - one edit)
 key 1 Escape
 roundtrip
