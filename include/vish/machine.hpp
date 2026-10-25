@@ -1058,8 +1058,11 @@ struct process_machine {
         st.joiners.push_back(0);
         return park();
       }
-      for(auto const & f: st.fibers)
-        if(f.error.present) throw restore_error(f.error);
+      for(auto & f: st.fibers)
+        if(f.error.present) {
+          f.error.present = false; // The rest of the step will add to it.
+          throw restore_error(f.error);
+        }
       st.done = true;
       if(!fib().vals.empty() && deref(fib().vals.back()).is<int64_t>()) st.exit_code = deref(fib().vals.back()).as<int64_t>();
       return;
@@ -1193,8 +1196,21 @@ struct process_machine {
     invoke(it->second, 0, 0, db[it->second.front()].where);
   }
 
-  // Step: One phase of the upper task; false, the process is complete.
+  // Step: One phase of the upper task; false, the process is complete. Error main - with fiber
+  // errors that it did not wait for (like the interpreter).
   bool step() {
+    try {
+      return step_one();
+    } catch(diagnostic & d) {
+      for(auto & f: st.fibers)
+        if(f.error.present) {
+          d.also.push_back(restore_error(f.error));
+          f.error.present = false;
+        }
+      throw;
+    }
+  }
+  bool step_one() {
     if(st.done) return false;
     if(external_wait && fib().state != f_ready) { // waiting for host: ready to take, otherwise there is no step
       pump();

@@ -1290,6 +1290,7 @@ std::string render(diagnostic const & d, std::string_view file, ast_db const & d
     out += cat("  ", name(f.where), ":", l.line, ":", l.col, ": ", f.what, n > 1 ? cat(" ×", n) : std::string(), "\n");
     i += n;
   }
+  for(auto const & a: d.also) out += render(a, file, db);
   return out;
 }
 

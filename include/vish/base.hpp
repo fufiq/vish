@@ -207,6 +207,11 @@ struct diagnostic : std::runtime_error {
   std::string type; // runtime - VM error as language exception: out_of_bounds, div_by_zero
   bool fixed = false; // parsing: Violation known at compilation (require) - error, no exception
   bool hook = false; // from hook parsing [[g(…)]]: visible only parsing - stops launch
+  // Other errors of the same program, each with its own track: the fiber error, which caused
+  // the main to become interlocked, do not hide behind it:
+// 
+  //.
+  std::vector<diagnostic> also;
 };
 
 // The line / column for span - only when output to a person.
@@ -237,6 +242,7 @@ std::string render(diagnostic const & d, std::string_view file, std::string_view
     out += cat("  ", file, ":", l.line, ":", l.col, ": ", f.what, n > 1 ? cat(" ×", n) : std::string(), "\n");
     i += n;
   }
+  for(auto const & a: d.also) out += render(a, file, text);
   return out;
 }
 

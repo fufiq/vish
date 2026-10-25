@@ -1242,6 +1242,11 @@ struct interpreter {
       if(r.kind == flow_kind::thr) uncaught(r);
       if(!checking()) join_all(); // VM awaits fiber program
       stop_lanes(false);
+    } catch(diagnostic & d) {
+      for(auto & f: fibers) // fiber errors, which the main did not wait for, are also program errors.
+        if(f.error) d.also.push_back(*std::exchange(f.error, std::nullopt));
+      cancel_fibers();
+      throw;
     } catch(...) {
       cancel_fibers();
       throw;
@@ -6311,7 +6316,7 @@ struct interpreter {
       park();
     }
     for(auto & f: fibers)
-      if(f.error) throw *f.error;
+      if(f.error) throw *std::exchange(f.error, std::nullopt); // The rest of run_main will add to it.
   }
 
   // --- VM processes (M3c) ---
