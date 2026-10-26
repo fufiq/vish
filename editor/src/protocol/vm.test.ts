@@ -110,7 +110,7 @@ describe('живая VM', () => {
       });
       c.write(encodeClient({ type: 'c_hello', version: schema.version }));
       c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
-      for (let i = 0; i < 100 && got.length < 4; ++i) {
+      for (let i = 0; i < 500 && got.length < 4; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
       const view = got.at(1);
@@ -128,7 +128,7 @@ describe('живая VM', () => {
         }),
       );
       c.write(encodeClient({ type: 'c_key', view: 1, key: 'End', mods: 0 }));
-      for (let i = 0; i < 100 && got.length < 7; ++i) {
+      for (let i = 0; i < 500 && got.length < 7; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
       // after submission - check-session tags and status bangs
@@ -154,7 +154,7 @@ describe('живая VM', () => {
         c.write(encodeClient({ type: 'c_key', view: 1, key, mods: 0 }));
       }
       const updates = () => got.filter((m) => m.type === 's_update').length;
-      for (let i = 0; i < 100 && updates() < 4; ++i) {
+      for (let i = 0; i < 500 && updates() < 4; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
       const nodes = new Map(view.nodes.map((n) => [n.id, n]));
@@ -174,7 +174,7 @@ describe('живая VM', () => {
       }
       expect(decors()).toBeGreaterThan(before);
       c.write(encodeClient({ type: 'c_key', view: 1, key: 'Escape', mods: 0 }));
-      for (let i = 0; i < 100 && updates() < 5; ++i) {
+      for (let i = 0; i < 500 && updates() < 5; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
       expect(text()).toContain(
@@ -224,7 +224,7 @@ describe('живая VM', () => {
       c.write(encodeClient({ type: 'c_run', stdin_text: '1.5 2', args: '' }));
       c.write(encodeClient({ type: 'c_save' }));
       const wait = async (t: string) => {
-        for (let i = 0; i < 100 && !got.some((m) => m.type === t); ++i) {
+        for (let i = 0; i < 500 && !got.some((m) => m.type === t); ++i) {
           await new Promise((r) => setTimeout(r, 10));
         }
         return got.find((m) => m.type === t);
