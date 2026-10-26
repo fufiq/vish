@@ -1682,7 +1682,7 @@ struct process_machine {
               mval got;
               int r = type_fit(deref(args[j]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
               if(!r) fits = false;
-              else if(r == 1) conv.push_back({j, got});
+              else if(r != 2) conv.push_back({j, got});
             }
           break;
         }
@@ -1708,8 +1708,8 @@ struct process_machine {
             fits = false;
             by_value += numeric_pair(deref(args[i]), helper.str(db.as<n_ident>(p.type).name)) && !p.strict;
           } else {
-            feat.push_back(r); // 2 - Type equals, 1 - imagine
-            if(r == 1) conv.push_back({i, got});
+            feat.push_back(r); // 2 - type equals, 3 - the same object under the general type, 1 - imagine
+            if(r != 2) conv.push_back({i, got});
           }
         }
       }
@@ -2077,8 +2077,9 @@ struct process_machine {
     return from_value(f.v, where);
   }
 
-  // Levels of coincidence of type, as in the interpreter: 2 - type is equal, 1 - value
-  // is imaginable (out - in the type of parameter), 0 - no.
+  // Levels of coincidence of type, as in the interpreter: 2 - type equals, 3 - the same object
+  // under the common type (heir, record → struct), 1 - the value is conceivable (out - in the
+  // type of parameter), 0 - no.
   int type_fit(mval const & v, std::string_view want, bool strict, mval & out) {
     out = v;
     if(is_shared_v(v) && want != "shared") { // Shared is suitable where stored (transparent)
@@ -2093,7 +2094,7 @@ struct process_machine {
     if(r == interpreter::fit::no) return 0;
     if(r == interpreter::fit::exact) return 2;
     out = from_value(got, {});
-    return 1;
+    return r == interpreter::fit::subsumes ? 3 : 1;
   }
   // Anonymous literature in a place of a known type (as in the interpreter, §4.3).
   bool is_record(mval const & v) const { return v.is<m_agg>() && helper.types.anonymous(v.as<m_agg>().type); }
@@ -3476,7 +3477,7 @@ struct process_machine {
       x = std::move(got);
     } else if(v.type && db.is<n_ident>(v.type) && !v.strict) { // Transformation by rule (f64 d = m - implicit programs)
       mval got;
-      if(type_fit(x, helper.str(db.as<n_ident>(v.type).name), false, got) == 1) x = std::move(got);
+      if(int q = type_fit(x, helper.str(db.as<n_ident>(v.type).name), false, got); q == 1 || q == 3) x = std::move(got);
     }
     if(v.type && db.is<n_ident>(v.type) && !v.strict) x = to_type(std::move(x), helper.str(db.as<n_ident>(v.type).name), db[v.init].where); // point p = {x: …}
     if(v.init) take_from(v.init, x, t.scope);
@@ -3550,7 +3551,7 @@ struct process_machine {
         throw d;
       }
       if(r == 0) throw diagnostic(cat("ожидался тип ", want, ", получен ", describe(x)), db[c.items[0]].where);
-      return finish(r == 1 ? std::move(got) : std::move(x));
+      return finish(r == 1 || r == 3 ? std::move(got) : std::move(x));
     }
     if(helper.str(tname) != "array") throw diagnostic(cat("конструктор ", helper.str(tname), "{} пока не поддержан"), db[n].where);
     m_arr a;

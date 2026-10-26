@@ -1,0 +1,32 @@
+// out: 20 4
+// out: f64 i64
+// out: база база
+// out: точка точка
+// machine
+// Уровни совпадения (§5.8): тип равен > тот же объект под общим типом (наследник вместо
+// базы, запись → struct) > параметр без типа > новое значение (i64 ↔ f64). Без типа
+// значение берётся как есть — 
+// прежде f(f64 n) брал i64 приведением раньше f(n), и
+// f(f64 n) => f(i64(n)) выбирал сам себя — хвостовой вызов без конца 
+//.
+sq(n) { n * 2 }
+sq(f64 n) => sq(i64(n));
+
+which(n) => "i64";
+which(f64 n) => "f64";
+
+struct shape { i64 id; }
+struct circle : shape { f64 r; }
+kind(shape s) => "база";
+kind(s) => "без типа";
+
+struct point { i64 x; i64 y; }
+place(point p) => "точка";
+place(p) => "без типа";
+
+main() {
+  print(sq(10), sq(2.5));
+  print(which(2.5), which(7));
+  print(kind(shape{1}), kind(circle{2, 1.5}));
+  print(place(point{1, 2}), place({x: 1, y: 2}));
+}

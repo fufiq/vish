@@ -2873,10 +2873,13 @@ struct interpreter {
 
   // Match levels of type:
 // 
-  // explicit - only an equal type. Imagine: i64 → f64 lossless, f64 → i64 integer; out is a
-  // value in parameter type. Maybe - run-time - meaning, will decide the execution.
+  // explicit - only an equal type. Imagine: i64 → f64 lossless, f64 → i64 integer; out is a value in
+  // parameter type. Maybe - run-time - meaning, will decide the execution. subsumes is the same
+  // object under a more general type (heir instead of base, record → struct, heir node): more
+  // specifically a parameter without type; representable is a new value (i64 ом f64, {} → zero,
+  // implicit): below the parameter without type (§5.8).
   //
-  enum class fit { no, exact, representable, maybe };
+  enum class fit { no, exact, representable, maybe, subsumes };
   fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
     out = v;
     if(want != "shared" && want != "auto" && is_shared(v)) { // Shared - type of stored, value - itself shared (transparent)
@@ -2906,8 +2909,11 @@ struct interpreter {
       it = fit_rules.emplace(std::move(key), r.as<int64_t>()).first;
     }
     switch(it->second) {
-      case 2: return fit::representable; // base
-      case 3: return record_fit(v, want, out); // {x: …} where struct is expected
+      case 2: return fit::subsumes; // base
+      case 3: { // {x: …} where struct is expected
+        fit r = record_fit(v, want, out);
+        return r == fit::representable ? fit::subsumes : r;
+      }
       case 4: return scalar_default(want, out) ? fit::representable : fit::no; // i64 n = {} — 0
       case 5: { // i64 - f64 without loss
         if(!v.known()) {
@@ -2934,7 +2940,7 @@ struct interpreter {
         if(!v.known()) return strict ? fit::no : fit::maybe;
         node_id c = code_node(v, {});
         std::string k(lang_kind_of(db[c]));
-        return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::representable : fit::no;
+        return k == want ? fit::exact : !strict && types.is_a(k, want) ? fit::subsumes : fit::no;
       }
       case 8: { // Transformation function: f64 implicit(meters m) =>
         if(!conv) return fit::no;
@@ -7858,7 +7864,7 @@ struct interpreter {
             if(std::string rw; !p.strict && is_record(vals[i]) && structs.contains(sym(want)) && record_fit(vals[i], want, got, &rw) == fit::no) why += cat(" (", rw, ")");
             by_value += numeric_pair(vals[i], want) && !p.strict; // type fits, doesn't fit the value
           } else {
-            feat.push_back(r == fit::exact ? 2 : 1); // "Type equals" or "can represent"
+            feat.push_back(r == fit::exact ? 2 : r == fit::subsumes ? 3 : 1); // "Type equals", "same object under general type", "can represent"
             maybe = maybe || r == fit::maybe;
             if(r != fit::exact) conv.push_back({i, got});
           }

@@ -4508,15 +4508,18 @@ chain_resolve(i64 k, ops, assoc, bool open) {
   ch_result{0, tree, array{}}
 }
 
-// The choice of overload is the rule of specificity (§5.4, M6 step 5 - with C++ per language):
-// “type equals” more specifically “can represent” (), the exact number of arguments - more
-// specifically the tail ...xs, the sample and leading require - the conditions of the
-// candidate. Signs of the candidate considers VM (whether type, unpacking, require):
-// array{tail, require, according to the parameters: 0 - without type, 1 - imagine, 2 - type
-// equal, 100 + n - sample with n checks}. Here - the weight of features, order (steady, in
-// descending), runtime - overload in value in parsing (reach - how much to disassemble) and
-// ambiguity. VM remembers the result by the signs: the rule is a pure function. No chains and
-// no congested calls: overload doesn't choose itself.
+// The choice of overload is the rule of specificity (§5.4, M6 step 5 - with C++ per language): “type equals” more specifically “can represent” (), the
+// exact number of arguments - more specifically the tail ...xs, the sample and leading require - the conditions of the candidate. Signs of the candidate
+// consider VM (whether type, unpacking, require): array{tail, require, according to the parameters: 0 - without type, 1 - imagine (new value), 2 - type
+// equals, 3 - the same object under the general type (heir, record → struct), 100 + n - sample with n checks}. Weight: Type equals > general type > no
+// type > imaginable - parameter without type takes value as is, otherwise f(f64 n) => f(i64(n)) would choose itself for i64 (tail without end). Here -
+// the weight of features, order (steady, in descending), runtime - overload in value in parsing (reach - how much to disassemble) and ambiguity. VM
+// remembers the result by the signs: the rule is a pure function. No chains and no congested calls: overload doesn't choose itself.
+//
+//
+//
+//
+//
 //
 struct ov_pick { array order; i64 reach; bool ambiguous; i64 tied; }
 
@@ -4529,6 +4532,8 @@ overload_pick(feats, maybes, bool checking) {
     while(i < f.size) {
       k = f[i];
       if(k >= 100) s = s + (1 + (k - 100));
+      else if(k == 1) s = s - 1; // new value (i64 а f64, implicit) - below the parameter without the type
+      else if(k == 3) s = s + 1; // the same object under the general type - above without type, below "type equal"
       else s = s + k;
       i = i + 1;
     }
