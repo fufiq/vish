@@ -1713,6 +1713,10 @@ struct interpreter {
     uint64_t body_ctx = 0;
     std::optional<diagnostic> error;
     std::optional<diagnostic> pending; // Error that fiber will get when it wakes up (mutual lock)
+    // where it is launched: stack spawn (with frame spawn) - tail of the fiber error track
+// 
+// 
+    std::vector<call_site> origin;
     bool cancel = false; // end of the program: spin the fiber stack
     bool direct = false; // In the queue first: awakened by exchange (direct transmission)
     symbol entry; // Process input: function and arguments (M3c)
@@ -5906,6 +5910,7 @@ struct interpreter {
     f.env = body_env;
     f.frame = t.frame;
     f.body_ctx = t.ctx;
+    f.origin = stack;
     return ok();
   }
 
@@ -5990,6 +5995,7 @@ struct interpreter {
     } catch(fiber_cancel const &) {
     } catch(diagnostic const & d) {
       f.error = d; // uncaught completes fiber with the track; the rest work
+      for(auto it = f.origin.rbegin(); it != f.origin.rend(); ++it) f.error->note(cat("в ", it->what), it->where);
     } catch(...) {
       f.error = diagnostic("внутренняя ошибка в файбере", {});
     }
