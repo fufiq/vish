@@ -1,0 +1,30 @@
+// Status bang (§13.1): mode and most importantly, the text collects VM.
+// 
+// There is no bang at rest, the mistake is in
+// it. Author's decision 2026-10-26.
+// program: editor_layers.vish
+open_view module
+// No errors - no bangs (program and audit - not status)
+// expect: status kind="" text="" hint=""
+// track - step and stack, mode keys
+trace 3
+// expect: status kind="trace" text="шаг 3 из
+// expect: · main" hint="F10 дальше
+key 1 F10
+key 1 F11
+// expect: · scale · main"
+key 1 Escape
+// expect: status kind="" text=""
+// Program error - in the bangs, the first line
+pointer 1 @print 0 0
+key 1 x
+idle
+// expect: status kind="error" text="неизвестная функция xprint
+key 1 Backspace
+idle
+// expect: status kind="" text=""
+// Start-to-result (the short program ends in the first quanta, “executes” at a live launch)
+run 3
+// expect: status kind="done" text="выполнено"
+run 
+// expect: status kind="error" text="ошибка при исполнении"

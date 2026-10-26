@@ -315,7 +315,17 @@ struct s_inspect {
   std::vector<s_inode> nodes;
   std::vector<s_line> expand;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect>;
+// Status banging (on top of the window): mode and most importantly - kind "error" (program error),
+// "trace" (track step), "run" (executed), "done" (event: launch is completed, saved), "hide; hint - a
+// hint of the mode keys. No bangs at all. Text for VM: .
+//
+//
+struct s_status {
+  std::string kind;
+  std::string text;
+  std::string hint;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status>;
 
 // --- staff ---
 

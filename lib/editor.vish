@@ -371,6 +371,13 @@ clipboard(str s) => native "cpp" {
   if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_clipboard{std::string((a[0]).as<str_v>().view())});
   return value(int64_t(0));
 };
+// status bangs to peer client: view ("error", "trace", "run", "done";" - hide), text, keys
+send_status(i64 peer, str kind, str text, str hint) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  editor_host->send_to((a[0]).as<int64_t>(), proto::s_status{std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view()), std::string((a[3]).as<str_v>().view())});
+  return value(int64_t(0));
+};
 // error-message
 report(str s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
@@ -846,13 +853,31 @@ close_traces() {
   for(p : range(clients.size)) if(clients[p].debugging) {
     clients[p].debugging = false;
     send_trace(p, false, 0, 0, code(), array{}, "", "");
+    calm_status(p);
   }
   0
 }
 // No representation, no place to tell the customer
 no_view(i64 id) => report("нет представления " + text(id));
 // route to the customer whose message is served
-show_trace(bool active, i64 step, i64 total, n, stack, str text, str error) => send_trace(now_peer(), active, step, total, n, stack, text, error);
+show_trace(bool active, i64 step, i64 total, n, stack, str out, str error) {
+  send_trace(now_peer(), active, step, total, n, stack, out, error);
+  if(!active) return calm_status(now_peer());
+  where = if(total == 0) "трасса пуста" else "шаг " + text(step + 1) + " из " + text(total);
+  for(f : stack) where = where + " · " + f;
+  send_status(now_peer(), "trace", where, "F10 дальше · ⇧F10 назад · F11 внутрь · ⇧F11 наружу · F4 до курсора · Esc выйти");
+}
+// Status bang (§13.1): mode and main thing.
+// Outside the track and running the first error of the program, there are no bangs without errors
+// (program and audit are not status). The text collects VM: .
+//
+calm_status(i64 peer) {
+  if(clients[client_of(peer)].debugging || program_running()) return 0;
+  k = check_errors();
+  if(k == 0) return send_status(peer, "", "", "");
+  first = lines_of(check_error_text(0, -1));
+  send_status(peer, "error", first[0], if(k > 1) "ещё ошибок: " + text(k - 1) else "")
+}
 
 // --- layout: places, bytes, node ---
 places(i64 v) => views[v].lay.node.size;
@@ -3201,6 +3226,7 @@ send_marks(i64 v) {
   if(in_layer(v)) layer_marks(found, v) else type_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
   show_marks(v, found);
+  calm_status(views[v].peer);
   if(view_kind(v) == "fn") send_layers(v) else 0
 }
 
@@ -3555,7 +3581,16 @@ on_run(str args, str input) {
   start_program(args, input);
 }
 // Execution of the launch - as the execution
-on_run_output(str text, bool ok, bool more, str state) => run_output(text, ok, more, state);
+on_run_output(str text, bool ok, bool more, str state) {
+  run_output(text, ok, more, state);
+  if(more && (state == "running")) return 0; // The change of state, not every piece.
+  if(state == "running") send_status(now_peer(), "run", "исполняется", "⇧F5 остановить")
+  else if(!ok) send_status(now_peer(), "error", "ошибка при исполнении", "вывод — в панели запуска")
+  else {
+    send_status(now_peer(), "done", if(state == "stopped") "остановлено" else "выполнено", "");
+    calm_status(now_peer()); // Event of the client goes out - under it again rest
+  }
+}
 // Shift+F5: Stop/Run
 on_stop() => if(program_running()) stop_program() else report("запуск: программа не исполняется");
 // run-off (F6)
@@ -3569,7 +3604,10 @@ on_trace_run(i64 id, str args, str input) {
 on_save() {
   finalize_views();
   name = program_name();
-  save_program(if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb");
+  path = if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb";
+  save_program(path);
+  send_status(now_peer(), "done", "сохранено: " + path, "");
+  calm_status(now_peer());
 }
 // function of editing the program: drafts - to the canon, edits - to the base, presentations - again
 apply_edit(str fn) {
@@ -3590,7 +3628,13 @@ merge_from(str path) {
   send_merge(true);
   ""
 }
-send_merge(bool with_taken) => send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts);
+send_merge(bool with_taken) {
+  send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts);
+  n = merge_state.conflicts.size;
+  took = if(with_taken) merge_state.taken.size else 0;
+  send_status(now_peer(), "done", if(n > 0) "конфликтов: " + text(n) else "слито", if(took > 0) "взято у них: " + text(took) else "");
+  calm_status(now_peer());
+}
 // The conflict is resolved: their version (the base has changed - re-imagining) or mine; false - no such thing.
 take_version(str key, bool theirs) {
   k = -1;

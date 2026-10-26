@@ -249,6 +249,14 @@ export interface Saved {
   type: 's_saved';
   path: string;
 }
+// Status bangs: kind - 'error', 'trace', 'run', 'done' (event) or '' (hide); text collects
+// VM, the client only draws.
+export interface Status {
+  type: 's_status';
+  kind: string;
+  text: string;
+  hint: string;
+}
 // Route step: number, total, current instruction, stack (inside out), step output, start
 // error; active - track open.
 export interface TraceStep {
@@ -352,7 +360,8 @@ export type ServerMsg =
   | Clipboard
   | Hover
   | Hint
-  | Inspect;
+  | Inspect
+  | Status;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

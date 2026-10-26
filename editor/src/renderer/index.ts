@@ -41,6 +41,8 @@ const mergePanel = byId('merge');
 type GotoMode = 'goto' | 'merge' | 'projection' | 'apply';
 let gotoMode: GotoMode = 'goto';
 const statusLine = byId('status');
+const statusText = byId('status-text');
+const statusHint = byId('status-hint');
 const runPanel = byId('run');
 const runStdin = byId('run-stdin') as HTMLTextAreaElement;
 const runArgs = byId('run-args') as HTMLInputElement;
@@ -114,7 +116,7 @@ function closeSide(): void {
 function receive(m: ServerMsg): void {
   switch (m.type) {
     case 's_hello':
-      statusLine.textContent = `${m.program} · ревизия ${String(m.revision)}`;
+      showStatus({ kind: '', text: '', hint: '' });
       send({ type: 'c_open_view', kind: 'module' });
       return;
     case 's_view': {
@@ -128,7 +130,6 @@ function receive(m: ServerMsg): void {
     case 's_update':
       views.get(m.view)?.update(m);
       requestInspect();
-      statusLine.textContent = `ревизия ${String(m.revision)}`;
       return;
     case 's_cursor':
       views.get(m.view)?.showCursor(m);
@@ -140,16 +141,9 @@ function receive(m: ServerMsg): void {
       if (v) inspector.show(v, m);
       return;
     }
-    case 's_decor': {
-      const error = views.get(m.view)?.showMarks(m);
-      if (views.get(m.view) !== active || debugging) return; // track-line
-      statusLine.textContent =
-        error === undefined
-          ? `ревизия ${String(m.revision)}`
-          : `ошибка: ${error.split('\n')[0] ?? ''}`;
-      statusLine.toggleAttribute('error', error !== undefined);
+    case 's_decor':
+      views.get(m.view)?.showMarks(m);
       return;
-    }
     case 's_layers':
       showLayers(m.view, m.layers, m.selected);
       return;
@@ -161,35 +155,25 @@ function receive(m: ServerMsg): void {
       runOutput.dataset.text = text;
       runOutput.textContent = text === '' ? '(вывода нет)' : text;
       runOutput.toggleAttribute('error', !m.ok);
-      statusLine.textContent =
-        m.state === 'running'
-          ? 'исполняется · Shift+F5 — остановить'
-          : m.state === 'stopped'
-            ? 'остановлено'
-            : m.ok
-              ? 'выполнено'
-              : 'ошибка при исполнении';
       return;
     }
     case 's_trace':
       debugging = m.active;
-      if (!m.active) {
-        statusLine.textContent = 'трасса закрыта';
-        return;
-      }
+      if (!m.active) return;
       runPanel.hidden = false;
       runOutput.textContent = m.output + (m.error === '' ? '' : `\n${m.error}`);
       runOutput.toggleAttribute('error', m.error !== '');
-      statusLine.textContent = `шаг ${String(m.step + 1)} из ${String(m.total)} · ${m.stack.join(' ← ')} · F10 дальше, Shift+F10 назад, F11 внутрь, Shift+F11 наружу, F4 до курсора, Escape — выйти`;
       return;
     case 's_merge':
-      showMerge(m.taken, m.conflicts);
+      showMerge(m.conflicts);
       return;
-    case 's_saved':
-      statusLine.textContent = `сохранено: ${m.path}`;
+    case 's_saved': // VM sends a bang (s_status)
+      return;
+    case 's_status':
+      showStatus(m);
       return;
     case 's_error':
-      statusLine.textContent = `VM: ${m.text}`;
+      flashStatus('error', m.text);
       return;
     case 's_select':
       views.get(m.view)?.showSelection(m);
@@ -212,10 +196,39 @@ function receive(m: ServerMsg): void {
     }
     case 's_clipboard':
       navigator.clipboard.writeText(m.text).catch((e: unknown) => {
-        statusLine.textContent = `буфер обмена: ${String(e)}`;
+        flashStatus('error', `буфер обмена: ${String(e)}`);
       });
       return;
   }
+}
+
+// Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM
+// message) - a few seconds on top of it. After the event, VM sends peace.
+let steady = { kind: '', text: '', hint: '' };
+let flashTimer: ReturnType<typeof setTimeout> | undefined;
+function paintStatus(s: { kind: string; text: string; hint: string }): void {
+  statusLine.setAttribute('kind', s.kind);
+  statusLine.hidden = s.kind === '';
+  if (s.kind === '') return; // The text goes out with the capsule
+  statusText.textContent = s.text;
+  statusHint.textContent = s.hint;
+}
+function flashStatus(kind: string, text: string, hint = ''): void {
+  clearTimeout(flashTimer);
+  paintStatus({ kind, text, hint });
+  flashTimer = setTimeout(() => {
+    flashTimer = undefined;
+    paintStatus(steady);
+  }, 3000);
+}
+function showStatus(s: { kind: string; text: string; hint: string }): void {
+  if (s.kind === 'done') {
+    steady = { kind: '', text: '', hint: '' };
+    flashStatus(s.kind, s.text, s.hint);
+    return;
+  }
+  steady = { kind: s.kind, text: s.text, hint: s.hint };
+  if (flashTimer === undefined) paintStatus(steady);
 }
 
 // Tabs of the layers of the function: "all" and contexts of its use (compile-time / run-time).
@@ -248,7 +261,7 @@ window.vm.onData((bytes) => {
   });
 });
 window.vm.onStatus((text) => {
-  statusLine.textContent = text;
+  showStatus({ kind: 'vm', text, hint: '' }); // communication with VM to s_hello
 });
 window.vm.onReady(() => {
   send({ type: 'c_hello', version: schema.version });
@@ -287,14 +300,9 @@ for (const field of [runStdin, runArgs] as HTMLElement[]) {
 //
 //
 function showMerge(
-  taken: readonly string[],
   conflicts: readonly { key: string; mine: string; theirs: string }[],
 ): void {
-  if (taken.length > 0)
-    statusLine.textContent = `взято у них: ${taken.join(', ')}`;
-  mergePanel.hidden = conflicts.length === 0;
-  if (conflicts.length === 0 && taken.length === 0)
-    statusLine.textContent = 'слито';
+  mergePanel.hidden = conflicts.length === 0; // The result is in a bang from VM.
   mergePanel.replaceChildren(
     ...conflicts.map((c) => {
       const box = document.createElement('div');
@@ -397,7 +405,7 @@ for (const pane of [app, side]) {
       panes.classList.toggle('structure');
       if (!structure()) {
         inspector.showLabel('', 0, 0);
-        statusLine.textContent = 'рамки узлов выключены';
+        flashStatus('done', 'рамки узлов выключены');
       }
       requestInspect();
       return;
@@ -519,7 +527,7 @@ for (const pane of [app, side]) {
       )
       .reverse();
     const inner = path.at(-1);
-    statusLine.textContent = inspector.describe(path);
+    flashStatus('path', inspector.describe(path)); // path node under pointer
     const r = inner
       ? inspector.roles.get(Number(inner.getAttribute('data-id')))
       : undefined;

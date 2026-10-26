@@ -118,15 +118,16 @@ describe('живая VM', () => {
         }),
       );
       c.write(encodeClient({ type: 'c_key', view: 1, key: 'End', mods: 0 }));
-      for (let i = 0; i < 100 && got.length < 6; ++i) {
+      for (let i = 0; i < 100 && got.length < 7; ++i) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      // after submission - check-ins (check session)
+      // after submission - check-session tags and status bangs
       expect(got.map((m) => m.type)).toEqual([
         's_hello',
         's_view',
         's_cursor',
         's_decor',
+        's_status',
         's_cursor',
         's_cursor',
       ]);
@@ -179,7 +180,7 @@ describe('живая VM', () => {
       expect(kids?.kind).toBe('n_block');
       expect(typed).toMatchObject({ piece: 2, offset: 1 });
       c.end();
-      const end = got.at(5);
+      const end = got.at(6);
       // end of the first line - before translating the line in a piece "{\n" of the block
       const block = view.nodes.find((n) => n.kind === 'n_block');
       expect(end).toMatchObject({ node: block?.id, piece: 0, offset: 1 });

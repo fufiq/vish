@@ -111,16 +111,60 @@ body {
   position: relative;
   flex: 1;
   overflow: auto;
-  padding: 16px 24px;
+  padding: 36px 24px 16px; /* сверху — место чёлки статуса */
   white-space: pre;
   outline: none;
   cursor: text;
 }
+/* Чёлка статуса — чёрная капсула сверху окна: режим и главное (ошибка, трасса,
+   запуск); в покое скрыта. Текст — от VM. */
 #status {
-  padding: 4px 24px;
+  position: fixed;
+  top: 6px;
+  left: 50%;
+  translate: -50% 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(90vw, 960px);
+  padding: 5px 14px 5px 12px;
+  border-radius: 999px;
+  background: #121110;
+  color: #f2efe9;
   font-size: 12px;
-  color: var(--vish-status);
-  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 0.18);
+  transition: opacity 0.2s;
+}
+@media (prefers-color-scheme: dark) {
+  #status {
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 0.14);
+  }
+}
+#status[hidden] {
+  display: flex;
+  opacity: 0;
+  pointer-events: none;
+}
+#status::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8a847c;
+}
+#status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#status-hint {
+  flex: none;
+  color: #9a948a;
+}
+#status-hint:empty {
+  display: none;
 }
 .vish-caret {
   position: absolute;
@@ -171,8 +215,23 @@ body {
 ::highlight(vish-error) {
   text-decoration: wavy underline var(--vish-error);
 }
-#status[error] {
-  color: var(--vish-error);
+#status[kind='error']::before {
+  background: #ef6b5b;
+}
+#status[kind='trace']::before {
+  background: #f0b429;
+}
+#status[kind='run']::before {
+  background: #4ade80;
+  animation: vish-pulse 1.2s ease-in-out infinite;
+}
+#status[kind='done']::before {
+  background: #4ade80;
+}
+@keyframes vish-pulse {
+  50% {
+    opacity: 0.3;
+  }
 }
 .vish-node[dead] {
   opacity: 0.4;

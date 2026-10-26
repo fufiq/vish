@@ -10,6 +10,8 @@ run
 wait 3
 // conclusion
 // expect: output text="0 8994\n" ok=true more=false state="running"
+// brows - by changing the state: "performed" with the first piece
+// expect: status kind="run" text="исполняется" hint="⇧F5 остановить"
 // editing during launch: the process executes the received code - a draft with editing is not visible to him
 pointer 1 @2:1 0 1
 key 1 Backspace
@@ -27,5 +29,6 @@ run
 wait 2
 stop
 // expect: output text="" ok=true more=true state="stopped"
+// expect: status kind="done" text="остановлено"
 stop
 // expect: error text="запуск: программа не исполняется"
