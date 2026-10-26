@@ -1863,7 +1863,12 @@ struct process_machine {
     for(node_id s: db.as<n_block>(fn.body).items) {
       if(!db.require_cond(s)) break;
       ++n;
-      auto c = helper.eval(db.require_cond(s), probe, 0);
+      interpreter::flow c;
+      try {
+        c = helper.eval(db.require_cond(s), probe, 0);
+      } catch(diagnostic const &) {
+        return -1; // predicate not instance - no candidate
+      }
       if(!c.v.is<bool>()) throw diagnostic("require не bool", where);
       if(!c.v.as<bool>()) return -1;
     }

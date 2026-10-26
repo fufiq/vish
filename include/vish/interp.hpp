@@ -7996,7 +7996,15 @@ struct interpreter {
     for(node_id s: db.as<n_block>(fn.body).items) {
       if(!db.require_cond(s) || db.is_assume(s)) break;
       ++n;
-      flow c = eval(db.require_cond(s), probe, 0);
+      // The predicate is not instance on these arguments - there is no candidate:
+// 
+      // 
+      flow c;
+      try {
+        c = eval(db.require_cond(s), probe, 0);
+      } catch(diagnostic const & d) {
+        return {false, n, cat("require не инстанцируется: ", d.what()), false};
+      }
       if(c.v.is<bool>() && !c.v.as<bool>()) return {false, n, "require не выполнено", false};
       if(!c.v.is<bool>() && c.v.known()) return {false, n, "require не bool", false};
       unsure = unsure || !c.v.is<bool>();
