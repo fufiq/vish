@@ -18,7 +18,7 @@ export interface NodeMarks {
 
 export const badgeSheet = new CSSStyleSheet();
 badgeSheet.replaceSync(`
-  .badge { color: var(--vish-type, gray); font-size: 0.85em; margin-left: 1px; }
+  .badge { color: var(--vish-type, gray); font-size: 0.65em; position: relative; top: 0.45em; margin-left: 1px; white-space: nowrap; }
   .badge.value { color: var(--vish-value, gray); }
 `);
 
@@ -41,9 +41,10 @@ export abstract class ASTNode extends HTMLElement {
     this.title = this.#error || this.#note;
   }
 
-  // Verification Tags from VM (s_decor): the type of announced name is an icon after
-  // node in its Shadow DOM (like the type icons in smisl), an error is an emphasis and
-  // a hint with a trace. The scenery, not the text.
+  // Verification Tags from VM (s_decor): Name type (ads and uses) - signature after node
+  // in its Shadow DOM, shallower and below the line, in the text stream (like type icons
+  // in smisl): neighboring signatures do not fit on each other. Error: Emphasizing and
+  // hinting with a trice. The scenery, not the text.
   protected abstract badgeRoot(): ShadowRoot;
 
   // m.value - value in the context of the layer (`= v` icon), m.dead - it does not
@@ -52,8 +53,8 @@ export abstract class ASTNode extends HTMLElement {
     this.#badge?.remove();
     this.#badge = undefined;
     const text = [
-      m.type === undefined ? '' : `: ${m.type}`,
-      m.value === undefined ? '' : ` = ${m.value}`,
+      m.type ?? '',
+      m.value === undefined ? '' : `${m.type === undefined ? '' : ' '}= ${m.value}`,
     ].join('');
     if (text !== '') {
       this.#badge = document.createElement('span');

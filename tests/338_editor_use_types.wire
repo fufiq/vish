@@ -1,0 +1,14 @@
+// Signatures of types and values for uses (author's decision 2026-10-26, "everywhere, always"):
+// each name of a local variable or parameter has a type and value at that location, if known in
+// compilation; not only for ads.
+//;.
+// program: editor_use_types.vish
+open_view module
+// declaration k = 0 - the value of the initializer
+// expect: kind="type" text="i64 = 0"
+// The use of k after k = k + 5 is its value at this point.
+// expect: kind="type" text="i64 = 5"
+// parameter x in the body scale - type by instance
+// expect: kind="type" text="f64"
+// name of the function called - without signature
+// expect-not: text="scale"

@@ -3128,7 +3128,29 @@ type_marks(found, i64 v) {
       }
     }
   }
+  // for uses, too (author's decision 2026-10-26, "everywhere, always"): the name of a local
+  // variable or parameter is the type and value, if known in compilation.
+// 
+  // . Not the name of the function being called; the ad is already marked above.
+  for(n : view_nodes(v)) if((code_kind(n) == ast.name) && (!marked_at(found, n) && local_use(n))) {
+    ts = shown_node(n);
+    if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+  }
   true
+}
+marked_at(found, n) {
+  r = false;
+  for(m : found) if(code_id(m.node) == code_id(n)) r = true;
+  r
+}
+// name - reading or writing a local variable/parameter (not called function, not type)
+local_use(n) {
+  callee = callee_of(code_parent(n));
+  if(given(callee) && (code_id(callee) == code_id(n))) return false;
+  name = name_of(n);
+  r = false;
+  for(c : context_names(n)) if((c.name == name) && ((c.kind == "переменная") || (c.kind == "параметр"))) r = true;
+  r
 }
 enclosing_fn(n) {
   x = code_parent(n);

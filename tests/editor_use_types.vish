@@ -1,0 +1,11 @@
+// The program for the 338_editor_use_types.wire script (itself a regular test).
+// stdin: 2.5
+// out: 5 7.5
+scale(x) => x * 3.0;
+
+main() {
+  k = 0;
+  k = k + 5;
+  xs = read_floats(stdin);
+  print(k, scale(xs[0]));
+}

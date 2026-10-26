@@ -159,7 +159,7 @@ describe('представление', () => {
     const s = v.byId.get(13);
     expect(s?.textContent).toBe('s'); // leaflet
     expect(s?.shadowRoot?.querySelector('.badge')?.textContent).toBe(
-      ': str = 1.5',
+      'str = 1.5',
     );
     expect(v.byId.get(12)?.hasAttribute('dead')).toBe(true);
     expect(v.byId.get(14)?.hasAttribute('error')).toBe(true);
