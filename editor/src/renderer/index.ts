@@ -13,6 +13,7 @@ import {
   type NodeId,
   type ServerMsg,
   type Stops,
+  type Layers,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
 import { ViewElement } from './view';
@@ -60,6 +61,12 @@ function send(m: ClientMsg): void {
 // Inspector AST (F2 - wood panel, Ctrl+Shift+A - frame node in the text): the element tree
 // under the cursor, places node and by whom they are disassembled - from VM.
 const panes = byId('panes');
+// ‹i/n› function with overload - open it in the second panel (there is a switch)
+panes.addEventListener('vish-open', (e) => {
+  const v = [...views.values()].find((x) => x.host.contains(e.target as Node));
+  if (v && e instanceof CustomEvent)
+    send({ type: 'c_open', view: v.data.view, node: e.detail as NodeId });
+});
 const inspector = new Inspector(byId('ast'), {
   open(v, node) {
     send({ type: 'c_open', view: v.data.view, node });
@@ -147,7 +154,7 @@ function receive(m: ServerMsg): void {
       views.get(m.view)?.showMarks(m);
       return;
     case 's_layers':
-      showLayers(m.view, m.layers, m.selected);
+      showLayers(m);
       return;
     case 's_complete':
       views.get(m.view)?.showCompletion(m);
@@ -270,12 +277,36 @@ function showStatus(s: { kind: string; text: string; hint: string }): void {
   if (flashTimer === undefined) paintStatus(steady);
 }
 
-// Tabs of the layers of the function: "all" and contexts of its use (compile-time / run-time).
-function showLayers(
-  view: number,
-  layers: readonly { key: string; kind: string }[],
-  selected: string,
-): void {
+// Function layers, two levels: congestion switch ‹ head i/n › (click - c_open other overload) and
+// context tabs selected: "all" and its instance (compile-time / run-time).
+function showLayers(m: Layers): void {
+  const { view, layers, selected, overloads, overload } = m;
+  const pick = (k: number) => {
+    const fn = overloads.at(k % overloads.length)?.fn ?? null;
+    if (fn !== null) send({ type: 'c_open', view, node: fn });
+  };
+  const arrow = (label: string, k: number) => {
+    const b = document.createElement('button');
+    b.className = 'arrow';
+    b.textContent = label;
+    b.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      pick(k);
+    });
+    return b;
+  };
+  const switcher: HTMLElement[] = [];
+  if (overloads.length > 1) {
+    const head = document.createElement('span');
+    head.className = 'overload';
+    head.textContent = `${overloads[overload]?.head ?? ''}  ${String(overload + 1)}/${String(overloads.length)}`;
+    switcher.push(
+      arrow('‹', overload - 1),
+      head,
+      arrow('›', overload + 1),
+      Object.assign(document.createElement('span'), { className: 'sep' }),
+    );
+  }
   const tab = (key: string, label: string, kind: string) => {
     const b = document.createElement('button');
     b.textContent = label;
@@ -288,6 +319,7 @@ function showLayers(
     return b;
   };
   layersBar.replaceChildren(
+    ...switcher,
     tab('', 'все', ''),
     ...layers.map((l) => tab(l.key, l.key, l.kind)),
   );

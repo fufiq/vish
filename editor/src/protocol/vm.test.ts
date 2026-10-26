@@ -55,7 +55,17 @@ describe('живая VM', () => {
       'output',
       'error',
     ]);
-    expect(fields('s_layers')).toEqual(['view', 'layers', 'selected']);
+    expect(fields('s_layers')).toEqual([
+      'view',
+      'layers',
+      'selected',
+      'overloads',
+      'overload',
+    ]);
+    expect(fields('s_overload')).toEqual(['fn', 'head']);
+    expect(fields('s_status')).toEqual(['kind', 'text', 'hint']);
+    expect(fields('s_stops')).toEqual(['current', 'stops']);
+    expect(fields('c_trace_step')).toEqual(['step']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
     expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);
     expect(fields('s_complete')).toEqual([

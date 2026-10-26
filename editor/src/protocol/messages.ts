@@ -237,11 +237,19 @@ export interface Layer {
   key: string;
   kind: string;
 }
+// overload functions (first layer level): node and head; overload - shown.
+export interface Overload {
+  type: 's_overload';
+  fn: NodeId | null;
+  head: string;
+}
 export interface Layers {
   type: 's_layers';
   view: number;
   layers: Layer[];
   selected: string;
+  overloads: Overload[];
+  overload: number;
 }
 // Launch output: more is a continuation of the former, state - 'running', 'stopped' or '' (finished).
 export interface Output {

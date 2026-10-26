@@ -1,0 +1,19 @@
+// There are two layers of function (author's decision 2026-10-26): overload and contexts.
+// 
+// "Select all preloads / specializations"; - in the
+// module only the label ‹i / n>.
+// program: editor_overload_layers.vish
+open_view module
+// expect: kind="overloads" text="1/2"
+// expect: kind="overloads" text="2/2"
+// second panel: overload f64 - switch and "shared / own" against the most common
+goto 1 norm(f64)
+key 1 Enter
+// expect: overloads=
+// expect: head="norm(x)"
+// expect: head="norm(f64 x)"
+// expect: overload=1
+// expect: kind="common"
+// expect: kind="own"
+// at the call in the module - the label shown overload
+// expect: kind="chosen" text="2/2"

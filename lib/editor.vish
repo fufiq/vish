@@ -329,10 +329,13 @@ send_marks_list(i64 peer, i64 id, marks) => native "cpp" {
   return value(int64_t(0));
 };
 // layer tabs: array{key, kt | mouth}; selected
-send_layer_tabs(i64 peer, i64 id, layers, str selected) => native "cpp" {
+send_layer_tabs(i64 peer, i64 id, layers, str selected, overloads, heads, i64 shown) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
-  proto::s_layers out{uint32_t((a[1]).as<int64_t>()), {}, std::string((a[3]).as<str_v>().view())};
+  auto & s = *editor_host;
+  proto::s_layers out{uint32_t((a[1]).as<int64_t>()), {}, std::string((a[3]).as<str_v>().view()), {}, uint32_t((a[6]).as<int64_t>())};
+  for(uint32_t k = 0; k < (a[4]).as<array_v>().size(); ++k)
+    out.overloads.push_back({s.node_or_none(vm, (a[4]).as<array_v>().get(k), where), std::string((a[5]).as<array_v>().get(k).as<str_v>().view())});
   auto const & xs = (a[2]).as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value one = xs.get(k);
@@ -1127,7 +1130,80 @@ layer_has(i64 v, n) => in_layer(v) && (given(n) && layer_has_of(views[v].root, v
 error_marks(i64 v) => errors_on(views[v].lay.nodes);
 // Presentation function layers: array{key, kt |Hg}
 layers_of(i64 v) => fn_layers(views[v].root);
-show_layers(i64 v, layers) => send_layer_tabs(views[v].peer, views[v].id, layers, views[v].layer);
+show_layers(i64 v, layers) {
+  fs = overloads_of(views[v].root);
+  heads = array{};
+  for(f : fs) heads.push(head_text(f));
+  send_layer_tabs(views[v].peer, views[v].id, layers, views[v].layer, fs, heads, lesser_of(code_index(fs, views[v].root), 0));
+}
+// The layers of function are two levels:
+// 
+// 
+// and "select all overloads/specializations." The first level is overload (added layers): in the
+// second panel the switch, in the module - the mark ‹i / n › for the function, the click opens the
+// panel;
+// 
+// The second is the contexts of the selected overload (compile-time/run-time, tabs as was). *My:*
+// "general" - the instruction is in the most general overload (the least parameters with the type),
+// otherwise "its own"; the label for calls choosing the shown overload.
+overloads_of(f) {
+  found = array{};
+  if(!given(f) || ((code_kind(f) != ast.function) || construction(f))) return found;
+  functions_in(found, code_module(f), code_name(f));
+  found
+}
+code_index(xs, c) {
+  k = -1;
+  for(i : range(xs.size)) if(code_id(xs[i]) == code_id(c)) k = i;
+  k
+}
+lesser_of(i64 x, i64 floor) => if(x < floor) floor else x;
+typed_params(f) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  n = 0;
+  for(p : ps) {
+    ast.parameter{_, pt, _, _, _, _, _} = p;
+    if(given(pt)) n += 1;
+  }
+  n
+}
+general_overload(fs) {
+  best = fs[0];
+  for(f : fs) if(typed_params(f) < typed_params(best)) best = f;
+  best
+}
+// body instructions (body expression - itself)
+body_stmts(f) {
+  ast.function{_, _, _, body, _, _, _, _, _} = f;
+  if(!given(body)) return array{};
+  if(code_kind(body) == ast.block) code_items(body) else array{body}
+}
+// The "common/own" labels in the instructions shown by overload (not the most general)
+overload_marks(found, i64 v) {
+  f = views[v].root;
+  fs = overloads_of(f);
+  if(fs.size < 2) return 0;
+  g = general_overload(fs);
+  if(code_id(g) == code_id(f)) return 0;
+  shared = array{};
+  for(s : body_stmts(g)) shared.push(print_node(s));
+  for(s : body_stmts(f)) found.push(mark{s, if(has_text(shared, print_node(s))) "common" else "own", "", 0, 0});
+  0
+}
+// Module: label ‹i/n› for function with overload; for calls, shown in second panel overload
+module_overload_marks(found, i64 v) {
+  shown = code();
+  for(w : range(views.size)) if((views[w].peer == views[v].peer) && (given(views[w].root) && (views[w].kind == "fn"))) shown = views[w].root;
+  sfs = overloads_of(shown);
+  for(n : view_nodes(v)) {
+    k = code_kind(n);
+    if(k == ast.function) {
+      fs = overloads_of(n);
+      if(fs.size > 1) found.push(mark{n, "overloads", (text(code_index(fs, n) + 1) + "/") + text(fs.size), 0, 0});
+    } else if((k == ast.call) && ((sfs.size > 1) && has_code(call_targets(n), shown))) found.push(mark{n, "chosen", (text(code_index(sfs, shown) + 1) + "/") + text(sfs.size), 0, 0});
+  }
+  0
+}
 set_layer(i64 v, str key) {
   views[v].layer = key;
   0
@@ -1320,6 +1396,7 @@ open_fn(f) {
     } else k += 1;
   }
   show_view_of(fv, false);
+  for(w : peer_views()) if(w != fv) send_marks(w); // tags shown overload at module calls
 }
 // Add the internal element of the module (text - from add_overload): the element - at the end of
 // the module, internal; tags of the module, open in the second panel.
@@ -3290,6 +3367,7 @@ send_layers(i64 v) => show_layers(v, layers_of(v));
 send_marks(i64 v) {
   found = array{};
   if(in_layer(v)) layer_marks(found, v) else type_marks(found, v);
+  if(view_kind(v) == "fn") overload_marks(found, v) else module_overload_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
   for(m : path_marks(views[v].lay.nodes)) found.push(m);
   show_marks(v, found);

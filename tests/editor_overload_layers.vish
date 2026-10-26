@@ -1,0 +1,15 @@
+// The program for the 341_editor_overload_layers.wire script (itself a regular test).
+// out: 10 2.75
+norm(x) {
+  y = x * x;
+  y + 1
+}
+
+norm(f64 x) {
+  y = x * x;
+  y + 0.5
+}
+
+main() {
+  print(norm(3), norm(1.5));
+}

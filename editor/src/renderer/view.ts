@@ -293,6 +293,9 @@ export class ViewElement {
       if (m.kind === 'current') e.current = true;
       if (m.kind === 'prev' || m.kind === 'next') e.near = m.kind;
       if (m.kind === 'path') e.path = m.text;
+      if (m.kind === 'overloads') e.overloads = m.text;
+      if (m.kind === 'chosen') e.chosen = m.text;
+      if (m.kind === 'common' || m.kind === 'own') e.line = m.kind;
       if (m.kind === 'error') {
         e.error = m.text;
         first ??= m.text;

@@ -216,10 +216,18 @@ struct s_layer {
   std::string key;
   std::string kind;
 };
+// overload of the presentation function (first layer level, author's solution 2026-10-26): node
+// and head of the ad; overload is the number shown (switching - c_open over node).
+struct s_overload {
+  node_id fn;
+  std::string head;
+};
 struct s_layers {
   uint32_t view;
   std::vector<s_layer> layers;
   std::string selected;
+  std::vector<s_overload> overloads;
+  uint32_t overload;
 };
 // Startup output: Print the program and error with the track (ok - no error). Start-up is the process of
 // the machine, output as it is executed: more is a continuation of the former, state - "running" (goes),

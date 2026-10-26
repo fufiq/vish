@@ -88,6 +88,29 @@ body {
   border-color: color-mix(in srgb, var(--vish-fg) 20%, transparent);
   background: var(--vish-popup);
 }
+#layers .overload {
+  align-self: center;
+  font-size: 12px;
+  color: var(--vish-value);
+  white-space: pre;
+}
+#layers .sep {
+  width: 1px;
+  margin: 2px 6px;
+  background: color-mix(in srgb, var(--vish-fg) 15%, transparent);
+}
+#layers button.arrow {
+  padding: 2px 6px;
+}
+/* инструкции перегрузки: полоса слева — как в общей логике (серая) или своя (цвет слоя) */
+.vish-node[line] {
+  box-shadow: -7px 0 0 -3px color-mix(in srgb, var(--vish-fg) 35%, transparent);
+}
+.vish-node[line='own'] {
+  box-shadow: -7px 0 0 -3px var(--vish-value);
+  background: color-mix(in srgb, var(--vish-value) 15%, transparent);
+  border-radius: 3px;
+}
 #layers button[data-kind]::after {
   content: ' ' attr(data-kind);
   color: var(--vish-type);

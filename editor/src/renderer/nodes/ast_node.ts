@@ -16,12 +16,17 @@ export interface NodeMarks {
   current?: boolean; // runway
   near?: 'prev' | 'next'; // the next step of the track of the same depth (ыF10/F10)
   path?: string; // the step of the "i/all" error path (1 - the entry point, the last - the place of error)
+  overloads?: string; // function with overload : "i/n" - which is it from the set (click - open)
+  chosen?: string; // the call selects overload shown in the second panel ("i/n")
+  line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
 }
 
 export const badgeSheet = new CSSStyleSheet();
 badgeSheet.replaceSync(`
   .badge { color: var(--vish-type, gray); font-size: 0.65em; position: relative; top: 0.45em; margin-left: 1px; white-space: nowrap; }
   .badge.value { color: var(--vish-value, gray); }
+  .layer { display: inline-block; margin-right: 3px; padding: 0 0.35em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; vertical-align: 0.3em; color: var(--vish-value, gray); border: 1px solid color-mix(in srgb, var(--vish-value, gray) 45%, transparent); cursor: pointer; }
+  .layer.chosen { margin: 0 0 0 2px; cursor: default; }
   .step { display: inline-block; min-width: 1.35em; margin-right: 2px; padding: 0 0.3em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; text-align: center; vertical-align: 0.3em; color: white; background: color-mix(in srgb, var(--vish-error, #c0392b) calc(30% + var(--step, 1) * 70%), var(--vish-bg, white)); }
 `);
 
@@ -35,6 +40,7 @@ export abstract class ASTNode extends HTMLElement {
   #note = '';
   #badge: HTMLSpanElement | undefined;
   #step: HTMLSpanElement | undefined;
+  #layer: HTMLSpanElement | undefined;
   #error = '';
   get note(): string {
     return this.#note;
@@ -66,6 +72,35 @@ export abstract class ASTNode extends HTMLElement {
       this.style.setProperty('--step', String(step / total));
     } else this.style.removeProperty('--step');
     this.toggleAttribute('path', m.path !== undefined);
+    // layers - overload : ‹i/n› before function (click to second panel), i/n after call
+    this.#layer?.remove();
+    this.#layer = undefined;
+    const layer = m.overloads ?? m.chosen;
+    if (layer !== undefined) {
+      this.#layer = document.createElement('span');
+      this.#layer.className = m.chosen === undefined ? 'layer' : 'layer chosen';
+      this.#layer.textContent = m.chosen === undefined ? `‹${layer}›` : layer;
+      this.#layer.title =
+        m.chosen === undefined
+          ? 'перегрузки: открыть во второй панели'
+          : 'выбирает показанную перегрузку';
+      if (m.chosen === undefined)
+        this.#layer.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.dispatchEvent(
+            new CustomEvent('vish-open', {
+              detail: this.nodeId,
+              bubbles: true,
+              composed: true,
+            }),
+          );
+        });
+      if (m.chosen === undefined) this.badgeRoot().prepend(this.#layer);
+      else this.badgeRoot().append(this.#layer);
+    }
+    if (m.line) this.setAttribute('line', m.line);
+    else this.removeAttribute('line');
     this.#badge?.remove();
     this.#badge = undefined;
     const text = [
