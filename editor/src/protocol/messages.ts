@@ -125,6 +125,11 @@ export interface Apply {
   type: 'c_apply';
   fn: string;
 }
+// Track: proceed to step (click on stop).
+export interface TraceStepAsk {
+  type: 'c_trace_step';
+  step: number;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -145,7 +150,8 @@ export type ClientMsg =
   | Open
   | InspectAsk
   | Apply
-  | Stop;
+  | Stop
+  | TraceStepAsk;
 
 export interface ServerHello {
   type: 's_hello';
@@ -248,6 +254,20 @@ export interface Output {
 export interface Saved {
   type: 's_saved';
   path: string;
+}
+// Track stops - a window around the current step: step number, call depth, function,
+// short text of the instruction, its node.
+export interface Stops {
+  type: 's_stops';
+  current: number;
+  stops: {
+    type: 's_stop';
+    step: number;
+    depth: number;
+    fn: string;
+    text: string;
+    node: NodeId | null;
+  }[];
 }
 // Status bangs: kind - 'error', 'trace', 'run', 'done' (event) or '' (hide); text collects
 // VM, the client only draws.
@@ -361,7 +381,8 @@ export type ServerMsg =
   | Hover
   | Hint
   | Inspect
-  | Status;
+  | Status
+  | Stops;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

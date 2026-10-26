@@ -14,6 +14,7 @@ export interface NodeMarks {
   error?: string;
   dead?: boolean;
   current?: boolean; // runway
+  near?: 'prev' | 'next'; // the next step of the track of the same depth (ыF10/F10)
   path?: string; // the step of the "i/all" error path (1 - the entry point, the last - the place of error)
 }
 
@@ -83,6 +84,8 @@ export abstract class ASTNode extends HTMLElement {
     this.toggleAttribute('error', m.error !== undefined);
     this.toggleAttribute('dead', m.dead === true);
     this.toggleAttribute('current', m.current === true);
+    if (m.near) this.setAttribute('near', m.near);
+    else this.removeAttribute('near');
     this.title =
       this.#error ||
       (m.dead ? 'не исполняется в этом контексте' : '') ||

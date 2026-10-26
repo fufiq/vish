@@ -10,10 +10,19 @@ trace 3
 // expect: stack=["main"] output=""
 // expect: kind="value" text="[3.0]"
 // expect: kind="current"
+// stop on the right - window around the step; next step (F10) - tagged
+// expect: stops current=2 stops=
+// expect: step=2 depth=1 fn="main" text="xs = read_floats(stdin)"
+// expect: fn="scale" text="if(x > 2.0) x * x else 0.0"
+// expect: kind="next"
+// Click on the stop - to her step; it has the previous one (уF10)
+trace_step 2
+// expect: stops current=2
 // F10 is the following instruction of the same depth; output to this step
 key 1 F10
 // expect: stack=["main"] output="0.0\n"
 // expect: kind="value" text="0.0"
+// expect: kind="prev"
 // F11 - inside the call: stack, values in the body function
 key 1 F11
 // expect: stack=["scale" "main"]

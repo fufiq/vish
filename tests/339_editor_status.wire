@@ -12,7 +12,7 @@ trace 3
 // expect: · main" hint="F10 дальше
 key 1 F10
 key 1 F11
-// expect: · scale · main"
+// expect: · scale · main · вывод: 0.0"
 key 1 Escape
 // expect: status kind="" text=""
 // Program error - in the bangs, the first line

@@ -127,7 +127,11 @@ struct c_inspect {
 struct c_apply {
   std::string fn;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop>;
+// Track: Go to step (click on stop in the list).
+struct c_trace_step {
+  uint32_t step;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step>;
 
 // --- VM customer ---
 
@@ -325,7 +329,21 @@ struct s_status {
   std::string text;
   std::string hint;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status>;
+// Track stops - window around the current step step step number, call depth, function, short text of
+// the instruction, its node; current - the current step number.
+//
+struct s_stop {
+  uint32_t step;
+  uint32_t depth;
+  std::string fn;
+  std::string text;
+  node_id node;
+};
+struct s_stops {
+  uint32_t current;
+  std::vector<s_stop> stops;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops>;
 
 // --- staff ---
 

@@ -291,6 +291,7 @@ export class ViewElement {
       if (m.kind === 'value') e.value = m.text;
       if (m.kind === 'dead') e.dead = true;
       if (m.kind === 'current') e.current = true;
+      if (m.kind === 'prev' || m.kind === 'next') e.near = m.kind;
       if (m.kind === 'path') e.path = m.text;
       if (m.kind === 'error') {
         e.error = m.text;

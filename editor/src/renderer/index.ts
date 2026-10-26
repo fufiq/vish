@@ -12,6 +12,7 @@ import {
   type ClientMsg,
   type NodeId,
   type ServerMsg,
+  type Stops,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
 import { ViewElement } from './view';
@@ -47,6 +48,7 @@ const runPanel = byId('run');
 const runStdin = byId('run-stdin') as HTMLTextAreaElement;
 const runArgs = byId('run-args') as HTMLInputElement;
 const runOutput = byId('run-output');
+const stopsPanel = byId('stops');
 const views = new Map<number, ViewElement>();
 let active: ViewElement | undefined;
 let debugging = false; // Open track: Escape - VM (exit)
@@ -159,6 +161,7 @@ function receive(m: ServerMsg): void {
     }
     case 's_trace':
       debugging = m.active;
+      stopsPanel.hidden = !m.active;
       if (!m.active) return;
       runPanel.hidden = false;
       runOutput.textContent = m.output + (m.error === '' ? '' : `\n${m.error}`);
@@ -168,6 +171,9 @@ function receive(m: ServerMsg): void {
       showMerge(m.conflicts);
       return;
     case 's_saved': // VM sends a bang (s_status)
+      return;
+    case 's_stops':
+      showStops(m);
       return;
     case 's_status':
       showStatus(m);
@@ -200,6 +206,39 @@ function receive(m: ServerMsg): void {
       });
       return;
   }
+}
+
+// Track stops on the right: call depth - shift and guides, current highlighted; click - to step
+// (VM). The window around the step sends VM.
+function showStops(m: Stops): void {
+  const head = document.createElement('div');
+  head.className = 'head';
+  head.textContent = 'остановки';
+  const list = document.createElement('div');
+  list.className = 'list';
+  for (const s of m.stops) {
+    const row = document.createElement('div');
+    row.className = 'stop';
+    row.toggleAttribute('current', s.step === m.current);
+    row.style.setProperty('--depth', String(Math.max(0, s.depth - 1)));
+    const step = document.createElement('span');
+    step.className = 'n';
+    step.textContent = String(s.step + 1);
+    const fn = document.createElement('span');
+    fn.className = 'fn';
+    fn.textContent = s.fn;
+    const text = document.createElement('span');
+    text.className = 'text';
+    text.textContent = s.text;
+    row.append(step, fn, text);
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      send({ type: 'c_trace_step', step: s.step });
+    });
+    list.append(row);
+  }
+  stopsPanel.replaceChildren(head, list);
+  list.querySelector('[current]')?.scrollIntoView({ block: 'nearest' });
 }
 
 // Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM

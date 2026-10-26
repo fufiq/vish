@@ -340,6 +340,7 @@ struct editor_server {
   void handle(peer & p, proto::c_save const &) { decide(&p, -1, "on_save", {}); }
   void handle(peer & p, proto::c_trace const & m) { decide(&p, -1, "on_trace_run", {value(int64_t(-1)), value(m.args), value(m.stdin_text)}); }
   void handle(peer & p, proto::c_apply const & m) { decide(&p, -1, "on_apply", {value(m.fn)}); }
+  void handle(peer & p, proto::c_trace_step const & m) { decide(&p, -1, "on_trace_step", {value(int64_t(m.step))}); }
   void handle(peer & p, proto::c_merge const & m) { decide(&p, -1, "on_merge", {value(m.path)}); }
   void handle(peer & p, proto::c_take const & m) { decide(&p, -1, "on_take", {value(m.key), value(m.theirs)}); }
 

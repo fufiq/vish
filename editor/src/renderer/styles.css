@@ -296,6 +296,15 @@ body {
   background: color-mix(in srgb, var(--vish-caret) 18%, transparent);
   border-radius: 3px;
 }
+/* соседние шаги трассы: ⇧F10 — назад, F10 — вперёд */
+.vish-node[near] {
+  border-radius: 3px;
+  outline: 1px dashed color-mix(in srgb, var(--vish-caret) 45%, transparent);
+  outline-offset: 1px;
+}
+.vish-node[near='next'] {
+  background: color-mix(in srgb, var(--vish-caret) 7%, transparent);
+}
 #merge {
   border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
   padding: 8px 24px;
@@ -385,6 +394,65 @@ body {
 .vish-tip b {
   color: var(--vish-caret);
 }
+/* остановки трассы: глубина вызова — сдвиг и направляющие */
+#stops {
+  width: 300px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
+  font-size: 12px;
+  padding-top: 30px; /* место чёлки статуса */
+}
+#stops[hidden] {
+  display: none;
+}
+#stops .head {
+  padding: 6px 10px;
+  color: var(--vish-status);
+  border-bottom: 1px solid color-mix(in srgb, var(--vish-fg) 10%, transparent);
+}
+#stops .list {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+}
+#stops .stop {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  white-space: nowrap;
+  padding: 0 8px 0 calc(10px + var(--depth) * 14px);
+  line-height: 1.7;
+  cursor: pointer;
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0 13px,
+    color-mix(in srgb, var(--vish-fg) 14%, transparent) 13px 14px
+  );
+  background-size: calc(var(--depth) * 14px) 100%;
+  background-position: 10px 0;
+  background-repeat: no-repeat;
+}
+#stops .stop:hover {
+  background-color: var(--vish-popup);
+}
+#stops .stop[current] {
+  background-color: color-mix(in srgb, var(--vish-caret) 18%, transparent);
+}
+#stops .n {
+  min-width: 2.5em;
+  text-align: right;
+  color: var(--vish-detail);
+}
+#stops .fn {
+  color: var(--vish-type);
+}
+#stops .text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* инспектор AST: панель дерева (F2) */
 #ast {
   width: 420px;
@@ -394,6 +462,7 @@ body {
   min-height: 0;
   border-left: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
   font-size: 12px;
+  padding-top: 30px; /* место чёлки статуса */
 }
 #ast[hidden] {
   display: none;
