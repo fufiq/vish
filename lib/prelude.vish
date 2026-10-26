@@ -1340,6 +1340,9 @@ struct jc_sub { code f; array kinds; array envsnap; i64 base; i64 ctx; i64 entry
 // body reads outside, spawn node
 struct jc_gen { code w; i64 w_ctx; i64 w_top; i64 w_base; i64 w_ret; i64 region; array caps; code at; }
 
+// frame of the generator convolution (conveyor: external - in the stack, while folded nested)
+struct jc_fuse { i64 stream; type elem; code body; array env; i64 top; i64 base; i64 ctx; i64 cur; array outer; array caps; i64 closes; bool fusing; bool in_b; }
+
 // catch in machine code: type (unit - any), label, variable value, stack depth
 struct jc_catch { type ty; i64 label; bool binds; str name; i64 slot; i64 depth; }
 
@@ -1478,6 +1481,14 @@ jit_compile(cg, f, types, type result) {
   f_outer = array{}; // slots visible from the outside
   f_caps = array{}; // slots that W reads
   f_closes = 0;
+  // Conveyor: W writer himself reads the flow of another generator - it is folded into for inside W,
+  // and its consumer is code W: the frame of the external convolution acts on the time of the
+  // consumer's body
+// Checks of the enclosed - guards b_caps / b_streams.
+  fuse_stack = array{};
+  b_caps = array{}; // Slots that read generators whose consumer body is now being generated
+  b_streams = array{}; // streams
+  late_close = array{}; // nested threads: close VM after external convolution (in W it is the place of error): [slot, node]
   has(xs, i64 x) => {
     r = false;
     for(y : xs) if(y == x) r = true;
@@ -1632,6 +1643,7 @@ jit_compile(cg, f, types, type result) {
   load_slot(type kind, i64 s) => put_bytes(if(kind == f64) slot_ldf(acc_f, s) else slot_ld(acc, s));
   // a record that would make the order W and B observable
   wrote(i64 sl) => {
+    for(cs : b_caps) if(has(cs, sl)) bad("потребитель пишет то, что читает генератор");
     if(!fusing) {
       for(g : gens) if(has(g.caps, sl)) bad("переменную генератора меняют после spawn");
     } else if(!in_b && has(f_outer, sl)) bad("генератор пишет наружу");
@@ -1760,7 +1772,7 @@ jit_compile(cg, f, types, type result) {
       if(code_kind(v.th) == ast.lambda) bad("блок — только body(v)");
       else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
     } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
-    else if(is_stream(env[k].kind) && (fusing && (in_b && (env[k].slot == f_stream)))) bad("потребитель трогает поток генератора");
+    else if(is_stream(env[k].kind) && ((fusing && (in_b && (env[k].slot == f_stream))) || has(b_streams, env[k].slot))) bad("потребитель трогает поток генератора");
     else if(is_handle(env[k].kind)) put_bytes(slot_ld(acc, env[k].slot)); // VM is the address of its cell
     else if(env[k].kind == jc_ref) ref_load(k);
     else if(env[k].kind == unit) {
@@ -3559,7 +3571,7 @@ jit_compile(cg, f, types, type result) {
   // for(stream s, expr body) on the stream that the waiting spawn sees: generator number
   generator_of(a) => {
     k = -1;
-    if(!fusing && (gens.size > 0)) {
+    if(!(fusing && in_b) && (gens.size > 0)) { // c W - nested convolution (conveyor)
       v = var_of(a);
       if((v >= 0) && (!env[v].thunk && is_stream(env[v].kind))) {
         for(i : range(gens.size)) if((k < 0) && has(gens[i].caps, env[v].slot)) k = i;
@@ -3679,6 +3691,7 @@ jit_compile(cg, f, types, type result) {
         rest = array{};
         for(i : range(gens.size)) if(i != k) rest.push(gens[i]);
         gens = rest;
+        if(fusing) fuse_stack.push(fuse_save());
         f_stream = sl;
         f_elem = elem(env[v].kind);
         f_body = body;
@@ -3700,14 +3713,41 @@ jit_compile(cg, f, types, type result) {
           }
           gen(wb);
         });
-        fusing = false;
-        if(f_closes != 1) bad("генератор: close(s) не один раз");
-        // Flow after cycle - closed and empty, as after a real exchange
-        put_bytes(slot_ld(acc, sl));
-        put_bytes(cg.move(ca1, acc));
-        vm_service(4, unit, e);
+        closes = f_closes;
+        if(fuse_stack.size > 0) {
+          fuse_load(fuse_stack[fuse_stack.size - 1]);
+          fuse_stack = drop_last(fuse_stack);
+        } else fusing = false;
+        if(closes != 1) bad("генератор: close(s) не один раз");
+        // flow after the cycle - closed and empty, as after the present exchange; nested - after the external
+        late_close.push(array{sl, e});
+        if(!fusing) {
+          for(lc : late_close) {
+            array{lsl, le} = lc;
+            put_bytes(slot_ld(acc, lsl));
+            put_bytes(cg.move(ca1, acc));
+            vm_service(4, unit, le);
+          }
+          late_close = array{};
+        }
       }
     }
+  };
+  fuse_save() => jc_fuse{f_stream, f_elem, f_body, f_env, f_top, f_base, f_ctx, f_cur, f_outer, f_caps, f_closes, fusing, in_b};
+  fuse_load(jc_fuse x) => {
+    f_stream = x.stream;
+    f_elem = x.elem;
+    f_body = x.body;
+    f_env = x.env;
+    f_top = x.top;
+    f_base = x.base;
+    f_ctx = x.ctx;
+    f_cur = x.cur;
+    f_outer = x.outer;
+    f_caps = x.caps;
+    f_closes = x.closes;
+    fusing = x.fusing;
+    in_b = x.in_b;
   };
   // VM operation inside W: write(s, v) - consumer body with x = v; close(s) - end
   sink(e, i64 op, xs) => {
@@ -3734,9 +3774,22 @@ jit_compile(cg, f, types, type result) {
         base = f_base;
         ctx = f_ctx;
         cur = f_cur;
-        in_b = true;
+        nested = fuse_stack.size > 0;
+        inner = fuse_save();
+        if(nested) { // consumer - the code of the external W: his frame (taken off the stack), checks of the attached - by security guards
+          fuse_load(fuse_stack[fuse_stack.size - 1]);
+          fuse_stack = drop_last(fuse_stack);
+          b_caps.push(inner.caps);
+          b_streams.push(inner.stream);
+        } else in_b = true;
         put(jc_var{pname, t, p, false, f, 0, 0, 0, 0});
         gen(bb);
+        if(nested) {
+          fuse_stack.push(fuse_save());
+          b_caps = drop_last(b_caps);
+          b_streams = drop_last(b_streams);
+        }
+        fuse_load(inner);
         in_b = false;
         env = w_env;
         top = w_top;

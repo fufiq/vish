@@ -1,0 +1,44 @@
+// out: 100100000 4997460 44850
+// jit-compiled: pairs
+// jit-compiled: triple
+// jit-compiled: small
+// machine
+// Конвейер генераторов → вложенные циклы: писатель
+// сам читает поток другого генератора — тот свёртывается в for внутри писателя. 
+//;
+// Автомата из файбера нет:
+//.
+pairs(i64 k, i64 n) {
+  t = 0;
+  for(j : range(k)) {
+    a = stream(64);
+    b = stream(64);
+    spawn { for(i : range(n)) write(a, i); close(a); }
+    spawn { for(x : a) write(b, x + 1); close(b); }
+    for(y : b) t = t + y;
+  }
+  t
+}
+triple(i64 n) {
+  a = stream(8);
+  b = stream(8);
+  c = stream(8);
+  spawn { for(i : range(n)) write(a, i); close(a); }
+  spawn { for(x : a) write(b, x * 2); close(b); }
+  spawn { for(y : b) write(c, y + 1); close(c); }
+  t = 0;
+  for(z : c) t = t + z;
+  t
+}
+small(i64 n) {
+  a = stream(8);
+  b = stream(8);
+  spawn { for(i : range(n)) write(a, i); close(a); }
+  spawn { for(x : a) if(x < 300) write(b, x); close(b); }
+  t = 0;
+  for(y : b) t = t + y;
+  t
+}
+main() {
+  print(pairs(200, 1000), triple(2236) - 2236, small(630));
+}
