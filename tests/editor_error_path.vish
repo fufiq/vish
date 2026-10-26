@@ -1,0 +1,8 @@
+// Program for 340_editor_error_path.wire scenario: Trace error through two calls.
+// error: оператор / не определён для str и i64
+half(x) => x / 2;
+twice(x) => half(x) + half(x);
+
+main() {
+  print(twice("a"));
+}

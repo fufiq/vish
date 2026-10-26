@@ -1,0 +1,19 @@
+// Code Error Path (§13.4): Trace steps tag "path" on node places, from entry point (1) to error point
+// (last).
+//;
+// 
+// - in the hint all steps with references.
+// program: editor_error_path.vish
+open_view module
+// expect: kind="error" text="оператор / не определён для str и i64
+// expect: kind="path" text="1/4"
+// expect: kind="path" text="2/4"
+// expect: kind="path" text="3/4"
+// expect: kind="path" text="4/4"
+// hint at any step: error and steps with links to places
+hover 1 @half:2
+// expect: kind="ошибка" text="оператор / не определён для str и i64"
+// expect: kind="шаг" text="1 · в main" target=#
+// expect: kind="шаг" text="2 · в twice" target=#
+// expect: kind="шаг" text="3 · в half" target=#
+// expect: kind="шаг" text="4 · место ошибки" target=#

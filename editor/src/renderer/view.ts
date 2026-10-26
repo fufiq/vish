@@ -209,9 +209,32 @@ export class ViewElement {
   #cursor: Cursor | undefined;
   #completion: Complete | undefined;
 
-  // Cadet VM.
+  // Cadet VM. The error path is visible in its entirety (step illumination, other muted)
+  // when the cursor or pointer on the node path; the step function (entry point) is only
+  // visible with its node.
+  #pathAt = { cursor: false, pointer: false };
+  static onPath(el: Element | undefined): boolean {
+    if (el instanceof ASTNode && el.hasAttribute('path')) return true;
+    for (let x = el?.parentElement; x instanceof ASTNode; x = x.parentElement)
+      if (x.hasAttribute('path') && x.dataset.kind !== 'n_fn') return true;
+    return false;
+  }
+  #showPath(): void {
+    this.host.toggleAttribute(
+      'path-focus',
+      this.#pathAt.cursor || this.#pathAt.pointer,
+    );
+  }
+  pointPath(el: Element | undefined): void {
+    this.#pathAt.pointer = ViewElement.onPath(el);
+    this.#showPath();
+  }
+
   showCursor(c: Cursor): void {
     this.#cursor = c;
+    this.#pathAt.cursor =
+      c.node !== null && ViewElement.onPath(this.byId.get(c.node));
+    this.#showPath();
     const box = this.#box(c.node, c.piece, c.offset);
     this.caret.hidden = !box;
     if (!box) return;
@@ -268,6 +291,7 @@ export class ViewElement {
       if (m.kind === 'value') e.value = m.text;
       if (m.kind === 'dead') e.dead = true;
       if (m.kind === 'current') e.current = true;
+      if (m.kind === 'path') e.path = m.text;
       if (m.kind === 'error') {
         e.error = m.text;
         first ??= m.text;

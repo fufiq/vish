@@ -14,12 +14,14 @@ export interface NodeMarks {
   error?: string;
   dead?: boolean;
   current?: boolean; // runway
+  path?: string; // the step of the "i/all" error path (1 - the entry point, the last - the place of error)
 }
 
 export const badgeSheet = new CSSStyleSheet();
 badgeSheet.replaceSync(`
   .badge { color: var(--vish-type, gray); font-size: 0.65em; position: relative; top: 0.45em; margin-left: 1px; white-space: nowrap; }
   .badge.value { color: var(--vish-value, gray); }
+  .step { display: inline-block; min-width: 1.35em; margin-right: 2px; padding: 0 0.3em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; text-align: center; vertical-align: 0.3em; color: white; background: color-mix(in srgb, var(--vish-error, #c0392b) calc(30% + var(--step, 1) * 70%), var(--vish-bg, white)); }
 `);
 
 // An AST node as a DOM element: DOM is a direct projection AST (smisl architecture).
@@ -31,6 +33,7 @@ export abstract class ASTNode extends HTMLElement {
   // note VM (cause of the hole) - hint and emphasis, not text
   #note = '';
   #badge: HTMLSpanElement | undefined;
+  #step: HTMLSpanElement | undefined;
   #error = '';
   get note(): string {
     return this.#note;
@@ -47,14 +50,28 @@ export abstract class ASTNode extends HTMLElement {
   // hinting with a trice. The scenery, not the text.
   protected abstract badgeRoot(): ShadowRoot;
 
-  // m.value - value in the context of the layer (`= v` icon), m.dead - it does not
-  // execute (muffle).
+  // m.value - value in the context of the layer (`= v` icon), m.dead - it does not execute
+  // (muffle). m.path is the step number of the error path before node, the tone from pale
+  // (entry point) to saturated red (error place).
   setMarks(m: NodeMarks): void {
+    this.#step?.remove();
+    this.#step = undefined;
+    const [step = 0, total = 1] = (m.path ?? '').split('/').map(Number);
+    if (m.path !== undefined) {
+      this.#step = document.createElement('span');
+      this.#step.className = 'step';
+      this.#step.textContent = String(step);
+      this.badgeRoot().prepend(this.#step);
+      this.style.setProperty('--step', String(step / total));
+    } else this.style.removeProperty('--step');
+    this.toggleAttribute('path', m.path !== undefined);
     this.#badge?.remove();
     this.#badge = undefined;
     const text = [
       m.type ?? '',
-      m.value === undefined ? '' : `${m.type === undefined ? '' : ' '}= ${m.value}`,
+      m.value === undefined
+        ? ''
+        : `${m.type === undefined ? '' : ' '}= ${m.value}`,
     ].join('');
     if (text !== '') {
       this.#badge = document.createElement('span');

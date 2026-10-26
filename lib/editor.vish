@@ -1109,12 +1109,6 @@ layer_types(i64 v, n) => if(in_layer(v)) layer_types_of(views[v].root, views[v].
 layer_has(i64 v, n) => in_layer(v) && (given(n) && layer_has_of(views[v].root, views[v].layer, n));
 // parsing error on node representation: array {узел, текст, from, to}
 error_marks(i64 v) => errors_on(views[v].lay.nodes);
-// parsing errors in node
-error_texts(i64 v, n) {
-  r = array{};
-  for(e : error_marks(v)) if(code_id(e[0]) == code_id(n)) r.push(e[1]);
-  r
-}
 // Presentation function layers: array{key, kt |Hg}
 layers_of(i64 v) => fn_layers(views[v].root);
 show_layers(i64 v, layers) => send_layer_tabs(views[v].peer, views[v].id, layers, views[v].layer);
@@ -2664,7 +2658,7 @@ hover_at(i64 v, n) {
     if((ts != "") && !called) lines.push(line{"тип", ts, code(), 0, 0});
     lit = layer_literal(v, n);
     if(lit != "") lines.push(line{"значение", lit, code(), 0, 0});
-    for(e : error_texts(v, n)) lines.push(line{"ошибка", e, code(), 0, 0});
+    for(e : error_lines(v, n)) lines.push(e);
     // function or design name - ads with links (selected in instance - first)
     name = "";
     if(k == ast.function) {
@@ -3084,6 +3078,62 @@ errors_on(ns) {
   }
   out
 }
+// Error Path (§13.4) - Trace in the code:
+//  
+// 
+// - the steps don't fold. Error steps k - from entry point to location: arraycode() - there is no space
+// in ns), the text of the frame; the last is the place itself. *My:* numbering from the entry point, the
+// tag "path" with the text "step/total".
+error_steps(ns, srcs, froms, tos, i64 k) {
+  out = array{};
+  f = check_error_frames(k);
+  for(i : range(f)) {
+    n = node_at(ns, srcs, froms, tos, check_error_place(k, (f - 1) - i));
+    out.push(array{if(n >= 0) node_code(n) else code(), check_error_text(k, (f - 1) - i)});
+  }
+  n = node_at(ns, srcs, froms, tos, check_error_place(k, -1));
+  out.push(array{if(n >= 0) node_code(n) else code(), "место ошибки"});
+  out
+}
+// The steps of all errors on node ns
+path_marks(ns) {
+  out = array{};
+  if(check_errors() == 0) return out;
+  array{srcs, froms, tos} = node_spans(ns);
+  for(k : range(check_errors())) {
+    steps = error_steps(ns, srcs, froms, tos, k);
+    for(i : range(steps.size)) {
+      array{n, _} = steps[i];
+      if(given(n)) out.push(mark{n, "path", (text(i + 1) + "/") + text(steps.size), 0, 0});
+    }
+  }
+  out
+}
+// node’s path hint: error and all its steps - links to places
+error_lines(i64 v, n) {
+  out = array{};
+  if(check_errors() == 0) return out;
+  ns = views[v].lay.nodes;
+  array{srcs, froms, tos} = node_spans(ns);
+  for(k : range(check_errors())) {
+    steps = error_steps(ns, srcs, froms, tos, k);
+    on = false;
+    for(st : steps) {
+      array{m, _} = st;
+      if(given(m) && on_step(n, m)) on = true;
+    }
+    if(on) {
+      out.push(line{"ошибка", check_error_text(k, -1), code(), 0, 0});
+      for(i : range(steps.size)) {
+        array{m, t} = steps[i];
+        out.push(line{"шаг", (text(i + 1) + " · ") + t, m, 0, 0});
+      }
+    }
+  }
+  out
+}
+// n is the node of step m or within it (function-step - only itself: inside it all its code)
+on_step(n, m) => if(code_kind(m) == ast.function) code_id(n) == code_id(m) else within(n, m);
 // Node of ns, in the text of which lies the place w (lowest); -1 - no
 node_at(ns, srcs, froms, tos, w) {
   array{ws, wb, we} = w;
@@ -3225,6 +3275,7 @@ send_marks(i64 v) {
   found = array{};
   if(in_layer(v)) layer_marks(found, v) else type_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
+  for(m : path_marks(views[v].lay.nodes)) found.push(m);
   show_marks(v, found);
   calm_status(views[v].peer);
   if(view_kind(v) == "fn") send_layers(v) else 0

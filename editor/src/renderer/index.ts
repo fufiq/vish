@@ -504,6 +504,7 @@ for (const pane of [app, side]) {
       return;
     }
     const n = ViewElement.nodeOf(e);
+    v.pointPath(n);
     if (n?.nodeId !== hoverNode) v.hideHover();
     clearTimeout(hoverTimer);
     if (!n) {

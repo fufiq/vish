@@ -9,6 +9,7 @@
   --vish-bg: #fbfaf7;
   --vish-fg: #1f1d1a;
   --vish-syntax: #6b6660;
+  --vish-syntax-full: #6b6660;
   --vish-caret: #c2410c;
   --vish-status: #8a847c;
 }
@@ -17,6 +18,7 @@
     --vish-bg: #1b1a18;
     --vish-fg: #e8e4dc;
     --vish-syntax: #9a948a;
+    --vish-syntax-full: #9a948a;
     --vish-caret: #fb923c;
     --vish-status: #7d776e;
     --vish-popup: #262422;
@@ -232,6 +234,25 @@ body {
   50% {
     opacity: 0.3;
   }
+}
+/* путь ошибки: шаги подсвечены тоном шага, прочий код слегка приглушён */
+.pane[path-focus] {
+  color: color-mix(in srgb, var(--vish-fg) 55%, var(--vish-bg));
+  --vish-syntax: color-mix(
+    in srgb,
+    var(--vish-syntax-full) 55%,
+    var(--vish-bg)
+  );
+}
+.pane[path-focus] .vish-node[path]:not([data-kind='n_fn']) {
+  color: var(--vish-fg);
+  --vish-syntax: var(--vish-syntax-full);
+  background: color-mix(
+    in srgb,
+    var(--vish-error) calc(6% + var(--step) * 12%),
+    transparent
+  );
+  border-radius: 3px;
 }
 .vish-node[dead] {
   opacity: 0.4;
