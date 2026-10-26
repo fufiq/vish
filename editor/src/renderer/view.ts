@@ -296,6 +296,7 @@ export class ViewElement {
       if (m.kind === 'overloads') e.overloads = m.text;
       if (m.kind === 'chosen') e.chosen = m.text;
       if (m.kind === 'common' || m.kind === 'own') e.line = m.kind;
+      if (m.kind === 'diverged') e.diverged = m.text;
       if (m.kind === 'error') {
         e.error = m.text;
         first ??= m.text;

@@ -102,6 +102,11 @@ body {
 #layers button.arrow {
   padding: 2px 6px;
 }
+/* общая инструкция перегрузки разошлась с общей логикой (O12) — предупреждение */
+.vish-node[diverged] {
+  text-decoration: wavy underline #d4a017;
+  text-underline-offset: 3px;
+}
 /* инструкции перегрузки: полоса слева — как в общей логике (серая) или своя (цвет слоя) */
 .vish-node[line] {
   box-shadow: -7px 0 0 -3px color-mix(in srgb, var(--vish-fg) 35%, transparent);

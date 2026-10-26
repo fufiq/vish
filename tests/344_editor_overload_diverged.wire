@@ -1,0 +1,14 @@
+// Consistency of overload layers: verification, not
+// synchronization. ;
+// 
+// The general instruction was corrected only in the most general overload - a
+// copy in another overload has the label "diverged".
+// program: editor_overload_layers.vish
+open_view module
+// expect-not: kind="diverged"
+pointer 1 @* 1 1
+key 1 Delete
+key 1 +
+key 1 Escape
+// expect: y = x + x;
+// expect: kind="diverged" text="разошлось с общей логикой: в norm(x) этой инструкции больше нет"

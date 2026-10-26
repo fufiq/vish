@@ -19,6 +19,7 @@ export interface NodeMarks {
   overloads?: string; // function with overload : "i/n" - which is it from the set (click - open)
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
+  diverged?: string; // It was general, but it is no longer in general logic (checking the consistency of layers).
 }
 
 export const badgeSheet = new CSSStyleSheet();
@@ -121,8 +122,10 @@ export abstract class ASTNode extends HTMLElement {
     this.toggleAttribute('current', m.current === true);
     if (m.near) this.setAttribute('near', m.near);
     else this.removeAttribute('near');
+    this.toggleAttribute('diverged', m.diverged !== undefined);
     this.title =
       this.#error ||
+      (m.diverged ?? '') ||
       (m.dead ? 'не исполняется в этом контексте' : '') ||
       this.#note;
   }

@@ -109,6 +109,9 @@ views = array{};   // All representations of all customers: number - place in th
 clients = array{}; // client number
 hint = edit_hint{-1, 0, 0, 0, 0, false};
 merge_state = no_merge(); // conflicts of the last merger before the decision of the person
+// O12: overload instructions shared with most general overload (in function)
+struct shared_seen { i64 fn; array texts; }
+seen_shared = array{};
 
 // --- Primitives of the base: projection printing, parsing editing, sending (in VM)
 // --------------------- Unknown in parsing argument - erased value (as in prelude), without effects.
@@ -1184,10 +1187,38 @@ overload_marks(found, i64 v) {
   fs = overloads_of(f);
   if(fs.size < 2) return 0;
   g = general_overload(fs);
+  diverged_marks(found, f);
   if(code_id(g) == code_id(f)) return 0;
   shared = array{};
   for(s : body_stmts(g)) shared.push(print_node(s));
   for(s : body_stmts(f)) found.push(mark{s, if(has_text(shared, print_node(s))) "common" else "own", "", 0, 0});
+  0
+}
+// Coherence of layers:
+// 
+// Verification, not synchronization: the overload instruction, which was shared with the most general
+// overload, and now it is not there (the general logic was corrected in one place), is marked "diverged".
+// Memory of "formerly common" in the text of the instructions; editing the overload itself (its own) is not a
+// discrepancy.
+diverged_marks(found, f) {
+  fs = overloads_of(f);
+  if(fs.size < 2) return 0;
+  g = general_overload(fs);
+  if(code_id(g) == code_id(f)) return 0;
+  general = array{};
+  for(st : body_stmts(g)) general.push(print_node(st));
+  mine = array{};
+  for(st : body_stmts(f)) mine.push(print_node(st));
+  k = -1;
+  for(i : range(seen_shared.size)) if(seen_shared[i].fn == code_id(f)) k = i;
+  was = if(k >= 0) seen_shared[k].texts else array{};
+  for(st : body_stmts(f)) {
+    t = print_node(st);
+    if(has_text(was, t) && !has_text(general, t)) found.push(mark{st, "diverged", ("разошлось с общей логикой: в " + head_text(g)) + " этой инструкции больше нет", 0, 0});
+  }
+  now = array{};
+  for(t : mine) if(has_text(general, t) || (has_text(was, t) && !has_text(now, t))) now.push(t);
+  if(k >= 0) seen_shared[k].texts = now else seen_shared.push(shared_seen{code_id(f), now});
   0
 }
 // Module: label ‹i/n› for function with overload; for calls, shown in second panel overload
@@ -1200,6 +1231,7 @@ module_overload_marks(found, i64 v) {
     if(k == ast.function) {
       fs = overloads_of(n);
       if(fs.size > 1) found.push(mark{n, "overloads", (text(code_index(fs, n) + 1) + "/") + text(fs.size), 0, 0});
+      diverged_marks(found, n);
     } else if((k == ast.call) && ((sfs.size > 1) && has_code(call_targets(n), shown))) found.push(mark{n, "chosen", (text(code_index(sfs, shown) + 1) + "/") + text(sfs.size), 0, 0});
   }
   0
