@@ -472,6 +472,19 @@ vm_proc_stale(i64 s, i64 n) => native "cpp" {
   auto t = x.proc->helper.types.named(std::string(x.db.strings.text(x.db.as<n_extend>(n).name)));
   return value(int64_t(x.proc->stale_values(t, struct_fields(x.db, n))));
 };
+// autotransfer of the values of struct n of the old layout (O8): "" - can (apply - moved), otherwise why not
+vm_proc_auto(i64 s, i64 n, bool apply) => native "cpp" {
+  for(auto & v: a)
+    if(!v.known()) return erase(value(std::string()));
+  auto & x = tools_host->session((a[0]).as<int64_t>());
+  node_id n(uint32_t((a[1]).as<int64_t>()));
+  auto t = x.proc->helper.types.named(std::string(x.db.strings.text(x.db.as<n_extend>(n).name)));
+  try {
+    return value(x.proc->auto_migrate(t, n, (a[2]).as<bool>()));
+  } catch(diagnostic const & d) {
+    return value(render(d, x.name, x.db));
+  }
+};
 vm_proc_migrate(i64 s, i64 n, i64 fn) => native "cpp" {
   for(auto & v: a)
     if(!v.known()) return erase(value(array_v::of({})));
@@ -624,8 +637,13 @@ edit_struct(i64 s, i64 v, items, i64 fresh, got) {
   for(n : got) if(takes_migrate(v, n, tn)) mig = n;
   alive = vm_proc_alive(s);
   stale = if(alive) vm_proc_stale(s, fresh) else 0;
-  if((stale > 0) && (mig < 0))
-    return ((((((((("правка отклонена: живой процесс держит значений " + tn) + " старой раскладки: ") + text(stale)) + " — нужна migrate(") + tn) + " old) => ") + tn) + "{…} в том же тексте (или proc stop)") + "\n");
+  // without migrate - autotransfer as a record → struct (O8) if it does not lose or invent data
+  auto = (stale > 0) && (mig < 0);
+  if(auto) {
+    why = vm_proc_auto(s, fresh, false);
+    if(why != "")
+      return ((((((((((("правка отклонена: живой процесс держит значений " + tn) + " старой раскладки: ") + text(stale)) + " — ") + why) + "(") + tn) + " old) => ") + tn) + "{…} в том же тексте (или proc stop)") + "\n");
+  }
   vm_replace(s, item, fresh);
   kept = array{};
   for(n : items) if((mig < 0) || !takes_migrate(v, n, tn)) kept.push(n);
@@ -637,7 +655,11 @@ edit_struct(i64 s, i64 v, items, i64 fresh, got) {
     vm_proc_clear(s, "migrate");
     for(n : kept) if(is_fn_named(v, n, "migrate")) vm_proc_register(s, n);
   }
-  if(stale > 0) {
+  if(auto) {
+    why = vm_proc_auto(s, item, true);
+    if(why != "") return why;
+    out = out + (("перенесено автоматически: " + text(stale)) + "\n");
+  } else if(stale > 0) {
     array{moved, error} = vm_proc_migrate(s, item, mig);
     if(error != "") return error;
     out = out + (("перенесено migrate: " + text(moved)) + "\n");

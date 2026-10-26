@@ -1,7 +1,7 @@
-// Live process after editing (§9.3, tail step 10). ct of the new body - in place in canonical
-// order: parsing of the program again, the results - in memory of the process (was: the new body
-// read ct k with the final elaboration value - 500 instead of 100). Struct layout - names and
-// types of fields: i64 v → f64 v - old layout, you need migrate(cell old).
+// Live process after editing (§9.3, tail step 10). ct of the new body - in place in canonical order: parsing of the
+// program again, the results - in memory of the process (was: the new body read ct k with the final elaboration value
+// - 500 instead of 100). Struct layout - names and types of fields: i64 v → f64 v - old layout; without migrate -
+// autotransfer by implicit presentation (O8).
 // program: live_ct.vish
 proc start
 // expect: процесс запущен
@@ -11,15 +11,23 @@ f() => k * 100;
 .
 // expect: функция f заменена
 edit cell
-struct cell { f64 v; }
+struct cell { f64 w; }
 .
-// expect: правка отклонена: живой процесс держит значений cell старой раскладки: 1
+// field v removed - data would be lost: no autotransfer (O8), you need migrate
+// expect: правка отклонена: живой процесс держит значений cell старой раскладки: 1 — поле v убрано — нужна migrate(cell old)
 edit cell
 struct cell { f64 v; }
-migrate(cell old) => cell{f64(old.v)};
 .
+// i64 v → f64 v - implicit actuation: autotransfer as record → struct (O8, 2026-10-27)
 // expect: struct cell заменена
-// expect: перенесено migrate: 1
+// expect: перенесено автоматически: 1
+edit cell
+struct cell { f64 v; i64 n = 4; }
+.
+// A new field with a default value is also an autotransfer
+// expect: перенесено автоматически: 1
+proc call c
+// expect: cell{v: 3.0, n: 4}
 proc run
 // expect: 100 3.0
 // expect-not: 500

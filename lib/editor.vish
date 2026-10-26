@@ -693,7 +693,7 @@ live_clear(str name) => native "cpp" {
   editor_host->live_clear(std::string((a[0]).as<str_v>().view()));
   return value(int64_t(0));
 };
-// struct n of the base of the old layout process - via migrate fn (-1 - no):' - moved
+// the values of struct n of the base of the old layout process - via migrate fn (-1 - autotransfer):' - moved
 live_migrate(i64 n, i64 fn) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
   int64_t f = (a[1]).as<int64_t>();
@@ -1289,8 +1289,9 @@ refresh_all() {
 // live launch process (hot replacement, §9.3). Editing - in a live process (drafts closed): the elements of
 // the program modules, modified from the last time, are replaced by a key in its database, as proc/edit
 // (§9.3); the started frames live in the old body. struct, which has the living values of the old layout -
-// through the migrate(T old) program, there is no one - the process stops. The bottom line is what to say to
-// a person ("nothing").
+// through the migrate(T old) program, no it - autotransfer as a record → struct (O8), and can not and his -
+// the process stops. The bottom line is what to say to a person ("nothing").
+//
 //
 sync_program() {
   if(!live_sync_due()) return "";
@@ -1311,13 +1312,7 @@ sync_program() {
         if(now.present && (was.present && (version_signature(0, now.node)[0] == "struct"))) {
           tn = version_signature(0, now.node)[1];
           stale = live_stale(now.node);
-          if(stale > 0) {
-            if(!find_key(now_items, ("migrate(" + tn) + ")").present) {
-              stop_program();
-              return ((((((("struct " + tn) + " изменён, а живой процесс держит значений старой раскладки: ") + text(stale)) + " — нужна migrate(") + tn) + " old) => ") + tn) + "{…}; процесс остановлен";
-            }
-            migrations.push(tn);
-          }
+          if(stale > 0) migrations.push(array{tn, stale, find_key(now_items, ("migrate(" + tn) + ")").present});
         }
         if(was.present && !now.present) {
           wk = version_signature(lv, was.node)[0];
@@ -1329,11 +1324,13 @@ sync_program() {
     }
   }
   if(changed == 0) return "";
-  for(tn : migrations) {
+  for(mg : migrations) {
+    array{tn, stale, has_migrate} = mg;
     why = migrate_live(lv, tn);
     if(why != "") {
       stop_program();
-      return ((("migrate " + tn) + ": ") + why) + "; процесс остановлен";
+      if(has_migrate) return ((("migrate " + tn) + ": ") + why) + "; процесс остановлен";
+      return ((((((((("struct " + tn) + " изменён, а живой процесс держит значений старой раскладки: ") + text(stale)) + " — ") + why) + "(") + tn) + " old) => ") + tn) + "{…}; процесс остановлен";
     }
   }
   live_refresh();

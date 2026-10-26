@@ -1535,6 +1535,73 @@ struct process_machine {
     return n;
   }
 
+  // Autotransfer: without migrate, the value of the old layout becomes the new struct st as the {поле:
+  // значение} entry - the “write → struct” (§5.8) rules: fields by name, field type by implicit
+  // presentation, new field by default. The field is removed, the type is not led, there is no default
+  // value, struct has a base - you can not (data would be lost or invented): you need migrate. The result
+  // is "(you can; apply - transferred) or why not; transfer - only if you can do everything (first
+  // sample)." My rule.
+  //
+  std::string auto_migrate(type_id t, node_id st, bool apply) {
+    if(apply)
+      if(std::string why = auto_migrate(t, st, false); !why.empty()) return why;
+    auto const & sd = db.as<n_extend>(st);
+    if(sd.base) return "у struct есть база — нужна migrate";
+    auto fields = struct_layout(st);
+    node_list vars;
+    for(node_id x: sd.items)
+      if(db.is<n_var>(x)) vars.push_back(x);
+    std::string why;
+    each_value([&](mval & x) {
+      if(!why.empty() || !x.is<m_agg>() || x.as<m_agg>().type != t || same_layout(x.as<m_agg>(), fields)) return;
+      value old = to_value(x);
+      auto const & have = old.as<agg_v>().fields;
+      for(auto const & [k, _]: have)
+        if(std::ranges::none_of(vars, [&](node_id f) { return db.as<n_var>(f).name == k; })) {
+          why = cat("поле ", db.strings.text(k), " убрано — нужна migrate");
+          return;
+        }
+      agg_v g{t, {}};
+      for(node_id f: vars) {
+        auto const & d = db.as<n_var>(f);
+        value const * got = nullptr;
+        for(auto const & [k, fv]: have)
+          if(k == d.name) got = &fv;
+        value fv;
+        if(got && d.type && db.is<n_ident>(d.type)) {
+          auto q = helper.type_fit(*got, db.strings.text(db.as<n_ident>(d.type).name), false, fv);
+          if(q == interpreter::fit::no || q == interpreter::fit::maybe) {
+            why = cat("поле ", db.strings.text(d.name), ": ", helper.types.describe(*got), " не приводится к ", db.strings.text(db.as<n_ident>(d.type).name), " — нужна migrate");
+            return;
+          }
+        } else if(got) fv = *got;
+        else if(d.init) {
+          auto r = helper.eval(d.init, helper.globals, 0);
+          if(!r.normal()) {
+            why = cat("значение по умолчанию поля ", db.strings.text(d.name), " не вычислилось");
+            return;
+          }
+          fv = helper.field_typed(d, std::move(r.v), db[d.init].where);
+        } else {
+          why = cat("у нового поля ", db.strings.text(d.name), " нет значения по умолчанию — нужна migrate");
+          return;
+        }
+        g.fields.push_back({d.name, std::move(fv)});
+      }
+      if(apply) x = from_value(value(std::move(g)), db[st].where);
+    });
+    return why;
+  }
+  std::vector<field_decl> struct_layout(node_id st) {
+    std::vector<field_decl> fields;
+    for(node_id x: db.as<n_extend>(st).items)
+      if(db.is<n_var>(x)) {
+        node_id ty = db.as<n_var>(x).type;
+        fields.push_back({db.as<n_var>(x).name, ty && db.is<n_ident>(ty) ? std::string(db.strings.text(db.as<n_ident>(ty).name)) : std::string()});
+      }
+    return fields;
+  }
+
   // --- раскрутка ------------------------------------------------------------------------------
 
   void unwind() {

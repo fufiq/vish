@@ -1378,7 +1378,9 @@ struct editor_server {
     live_run & r = *live;
     process_machine & m = *r.m;
     try {
-      m.migrate_values(m.helper.types.named(std::string(r.db.strings.text(r.db.as<n_extend>(item).name))), struct_fields(r.db, item), fn);
+      auto t = m.helper.types.named(std::string(r.db.strings.text(r.db.as<n_extend>(item).name)));
+      if(!fn) return m.auto_migrate(t, item, true); // migrate no - autotransport (O8)
+      m.migrate_values(t, struct_fields(r.db, item), fn);
     } catch(diagnostic const & d) {
       return d.what();
     }
