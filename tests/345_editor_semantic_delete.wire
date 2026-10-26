@@ -1,0 +1,11 @@
+// Only semantic editing:
+// 
+// Bracket separately - failure (test 63); node as a
+// whole (allocation of everything) - is possible.
+// program: editor_overload_layers.vish
+open_view module
+key 1 a 2
+key 1 Delete
+// expect-not: скобку существующего узла
+// expect-not: n_fn
+// expect: kind="n_module" pieces=[]

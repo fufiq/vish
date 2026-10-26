@@ -68,6 +68,7 @@ struct draft {
   i64 since;     // revision of the base at the opening: journal after it - one edit
   str before;    // text of the unit before the draft (canon) - for rollback of the accepted
   array sources; // importation
+  i64 known;     // node with id less - were before the draft (their brackets - only together with node, O16)
 }
 struct snapshot { str text; i64 caret; } // rollback inside the draft: text and byte of the cursor
 // Accepted editing (closed draft): elements and their text before and after - rollback and repetition of
@@ -133,6 +134,8 @@ node_codes(ns) => native "cpp" {
 };
 // base audit
 revision() => native "cpp" { return value(int64_t(editor_host->session.db.revision)); };
+// id node base boundary: node with id less is already there
+node_limit() => native "cpp" { return value(int64_t(editor_host->session.db.size())); };
 // Print presentation (base of language): layout (layout) - root, module (otherwise one function),
 // projection; draft module - elements [at, at + count) text as typed (count -1 - no); draft function - its
 // text as typed (fn_source -1 - no)
@@ -820,7 +823,7 @@ lower(str s) => native "cpp" {
 
 // --- Views: Find, Open, Close ---
 empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0, 0, -1};
-empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}};
+empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}, 0};
 new_view(i64 peer, i64 id, root, str kind) => view{peer, id, root, kind, "", code(), empty_layout(), 0, -1, -1, false, false, false, false, array{}, 0, 0, array{}, empty_draft(), array{}, array{}, array{}, array{}};
 // Representation of the client whose message is served by his number; -1 - no (or closed); number -1 -
 // first open
@@ -1522,6 +1525,7 @@ open_draft(i64 v, i64 a, i64 b) {
   ge = byte_of(v, r.to);
   if(!views[v].d.open) {
     views[v].d.since = revision();
+    views[v].d.known = node_limit();
     views[v].d.sources = array{};
     views[v].d.before = slice_text(views[v].lay.text, gb, ge);
   } else {
@@ -1784,6 +1788,10 @@ finalize_everyone() {
 // Editing [a, b) on ins: in a draft, otherwise (module cap) - over parsing brackets; caret - cursor in
 // the insert (code points; -1 - after it)
 replace(i64 v, i64 a, i64 b, str ins, i64 caret) {
+  if(breaks_entity(v, a, b)) {
+    report("скобку существующего узла не стереть отдельно: удалить можно только узел целиком (выделите его)");
+    return send_cursor(v);
+  }
   n = code_points(ins);
   c = if((caret < 0) || (caret > n)) n else caret;
   views[v].anchor = -1;
@@ -1794,6 +1802,31 @@ replace(i64 v, i64 a, i64 b, str ins, i64 caret) {
     edit(v, a, b, ins, c);
   }
   0
+}
+// Only semantic editing:
+// 
+// Removable [a, b] touches the bracket node, which was before the draft, and does not capture the entire node -
+// it cannot. The brackets of lines, holes and raw blocks typed in this draft are free. *My: * boundary "to the
+// draft" - id node.
+breaks_entity(i64 v, i64 a, i64 b) {
+  if(a >= b) return false;
+  known = if(views[v].d.open) views[v].d.known else node_limit();
+  r = false;
+  for(i : range(b - a)) if(!r) {
+    p = a + i;
+    c = lead(v, p);
+    if((c == '{') || ((c == '}') || ((c == '(') || ((c == ')') || ((c == '[') || (c == ']')))))) {
+      n = place_node(v, p);
+      if(given(n) && (code_id(n) < known)) {
+        k = code_kind(n);
+        if((k != ast.string) && ((k != ast.hole) && (k != ast.raw))) { // raw block - its own text
+          li = layout_of(v, n);
+          if((li >= 0) && !((a <= views[v].lay.from[li]) && (views[v].lay.to[li] <= b))) r = true;
+        }
+      }
+    }
+  }
+  r
 }
 // The cursor is moved (solution - move_to): the word set is over, the addition is closed; outside the draft
 // - the canon; the cursor and the hint - to the client.
@@ -1860,7 +1893,7 @@ undo_closed(i64 v, bool again) {
     for(x : views[w].d.items) if(has_code(e.items, x)) return report("элемент правит другой клиент");
   from_place = place_of_byte(v, ob);
   to_place = place_of_byte(v, oe);
-  views[v].d = draft{true, e.items, e.next, 0, array{}, array{}, revision(), e.after, array{}};
+  views[v].d = draft{true, e.items, e.next, 0, array{}, array{}, revision(), e.after, array{}, node_limit()};
   views[v].anchor = -1;
   views[v].goal = -1;
   views[v].typing = false;
