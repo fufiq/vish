@@ -1517,6 +1517,9 @@ struct interpreter {
   // results ct parsing a: by call location and final ct variables
   void take_canonical(interpreter & a) {
     for(auto const & [k, v]: a.ct_memo) ct_memo.try_emplace(k, v);
+    if(ct_touches.empty()) ct_touches = a.ct_touches;
+    refs_static.insert(a.refs_static.begin(), a.refs_static.end());
+    refs_runtime.insert(a.refs_runtime.begin(), a.refs_runtime.end());
     for(symbol n: a.ct_names)
       if(value * mine = globals->find(n); mine && ct_cells.contains(mine))
         if(value * theirs = a.globals->find(n)) *mine = *theirs;
@@ -1567,6 +1570,41 @@ struct interpreter {
       for(auto const & [w, inst, v]: ct_order)
         if(mine(w)) out += cat("  ", loc(w), " в ", inst, " → ", v, "\n");
     }
+    // O2: Order is part of semantics
+// There is no experience of such systems ( ) - the test shows that the order depends:
+// the cell is written from several
+    // Reading the scriptures before reading the scriptures from another place. My rule of reporting.
+    //
+    {
+      std::string dep;
+      std::vector<symbol> names;
+      for(auto const & t: ct_touches)
+        if(std::ranges::find(names, t.name) == names.end()) names.push_back(t.name);
+      for(symbol nm: names) {
+        std::vector<std::pair<span, std::string>> writers;
+        for(auto const & t: ct_touches)
+          if(t.name == nm && t.write && mine(t.where) && std::ranges::none_of(writers, [&](auto const & w) { return w.first.begin == t.where.begin && w.first.source == t.where.source; }))
+            writers.push_back({t.where, t.inst});
+        if(writers.empty()) continue;
+        std::string ws;
+        for(auto const & [w, inst]: writers) ws += cat(ws.empty() ? "" : ", ", loc(w), " (", inst, ")");
+        if(writers.size() > 1) dep += cat("  ", str(nm), ": пишут ", ws, " — итог зависит от порядка\n");
+        std::set<std::pair<uint32_t, uint32_t>> said;
+        for(std::size_t i = 0; i < ct_touches.size(); ++i) {
+          auto const & r = ct_touches[i];
+          if(r.name != nm || r.write || !mine(r.where) || said.contains({r.where.source, r.where.begin})) continue;
+          for(std::size_t j = i + 1; j < ct_touches.size(); ++j) {
+            auto const & w = ct_touches[j];
+            if(w.name == nm && w.write && mine(w.where) && (w.where.begin != r.where.begin || w.where.source != r.where.source)) {
+              dep += cat("  ", str(nm), ": ", loc(r.where), " (", r.inst, ") читает до записи ", loc(w.where), " (", w.inst, ")\n");
+              said.insert({r.where.source, r.where.begin});
+              break;
+            }
+          }
+        }
+      }
+      if(!dep.empty()) out += "зависит от порядка (ct-ячейки):\n" + dep;
+    }
     if(!db.elab_changes.empty()) { // The result of elaboration is at the base (it could be done by another interpreter).
       out += "изменения кода ct-кодом экземпляров (элаборация):\n";
       for(auto const & [w, inst, what]: db.elab_changes) out += cat("  ", loc(w), " в ", inst, ": ", what, "\n");
@@ -1590,6 +1628,16 @@ struct interpreter {
           if(mine(c.first)) lv += cat("    ", loc(c.first), " ", c.second, "\n");
     }
     if(!lv.empty()) out += "статичность экземпляров:\n" + lv;
+    // O13: 
+// 
+// Accuracy of support analysis: use of links solved by parsing, and with verification
+    // generational
+    std::size_t rs = 0, rr = 0;
+    for(auto const & k: refs_static)
+      if(!db.prelude || k.first != db[db.prelude].where.source) ++rs;
+    for(auto const & k: refs_runtime)
+      if(!db.prelude || k.first != db[db.prelude].where.source) ++rr;
+    if(rs + rr > 0) out += cat("опоры ссылок: доказано разбором ", rs, ", проверка поколения при исполнении ", rr, "\n");
     return out;
   }
 
@@ -2209,8 +2257,10 @@ struct interpreter {
         auto key = std::pair{n.value, ctx};
         if(auto it = ct_memo.find(key); it != ct_memo.end()) return ok(it->second);
         if(checking()) ct_memo[key] = *cell;
+        note_touch(cell, db[n].where, false);
         return ok(*cell);
       }
+      if(ct_depth > 0 && ct_cells.contains(cell)) note_touch(cell, db[n].where, false);
       not_hidden(*cell, x.name, db[n].where);
       return read(cell, db[n].where);
     }
@@ -5766,8 +5816,13 @@ struct interpreter {
   void hook_ref_used(ref_v const & r, span where) {
     symbol h = sym("ref_used");
     if(!r.memo || !functions.contains(h)) return;
+    uint64_t before = checks;
     call_hook(h, {{r.name, r.cell}}, {{sym("ссылка"), ct_states.at(r.memo)}}, where, 0, 0);
+    // O13: Statistical level of supports - how many use links are solved by parsing, how many checks
+    // a generation when executed
+    if(checking() && !level_probe) (checks == before ? refs_static : refs_runtime).insert({where.source, where.begin});
   }
+  std::set<std::pair<uint32_t, uint32_t>> refs_static, refs_runtime;
 
   // [[g(…)]] for a function where g is a function of the language: ct-hook of the call - for parsing
   // each call is executed with the parameters of the function associated with arguments (place -
@@ -7108,6 +7163,7 @@ struct interpreter {
     }
     if(ct_cells.contains(target) && ct_depth == 0 && !level_probe)
       fail("ct-переменная меняется только кодом при компиляции (ct { … })", where);
+    if(ct_cells.contains(target)) note_touch(target, where, true);
     bool pinned = target->pinned;
     bool out_init = op == "=" && db.is<n_ident>(lhs) && out_marker(target->hidden); // Out-Parameter: Recording - Building on Place
     if(!pinned && target->hidden && !out_init) not_hidden(*target, symbol{}, where); // x.f = ... with a hidden name.
@@ -9621,6 +9677,22 @@ struct interpreter {
   std::map<std::pair<uint64_t, uint64_t>, value> stream_shapes; // Place of creation of flow → type of elements (parsing program)
   std::map<uint32_t, std::vector<uint32_t>> resolved_calls; // call node → selected overload (by instance)
   std::vector<std::tuple<span, std::string, std::string>> ct_order; // policeman
+  // O2: Reading and writing ct cells in canonical order (parsing) - which depends on order
+  struct ct_touch {
+    symbol name;
+    span where;
+    std::string inst;
+    bool write;
+  };
+  std::vector<ct_touch> ct_touches;
+  void note_touch(value const * cell, span where, bool write) {
+    if(!checking() || level_probe) return;
+    for(symbol n: ct_names)
+      if(globals->find(n) == cell) {
+        ct_touches.push_back({n, where, stack.empty() ? std::string("модуль") : stack.back().what, write});
+        return;
+      }
+  }
   std::set<value const *> ct_cells; // ct-variable module
   // The variable module → the module that declared it: visible to its code and the code of the
   // modules that see it (use, prelude) - hygiene by visibility (foreign_global).
