@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { projectionText, type View } from '../protocol/messages';
 import { pieceOfText } from './nodes/ast_node';
+import { defineNodes } from './nodes/index';
 import { codePoints, utf16Offset, ViewElement } from './view';
 
 // Text that a person sees: shadow scenery + children by their slots.
@@ -43,6 +44,7 @@ const view: View = {
   ],
 };
 
+defineNodes();
 describe('представление', () => {
   it('DOM — проекция: собранный текст равен тексту кусков', () => {
     const host = document.createElement('div');

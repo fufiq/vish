@@ -33,6 +33,9 @@ badgeSheet.replaceSync(`
   .step { display: inline-block; min-width: 1.35em; margin-right: 2px; padding: 0 0.3em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; text-align: center; vertical-align: 0.3em; color: white; background: color-mix(in srgb, var(--vish-error, #c0392b) calc(30% + var(--step, 1) * 70%), var(--vish-bg, white)); }
 `);
 
+// The icons and syntax in Shadow DOM node are open to themes such as:part(badge | badge value | step | layer)
+// | syntax - the theme changes their appearance without touching the elements.
+
 // An AST node as a DOM element: DOM is a direct projection AST (smisl architecture).
 // The syntax of node (its chunks) sends VM - the client has no grammar.
 export abstract class ASTNode extends HTMLElement {
@@ -70,6 +73,7 @@ export abstract class ASTNode extends HTMLElement {
     if (m.path !== undefined) {
       this.#step = document.createElement('span');
       this.#step.className = 'step';
+      this.#step.part = 'step';
       this.#step.textContent = String(step);
       this.badgeRoot().prepend(this.#step);
       this.style.setProperty('--step', String(step / total));
@@ -82,6 +86,7 @@ export abstract class ASTNode extends HTMLElement {
     if (layer !== undefined) {
       this.#layer = document.createElement('span');
       this.#layer.className = m.chosen === undefined ? 'layer' : 'layer chosen';
+      this.#layer.part = this.#layer.className;
       this.#layer.textContent = m.chosen === undefined ? `‹${layer}›` : layer;
       this.#layer.title =
         m.chosen === undefined
@@ -119,6 +124,7 @@ export abstract class ASTNode extends HTMLElement {
         : m.value === undefined
           ? 'badge'
           : 'badge value';
+      this.#badge.part = this.#badge.className;
       if (m.unknown) this.#badge.title = 'тип не выведен';
       this.#badge.textContent = text;
       this.badgeRoot().append(this.#badge);

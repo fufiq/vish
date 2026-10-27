@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { schema } from '../../protocol/messages';
-import { tagOf } from './index';
+import { defineNodes, tagOf } from './index';
 import { RecordNode } from './record_node';
+
+defineNodes();
 
 describe('виды узлов', () => {
   it('на каждый вид из схемы VM зарегистрирован свой элемент', () => {

@@ -12,24 +12,47 @@ import {
   type ClientMsg,
   type NodeId,
   type ServerMsg,
-  type Stops,
-  type Peers,
   type Output,
-  type Conflict,
-  type Proposal,
-  type Layers,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
 import { ViewElement } from './view';
 import { Inspector } from './inspector';
-import './nodes/index';
-import './styles.css';
+import { defineNodes } from './nodes/index';
+import {
+  resolve,
+  type Host,
+  type OutRow,
+  type StatusView,
+  type Theme,
+} from './theme';
 
 declare global {
   interface Window {
     vm: VmBridge;
   }
 }
+
+// Topic (theme.ts): The themes/<name>/ folders are picked up by themselves, the selected one is transmitted by
+// the main process (-theme <name> → ?theme=). Styles, window markings and node elements - to everything else.
+const themes = new Map(
+  Object.values(
+    import.meta.glob<{ default: Theme }>('./themes/*/index.ts', {
+      eager: true,
+    }),
+  ).map((m) => [m.default.name, m.default]),
+);
+const theme = resolve(
+  themes,
+  new URLSearchParams(location.search).get('theme') ?? 'canvas',
+);
+for (const css of theme.css)
+  document.head.append(
+    Object.assign(document.createElement('style'), { textContent: css }),
+  );
+document.body.innerHTML = theme.shell;
+document.body.dataset.theme = theme.name;
+defineNodes(theme.nodes);
+const panels = theme.panels;
 
 function byId(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -41,6 +64,8 @@ const app = byId('app');
 const side = byId('side');
 const sideWrap = byId('side-wrap');
 const layersBar = byId('layers');
+const header = document.getElementById('header'); // The hat may not be (classic)
+const params = new URLSearchParams(location.search);
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
 const mergePanel = byId('merge');
@@ -52,8 +77,6 @@ const aiInput = byId('ai-input') as HTMLTextAreaElement;
 type GotoMode = 'goto' | 'merge' | 'projection' | 'apply';
 let gotoMode: GotoMode = 'goto';
 const statusLine = byId('status');
-const statusText = byId('status-text');
-const statusHint = byId('status-hint');
 const runPanel = byId('run');
 const runStdin = byId('run-stdin') as HTMLTextAreaElement;
 const runArgs = byId('run-args') as HTMLInputElement;
@@ -67,6 +90,21 @@ let debugging = false; // Open track: Escape - VM (exit)
 function send(m: ClientMsg): void {
   window.vm.send(encodeClient(m));
 }
+const mainView = () => [...views.values()].find((x) => x.host === app);
+// What theme panels can do (theme.ts)
+const host: Host = {
+  send,
+  open(node) {
+    const v = mainView();
+    if (v) send({ type: 'c_open', view: v.data.view, node });
+  },
+  reconnect() {
+    window.vm.reconnect();
+  },
+  goto(text) {
+    if (active) send({ type: 'c_goto', view: active.data.view, text });
+  },
+};
 
 // Inspector AST (F2 - wood panel, Ctrl+Shift+A - frame node in the text): the element tree
 // under the cursor, places node and by whom they are disassembled - from VM.
@@ -120,6 +158,33 @@ function requestInspect(): void {
 function activate(v: ViewElement | undefined): void {
   active = v;
   (v?.host ?? app).focus();
+  paintHeader();
+}
+
+// Header and line numbers (draws the theme): the program file, the result of checking the module, the position
+// of the cursor of the active panel. Checked - the marks came to the last edit; errors - error marks.
+const checks = new Map<number, { revision: number; errors: number }>();
+function paintHeader(): void {
+  if (!header) return;
+  const main = mainView();
+  const at = active?.cursor
+    ? active.position(active.cursor)
+    : { line: 1, col: 1 };
+  const c = main ? checks.get(main.data.view) : undefined;
+  panels.header(
+    header,
+    {
+      file: params.get('file') ?? '',
+      errors: c?.errors ?? 0,
+      checked: c !== undefined && c.revision >= 0,
+      line: at.line,
+      col: at.col,
+    },
+    host,
+  );
+}
+function paintGutter(v: ViewElement | undefined): void {
+  if (v) panels.gutter(v.gutter, v.position().line);
 }
 
 function closeSide(): void {
@@ -147,17 +212,25 @@ function receive(m: ServerMsg): void {
       sideWrap.hidden = sideWrap.hidden && host !== side;
       const v = new ViewElement(host, m);
       views.set(m.view, v);
+      paintGutter(v);
       activate(v);
       if (fresh && host === side && m.kind === 'module') openGoto('projection'); // her projection is the key
       return;
     }
     case 's_update':
       views.get(m.view)?.update(m);
+      paintGutter(views.get(m.view));
+      checks.set(m.view, {
+        revision: -1,
+        errors: checks.get(m.view)?.errors ?? 0,
+      }); // tested
+      paintHeader();
       requestInspect();
       return;
     case 's_cursor':
       views.get(m.view)?.showCursor(m);
       if (m.node !== null) cursorNode.set(m.view, m.node);
+      paintHeader();
       requestInspect();
       return;
     case 's_inspect': {
@@ -167,9 +240,14 @@ function receive(m: ServerMsg): void {
     }
     case 's_decor':
       views.get(m.view)?.showMarks(m);
+      checks.set(m.view, {
+        revision: m.revision,
+        errors: m.marks.filter((k) => k.kind === 'error').length,
+      });
+      paintHeader();
       return;
     case 's_layers':
-      showLayers(m);
+      panels.layers(layersBar, m, host);
       return;
     case 's_complete':
       views.get(m.view)?.showCompletion(m);
@@ -187,22 +265,22 @@ function receive(m: ServerMsg): void {
       runOutput.toggleAttribute('error', m.error !== '');
       return;
     case 's_proposals':
-      showProposals(m.proposals);
+      panels.proposals(proposalsPanel, m.proposals, host);
       return;
     case 's_items':
       return;
     case 's_merge':
-      showMerge(m.conflicts);
+      panels.merge(mergePanel, m.conflicts, host);
       return;
     case 's_saved': // VM sends a bang (s_status)
       return;
     case 's_stops':
-      showStops(m);
+      panels.stops(stopsPanel, m, host);
       return;
     case 's_peers': {
       const v = views.get(m.view);
       v?.showPeers(m);
-      if (v?.host === app) showClients(m);
+      if (v?.host === app) panels.clients(byId('clients'), m, host);
       return;
     }
     case 's_status':
@@ -272,128 +350,9 @@ window.vm.onAi((kind, text) => {
   if (kind !== 'done' || text !== '') aiLine(kind, text);
 });
 
-// Proposals of edits (AI): element, who and why, current text and proposed with a marked difference;
-// "Accept" - one edit, "Reject" - remove (decides VM).
-function showProposals(ps: readonly Proposal[]): void {
-  proposalsPanel.hidden = ps.length === 0;
-  proposalsPanel.replaceChildren(
-    ...ps.map((p) => {
-      const box = document.createElement('div');
-      box.className = 'proposal';
-      const head = document.createElement('div');
-      head.className = 'title';
-      head.textContent = `${p.from} предлагает: ${p.key} — ${p.why}`;
-      const cols = document.createElement('div');
-      cols.className = 'cols';
-      const col = (name: string, text: string, from: number, to: number) => {
-        const c = document.createElement('div');
-        c.className = 'side';
-        const h = document.createElement('div');
-        h.className = 'head';
-        h.textContent = name;
-        const pre = document.createElement('pre');
-        // eslint-disable-next-line @typescript-eslint/no-misused-spread
-        const cps = [...text];
-        if (text === '') pre.textContent = '— нет —';
-        else if (to > from) {
-          const mark = document.createElement('mark');
-          mark.textContent = cps.slice(from, to).join('');
-          pre.append(cps.slice(0, from).join(''), mark, cps.slice(to).join(''));
-        } else pre.textContent = text;
-        c.append(h, pre);
-        return c;
-      };
-      cols.append(
-        col('сейчас', p.base, 0, 0),
-        col(`предложено · ${p.note}`, p.text, p.text_from, p.text_to),
-      );
-      const buttons = document.createElement('div');
-      buttons.className = 'buttons';
-      const button = (label: string, accept: boolean) => {
-        const b = document.createElement('button');
-        b.textContent = label;
-        b.toggleAttribute('accept', accept);
-        b.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          send({ type: 'c_decide', id: p.id, accept });
-        });
-        return b;
-      };
-      buttons.append(button('Принять', true), button('Отклонить', false));
-      box.append(head, cols, buttons);
-      return box;
-    }),
-  );
-}
-
-// Other clients: each has where the cursor is and what rules (frame
-// "Two clients"); no one - no panel.
-function showClients(m: Peers): void {
-  const panel = byId('clients');
-  panel.hidden = m.peers.length === 0;
-  const head = document.createElement('div');
-  head.className = 'head';
-  head.textContent = `Одна VM — клиентов: ${String(m.peers.length + 1)}`;
-  panel.replaceChildren(
-    head,
-    ...m.peers.map((p) => {
-      const row = document.createElement('div');
-      row.className = 'client';
-      const avatar = document.createElement('span');
-      avatar.className = 'avatar';
-      avatar.textContent = p.name === '' ? 'К' : (p.name.at(0) ?? 'К');
-      const text = document.createElement('span');
-      const name = document.createElement('b');
-      name.textContent =
-        p.name === '' ? `клиент ${String(p.client + 1)}` : p.name;
-      const where = document.createElement('span');
-      where.textContent =
-        p.draft === ''
-          ? `курсор: ${p.where}`
-          : `черновик ${p.draft} — набирает`;
-      text.append(name, where);
-      row.append(avatar, text);
-      return row;
-    }),
-  );
-}
-
-// Track stops on the right: call depth - shift and guides, current highlighted; click - to step
-// (VM). The window around the step sends VM.
-function showStops(m: Stops): void {
-  const head = document.createElement('div');
-  head.className = 'head';
-  head.textContent = 'остановки';
-  const list = document.createElement('div');
-  list.className = 'list';
-  for (const s of m.stops) {
-    const row = document.createElement('div');
-    row.className = 'stop';
-    row.toggleAttribute('current', s.step === m.current);
-    row.style.setProperty('--depth', String(Math.max(0, s.depth - 1)));
-    const step = document.createElement('span');
-    step.className = 'n';
-    step.textContent = String(s.step + 1);
-    const fn = document.createElement('span');
-    fn.className = 'fn';
-    fn.textContent = s.fn;
-    const text = document.createElement('span');
-    text.className = 'text';
-    text.textContent = s.text;
-    row.append(step, fn, text);
-    row.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      send({ type: 'c_trace_step', step: s.step });
-    });
-    list.append(row);
-  }
-  stopsPanel.replaceChildren(head, list);
-  list.querySelector('[current]')?.scrollIntoView({ block: 'nearest' });
-}
-
-// Launch output (frame "Run"): a line - with the signature of your print ("main:12", click - to call);
-// executable - backlight in the code. Lines without space (error, run by interpreter) - text.
-let outRows: { text: string; label: string; node: NodeId | null }[] = [];
+// Launch Output (Run frame): Lines with the signature of their print accumulate while VM sends more;
+// executable - backlight in the code.
+let outRows: OutRow[] = [];
 function showOutput(m: Output): void {
   if (!m.more) outRows = [];
   const lines = m.text.split('\n');
@@ -403,63 +362,18 @@ function showOutput(m: Output): void {
     outRows.push({ text, label: src?.label ?? '', node: src?.node ?? null });
   });
   runOutput.toggleAttribute('error', !m.ok);
-  if (outRows.length === 0) runOutput.textContent = '(вывода нет)';
-  else
-    runOutput.replaceChildren(
-      ...outRows.map((r) => {
-        const row = document.createElement('div');
-        row.className = 'out-row';
-        const label = document.createElement('span');
-        label.className = 'out-at';
-        label.textContent = r.label;
-        if (r.node !== null) {
-          const node = r.node;
-          label.classList.add('link');
-          label.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            const v = [...views.values()].find((x) => x.host === app);
-            if (v) send({ type: 'c_open', view: v.data.view, node });
-          });
-        }
-        const text = document.createElement('span');
-        text.textContent = r.text;
-        row.append(label, text);
-        return row;
-      }),
-    );
-  [...views.values()].find((x) => x.host === app)?.showRunning(m.now);
+  panels.output(runOutput, outRows, host);
+  mainView()?.showRunning(m.now);
 }
 
 // Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM message)
 // - a few seconds on top of it. After the event, VM sends peace. Brush button (frame "Office states"):
 // "goto signature" - the transition list (there "add"), "reconnect" - connect to the VM again
 // (communication - the main process).
-interface StatusView {
-  kind: string;
-  text: string;
-  hint: string;
-  action?: string;
-  label?: string;
-}
 let steady: StatusView = { kind: '', text: '', hint: '' };
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
-const statusAction = byId('status-action');
-let statusDo = '';
-statusAction.addEventListener('mousedown', (e) => {
-  e.preventDefault();
-  if (statusDo === 'reconnect') window.vm.reconnect();
-  else if (statusDo.startsWith('goto ') && active)
-    send({ type: 'c_goto', view: active.data.view, text: statusDo.slice(5) });
-});
 function paintStatus(s: StatusView): void {
-  statusLine.setAttribute('kind', s.kind);
-  statusLine.hidden = s.kind === '';
-  if (s.kind === '') return; // The text goes out with the capsule
-  statusText.textContent = s.text;
-  statusHint.textContent = s.hint;
-  statusDo = s.action ?? '';
-  statusAction.hidden = statusDo === '';
-  statusAction.textContent = s.label ?? '';
+  panels.status(statusLine, s, host);
 }
 function flashStatus(kind: string, text: string, hint = ''): void {
   clearTimeout(flashTimer);
@@ -477,54 +391,6 @@ function showStatus(s: StatusView): void {
   }
   steady = { ...s };
   if (flashTimer === undefined) paintStatus(steady);
-}
-
-// Function layers, two levels: congestion switch ‹ head i/n › (click - c_open other overload) and
-// context tabs selected: "all" and its instance (compile-time / run-time).
-function showLayers(m: Layers): void {
-  const { view, layers, selected, overloads, overload } = m;
-  const pick = (k: number) => {
-    const fn = overloads.at(k % overloads.length)?.fn ?? null;
-    if (fn !== null) send({ type: 'c_open', view, node: fn });
-  };
-  const arrow = (label: string, k: number) => {
-    const b = document.createElement('button');
-    b.className = 'arrow';
-    b.textContent = label;
-    b.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      pick(k);
-    });
-    return b;
-  };
-  const switcher: HTMLElement[] = [];
-  if (overloads.length > 1) {
-    const head = document.createElement('span');
-    head.className = 'overload';
-    head.textContent = `${overloads[overload]?.head ?? ''}  ${String(overload + 1)}/${String(overloads.length)}`;
-    switcher.push(
-      arrow('‹', overload - 1),
-      head,
-      arrow('›', overload + 1),
-      Object.assign(document.createElement('span'), { className: 'sep' }),
-    );
-  }
-  const tab = (key: string, label: string, kind: string) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    if (kind !== '') b.dataset.kind = kind;
-    b.toggleAttribute('selected', key === selected);
-    b.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      send({ type: 'c_layer', view, key });
-    });
-    return b;
-  };
-  layersBar.replaceChildren(
-    ...switcher,
-    tab('', 'все', ''),
-    ...layers.map((l) => tab(l.key, l.key, l.kind)),
-  );
 }
 
 const split = new FrameSplitter();
@@ -578,76 +444,6 @@ for (const field of [runStdin, runArgs] as HTMLElement[]) {
     }
     if (e.key === 'Escape') activate(active);
   });
-}
-
-// Merger (Ctrl+M): Conflicts are both options nearby; take them or leave mine.
-//
-//
-function showMerge(conflicts: readonly Conflict[]): void {
-  mergePanel.hidden = conflicts.length === 0; // The result is in a bang from VM.
-  mergePanel.replaceChildren(
-    ...conflicts.map((c) => {
-      const box = document.createElement('div');
-      box.className = 'conflict';
-      const title = document.createElement('div');
-      title.className = 'title';
-      title.textContent = `конфликт: ${c.key}`;
-      // Column: name, difference with the base, text with illuminated changed, button (the base does not)
-      const side = (
-        name: string,
-        text: string,
-        note: string,
-        from: number,
-        to: number,
-        take?: { label: string; theirs: boolean },
-      ) => {
-        const col = document.createElement('div');
-        col.className = 'side';
-        const head = document.createElement('div');
-        head.className = 'head';
-        const b = document.createElement('b');
-        b.textContent = name;
-        const n = document.createElement('span');
-        n.textContent = note;
-        head.append(b, n);
-        const pre = document.createElement('pre');
-        // eslint-disable-next-line @typescript-eslint/no-misused-spread
-        const cps = [...text];
-        if (text === '') pre.textContent = '— нет —';
-        else if (to > from) {
-          const mark = document.createElement('mark');
-          mark.textContent = cps.slice(from, to).join('');
-          pre.append(cps.slice(0, from).join(''), mark, cps.slice(to).join(''));
-        } else pre.textContent = text;
-        col.append(head, pre);
-        if (take) {
-          const btn = document.createElement('button');
-          btn.textContent = take.label;
-          btn.addEventListener('mousedown', (e) => {
-            e.preventDefault();
-            send({ type: 'c_take', key: c.key, theirs: take.theirs });
-          });
-          col.append(btn);
-        }
-        return col;
-      };
-      const cols = document.createElement('div');
-      cols.className = 'cols';
-      cols.append(
-        side('база', c.base, 'общее начало', 0, 0),
-        side('мой', c.mine, c.mine_note, c.mine_from, c.mine_to, {
-          label: 'Оставить мой',
-          theirs: false,
-        }),
-        side('их', c.theirs, c.theirs_note, c.theirs_from, c.theirs_to, {
-          label: 'Взять их',
-          theirs: true,
-        }),
-      );
-      box.append(title, cols);
-      return box;
-    }),
-  );
 }
 
 // Ctrl+P is the signature string; it is sent by Enter, Escape is closed.

@@ -39,6 +39,8 @@ export class ViewElement {
   readonly preview = document.createElement('div');
   // revealing the inspector's node with a ghost string under it (frame "Simple Disclosure")
   readonly ghost = document.createElement('div');
+  // Line number - draws the theme (panels.gutter), there is only a place in the window
+  readonly gutter = document.createElement('div');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -62,11 +64,13 @@ export class ViewElement {
     this.preview.hidden = true;
     this.ghost.className = 'vish-ghost';
     this.ghost.hidden = true;
+    this.gutter.className = 'vish-gutter';
     host.replaceChildren(...this.#chrome(this.root));
   }
 
   #chrome(root: ASTNode): Node[] {
     return [
+      this.gutter,
       this.selectionLayer,
       root,
       this.peersLayer,
@@ -121,6 +125,40 @@ export class ViewElement {
     this.byId.set(id, el);
     el.show(n.pieces, (c) => this.#build(c));
     return el;
+  }
+
+  // Line and column (from 1) places in the text of the presentation: chunks in order to (node, piece,
+  // offset); without space - the number of lines of text.
+  position(at?: { node: NodeId | null; piece: number; offset: number }): {
+    line: number;
+    col: number;
+  } {
+    let line = 1;
+    let col = 1;
+    const add = (text: string) => {
+      for (const ch of text)
+        if (ch === '\n') {
+          ++line;
+          col = 1;
+        } else ++col;
+    };
+    const walk = (id: NodeId): boolean => {
+      for (const [i, p] of (this.nodes.get(id)?.pieces ?? []).entries()) {
+        if (typeof p !== 'string') {
+          if (walk(p)) return true;
+          continue;
+        }
+        if (at?.node === id && i === at.piece) {
+          // eslint-disable-next-line @typescript-eslint/no-misused-spread
+          add([...p].slice(0, at.offset).join(''));
+          return true;
+        }
+        add(p);
+      }
+      return false;
+    };
+    walk(this.root?.nodeId ?? this.data.root);
+    return { line, col };
   }
 
   // Edit from VM: the node subtree is reassembled and replaced by the old (the same
@@ -292,6 +330,9 @@ export class ViewElement {
   }
 
   #cursor: Cursor | undefined;
+  get cursor(): Cursor | undefined {
+    return this.#cursor;
+  }
   #completion: Complete | undefined;
 
   // Cadet VM. The error path is visible in its entirety (step illumination, other muted)

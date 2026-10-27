@@ -5,13 +5,13 @@
 // Connect, otherwise start: the editor connects to the socket; if the VM is not there
 // and the program is set, it raises the `vish serve <программа> <сокет>` itself (and
 // extinguishes when it exits). Several editors can be connected to one VM.
-// electron-vite dev -- --program ../tests/stats.vish [--socket path]
+// electron-vite dev -- --program ../tests/stats.vish [--socket path] [-theme classic]
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { app, BrowserWindow, ipcMain } from 'electron';
 
@@ -79,10 +79,20 @@ async function start(): Promise<void> {
       sandbox: false, // preload - ES-module
     },
   });
+  // window - theme (renderer/theme.ts) and the name of the program file for the cap
+  const query: Record<string, string> = {
+    file: program ? basename(program) : '',
+  };
+  const theme = arg('theme') ?? process.env.VISH_THEME;
+  if (theme) query.theme = theme;
   if (process.env.ELECTRON_RENDERER_URL) {
-    await win.loadURL(process.env.ELECTRON_RENDERER_URL);
+    await win.loadURL(
+      `${process.env.ELECTRON_RENDERER_URL}?${new URLSearchParams(query).toString()}`,
+    );
   } else {
-    await win.loadFile(join(import.meta.dirname, '../renderer/index.html'));
+    await win.loadFile(join(import.meta.dirname, '../renderer/index.html'), {
+      query,
+    });
   }
   await attach();
 }

@@ -1,0 +1,204 @@
+/* Тема «холст»: значения — из кадров холста (Laptop.dc.html, StyleKit.dc.html). */
+:root {
+  color-scheme: light;
+  --vish-bg: #f6f5f2;
+  --vish-fg: #1c1c1a;
+  --vish-syntax: #a3a19a;
+  --vish-syntax-full: #a3a19a;
+  --vish-caret: #1c1c1a;
+  --vish-status: #77756f;
+  --vish-popup: #f1efea;
+  --vish-selected: #e6e3dc;
+  --vish-detail: #8a877f;
+  --vish-type: currentColor;
+  --vish-value: #7c5a8a;
+  --vish-error: #c0392b;
+  /* сущности AST (StyleKit) — для элементов узлов (пункт 2) */
+  --vish-fn: #1e3a8a;
+  --vish-param: #7c2d12;
+  --vish-keyword: #6d28d9;
+  --vish-literal: #c2410c;
+  --vish-var: #a21caf;
+  --vish-comment: #977a3c;
+  --vish-gutter: #c2c0b9;
+  --canvas-card: rgb(252 252 250 / 0.74);
+  --canvas-line: #ebeae6;
+  --canvas-ui: Inter, system-ui, sans-serif;
+  --canvas-code: 'JetBrains Mono', monospace;
+}
+html,
+body {
+  background: var(--vish-bg);
+}
+body {
+  position: relative;
+  font: 17px/33px var(--canvas-code);
+  font-variant-ligatures: none;
+  font-feature-settings:
+    'calt' 0,
+    'liga' 0;
+  overflow: hidden;
+}
+
+/* фон: три размытых пятна за карточкой */
+#backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+#backdrop i {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+}
+#backdrop i:nth-child(1) {
+  left: 8%;
+  top: 13%;
+  width: 420px;
+  height: 320px;
+  background: #e3e0d8;
+  filter: blur(70px);
+}
+#backdrop i:nth-child(2) {
+  left: 60%;
+  top: 10%;
+  width: 380px;
+  height: 300px;
+  background: #e7e4ef;
+}
+#backdrop i:nth-child(3) {
+  left: 45%;
+  top: 62%;
+  width: 520px;
+  height: 260px;
+  background: #dedcd6;
+}
+
+/* шапка: VISH · файл ··· ● проверено · строка:столбец */
+#header {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 20px;
+  font: 13px/1 var(--canvas-ui);
+  color: #3f3e3a;
+  white-space: nowrap;
+}
+#header .brand {
+  font-family: var(--canvas-code);
+  letter-spacing: 0.08em;
+  color: #1c1c1a;
+}
+#header .file {
+  margin-left: 18px;
+}
+#header .fill {
+  flex: 1;
+}
+#header .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+#header .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+#header .check[data-state='busy'] .dot {
+  background: #d4a017;
+}
+#header .check[data-state='error'] .dot {
+  background: var(--vish-error);
+}
+#header .at {
+  margin-left: 18px;
+  font: 12px var(--canvas-code);
+  color: #77756f;
+}
+
+/* карточка с кодом — стекло поверх пятен */
+#panes {
+  position: relative;
+  z-index: 1;
+  margin: 24px clamp(16px, 6.7vw, 96px) 36px;
+  background: var(--canvas-card);
+  backdrop-filter: blur(28px);
+  border: 1px solid var(--canvas-line);
+  border-radius: 20px;
+  box-shadow:
+    0 1px 2px rgb(20 20 10 / 0.03),
+    0 24px 60px rgb(20 20 10 / 0.06);
+  overflow: hidden;
+}
+#side-wrap {
+  border-left-color: var(--canvas-line);
+}
+#side {
+  background: rgb(255 255 255 / 0.45);
+}
+.pane {
+  padding: 22px 24px 16px 86px;
+  color: var(--vish-fg);
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent; /* в кадре полос нет — видна при наведении */
+}
+.pane:hover {
+  scrollbar-color: rgb(28 28 26 / 0.18) transparent;
+}
+
+/* номера строк: колонка 64px, отступ 22px до кода */
+.vish-gutter {
+  display: block;
+  position: absolute;
+  left: 0;
+  top: 22px;
+  width: 64px;
+  padding-right: 22px;
+  box-sizing: border-box;
+  text-align: right;
+  color: var(--vish-gutter);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* значок типа — мельче, ниже строки, цвета имени (кадр: Inter 11px, 500, прозрачность 0.8) */
+.vish-node::part(badge) {
+  font: 500 11px var(--canvas-ui);
+  color: inherit;
+  opacity: 0.8;
+  top: 9px;
+  margin-left: 2px;
+}
+.vish-node::part(syntax) {
+  color: var(--vish-syntax);
+}
+
+/* панели — шрифт интерфейса */
+#run,
+#merge,
+#proposals,
+#goto,
+#ast,
+#stops,
+#clients,
+#ai,
+#layers {
+  position: relative;
+  z-index: 1;
+  font-family: var(--canvas-ui);
+  font-size: 13px;
+  line-height: 1.5;
+}
+#run pre,
+#merge pre,
+#proposals pre,
+#goto-input {
+  font-family: var(--canvas-code);
+}

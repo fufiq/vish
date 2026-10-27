@@ -1,0 +1,38 @@
+<div id="panes">
+  <div id="app" class="pane" tabindex="0"></div>
+  <div id="side-wrap" hidden>
+    <nav id="layers"></nav>
+    <div id="side" class="pane" tabindex="0"></div>
+  </div>
+  <aside id="ast" hidden></aside>
+  <aside id="stops" hidden></aside>
+  <aside id="clients" hidden></aside>
+  <aside id="ai" hidden>
+    <div class="head">ИИ — ваш Claude Code · правки — предложениями</div>
+    <div class="log"></div>
+    <form id="ai-form">
+      <textarea
+        id="ai-input"
+        rows="3"
+        placeholder="спросите или попросите правку… (Ctrl+Enter)"
+      ></textarea>
+      <button type="submit">Отправить</button>
+    </form>
+  </aside>
+</div>
+<section id="run" hidden>
+  <div class="run-inputs">
+    <textarea id="run-stdin" rows="2" placeholder="stdin программы"></textarea>
+    <input id="run-args" placeholder="аргументы" />
+  </div>
+  <pre id="run-output"></pre>
+</section>
+<section id="merge" hidden></section>
+<section id="proposals" hidden></section>
+<form id="goto" hidden>
+  <input id="goto-input" placeholder="перейти или добавить: foo(i64)" />
+</form>
+<div id="status" kind="vm">
+  <span id="status-text">подключение к VM…</span><span id="status-hint"></span
+  ><button id="status-action" hidden></button>
+</div>

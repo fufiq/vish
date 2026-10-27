@@ -906,3 +906,7 @@ body {
 .vish-structure-label[hidden] {
   display: none;
 }
+/* номера строк — в теме «холст» */
+.vish-gutter {
+  display: none;
+}

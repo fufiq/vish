@@ -52,6 +52,7 @@ export class RecordNode extends ASTNode {
       if (typeof p === 'string') {
         const span = document.createElement('span');
         span.className = 'syntax';
+        span.part = 'syntax';
         span.append(this.pieceText(i, p));
         deco.push(span);
         return;
