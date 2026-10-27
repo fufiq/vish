@@ -59,7 +59,7 @@ describe('представление', () => {
     expect(v.byId.get(14)?.shadowRoot).toBeNull();
     expect(v.byId.get(14)?.textContent).toBe('"привет 🙂"');
     expect(v.byId.get(11)?.shadowRoot?.textContent).toBe('{\n  ;\n}');
-    const t = v.byId.get(12)?.textOf(1);
+    const t = v.byId.get(12)?.textsOf(1)[0];
     expect(t && pieceOfText.get(t)).toEqual({ node: 12, piece: 1 });
   });
 

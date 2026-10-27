@@ -202,3 +202,111 @@ body {
 #goto-input {
   font-family: var(--canvas-code);
 }
+
+/* Сущности AST (кадр «Стиль · сущности AST»): роль имени и разметку своего текста присылает VM
+   (data-role, data-entity, ::part(вид)), вид узла — тег. Нет роли — без цвета: «ситуация "без
+   цвета" выделяет сломанный код» . */
+.vish-node[data-role='fn'],
+.vish-node::part(decl) {
+  color: var(--vish-fn);
+}
+.vish-node[data-role='prelude'],
+.vish-node::part(keyword) {
+  color: var(--vish-keyword);
+}
+.vish-node[data-role='native'] {
+  color: #57534e;
+}
+.vish-node[data-role='global'] {
+  color: #0f766e;
+}
+.vish-node::part(field) {
+  color: #0f766e;
+}
+/* у каждой переменной и параметра — свой цвет (номер сущности в функции), шесть по кругу */
+.vish-node[data-entity] {
+  color: var(--vish-var);
+}
+[data-entity='0'],
+[data-entity='6'],
+[data-entity='12'],
+[data-entity='18'] {
+  --entity: #0e7490;
+}
+[data-entity='1'],
+[data-entity='7'],
+[data-entity='13'],
+[data-entity='19'] {
+  --entity: #7c2d12;
+}
+[data-entity='2'],
+[data-entity='8'],
+[data-entity='14'],
+[data-entity='20'] {
+  --entity: #15803d;
+}
+[data-entity='3'],
+[data-entity='9'],
+[data-entity='15'],
+[data-entity='21'] {
+  --entity: #a21caf;
+}
+[data-entity='4'],
+[data-entity='10'],
+[data-entity='16'],
+[data-entity='22'] {
+  --entity: #b45309;
+}
+[data-entity='5'],
+[data-entity='11'],
+[data-entity='17'],
+[data-entity='23'] {
+  --entity: #1d4ed8;
+}
+.vish-node[data-entity] {
+  color: var(--entity, var(--vish-var));
+}
+/* литералы и записи по виду узла */
+vish-int,
+vish-float {
+  color: var(--vish-literal);
+}
+vish-str {
+  color: #15803d;
+}
+vish-sym {
+  color: #b45309;
+}
+vish-throw::part(keyword) {
+  color: #b91c1c;
+}
+vish-ct::part(keyword) {
+  color: #c2410c;
+}
+vish-quote::part(keyword),
+vish-splice::part(keyword) {
+  color: #4338ca;
+}
+vish-extend::part(keyword) {
+  color: #0f766e;
+}
+/* комментарий — текстом интерфейса со значком вместо `//` */
+.vish-node::part(comment) {
+  font: 400 14.5px var(--canvas-ui);
+  color: var(--vish-comment);
+}
+.vish-node::part(comment-mark) {
+  font-size: 0;
+  line-height: 0; /* иначе пустой знак со строкой 33px раздвигает строку */
+}
+.vish-node::part(comment-mark)::before {
+  content: '';
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 7px;
+  vertical-align: -1px;
+  background: #c8ad6e;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M5 4h14v12l-4 4H5z'/%3E%3Cpath d='M15 20v-4h4M8 9h8M8 13h5'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}

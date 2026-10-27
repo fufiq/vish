@@ -1,0 +1,17 @@
+// Name roles and markup of your text (paragraph 2 of the design, user decisions 2026-10-27: color -
+// according to entity, role - VM label).
+//;.
+// total: xs — параметр 0, s — переменная 1, x — параметр конструкции for 2; total — своя функция,
+// for - prelude, print - primitive VM; comment - sign and text, ad name, .size field.
+// program: editor_roles.vish
+open_view module
+// expect: kind="role" text="param 0"
+// expect: kind="role" text="var 1"
+// expect: kind="role" text="param 2"
+// expect: kind="role" text="fn"
+// expect: kind="role" text="prelude"
+// expect: kind="role" text="native"
+// expect: kind="span" text="comment-mark"
+// expect: kind="span" text="comment"
+// expect: kind="span" text="decl"
+// expect: kind="span" text="field"

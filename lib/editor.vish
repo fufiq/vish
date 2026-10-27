@@ -3546,6 +3546,180 @@ enclosing_fn(n) {
   while(given(x) && (code_kind(x) != ast.function)) x = code_parent(x);
   x
 }
+
+// --- The role of names and markup of your text node (design item 2) ---
+// 
+//  
+// Role and entity know VM, the client only paints (user decisions 2026-10-27: color - according to entity,
+// role - label VM). The role tag at the name: "fn" (its function), "prelude", "native" (primitive VM), "param
+// N", "var N", "global N" - N - the number entity in its function in the order of the announcement; not
+// allowed - no label (without color). Span tag (from, to - code points of its text node): "decl" - the name of
+// the declared function, "field" - the name of the member after the point, "comment" (in lowercase -
+// "comment-mark" on `//`), "keyword" - the word of the syntax of the record. *My:* numbering entity, overlap
+// is the design or lambda parameter (new entity), variable is the first assignment.
+//
+//
+struct binder { str name; code node; bool inner; }
+struct scope_binders { i64 id; array list; }
+// entity functions (or programs are global in order of announcement; function parameters are first
+binders_of(f) {
+  acc = array{};
+  if(code_kind(f) == ast.function) {
+    ast.function{_, ps, _, body, _, _, _, _, _} = f;
+    for(p : ps) acc.push(binder{code_name(p), p, false});
+    if(given(body)) collect_binders(body, acc);
+  } else for(x : code_items(f)) if(code_kind(x) != ast.function) collect_binders(x, acc);
+  acc
+}
+// the name has already been declared a variable or a function parameter (design parameters - not counting)
+var_bound(acc, str name) {
+  r = false;
+  for(b : acc) if(!b.inner && (b.name == name)) r = true;
+  r
+}
+collect_binders(n, acc) {
+  k = code_kind(n);
+  if(k == ast.parameter) acc.push(binder{code_name(n), n, true});
+  else if(k == ast.variable) {
+    ast.variable{vn, _, _, _, _, _, _, _} = n;
+    if(!var_bound(acc, vn)) acc.push(binder{vn, n, false});
+  } else {
+    lhs = assign_target(n);
+    if(given(lhs) && !var_bound(acc, name_of(lhs))) acc.push(binder{name_of(lhs), lhs, false});
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) collect_binders(c, acc);
+  true
+}
+scope_list(cache, scope) {
+  for(s : cache) if(s.id == code_id(scope)) return s.list;
+  list = binders_of(scope);
+  cache.push(scope_binders{code_id(scope), list});
+  list
+}
+binder_index(bs, x) {
+  r = -1;
+  for(i : range(bs.size)) if(code_id(bs[i].node) == code_id(x)) r = i;
+  r
+}
+// entity of the name n: parameter of the nearest enveloping structure, lambda or function; otherwise
+// the variable function; -1 - no
+name_binder(n, str name, bs, f) {
+  x = code_parent(n);
+  while(given(x)) {
+    for(c : code_items(x)) if((code_kind(c) == ast.parameter) && (code_name(c) == name)) return binder_index(bs, c);
+    if(given(f) && (code_id(x) == code_id(f))) x = code();
+    else x = code_parent(x);
+  }
+  r = -1;
+  for(i : range(bs.size)) if((r < 0) && (!bs[i].inner && (bs[i].name == name))) r = i;
+  r
+}
+fn_role(f) {
+  ast.function{_, _, _, body, _, _, _, _, _} = f;
+  if(given(body) && (code_kind(body) == ast.native)) "native" else if(in_prelude(f)) "prelude" else "fn"
+}
+name_role(n, cache, builtins) {
+  name = name_of(n);
+  f = enclosing_fn(n);
+  scope = if(given(f)) f else program();
+  bs = scope_list(cache, scope);
+  i = name_binder(n, name, bs, f);
+  if(i >= 0) return (if(!given(f)) "global " else if(code_kind(bs[i].node) == ast.parameter) "param " else "var ") + text(i);
+  fs = declarations(name, n);
+  if(fs.size > 0) return fn_role(fs[0]);
+  for(b : builtins) if(b == name) return "native";
+  ""
+}
+word_start(i64 ch) => (((ch >= 'a') && (ch <= 'z')) || ((ch >= 'A') && (ch <= 'Z'))) || (ch == '_');
+word_char(i64 ch) => word_start(ch) || ((ch >= '0') && (ch <= '9'));
+// your text node layout k (pieces-texts in a row); the sheet -" (its text - name or literature)
+own_text(i64 v, i64 k) {
+  first = views[v].lay.first[k];
+  count = views[v].lay.count[k];
+  leaf = true;
+  for(j : range(count)) if(views[v].lay.pchild[first + j] >= 0) leaf = false;
+  if(leaf) return "";
+  r = "";
+  for(j : range(count)) if(views[v].lay.pchild[first + j] < 0) {
+    p = first + j;
+    b = views[v].lay.pbyte[p];
+    e = if((p + 1) < views[v].lay.pbyte.size) views[v].lay.pbyte[p + 1] else views[v].lay.ptext.size;
+    r = r + slice_text(views[v].lay.ptext, b, e);
+  }
+  r
+}
+// markup of your text s node n: comments and syntax words
+scan_spans(found, n, str s) {
+  decl = if(code_kind(n) == ast.function) code_name(n) else "";
+  field = member_name(n);
+  i = 0;
+  cp = 0;
+  while(i < s.size) {
+    ch = s[i];
+    nx = if((i + 1) < s.size) s[i + 1] else 0;
+    if((ch == '/') && ((nx == '/') || (nx == '*'))) {
+      from = cp;
+      eol = nx == '/';
+      done = false;
+      i += 2;
+      cp += 2;
+      while((i < s.size) && !done) {
+        if(eol && (s[i] == '\n')) done = true;
+        else {
+          if(!eol && ((s[i] == '*') && (((i + 1) < s.size) && (s[i + 1] == '/')))) {
+            done = true;
+            i += 1;
+            cp += 1;
+          }
+          if((s[i] & 192) != 128) cp += 1;
+          i += 1;
+        }
+      }
+      // `//` lines - separately: the theme can replace the sign with an icon (frame "Laptop")
+      if(eol) {
+        found.push(mark{n, "span", "comment-mark", from, from + 2});
+        found.push(mark{n, "span", "comment", from + 2, cp});
+      } else found.push(mark{n, "span", "comment", from, cp});
+    } else if(word_start(ch)) {
+      from = cp;
+      b = i;
+      while((i < s.size) && word_char(s[i])) {
+        cp += 1;
+        i += 1;
+      }
+      w = slice_text(s, b, i);
+      dot = (b > 0) && (s[b - 1] == '.');
+      kind = if(w == decl) "decl" else if(dot && (w == field)) "field" else "keyword";
+      if(w == decl) decl = "";
+      found.push(mark{n, "span", kind, from, cp});
+    } else {
+      if((ch & 192) != 128) cp += 1;
+      i += 1;
+    }
+  }
+  0
+}
+role_marks(found, i64 v) {
+  cache = array{};
+  builtins = array{};
+  for(b : vm_builtins()) builtins.push(b[0]);
+  for(k : range(views[v].lay.nodes.size)) {
+    n = node_code(views[v].lay.nodes[k]);
+    kind = code_kind(n);
+    if(kind == ast.name) {
+      r = name_role(n, cache, builtins);
+      if(r != "") found.push(mark{n, "role", r, 0, 0});
+    } else if(kind == ast.parameter) {
+      f = enclosing_fn(n);
+      scope = if(given(f)) f else program();
+      i = binder_index(scope_list(cache, scope), n);
+      if(i >= 0) found.push(mark{n, "role", "param " + text(i), 0, 0});
+    }
+    own = own_text(v, k);
+    if(own != "") scan_spans(found, n, own);
+  }
+  true
+}
 // Name types in the layer: all its mentions in the subtree (without nested functions)
 layer_name_types(i64 v, n, str name, ts) {
   if((code_kind(n) == ast.name) && (name_of(n) == name)) for(t : layer_types(v, n)) {
@@ -3588,6 +3762,7 @@ send_layers(i64 v) => show_layers(v, layers_of(v));
 send_marks(i64 v) {
   found = array{};
   if(in_layer(v)) layer_marks(found, v) else type_marks(found, v);
+  role_marks(found, v);
   if(view_kind(v) == "fn") overload_marks(found, v) else module_overload_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
   for(m : path_marks(views[v].lay.nodes)) found.push(m);

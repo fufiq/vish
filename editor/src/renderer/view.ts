@@ -14,7 +14,10 @@ import type {
 } from '../protocol/messages';
 import {
   ASTNode,
+  codePoints,
   pieceOfText,
+  startOfText,
+  utf16Offset,
   type NodeMarks,
   type PieceText,
 } from './nodes/ast_node';
@@ -252,9 +255,10 @@ export class ViewElement {
   }
   #selection: Selection | undefined;
 
-  // Texts of pieces in order projection : (node, piece) → Text.
-  #texts(): { node: NodeId; piece: number; text: Text }[] {
-    const out: { node: NodeId; piece: number; text: Text }[] = [];
+  // Texts of pieces in order projection : (knot, piece, beginning in piece) → Text.
+  #texts(): { node: NodeId; piece: number; start: number; text: Text }[] {
+    const out: { node: NodeId; piece: number; start: number; text: Text }[] =
+      [];
     const walk = (id: NodeId): void => {
       const n = this.nodes.get(id);
       const el = this.byId.get(id);
@@ -264,8 +268,13 @@ export class ViewElement {
           walk(p);
           return;
         }
-        const t = el.textOf(i);
-        if (t) out.push({ node: id, piece: i, text: t });
+        for (const t of el.textsOf(i))
+          out.push({
+            node: id,
+            piece: i,
+            start: startOfText.get(t) ?? 0,
+            text: t,
+          });
       });
     };
     if (this.root) walk(this.root.nodeId);
@@ -280,10 +289,20 @@ export class ViewElement {
     const cn = c?.node ?? null;
     if (s.node === null || !c || cn === null) return;
     const texts = this.#texts();
-    const at = (node: NodeId, piece: number) =>
-      texts.findIndex((t) => t.node === node && t.piece === piece);
-    let a = { i: at(s.node, s.piece), off: s.offset };
-    let b = { i: at(cn, c.piece), off: c.offset };
+    // the segment of the piece with the offset place (the end of the segment is the beginning of the next) and the displacement in it
+    const at = (node: NodeId, piece: number, offset: number) => {
+      let i = -1;
+      for (const [k, t] of texts.entries())
+        if (
+          t.node === node &&
+          t.piece === piece &&
+          (i < 0 || t.start <= offset)
+        )
+          i = k;
+      return { i, off: i < 0 ? 0 : offset - (texts[i]?.start ?? 0) };
+    };
+    let a = at(s.node, s.piece, s.offset);
+    let b = at(cn, c.piece, c.offset);
     if (a.i < 0 || b.i < 0) return;
     if (a.i > b.i || (a.i === b.i && a.off > b.off)) [a, b] = [b, a];
     const origin = this.host.getBoundingClientRect();
@@ -310,9 +329,10 @@ export class ViewElement {
     piece: number,
     offset: number,
   ): { left: number; top: number; height: number } | undefined {
-    const text = node === null ? undefined : this.byId.get(node)?.textOf(piece);
-    if (!text) return undefined;
-    const at = utf16Offset(text.data, offset);
+    const place =
+      node === null ? undefined : this.byId.get(node)?.textAt(piece, offset);
+    if (!place) return undefined;
+    const { text, at } = place;
     const range = document.createRange();
     range.setStart(text, at);
     range.setEnd(text, Math.min(at + 1, text.length));
@@ -383,9 +403,10 @@ export class ViewElement {
     const range = document.createRange();
     let seen = 0;
     let started = false;
-    for (const [i, p] of n.pieces.entries()) {
-      const t = typeof p === 'string' ? el.textOf(i) : undefined;
-      if (!t) continue;
+    const texts = n.pieces.flatMap((p, i) =>
+      typeof p === 'string' ? el.textsOf(i) : [],
+    );
+    for (const t of texts) {
       const len = codePoints(t.data);
       if (!started && from < seen + len) {
         range.setStart(t, utf16Offset(t.data, from - seen));
@@ -424,6 +445,9 @@ export class ViewElement {
       if (m.kind === 'common' || m.kind === 'own') e.line = m.kind;
       if (m.kind === 'diverged') e.diverged = m.text;
       if (m.kind === 'unknown') e.unknown = true;
+      if (m.kind === 'role') e.role = m.text;
+      if (m.kind === 'span')
+        (e.spans ??= []).push({ from: m.from, to: m.to, kind: m.text });
       if (m.kind === 'error') {
         e.error = m.text;
         first ??= m.text;
@@ -511,26 +535,14 @@ export class ViewElement {
     if (!where) return undefined;
     return {
       ...where,
-      offset: codePoints(pos.offsetNode.data.slice(0, pos.offset)),
+      offset:
+        (startOfText.get(pos.offsetNode) ?? 0) +
+        codePoints(pos.offsetNode.data.slice(0, pos.offset)),
     };
   }
 }
 
-export function codePoints(s: string): number {
-  // Protocol offsets - in code points (as in VM), not in
-  // eslint-disable-next-line @typescript-eslint/no-misused-spread graphemes
-  return [...s].length;
-}
-
-export function utf16Offset(s: string, cp: number): number {
-  let at = 0;
-  let n = 0;
-  for (const ch of s) {
-    if (n++ === cp) return at;
-    at += ch.length;
-  }
-  return at;
-}
+export { codePoints, utf16Offset } from './nodes/ast_node';
 
 // Lines of hint: view - signature, link - by click (open).
 export function renderLines(

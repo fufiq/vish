@@ -7,6 +7,33 @@ export interface PieceText {
   piece: number;
 }
 export const pieceOfText = new WeakMap<Text, PieceText>();
+// The piece can be divided into several Texts (Span markup from VM): from which code point the piece
+// begins this Text.
+export const startOfText = new WeakMap<Text, number>();
+
+// The segment of his text node [from, to) in the code points of his chunks-texts in a row: view from VM
+// (decl, field, comment, keyword) - the theme paints it through ::part(вид).
+export interface Span {
+  from: number;
+  to: number;
+  kind: string;
+}
+
+export function codePoints(s: string): number {
+  // Protocol offsets - in code points (as in VM), not in
+  // eslint-disable-next-line @typescript-eslint/no-misused-spread graphemes
+  return [...s].length;
+}
+
+export function utf16Offset(s: string, cp: number): number {
+  let at = 0;
+  let n = 0;
+  for (const ch of s) {
+    if (n++ === cp) return at;
+    at += ch.length;
+  }
+  return at;
+}
 
 export interface NodeMarks {
   type?: string;
@@ -20,6 +47,8 @@ export interface NodeMarks {
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
   diverged?: string;
+  role?: string; // VM: fn, prelude, native, param N, var N, global N
+  spans?: Span[]; // markup of your text (component node)
   unknown?: boolean; // type not deduced - badge "?" // was general, but in general logic it is no longer (checking the consistency of layers)
 }
 
@@ -67,6 +96,13 @@ export abstract class ASTNode extends HTMLElement {
   // (muffle). m.path is the step number of the error path before node, the tone from pale
   // (entry point) to saturated red (error place).
   setMarks(m: NodeMarks): void {
+    // Name role and entity number - attributes: theme color[data-role],[data-entity]
+    const [role = '', entity = ''] = (m.role ?? '').split(' ');
+    if (role === '') delete this.dataset.role;
+    else this.dataset.role = role;
+    if (entity === '') delete this.dataset.entity;
+    else this.dataset.entity = entity;
+    this.paintSpans(m.spans ?? []);
     this.#step?.remove();
     this.#step = undefined;
     const [step = 0, total = 1] = (m.path ?? '').split('/').map(Number);
@@ -142,7 +178,7 @@ export abstract class ASTNode extends HTMLElement {
       (m.dead ? 'не исполняется в этом контексте' : '') ||
       this.#note;
   }
-  readonly #texts = new Map<number, Text>();
+  readonly #texts = new Map<number, Text[]>();
 
   connectedCallback(): void {
     this.classList.add('vish-node');
@@ -151,14 +187,39 @@ export abstract class ASTNode extends HTMLElement {
   // Show the pieces; child(id) is a child element.
   abstract show(pieces: readonly Piece[], child: (id: NodeId) => ASTNode): void;
 
-  textOf(piece: number): Text | undefined {
-    return this.#texts.get(piece);
+  // Marking up your text (component node) - RecordNode.
+  protected paintSpans(spans: readonly Span[]): void {
+    this.toggleAttribute('spans', spans.length > 0);
   }
 
-  protected pieceText(piece: number, text: string): Text {
+  // Texts of the piece in order (one or more - by markup).
+  textsOf(piece: number): readonly Text[] {
+    return this.#texts.get(piece) ?? [];
+  }
+
+  // Place offset piece (code points) → Text and offset UTF-16 in it; the end of the segment is the
+  // beginning of the next.
+  textAt(
+    piece: number,
+    offset: number,
+  ): { text: Text; at: number } | undefined {
+    const ts = this.textsOf(piece);
+    for (const [i, t] of ts.entries()) {
+      const start = startOfText.get(t) ?? 0;
+      if (offset < start + codePoints(t.data) || i === ts.length - 1)
+        return { text: t, at: utf16Offset(t.data, offset - start) };
+    }
+    return undefined;
+  }
+
+  // Text piece, starting with the code point start (0 - the piece again).
+  protected pieceText(piece: number, text: string, start = 0): Text {
     const t = document.createTextNode(text);
-    this.#texts.set(piece, t);
+    const list = start === 0 ? [] : (this.#texts.get(piece) ?? []);
+    list.push(t);
+    this.#texts.set(piece, list);
     pieceOfText.set(t, { node: this.nodeId, piece });
+    startOfText.set(t, start);
     return t;
   }
 }

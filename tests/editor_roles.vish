@@ -1,0 +1,12 @@
+// Program for the 349_editor_roles.wire script: Name roles and markup of your node text.
+// out: 10
+total(xs) {
+  s = 0;
+  for(x : xs) s = s + x;
+  s
+}
+
+main() {
+  xs = array{1, 2, 3, 4};
+  print(total(xs) + (xs.size - 4));
+}
