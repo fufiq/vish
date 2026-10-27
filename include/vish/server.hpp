@@ -443,6 +443,11 @@ struct editor_server {
   // before and after editing without bypassing the text.
 
   bool is_inner(node_id n) const { return std::ranges::contains(session.db.as<n_module>(session.root).inner, n.value); }
+  // overload, folded in the module representation
+//:
+  // Printing and container elements do not see them as internal. The set defines the language (set_folded).
+  std::vector<node_id> folded;
+  bool unseen(node_id n) const { return is_inner(n) || std::ranges::contains(folded, n); }
 
   static uint64_t mix(uint64_t h, std::string_view s) {
     for(char c: s) h = (h ^ static_cast<unsigned char>(c)) * 0x100000001b3ull;
@@ -470,7 +475,7 @@ struct editor_server {
     auto const & db = session.db;
     printed p;
     // The presentation of the module does not show the internal elements - "not littering"
-    printer pr(db, module ? printer::filter([&](node_id n) { return !is_inner(n); }) : printer::filter{});
+    printer pr(db, module ? printer::filter([&](node_id n) { return !unseen(n); }) : printer::filter{});
     pr.layouts = &p.ls;
     pr.projection = projection;
     printer::verbatim_group group{uint32_t(g_at), uint32_t(std::max<int64_t>(g_count, 0)), uint32_t(g_source)};
@@ -813,7 +818,7 @@ struct editor_server {
     if(db.is<n_block>(c)) return db.as<n_block>(c).items;
     node_list out;
     for(node_id n: db.as<n_module>(c).items)
-      if(!is_inner(n)) out.push_back(n);
+      if(!unseen(n)) out.push_back(n);
     return out;
   }
   node_list inner_items() const {

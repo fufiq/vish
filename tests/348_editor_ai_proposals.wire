@@ -19,7 +19,9 @@ open_view module
 // person accepts - the element is replaced by one edit
 decide 1 1
 // expect: status kind="done" text="принято: norm(f64)"
+// received overload is shown in place (frame "Layers")
 // expect: y + 0.25
-// This overload is replaced by the total norm(x).
-// expect: norm(x) {⏎  y = x * x;⏎  y + 1⏎}
 // expect: proposals proposals=⏎
+// This overload is replaced by the total norm(x).
+layer 1 prev:@norm
+// expect: norm(x) {⏎  y = x * x;⏎  y + 1⏎}

@@ -8,7 +8,8 @@ open_view module
 // expect: другому клиенту:
 // expect: peers view=1 peers=
 // expect: client=1 name="" node=#
-// expect: offset=2 where="main, строка 14" draft=""
+// line - in the module with the folded overload norm(f64) (frame "Layers")
+// expect: offset=2 where="main, строка 9" draft=""
 // The second type - the first one sees its draft (main element)
 [2] key 1 x
-// expect: offset=3 where="main, строка 14" draft="main" draft_node=#
+// expect: offset=3 where="main, строка 9" draft="main" draft_node=#

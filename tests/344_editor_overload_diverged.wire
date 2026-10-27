@@ -11,4 +11,6 @@ key 1 Delete
 key 1 +
 key 1 Escape
 // expect: y = x + x;
+// copy in folded overload f64 - the label is visible when shown in place (frame "Layers")
+layer 1 next:@norm
 // expect: kind="diverged" text="разошлось с общей логикой: в norm(x) этой инструкции больше нет"

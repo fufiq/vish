@@ -978,7 +978,7 @@ find_node(i64 c, i64 n, str want, bool notes, left, tab) {
   for(i : range(count)) if(tab.pkid[f + i] >= 0) find_node(c, tab.pkid[f + i], want, notes, left, tab);
   true
 }
-// @ substring[:N] - node number (#N, not found - #?); `сообщение N …` - searched in representation N
+// @ substring[:N] - node number (#N, not found - #?); in the word key:@ substring - key: #N; `сообщение N …` - searched in representation N
 resolve(cl, i64 c, str line, tab) {
   ws = words_of(line);
   if(ws.size > 1) {
@@ -988,9 +988,11 @@ resolve(cl, i64 c, str line, tab) {
   r = "";
   for(w : ws) {
     if(r != "") r = r + " ";
-    if(!starts_with(w, "@")) r = r + w;
+    at = find_text(w, ":@"); // key with the link inside: next:@norm - next: #N
+    if(!starts_with(w, "@") && (at < 0)) r = r + w;
     else {
-      want = text_from(w, 1);
+      if(at >= 0) r = r + slice_text(w, 0, at + 1);
+      want = text_from(w, if(at >= 0) at + 2 else 1);
       nth = 1;
       colon = -1;
       for(k : range(want.size)) if(want[k] == ':') colon = k;

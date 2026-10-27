@@ -155,7 +155,9 @@ struct scenario {
   std::string print(node_id r, bool module_view, std::string const & key) {
     std::vector<uint32_t> inner;
     if(dbp->is<n_module>(r)) inner = dbp->as<n_module>(r).inner;
-    printer pr(*dbp, module_view ? printer::filter([&](node_id n) { return !std::ranges::contains(inner, n.value); }) : printer::filter{});
+    // as in the presentation of the module: without internal and without folded overloads (they are set by the language of the editor)
+    auto hidden = [&](node_id n) { return std::ranges::contains(inner, n.value) || (server && std::ranges::contains(server->folded, n)); };
+    printer pr(*dbp, module_view ? printer::filter([&](node_id n) { return !hidden(n); }) : printer::filter{});
     std::vector<node_layout> scratch;
     pr.layouts = &scratch;
     if(!key.empty())

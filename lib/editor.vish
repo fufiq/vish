@@ -116,6 +116,9 @@ struct shared_seen { i64 fn; array texts; }
 seen_shared = array{};
 cursors_moved = false; // The cursor moved - send to other customers at the end of the decision
 proposals = array{}; // Proposals of edits (AI) - before the decision of the person
+// shown by the overload group in the module view (frame "Layers"): group name → function
+struct pick { str name; i64 fn; }
+picks = array{};
 next_proposal = 0;
 migrate_needed = ""; // process got up: struct without migrate (its type) - bangs with "Add migrate"
 migrate_said = "";
@@ -517,7 +520,21 @@ note_lead(f) => native "cpp" {
     for(auto const & l: nt->lead) xs.push_back(value(l));
   return value(array_v::of(std::move(xs)));
 };
-// internal element of the program module; in prelude
+// internal element of the program module; in prelude, the folded overload representations of the module (they
+// are not printed or considered elements - as internal)
+set_folded(ids) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  s.folded.clear();
+  auto const & xs = (a[0]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) s.folded.push_back(node_id(uint32_t(xs.get(k).as<int64_t>())));
+  return value(int64_t(0));
+};
+// Module element not visible in view: internal or folded overload
+unseen(f) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(false));
+  return value(editor_host->unseen(vm.code_node(a[0], where)));
+};
 is_inner(f) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
   return value(editor_host->is_inner(vm.code_node(a[0], where)));
@@ -1092,6 +1109,7 @@ relayout_from(i64 v, old, bool in_place) {
     }
   }
   as_module = views[v].kind == "module";
+  if(as_module) refold();
   count = if(views[v].d.open && as_module) views[v].d.items.size else -1;
   at = if(count >= 0) group_at(v) else 0;
   fn_source = if(!as_module && views[v].d.open) views[v].d.source else -1;
@@ -1485,18 +1503,144 @@ diverged_marks(found, f) {
   if(k >= 0) seen_shared[k].texts = now else seen_shared.push(shared_seen{code_id(f), now});
   0
 }
-// Module: label ‹i/n› for function with overload; for calls, shown in second panel overload
+// Module: tag ‹i/n› for a function with overload; for calls - shown in the second panel overload --- layers
+// - overload in the module (design item 7, frame "Layers") ---
+// 
+// 
+// 
+// User Solutions 2026-10-27: from the congestion group, the module shows one, › › replaces it on the
+// spot; signature - the first line of the comment (general - "general logic"); calls - the chip of the
+// selected overload, the calls of others are muted. *My:* choice is common to all representations of the
+// module (one state VM), by default - general overload.
+
+// Program congestion groups: module functions with one name, more than one (without internal)
+overload_groups() {
+  out = array{};
+  names = array{};
+  for(f : code_items(program())) if((code_kind(f) == ast.function) && (!is_inner(f) && !construction(f))) {
+    n = code_name(f);
+    if(!has_text(names, n)) {
+      fs = array{};
+      for(g : overloads_of(f)) if(!is_inner(g)) fs.push(g);
+      if(fs.size > 1) out.push(fs);
+      names.push(n);
+    }
+  }
+  out
+}
+// shown by overload group: selected (if any), otherwise common
+shown_overload(fs) {
+  n = code_name(fs[0]);
+  for(p : picks) if(p.name == n) for(f : fs) if(code_id(f) == p.fn) return f;
+  general_overload(fs)
+}
+// curtail unseen overload (print and elements cannot see them)
+refold() {
+  ids = array{};
+  for(fs : overload_groups()) {
+    sh = shown_overload(fs);
+    for(f : fs) if(code_id(f) != code_id(sh)) ids.push(code_id(f));
+  }
+  set_folded(ids);
+}
+// overload signature: its one-line comment (multi-line over the first function is the file cap);
+// without it, the general - "general logic", the others - the head. My one-line rule.
+overload_label(f, fs) {
+  lead = note_lead(f);
+  if(lead.size == 1) {
+    t = if(starts_with(lead[0], "//")) trim(text_from(lead[0], 2)) else trim(lead[0]);
+    if(t != "") return t;
+  }
+  if(code_id(general_overload(fs)) == code_id(f)) "общая логика" else head_text(f)
+}
+// function key, as in version elements: name and parameter types (without type - " ")
+fn_key(f) {
+  ast.function{name, ps, _, _, _, _, _, _, _} = f;
+  k = name + "(";
+  for(j : range(ps.size)) {
+    ast.parameter{_, pt, _, _, _, _, _} = ps[j];
+    k = (k + (if(j > 0) ", " else "")) + (if(given(pt)) print_node(pt) else "_");
+  }
+  k + ")"
+}
+// show overload f (click › › in the module): selection to all module representations
+pick_overload(f) {
+  n = code_name(f);
+  k = -1;
+  for(i : range(picks.size)) if(picks[i].name == n) k = i;
+  if(k >= 0) picks[k].fn = code_id(f) else picks.push(pick{n, code_id(f)});
+  refold();
+  true
+}
+// different parts of overload from the general: parameters that the general does not have, and in their
+// instructions - the smallest node, whose text diverged from the general instruction in the same place
+own_parts(found, f, g) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  ast.function{_, gps, _, _, _, _, _, _, _} = g;
+  gp = array{};
+  for(p : gps) gp.push(print_node(p));
+  head_own = false;
+  for(p : ps) if(!has_text(gp, print_node(p))) {
+    found.push(mark{p, "own-part", "", 0, 0});
+    head_own = true;
+  }
+  if(head_own) found.push(mark{f, "own-head", "", 0, 0}); // Its head is a stripe at its line.
+  mine = body_stmts(f);
+  base = body_stmts(g);
+  for(i : range(mine.size)) if((i < base.size) && (print_node(mine[i]) != print_node(base[i]))) diff_parts(found, mine[i], base[i]);
+  0
+}
+diff_parts(found, a, b) {
+  xs = code_items(a);
+  ys = code_items(b);
+  if((code_kind(a) != code_kind(b)) || ((xs.size != ys.size) || (xs.size == 0))) return found.push(mark{a, "own-part", "", 0, 0});
+  for(i : range(xs.size)) if(print_node(xs[i]) != print_node(ys[i])) diff_parts(found, xs[i], ys[i]);
+  0
+}
 module_overload_marks(found, i64 v) {
-  shown = code();
-  for(w : range(views.size)) if((views[w].peer == views[v].peer) && (given(views[w].root) && (views[w].kind == "fn"))) shown = views[w].root;
-  sfs = overloads_of(shown);
+  groups = overload_groups();
+  // Consistency (O12) - in all group overloads, and in folded: "was common" is remembered until it is
+  // visible; labels - only node representation
+  seen = array{};
+  for(fs : groups) for(f : fs) {
+    seen.push(code_id(f));
+    tmp = array{};
+    diverged_marks(tmp, f);
+    for(m : tmp) if(layout_of(v, m.node) >= 0) found.push(m);
+  }
   for(n : view_nodes(v)) {
     k = code_kind(n);
     if(k == ast.function) {
       fs = overloads_of(n);
-      if(fs.size > 1) found.push(mark{n, "overloads", (text(code_index(fs, n) + 1) + "/") + text(fs.size), 0, 0});
-      diverged_marks(found, n);
-    } else if((k == ast.call) && ((sfs.size > 1) && has_code(call_targets(n), shown))) found.push(mark{n, "chosen", (text(code_index(sfs, shown) + 1) + "/") + text(sfs.size), 0, 0});
+      vis = array{};
+      for(g : fs) if(!is_inner(g)) vis.push(g);
+      if(vis.size > 1) {
+        i = code_index(vis, n);
+        prev = vis[((i + vis.size) - 1) % vis.size];
+        next = vis[(i + 1) % vis.size];
+        // "i/n|previous|next |signature" - switch in place
+        found.push(mark{n, "overloads", (((((((text(i + 1) + "/") + text(vis.size)) + "|") + text(code_id(prev))) + "|") + text(code_id(next))) + "|") + overload_label(n, vis), 0, 0});
+        g = general_overload(vis);
+        if(code_id(g) != code_id(n)) {
+          shared = array{};
+          for(st : body_stmts(g)) shared.push(print_node(st));
+          for(st : body_stmts(n)) found.push(mark{st, if(has_text(shared, print_node(st))) "common" else "own", "", 0, 0});
+          own_parts(found, n, g);
+        }
+      }
+      if(!has_int(seen, code_id(n))) diverged_marks(found, n);
+    } else if(k == ast.call) {
+      for(fs : groups) {
+        hit = code();
+        for(t : call_targets(n)) for(f : fs) if(code_id(f) == code_id(t)) hit = f;
+        if(given(hit)) {
+          i = code_index(fs, hit);
+          // "i| signature" - chip selected overload (color - by number); call another, not shown - other
+          found.push(mark{n, "chosen", (text(i + 1) + "|") + overload_label(hit, fs), 0, 0});
+          if(code_id(hit) != code_id(shown_overload(fs))) found.push(mark{n, "other", "", 0, 0});
+        }
+      }
+    }
   }
   0
 }
@@ -2210,7 +2354,7 @@ struct spot { i64 mode; code target; i64 k; i64 count; i64 at; }
 items_of(c) {
   if(code_kind(c) == ast.block) return code_items(c);
   r = array{};
-  for(x : code_items(c)) if(!is_inner(x)) r.push(x);
+  for(x : code_items(c)) if(!unseen(x)) r.push(x); // internal and folded overload are not visible
   r
 }
 // places of the container elements [from, from + count] in the representation w; count 0 is the insert point at
@@ -4748,6 +4892,8 @@ on_decide(i64 id, bool accept) {
   if(accept) {
     finalize_everyone();
     r = apply_proposal(p.key, p.text);
+    // accepted overload - show in place (frame "Layers": folded otherwise not visible)
+    for(fs : overload_groups()) for(f : fs) if(fn_key(f) == p.key) pick_overload(f);
     refresh_all();
     if(contains(r, "отклонена") || contains(r, "нет ")) send_status(now_peer(), "error", ("не принято: " + p.key) + " — " + trim(r), "")
     else send_status(now_peer(), "done", "принято: " + p.key, "");
@@ -4826,6 +4972,23 @@ on_take(str key, bool theirs) {
 on_layer(i64 id, str key) {
   v = view_of(id);
   if(v < 0) return report("слои — у представления функции");
+  // Module: "fn:<node>" - show this overload in place ( головы › at the head, frame "Layers") (scenarios: "next:
+  // #N" / "prev: #N" - adjacent overload shown N: folded link is not)
+  step = if(starts_with(key, "next:#")) 1 else if(starts_with(key, "prev:#")) -1 else 0;
+  if((view_kind(v) == "module") && ((step != 0) || starts_with(key, "fn:"))) {
+    f = node_code(number_of(text_from(key, if(step != 0) 6 else 3)));
+    if(step != 0) {
+      fs = array{};
+      for(g : overloads_of(f)) if(!is_inner(g)) fs.push(g);
+      f = fs[((code_index(fs, f) + fs.size) + step) % fs.size];
+    }
+    finalize_views();
+    pick_overload(f);
+    refresh_all();
+    p = node_place(v, f);
+    if(p >= 0) set_cursor(v, p);
+    return send_cursor(v);
+  }
   if(view_kind(v) != "fn") return report("слои — у представления функции");
   set_layer(v, key);
   send_marks(v);

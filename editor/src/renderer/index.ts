@@ -109,7 +109,13 @@ const host: Host = {
 // Inspector AST (F2 - wood panel, Ctrl+Shift+A - frame node in the text): the element tree
 // under the cursor, places node and by whom they are disassembled - from VM.
 const panes = byId('panes');
-// ‹i/n› function with overload - open it in the second panel (there is a switch)
+// ‹i/n› function with overload - open it in the second panel (there is a switch) › function
+// with overload - show the neighboring in place (frame “Layers”)
+panes.addEventListener('vish-layer', (e) => {
+  const v = [...views.values()].find((x) => x.host.contains(e.target as Node));
+  if (v && e instanceof CustomEvent)
+    send({ type: 'c_layer', view: v.data.view, key: String(e.detail) });
+});
 panes.addEventListener('vish-open', (e) => {
   const v = [...views.values()].find((x) => x.host.contains(e.target as Node));
   if (v && e instanceof CustomEvent)

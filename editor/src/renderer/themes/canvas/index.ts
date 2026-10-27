@@ -33,6 +33,7 @@ const theme: Theme = {
           d.textContent = l.code ? String(i + 1) : '\u00a0'; // empty div would collapse
           d.toggleAttribute('draft', l.draft); // draft
           if (l.path > 0) d.dataset.path = l.path === 2 ? 'place' : 'step'; // line
+          if (l.layer !== '') d.dataset.layer = l.layer; // Instruction overload: General or Own
           return d;
         }),
       );

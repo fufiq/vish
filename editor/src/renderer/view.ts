@@ -450,7 +450,7 @@ export class ViewElement {
 
   // Lines of text for numbers: whether there is code in a line - not spaces and not a comment (Span tags
   // from VM; text sheet - always code).
-  lines(): { code: boolean; draft: boolean; path: number }[] {
+  lines(): { code: boolean; draft: boolean; path: number; layer: string }[] {
     const comments = new Map<NodeId, [number, number][]>();
     for (const m of this.#decor?.marks ?? [])
       if (m.kind === 'span' && m.text.startsWith('comment')) {
@@ -465,12 +465,16 @@ export class ViewElement {
         const [i = '', n = ''] = m.text.split('/');
         steps.set(m.node, i === n ? 2 : 1);
       }
+    const layers = new Map<NodeId, string>();
+    for (const m of this.#decor?.marks ?? [])
+      if (m.kind === 'common' || m.kind === 'own' || m.kind === 'own-head')
+        layers.set(m.node, m.kind === 'common' ? 'common' : 'own');
     const drafts = new Set(
       (this.#decor?.marks ?? [])
         .filter((m) => m.kind === 'draft')
         .map((m) => m.node),
     );
-    const out = [{ code: false, draft: false, path: 0 }];
+    const out = [{ code: false, draft: false, path: 0, layer: '' }];
     let inDraft = 0;
     const walk = (id: NodeId): void => {
       const n = this.nodes.get(id);
@@ -479,6 +483,8 @@ export class ViewElement {
       const step = steps.get(id) ?? 0;
       const here = out[out.length - 1];
       if (step > here.path) here.path = step;
+      const layer = layers.get(id);
+      if (layer && here.layer === '') here.layer = layer;
       const leaf = n.pieces.every((p) => typeof p === 'string');
       const cs = comments.get(id) ?? [];
       let own = 0;
@@ -490,7 +496,8 @@ export class ViewElement {
         for (const ch of p) {
           const line = out[out.length - 1];
           if (inDraft > 0) line.draft = true;
-          if (ch === '\n') out.push({ code: false, draft: false, path: 0 });
+          if (ch === '\n')
+            out.push({ code: false, draft: false, path: 0, layer: '' });
           else if (
             ch.trim() !== '' &&
             (leaf || !cs.some(([a, b]) => own >= a && own < b))
@@ -562,6 +569,8 @@ export class ViewElement {
       if (m.kind === 'role') e.role = m.text;
       if (m.kind === 'use') e.use = m.text;
       if (m.kind === 'mismatch') e.mismatch = m.text;
+      if (m.kind === 'other') e.other = true;
+      if (m.kind === 'own-part') e.ownPart = true;
       if (m.kind === 'span')
         (e.spans ??= []).push({ from: m.from, to: m.to, kind: m.text });
       if (m.kind === 'error') {

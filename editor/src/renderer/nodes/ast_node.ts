@@ -43,7 +43,9 @@ export interface NodeMarks {
   current?: boolean; // runway
   near?: 'prev' | 'next'; // the next step of the track of the same depth (ыF10/F10)
   path?: string; // the step of the "i/all" error path (1 - the entry point, the last - the place of error)
-  overloads?: string; // function with overload : "i/n" - which is it from the set (click - open)
+  overloads?: string; // function with overload: "i/n|previous |next signature"
+  other?: boolean; // call selects not shown overload - dim
+  ownPart?: boolean; // part of overload which differs from the general
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
   diverged?: string;
@@ -62,6 +64,8 @@ badgeSheet.replaceSync(`
   .above { display: none; }
   .layer { display: inline-block; margin-right: 3px; padding: 0 0.35em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; vertical-align: 0.3em; color: var(--vish-value, gray); border: 1px solid color-mix(in srgb, var(--vish-value, gray) 45%, transparent); cursor: pointer; }
   .layer.chosen { margin: 0 0 0 2px; cursor: default; }
+  .switch { display: inline-flex; gap: 3px; align-items: center; margin-right: 4px; font-size: 0.7em; color: var(--vish-value, gray); }
+  .switch .arrow { cursor: pointer; padding: 0 2px; }
   .step { display: inline-block; min-width: 1.35em; margin-right: 2px; padding: 0 0.3em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; text-align: center; vertical-align: 0.3em; color: white; background: color-mix(in srgb, var(--vish-error, #c0392b) calc(30% + var(--step, 1) * 70%), var(--vish-bg, white)); }
 `);
 
@@ -120,34 +124,66 @@ export abstract class ASTNode extends HTMLElement {
     } else this.style.removeProperty('--step');
     this.toggleAttribute('path', m.path !== undefined);
     this.toggleAttribute('error-place', m.path !== undefined && step === total); // The place of error is the last step
-    // layers - overload : ‹i/n› before function (click to second panel), i/n after call
+    // layers - overload (frame "Layers"): the function has a switch ‹ i/n › with a signature (arrows - show the
+    // neighbor in place: the event vish-layer "fn: node"); the call - the chip of the selected overload (part
+    // selected selected selected-i - color by number); call not shown - other, your overload - own-part
     this.#layer?.remove();
     this.#layer = undefined;
-    const layer = m.overloads ?? m.chosen;
-    if (layer !== undefined) {
-      this.#layer = document.createElement('span');
-      this.#layer.className = m.chosen === undefined ? 'layer' : 'layer chosen';
-      this.#layer.part = this.#layer.className;
-      this.#layer.textContent = m.chosen === undefined ? `‹${layer}›` : layer;
-      this.#layer.title =
-        m.chosen === undefined
-          ? 'перегрузки: открыть во второй панели'
-          : 'выбирает показанную перегрузку';
-      if (m.chosen === undefined)
-        this.#layer.addEventListener('mousedown', (e) => {
+    if (m.overloads !== undefined) {
+      const [at = '', prev = '', next = '', label = ''] =
+        m.overloads.split('|');
+      const sw = document.createElement('span');
+      sw.className = 'switch';
+      sw.part = 'switch';
+      const arrow = (text: string, to: string, title: string) => {
+        const b = document.createElement('span');
+        b.className = 'arrow';
+        b.part = 'switch-arrow';
+        b.textContent = text;
+        b.title = title;
+        b.addEventListener('mousedown', (e) => {
           e.preventDefault();
           e.stopPropagation();
           this.dispatchEvent(
-            new CustomEvent('vish-open', {
-              detail: this.nodeId,
+            new CustomEvent('vish-layer', {
+              detail: `fn:${to}`,
               bubbles: true,
               composed: true,
             }),
           );
         });
-      if (m.chosen === undefined) this.badgeRoot().prepend(this.#layer);
-      else this.badgeRoot().append(this.#layer);
+        return b;
+      };
+      const [i = '', n = ''] = at.split('/');
+      const count = document.createElement('span');
+      count.part = 'switch-count';
+      const cur = document.createElement('b');
+      cur.textContent = i;
+      count.append(cur, `/${n}`);
+      const name = document.createElement('span');
+      name.part = 'switch-label';
+      name.textContent = label;
+      sw.append(
+        arrow('‹', prev, 'предыдущая перегрузка'),
+        count,
+        arrow('›', next, 'следующая перегрузка'),
+        name,
+      );
+      this.#layer = sw;
+      this.badgeRoot().prepend(sw);
+    } else if (m.chosen !== undefined) {
+      const [i = '', label = ''] = m.chosen.split('|');
+      const chip = document.createElement('span');
+      chip.className = 'layer chosen';
+      chip.part = `chosen chosen-${i}`;
+      chip.textContent = label;
+      chip.title = 'выбирает эту перегрузку';
+      this.#layer = chip;
+      this.badgeRoot().append(chip);
     }
+    this.toggleAttribute('overloaded', m.overloads !== undefined);
+    this.toggleAttribute('other', m.other === true);
+    this.toggleAttribute('own-part', m.ownPart === true);
     if (m.line) this.setAttribute('line', m.line);
     else this.removeAttribute('line');
     this.#badge?.remove();

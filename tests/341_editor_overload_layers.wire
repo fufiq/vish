@@ -1,19 +1,29 @@
-// There are two layers of function (author's decision 2026-10-26): overload and contexts.
-// 
-// "Select all preloads / specializations"; - in the
-// module only the label ‹i / n>.
+// Feature layers - overload (user solutions 2026-10-26 and 2026-10-27, Layer frame): "We write a function for
+// static context first, then we add dynamic layers to it ... these functions should glean general logic."
+//
+// The module shows one overload group and
+// replaces it in place.
 // program: editor_overload_layers.vish
 open_view module
-// expect: kind="overloads" text="1/2"
-// expect: kind="overloads" text="2/2"
-// second panel: overload f64 - switch and "shared / own" against the most common
+// first common; ‹ i/n › with neighbors and signature; other overload in the module text is not visible
+// expect: kind="overloads" text="1/2|
+// expect: |общая логика"
+// expect-not: norm(f64 x) {
+// for calls - the chip of the selected overload (number - color, signature), the call not shown - other
+// expect: kind="chosen" text="1|общая логика"
+// expect: kind="chosen" text="2|norm(f64 x)"
+// expect: kind="other"
+// Replace on the spot: f64 instead of general, "common / own" and different parts
+layer 1 next:@norm
+// expect: norm(f64 x) {
+// expect: kind="overloads" text="2/2|
+// expect: kind="common"
+// expect: kind="own"
+// expect: kind="own-part"
+// second panel still: overload f64 - switch and "shared / own" against the most common
 goto 1 norm(f64)
 key 1 Enter
 // expect: overloads=
 // expect: head="norm(x)"
 // expect: head="norm(f64 x)"
 // expect: overload=1
-// expect: kind="common"
-// expect: kind="own"
-// at the call in the module - the label shown overload
-// expect: kind="chosen" text="2/2"
