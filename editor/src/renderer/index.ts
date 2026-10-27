@@ -13,6 +13,7 @@ import {
   type NodeId,
   type ServerMsg,
   type Stops,
+  type Peers,
   type Layers,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
@@ -182,6 +183,12 @@ function receive(m: ServerMsg): void {
     case 's_stops':
       showStops(m);
       return;
+    case 's_peers': {
+      const v = views.get(m.view);
+      v?.showPeers(m);
+      if (v?.host === app) showClients(m);
+      return;
+    }
     case 's_status':
       showStatus(m);
       return;
@@ -213,6 +220,37 @@ function receive(m: ServerMsg): void {
       });
       return;
   }
+}
+
+// Other clients: each has where the cursor is and what rules (frame
+// "Two clients"); no one - no panel.
+function showClients(m: Peers): void {
+  const panel = byId('clients');
+  panel.hidden = m.peers.length === 0;
+  const head = document.createElement('div');
+  head.className = 'head';
+  head.textContent = `Одна VM — клиентов: ${String(m.peers.length + 1)}`;
+  panel.replaceChildren(
+    head,
+    ...m.peers.map((p) => {
+      const row = document.createElement('div');
+      row.className = 'client';
+      const avatar = document.createElement('span');
+      avatar.className = 'avatar';
+      avatar.textContent = 'К';
+      const text = document.createElement('span');
+      const name = document.createElement('b');
+      name.textContent = `клиент ${String(p.client + 1)}`;
+      const where = document.createElement('span');
+      where.textContent =
+        p.draft === ''
+          ? `курсор: ${p.where}`
+          : `черновик ${p.draft} — набирает`;
+      text.append(name, where);
+      row.append(avatar, text);
+      return row;
+    }),
+  );
 }
 
 // Track stops on the right: call depth - shift and guides, current highlighted; click - to step

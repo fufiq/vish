@@ -277,6 +277,22 @@ export interface Stops {
     node: NodeId | null;
   }[];
 }
+// Other clients in the view: cursor (node, piece, offset), where it is that rules the draft -
+// unimportant data separate message.
+export interface Peers {
+  type: 's_peers';
+  view: number;
+  peers: {
+    type: 's_peer';
+    client: number;
+    node: NodeId | null;
+    piece: number;
+    offset: number;
+    where: string;
+    draft: string;
+    draft_node: NodeId | null;
+  }[];
+}
 // Status bangs: kind - 'error', 'trace', 'run', 'done' (event) or '' (hide); text collects
 // VM, the client only draws.
 export interface Status {
@@ -390,7 +406,8 @@ export type ServerMsg =
   | Hint
   | Inspect
   | Status
-  | Stops;
+  | Stops
+  | Peers;
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

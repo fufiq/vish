@@ -1,0 +1,14 @@
+// Other clients (frame "Two clients"): cursor and draft - a separate message, without journal and
+// synchronization:
+//.
+// program: editor_overload_layers.vish
+open_view module
+[2] open_view module
+[2] pointer 1 @print 0 2
+// expect: другому клиенту:
+// expect: peers view=1 peers=
+// expect: client=1 node=#
+// expect: offset=2 where="main, строка 14" draft=""
+// The second type - the first one sees its draft (main element)
+[2] key 1 x
+// expect: offset=3 where="main, строка 14" draft="main" draft_node=#

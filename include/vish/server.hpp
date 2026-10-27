@@ -127,7 +127,10 @@ struct editor_server {
       } guard{deciding};
       decide_now(p, view, name, std::move(args));
     }
-    if(!deciding) flush_run_notes();
+    if(!deciding) {
+      flush_run_notes();
+      flush_peers();
+    }
   }
   void decide_now(peer * p, int64_t view, std::string_view name, std::vector<value> args) {
     host_hold hold{this, std::exchange(now_peer, p)};
@@ -144,6 +147,14 @@ struct editor_server {
     } catch(diagnostic const & d) { // solution error in the client language, with a place in editor.vish
       if(p) send(*p, proto::s_error{cat("редактор: ", render(d, "editor.vish", session.db))});
       else put(stderr, cat("редактор: ", render(d, "editor.vish", session.db), "\n"));
+    }
+  }
+  // cursors of other clients - after the decision
+  void flush_peers() {
+    try {
+      ask("share_cursors", {});
+    } catch(diagnostic const & d) {
+      put(stderr, cat("редактор: ", render(d, "editor.vish", session.db), "\n"));
     }
   }
   // Question Module Editor (function name) - value

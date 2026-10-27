@@ -6,6 +6,7 @@ import type {
   HintLine,
   Hover,
   NodeId,
+  Peers,
   Selection,
   Update,
   View,
@@ -32,6 +33,8 @@ export class ViewElement {
   // Instructions: guidance (at the pointer) and set (above the cursor)
   readonly tip = document.createElement('div');
   readonly hint = document.createElement('div');
+  // other clients: their carriages and frame elements in their draft (frame "Two Clients")
+  readonly peersLayer = document.createElement('div');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -50,6 +53,7 @@ export class ViewElement {
     this.tip.hidden = true;
     this.hint.className = 'vish-tip vish-hint';
     this.hint.hidden = true;
+    this.peersLayer.className = 'vish-peers';
     host.replaceChildren(...this.#chrome(this.root));
   }
 
@@ -57,6 +61,7 @@ export class ViewElement {
     return [
       this.selectionLayer,
       root,
+      this.peersLayer,
       this.caret,
       this.popup,
       this.hint,
@@ -124,9 +129,59 @@ export class ViewElement {
     // node, which saved id, - with the same labels until the next check (VM saves id
     // node when dialing)
     if (this.#decor) this.showMarks(this.#decor);
+    if (this.#peers) this.showPeers(this.#peers);
   }
 
   #decor: Decor | undefined;
+  #peers: Peers | undefined;
+
+  // Other clients: a carriage with the signature "client N" and a dotted frame around the element he rules
+  // with the draft; node is not in the layout - the nearest ancestor (VM has already substituted).
+  showPeers(m: Peers): void {
+    this.#peers = m;
+    const out: HTMLElement[] = [];
+    const origin = this.host.getBoundingClientRect();
+    const at = (r: DOMRect) => ({
+      left: r.left - origin.left + this.host.scrollLeft,
+      top: r.top - origin.top + this.host.scrollTop,
+      height: r.height,
+      width: r.width,
+    });
+    for (const p of m.peers) {
+      const name = `клиент ${String(p.client + 1)}`;
+      if (p.draft_node !== null) {
+        const el = this.byId.get(p.draft_node);
+        if (el) {
+          const r = at(el.getBoundingClientRect());
+          const box = document.createElement('div');
+          box.className = 'peer-draft';
+          box.style.left = `${String(r.left - 6)}px`;
+          box.style.top = `${String(r.top - 4)}px`;
+          box.style.width = `${String(r.width + 12)}px`;
+          box.style.height = `${String(r.height + 8)}px`;
+          const label = document.createElement('span');
+          label.textContent = `правит ${name} · черновик`;
+          box.append(label);
+          out.push(box);
+        }
+      }
+      const node = p.node === null ? undefined : this.byId.get(p.node);
+      const b =
+        this.#box(p.node, p.piece, p.offset) ??
+        (node ? at(node.getBoundingClientRect()) : undefined);
+      if (!b) continue;
+      const caret = document.createElement('div');
+      caret.className = 'peer-caret';
+      caret.style.left = `${String(b.left)}px`;
+      caret.style.top = `${String(b.top)}px`;
+      caret.style.height = `${String(b.height)}px`;
+      const label = document.createElement('span');
+      label.textContent = name;
+      caret.append(label);
+      out.push(caret);
+    }
+    this.peersLayer.replaceChildren(...out);
+  }
   #selection: Selection | undefined;
 
   // Texts of pieces in order projection : (node, piece) → Text.

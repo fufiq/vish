@@ -351,7 +351,25 @@ struct s_stops {
   uint32_t current;
   std::vector<s_stop> stops;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops>;
+// Other clients in the view: cursor (node, piece, offset; node is not in the layout - the closest
+// ancestor), where it rules the draft (draft - names, draft_node - element). Unimportant data - a separate
+// message:
+// 
+//.
+struct s_peer {
+  uint32_t client;
+  node_id node;
+  uint32_t piece;
+  uint32_t offset;
+  std::string where;
+  std::string draft;
+  node_id draft_node;
+};
+struct s_peers {
+  uint32_t view;
+  std::vector<s_peer> peers;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers>;
 
 // --- staff ---
 

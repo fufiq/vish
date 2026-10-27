@@ -99,6 +99,7 @@ struct view {
   array redo;
   array done;        // Accepted amendments (closed)
   array undone;
+  str peers_sent;    // Signing the latest list of other customers (do not submit the same)
 }
 // client: watches the launch track (step keys - debugger) and its step
 struct client { bool debugging; i64 trace_pos; }
@@ -113,6 +114,7 @@ merge_state = no_merge(); // conflicts of the last merger before the decision of
 // O12: overload instructions shared with most general overload (in function)
 struct shared_seen { i64 fn; array texts; }
 seen_shared = array{};
+cursors_moved = false; // The cursor moved - send to other customers at the end of the decision
 
 // --- Primitives of the base: projection printing, parsing editing, sending (in VM)
 // --------------------- Unknown in parsing argument - erased value (as in prelude), without effects.
@@ -385,6 +387,20 @@ send_stops(i64 peer, i64 current, stops) => native "cpp" {
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value x = xs.get(k);
     out.stops.push_back({uint32_t(s.field(x, "step", where).as<int64_t>()), uint32_t(s.field(x, "depth", where).as<int64_t>()), std::string(s.field(x, "fn", where).as<str_v>().view()), std::string(s.field(x, "text", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "node", where), where)});
+  }
+  s.send_to((a[0]).as<int64_t>(), out);
+  return value(int64_t(0));
+};
+// Other clients - id peer client representation (peer_info)
+send_peers_list(i64 peer, i64 id, peers) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_peers out{uint32_t((a[1]).as<int64_t>()), {}};
+  auto const & xs = (a[2]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value x = xs.get(k);
+    out.peers.push_back({uint32_t(s.field(x, "client", where).as<int64_t>()), s.node_or_none(vm, s.field(x, "node", where), where), uint32_t(s.field(x, "piece", where).as<int64_t>()), uint32_t(s.field(x, "offset", where).as<int64_t>()), std::string(s.field(x, "where", where).as<str_v>().view()), std::string(s.field(x, "draft", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "draft_node", where), where)});
   }
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
@@ -824,7 +840,7 @@ lower(str s) => native "cpp" {
 // --- Views: Find, Open, Close ---
 empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0, 0, -1};
 empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}, 0};
-new_view(i64 peer, i64 id, root, str kind) => view{peer, id, root, kind, "", code(), empty_layout(), 0, -1, -1, false, false, false, false, array{}, 0, 0, array{}, empty_draft(), array{}, array{}, array{}, array{}};
+new_view(i64 peer, i64 id, root, str kind) => view{peer, id, root, kind, "", code(), empty_layout(), 0, -1, -1, false, false, false, false, array{}, 0, 0, array{}, empty_draft(), array{}, array{}, array{}, array{}, ""};
 // Representation of the client whose message is served by his number; -1 - no (or closed); number -1 -
 // first open
 view_of(i64 id) {
@@ -1027,6 +1043,7 @@ greater(i64 x, i64 y) => if(x > y) x else y;
 send_cursor(i64 v) {
   array{n, p, o} = caret_of(v, views[v].cursor);
   send_caret(views[v].peer, views[v].id, false, n, p, o);
+  cursors_moved = true; // To other clients, at the end of the decision (share_cursors), after an important
   an = views[v].anchor;
   sel = (an >= 0) && ((an != views[v].cursor) && (an < places(v)));
   if(!sel && !views[v].selection_sent) return 0;
@@ -1036,6 +1053,57 @@ send_cursor(i64 v) {
   } else send_caret(views[v].peer, views[v].id, true, -1, 0, 0);
   views[v].selection_sent = sel;
   0
+}
+// Other clients (Frame "Two clients"): cursors and drafts - unimportant data in a separate message, without
+// journal and synchronization. Each view is the cursors of other clients' views; node is not in its layout -
+// the closest ancestor. The same list is not sent a second time. My:* composition (where that rules).
+//
+struct peer_info { i64 client; code node; i64 piece; i64 offset; str where; str draft; code draft_node; }
+share_cursors() {
+  if(!cursors_moved) return 0;
+  cursors_moved = false;
+  for(w : range(views.size)) if(given(views[w].root)) {
+    ps = array{};
+    sig = "";
+    for(u : range(views.size)) if((views[u].peer != views[w].peer) && given(views[u].root)) {
+      info = peer_at(w, u);
+      ps.push(info);
+      sig = (((((sig + text(info.client)) + ":") + text(code_id(info.node))) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
+    }
+    if(sig != views[w].peers_sent) {
+      views[w].peers_sent = sig;
+      send_peers_list(views[w].peer, views[w].id, ps);
+    }
+  }
+  0
+}
+// cursor of representation u - in coordinates of representation w
+peer_at(i64 w, i64 u) {
+  array{n, p, o} = caret_of(u, views[u].cursor);
+  at = place_node(u, views[u].cursor);
+  shown = at;
+  while(given(shown) && (layout_of(w, shown) < 0)) shown = code_parent(shown);
+  if(given(shown) && (code_id(shown) != code_id(at))) {
+    p = 0;
+    o = 0;
+  }
+  f = enclosing_fn(at);
+  where = (if(given(f)) code_name(f) + ", " else "") + ("строка " + text(line_at(u, views[u].cursor) + 1));
+  draft = "";
+  dn = code();
+  if(views[u].d.open) {
+    for(x : views[u].d.items) if(given(x)) {
+      draft = (draft + (if(draft == "") "" else ", ")) + code_name(x);
+      if(!given(dn) && (layout_of(w, x) >= 0)) dn = x;
+    }
+  }
+  peer_info{views[u].peer, if(given(shown)) shown else code(), p, o, where, draft, dn}
+}
+// row number k (from zero)
+line_at(i64 v, i64 k) {
+  n = 0;
+  for(i : range(lesser(k, places(v)))) if(lead(v, i) == '\n') n += 1;
+  n
 }
 cursor(i64 v) => views[v].cursor;
 set_cursor(i64 v, i64 k) {

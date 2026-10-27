@@ -422,6 +422,97 @@ body {
 .vish-tip b {
   color: var(--vish-caret);
 }
+/* другие клиенты: каретка с подписью, рамка элемента в их черновике, список клиентов */
+.vish-peers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.peer-caret {
+  position: absolute;
+  width: 2px;
+  background: #7c3aed;
+}
+.peer-caret span {
+  position: absolute;
+  left: -1px;
+  bottom: 100%;
+  padding: 0 5px;
+  border-radius: 4px 4px 4px 0;
+  background: #7c3aed;
+  color: white;
+  font:
+    10.5px system-ui,
+    sans-serif;
+  white-space: nowrap;
+}
+.peer-draft {
+  position: absolute;
+  border: 1.5px dashed #c4b5fd;
+  border-left: 3px solid #7c3aed;
+  border-radius: 0 10px 10px 0;
+  background: rgb(124 58 237 / 0.04);
+}
+.peer-draft span {
+  position: absolute;
+  right: 8px;
+  top: -10px;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: #ede9fe;
+  color: #7c3aed;
+  font:
+    11.5px system-ui,
+    sans-serif;
+  white-space: nowrap;
+}
+#clients {
+  position: fixed;
+  right: 16px;
+  top: 44px;
+  z-index: 15;
+  width: 260px;
+  padding: 10px 6px 8px;
+  border-radius: 14px;
+  background: var(--vish-popup);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.12);
+  font:
+    12.5px system-ui,
+    sans-serif;
+}
+#clients[hidden] {
+  display: none;
+}
+#clients .head {
+  padding: 0 8px 6px;
+  font-weight: 500;
+}
+#clients .client {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+#clients .client > span:last-child {
+  display: flex;
+  flex-direction: column;
+  color: var(--vish-detail);
+}
+#clients .client b {
+  font-weight: 500;
+  color: var(--vish-fg);
+}
+#clients .avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #7c3aed;
+  color: white;
+  font-weight: 600;
+}
 /* остановки трассы: глубина вызова — сдвиг и направляющие */
 #stops {
   width: 300px;
