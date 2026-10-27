@@ -51,7 +51,7 @@
     "s_hint": [["view", "u32"], ["node", "node"], ["piece", "u32"], ["offset", "u32"], ["lines", ["vector", "s_line"]]],
     "s_inode": [["id", "node"], ["depth", "u32"], ["role", "string"], ["kind", "string"], ["text", "string"], ["rule", "string"], ["rule_at", "node"], ["types", "string"]],
     "s_inspect": [["view", "u32"], ["root", "node"], ["focus", "node"], ["nodes", ["vector", "s_inode"]], ["expand", ["vector", "s_line"]]],
-    "s_status": [["kind", "string"], ["text", "string"], ["hint", "string"]],
+    "s_status": [["kind", "string"], ["text", "string"], ["hint", "string"], ["action", "string"], ["label", "string"]],
     "s_stop": [["step", "u32"], ["depth", "u32"], ["fn", "string"], ["text", "string"], ["node", "node"]],
     "s_stops": [["current", "u32"], ["stops", ["vector", "s_stop"]]],
     "s_peer": [["client", "u32"], ["node", "node"], ["piece", "u32"], ["offset", "u32"], ["where", "string"], ["draft", "string"], ["draft_node", "node"]],

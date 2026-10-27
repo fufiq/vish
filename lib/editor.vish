@@ -115,6 +115,8 @@ merge_state = no_merge(); // conflicts of the last merger before the decision of
 struct shared_seen { i64 fn; array texts; }
 seen_shared = array{};
 cursors_moved = false; // The cursor moved - send to other customers at the end of the decision
+migrate_needed = ""; // process got up: struct without migrate (its type) - bangs with "Add migrate"
+migrate_said = "";
 
 // --- Primitives of the base: projection printing, parsing editing, sending (in VM)
 // --------------------- Unknown in parsing argument - erased value (as in prelude), without effects.
@@ -411,12 +413,14 @@ clipboard(str s) => native "cpp" {
   return value(int64_t(0));
 };
 // status bangs to peer client: view ("error", "trace", "run", "done";" - hide), text, keys
-send_status(i64 peer, str kind, str text, str hint) => native "cpp" {
+send_status_with(i64 peer, str kind, str text, str hint, str action, str label) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
-  editor_host->send_to((a[0]).as<int64_t>(), proto::s_status{std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view()), std::string((a[3]).as<str_v>().view())});
+  auto t = [&](int k) { return std::string((a[k]).as<str_v>().view()); };
+  editor_host->send_to((a[0]).as<int64_t>(), proto::s_status{t(1), t(2), t(3), t(4), t(5)});
   return value(int64_t(0));
 };
+send_status(i64 peer, str kind, str text, str hint) => send_status_with(peer, kind, text, hint, "", "");
 // error-message
 report(str s) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
@@ -930,6 +934,8 @@ show_trace(bool active, i64 step, i64 total, n, stack, str out, str error) {
 //
 calm_status(i64 peer) {
   if(clients[client_of(peer)].debugging || program_running()) return 0;
+  // process got up: struct without migrate - error with action until it was added (frame "Service States")
+  if(migrate_needed != "") return send_status_with(peer, "error", migrate_said, "", ("goto migrate(" + migrate_needed) + ")", "Добавить migrate");
   k = check_errors();
   if(k == 0) return send_status(peer, "", "", "");
   first = lines_of(check_error_text(0, -1));
@@ -1081,7 +1087,9 @@ share_cursors() {
   for(w : range(views.size)) if(given(views[w].root)) {
     ps = array{};
     sig = "";
-    for(u : range(views.size)) if((views[u].peer != views[w].peer) && given(views[u].root)) {
+    seen = array{};
+    for(u : range(views.size)) if((views[u].peer != views[w].peer) && (given(views[u].root) && !holds_int(seen, views[u].peer))) {
+      seen.push(views[u].peer); // Customer - once (first presentation)
       info = peer_at(w, u);
       ps.push(info);
       sig = (((((sig + text(info.client)) + ":") + text(code_id(info.node))) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
@@ -1092,6 +1100,11 @@ share_cursors() {
     }
   }
   0
+}
+holds_int(xs, i64 x) {
+  r = false;
+  for(y : xs) if(y == x) r = true;
+  r
 }
 // cursor of representation u - in coordinates of representation w
 peer_at(i64 w, i64 u) {
@@ -1453,7 +1466,9 @@ sync_program() {
     if(why != "") {
       stop_program();
       if(has_migrate) return ((("migrate " + tn) + ": ") + why) + "; процесс остановлен";
-      return ((((((((("struct " + tn) + " изменён, а живой процесс держит значений старой раскладки: ") + text(stale)) + " — ") + why) + "(") + tn) + " old) => ") + tn) + "{…}; процесс остановлен";
+      migrate_needed = tn;
+      migrate_said = ((((((((("struct " + tn) + " изменён, а живой процесс держит значений старой раскладки: ") + text(stale)) + " — ") + why) + "(") + tn) + " old) => ") + tn) + "{…}; процесс остановлен";
+      return migrate_said;
     }
   }
   live_refresh();
@@ -1482,7 +1497,9 @@ idle() {
   for(w : range(views.size)) if(given(views[w].root)) send_marks(w);
   if(program_running() && !any_draft_open()) {
     said = sync_program();
-    if(said != "") report(said);
+    if(said != "") {
+      if(migrate_needed != "") calm_status(now_peer()) else report(said);
+    }
   }
   0
 }
@@ -2347,6 +2364,16 @@ on_close_view(i64 id) {
   if(v < 0) return 0;
   finalize(v);
   views[v].root = code();
+  cursors_moved = true;
+  0
+}
+// client p is disconnected: its drafts - to the canon, presentations are closed, others - a new list of customers
+on_peer_gone(i64 p) {
+  for(w : range(views.size)) if((views[w].peer == p) && given(views[w].root)) {
+    finalize(w);
+    views[w].root = code();
+  }
+  cursors_moved = true;
   0
 }
 
@@ -3930,6 +3957,7 @@ on_trace(i64 v) {
 // (F5) - accepted text: process in the same VM, the editor does not stand up
 // 
 on_run(str args, str input) {
+  migrate_needed = "";
   finalize_views();
   start_program(args, input);
 }

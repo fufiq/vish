@@ -37,6 +37,8 @@ export class ViewElement {
   readonly peersLayer = document.createElement('div');
   // “will be created” - next to the transition list when you select “add” (frame “Transition”)
   readonly preview = document.createElement('div');
+  // revealing the inspector's node with a ghost string under it (frame "Simple Disclosure")
+  readonly ghost = document.createElement('div');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -58,6 +60,8 @@ export class ViewElement {
     this.peersLayer.className = 'vish-peers';
     this.preview.className = 'vish-preview';
     this.preview.hidden = true;
+    this.ghost.className = 'vish-ghost';
+    this.ghost.hidden = true;
     host.replaceChildren(...this.#chrome(this.root));
   }
 
@@ -69,6 +73,7 @@ export class ViewElement {
       this.caret,
       this.popup,
       this.preview,
+      this.ghost,
       this.hint,
       this.tip,
     ];
@@ -140,6 +145,18 @@ export class ViewElement {
   #decor: Decor | undefined;
   #peers: Peers | undefined;
   #running: Element | undefined;
+
+  // Ghost line under node (null - remove).
+  showGhost(node: NodeId | null, text: string): void {
+    const el = node === null ? undefined : this.byId.get(node);
+    this.ghost.hidden = !el || text === '';
+    if (!el || this.ghost.hidden) return;
+    const origin = this.host.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    this.ghost.textContent = `⤷ ${text}`;
+    this.ghost.style.left = `${String(r.left - origin.left + this.host.scrollLeft)}px`;
+    this.ghost.style.top = `${String(r.bottom - origin.top + this.host.scrollTop)}px`;
+  }
 
   // Executed by start (frame "Run"): node - backlit string; null - nothing.
   showRunning(node: NodeId | null): void {

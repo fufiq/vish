@@ -129,6 +129,7 @@ struct editor_server {
     }
     if(!deciding) {
       flush_run_notes();
+      flush_gone();
       flush_peers();
     }
   }
@@ -277,6 +278,16 @@ struct editor_server {
     p.open = false;
     p.out.clear();
     os::close_fd(p.fd);
+    gone.push_back(int64_t(index_of(p))); // Language - after the current decision
+    if(!deciding) flush_gone();
+  }
+  std::vector<int64_t> gone; // Disconnected clients: their views close (solution on_peer_gone)
+  void flush_gone() {
+    while(!gone.empty()) {
+      int64_t k = gone.front();
+      gone.erase(gone.begin());
+      decide(nullptr, -1, "on_peer_gone", {value(k)});
+    }
   }
 
   void send(peer & p, proto::server_msg const & m) {

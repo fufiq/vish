@@ -106,6 +106,11 @@ export class Inspector {
     renderLines(this.expand, m.expand, (node) => {
       this.actions.place(view, node);
     });
+    // Simple Disclosure: What the focus turned into - the ghost beneath it in the code
+    const into = m.expand.find(
+      (l) => l.kind === 'раскрытие' || l.kind === 'итог',
+    );
+    view.showGhost(m.focus, into ? (into.text.split('\n')[0] ?? '') : '');
   }
 
   // The node in the text is illuminated (hinting to a tree line).

@@ -70,7 +70,13 @@ describe('живая VM', () => {
       'overload',
     ]);
     expect(fields('s_overload')).toEqual(['fn', 'head']);
-    expect(fields('s_status')).toEqual(['kind', 'text', 'hint']);
+    expect(fields('s_status')).toEqual([
+      'kind',
+      'text',
+      'hint',
+      'action',
+      'label',
+    ]);
     expect(fields('s_stops')).toEqual(['current', 'stops']);
     expect(fields('c_trace_step')).toEqual(['step']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);

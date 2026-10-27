@@ -30,8 +30,8 @@ function toWindow(channel: string, ...args: unknown[]): void {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
 
-function status(text: string): void {
-  toWindow('vm:status', text);
+function status(text: string, lost = false): void {
+  toWindow('vm:status', text, lost);
 }
 
 function tryConnect(): Promise<Socket> {
@@ -81,10 +81,15 @@ async function start(): Promise<void> {
   } else {
     await win.loadFile(join(import.meta.dirname, '../renderer/index.html'));
   }
+  await attach();
+}
+
+// Connect to the VM (if it is not - raise); lost - "Connect" in the bangs of the window.
+async function attach(): Promise<void> {
   try {
     socket = await connectVm();
   } catch (e) {
-    status(`нет VM: ${(e as Error).message}`);
+    status(`нет VM: ${(e as Error).message}`, true);
     return;
   }
   status(`VM: ${socketPath}`);
@@ -92,10 +97,15 @@ async function start(): Promise<void> {
     toWindow('vm:data', new Uint8Array(d));
   });
   socket.on('close', () => {
-    status('VM отключилась');
+    status('VM отключилась', true);
   });
   toWindow('vm:ready');
 }
+
+ipcMain.on('vm:reconnect', () => {
+  if (socket && !socket.destroyed) return;
+  void attach();
+});
 
 ipcMain.on('vm:ask', () => {
   if (socket && !socket.destroyed && !socket.connecting) toWindow('vm:ready');

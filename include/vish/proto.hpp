@@ -345,15 +345,19 @@ struct s_inspect {
   std::vector<s_inode> nodes;
   std::vector<s_line> expand;
 };
-// Status banging (on top of the window): mode and most importantly - kind "error" (program error),
-// "trace" (track step), "run" (executed), "done" (event: launch is completed, saved), "hide; hint - a
-// hint of the mode keys. No bangs at all. Text for VM: .
+// Status banging (on top of the window): mode and most importantly - kind "error" (program error), "trace"
+// (track step), "run" (executed), "done" (event: launch is completed, saved), "hide; hint - a hint of the
+// mode keys. No bangs at all. Text - VM: . action - the action of the button ("goto signature" - the
+// transition list from "add"), label - its inscription (frame "Service states"); empty - no button.
+//
 //
 //
 struct s_status {
   std::string kind;
   std::string text;
   std::string hint;
+  std::string action;
+  std::string label;
 };
 // Track stops - window around the current step step step number, call depth, function, short text of
 // the instruction, its node; current - the current step number.

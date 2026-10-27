@@ -196,6 +196,30 @@ body {
 #status-hint:empty {
   display: none;
 }
+#status-action {
+  flex: none;
+  padding: 2px 10px;
+  border: none;
+  border-radius: 999px;
+  background: #f2efe9;
+  color: #121110;
+  font:
+    500 12px system-ui,
+    sans-serif;
+  cursor: pointer;
+}
+#status-action[hidden] {
+  display: none;
+}
+/* функция во второй панели — на своём фоне (кадр «Слои») */
+#side {
+  background: color-mix(in srgb, white 70%, var(--vish-bg));
+}
+@media (prefers-color-scheme: dark) {
+  #side {
+    background: color-mix(in srgb, white 4%, var(--vish-bg));
+  }
+}
 .vish-caret {
   position: absolute;
   width: 2px;
@@ -220,6 +244,25 @@ body {
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.25);
   white-space: nowrap;
   z-index: 1;
+}
+/* две проекции рядом: тот же узел дерева в другой панели */
+.vish-node[twin] {
+  background: color-mix(in srgb, var(--vish-type) 18%, transparent);
+  border-radius: 3px;
+}
+.vish-ghost {
+  position: absolute;
+  margin-top: 1px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--vish-value) 8%, transparent);
+  color: color-mix(in srgb, var(--vish-value) 80%, var(--vish-bg));
+  font-size: 0.9em;
+  pointer-events: none;
+  white-space: pre;
+}
+.vish-ghost[hidden] {
+  display: none;
 }
 .vish-preview {
   position: absolute;

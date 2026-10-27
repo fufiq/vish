@@ -297,13 +297,16 @@ export interface Peers {
     draft_node: NodeId | null;
   }[];
 }
-// Status bangs: kind - 'error', 'trace', 'run', 'done' (event) or '' (hide); text collects
-// VM, the client only draws.
+// Status bangs: kind - 'error', 'trace', 'run', 'done' (event) or '' (hide); text collects VM,
+// the client only draws. action - action of the button (“goto signature”), label - its
+// inscription; empty - no button.
 export interface Status {
   type: 's_status';
   kind: string;
   text: string;
   hint: string;
+  action: string;
+  label: string;
 }
 // Route step: number, total, current instruction, stack (inside out), step output, start
 // error; active - track open.

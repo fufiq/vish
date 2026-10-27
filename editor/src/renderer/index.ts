@@ -55,6 +55,7 @@ const runOutput = byId('run-output');
 const stopsPanel = byId('stops');
 const views = new Map<number, ViewElement>();
 let active: ViewElement | undefined;
+let sideModule = false; // We wait for the second presentation of the module - in the second panel
 let debugging = false; // Open track: Escape - VM (exit)
 
 function send(m: ClientMsg): void {
@@ -132,11 +133,16 @@ function receive(m: ServerMsg): void {
       send({ type: 'c_open_view', kind: 'module' });
       return;
     case 's_view': {
-      const host = m.kind === 'fn' ? side : app;
+      // second view of the module (Ctrl+Shift+J) - in the second panel: the same program in another projection
+      const host =
+        views.get(m.view)?.host ?? (m.kind === 'fn' || sideModule ? side : app); // famous
+      const fresh = !views.has(m.view);
+      if (m.kind === 'module') sideModule = false;
       sideWrap.hidden = sideWrap.hidden && host !== side;
       const v = new ViewElement(host, m);
       views.set(m.view, v);
       activate(v);
+      if (fresh && host === side && m.kind === 'module') openGoto('projection'); // her projection is the key
       return;
     }
     case 's_update':
@@ -324,16 +330,36 @@ function showOutput(m: Output): void {
   [...views.values()].find((x) => x.host === app)?.showRunning(m.now);
 }
 
-// Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM
-// message) - a few seconds on top of it. After the event, VM sends peace.
-let steady = { kind: '', text: '', hint: '' };
+// Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM message)
+// - a few seconds on top of it. After the event, VM sends peace. Brush button (frame "Office states"):
+// "goto signature" - the transition list (there "add"), "reconnect" - connect to the VM again
+// (communication - the main process).
+interface StatusView {
+  kind: string;
+  text: string;
+  hint: string;
+  action?: string;
+  label?: string;
+}
+let steady: StatusView = { kind: '', text: '', hint: '' };
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
-function paintStatus(s: { kind: string; text: string; hint: string }): void {
+const statusAction = byId('status-action');
+let statusDo = '';
+statusAction.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  if (statusDo === 'reconnect') window.vm.reconnect();
+  else if (statusDo.startsWith('goto ') && active)
+    send({ type: 'c_goto', view: active.data.view, text: statusDo.slice(5) });
+});
+function paintStatus(s: StatusView): void {
   statusLine.setAttribute('kind', s.kind);
   statusLine.hidden = s.kind === '';
   if (s.kind === '') return; // The text goes out with the capsule
   statusText.textContent = s.text;
   statusHint.textContent = s.hint;
+  statusDo = s.action ?? '';
+  statusAction.hidden = statusDo === '';
+  statusAction.textContent = s.label ?? '';
 }
 function flashStatus(kind: string, text: string, hint = ''): void {
   clearTimeout(flashTimer);
@@ -343,13 +369,13 @@ function flashStatus(kind: string, text: string, hint = ''): void {
     paintStatus(steady);
   }, 3000);
 }
-function showStatus(s: { kind: string; text: string; hint: string }): void {
+function showStatus(s: StatusView): void {
   if (s.kind === 'done') {
     steady = { kind: '', text: '', hint: '' };
     flashStatus(s.kind, s.text, s.hint);
     return;
   }
-  steady = { kind: s.kind, text: s.text, hint: s.hint };
+  steady = { ...s };
   if (flashTimer === undefined) paintStatus(steady);
 }
 
@@ -407,8 +433,19 @@ window.vm.onData((bytes) => {
     receive(decodeServer(body));
   });
 });
-window.vm.onStatus((text) => {
-  showStatus({ kind: 'vm', text, hint: '' }); // communication with VM to s_hello
+window.vm.onStatus((text, lost) => {
+  // communication with VM - to s_hello; disconnected - “Connect” button
+  showStatus(
+    lost
+      ? {
+          kind: 'error',
+          text,
+          hint: '',
+          action: 'reconnect',
+          label: 'Подключить',
+        }
+      : { kind: 'vm', text, hint: '' },
+  );
 });
 window.vm.onReady(() => {
   send({ type: 'c_hello', version: schema.version });
@@ -561,8 +598,21 @@ gotoInput.addEventListener('keydown', (e) => {
 let hoverAt: { x: number; y: number } | undefined;
 let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 let hoverNode = -1;
-// Keys - VM (except for developer tools and Ctrl+P - signature strings).
+// Keys - VM (except for developer tools and Ctrl+P - signature strings). Two projections are next: the
+// node under the pointer - and in another panel (the same node of the tree, id common).
+let twin: Element | undefined;
+function showTwin(from: HTMLElement, id: string | null): void {
+  twin?.removeAttribute('twin');
+  twin = undefined;
+  const other = from === app ? side : app;
+  if (id === null || sideWrap.hidden) return;
+  twin = other.querySelector(`[data-id="${id}"]`) ?? undefined;
+  twin?.setAttribute('twin', '');
+}
 for (const pane of [app, side]) {
+  pane.addEventListener('mousemove', (e) => {
+    showTwin(pane, ViewElement.nodeOf(e)?.getAttribute('data-id') ?? null);
+  });
   pane.addEventListener('keydown', (e) => {
     const v = [...views.values()].find((x) => x.host === pane);
     if (!v || (e.ctrlKey && e.shiftKey && e.key === 'I')) return;
@@ -572,6 +622,8 @@ for (const pane of [app, side]) {
     if (e.key === 'F2') {
       e.preventDefault();
       byId('ast').hidden = !byId('ast').hidden;
+      if (byId('ast').hidden)
+        for (const w of views.values()) w.showGhost(null, '');
       requestInspect();
       return;
     }
@@ -608,6 +660,13 @@ for (const pane of [app, side]) {
     }
     if (e.ctrlKey && e.key === 'm') {
       openGoto('merge');
+      return;
+    }
+    // Ctrl+Shift+J - two projections side by side (frame “Projection”): module again in the second panel
+    if (e.ctrlKey && e.shiftKey && (e.key === 'J' || e.key === 'О')) {
+      e.preventDefault();
+      sideModule = true;
+      send({ type: 'c_open_view', kind: 'module' });
       return;
     }
     if (e.ctrlKey && e.key === 'j') {
