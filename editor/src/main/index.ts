@@ -9,7 +9,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { app, BrowserWindow, ipcMain } from 'electron';
@@ -153,7 +154,10 @@ ipcMain.on('ai:ask', (_e, text: string) => {
     'Grep',
     'Glob',
   ];
-  const proc = spawn(process.env.CLAUDE_BIN ?? 'claude', args, {
+  // claude is from CLAUDE_BIN, otherwise the Claude Code installer puts it in ~/.local/bin (not always in PATH).
+  const local = join(homedir(), '.local/bin/claude');
+  const bin = process.env.CLAUDE_BIN ?? (existsSync(local) ? local : 'claude');
+  const proc = spawn(bin, args, {
     cwd: program ? dirname(program) : process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
