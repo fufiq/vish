@@ -10,6 +10,8 @@ run
 wait 3
 // conclusion
 // expect: output text="0 8994\n" ok=true more=false state="running"
+// It starts with what is executed (node), the string has its print.
+// expect: label="main:18" now=#
 // brows - by changing the state: "performed" with the first piece
 // expect: status kind="run" text="исполняется" hint="⇧F5 остановить"
 // editing during launch: the process executes the received code - a draft with editing is not visible to him

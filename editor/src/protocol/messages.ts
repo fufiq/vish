@@ -251,13 +251,16 @@ export interface Layers {
   overloads: Overload[];
   overload: number;
 }
-// Launch output: more is a continuation of the former, state - 'running', 'stopped' or '' (finished).
+// Launch output: more is a continuation of the former, state - 'running', 'stopped' or '' (finished). From -
+// on the line text: the node of its print and the signature "function: line"; now - what is executed.
 export interface Output {
   type: 's_output';
   text: string;
   ok: boolean;
   more: boolean;
   state: string;
+  from: { type: 's_src'; node: NodeId | null; label: string }[];
+  now: NodeId | null;
 }
 export interface Saved {
   type: 's_saved';

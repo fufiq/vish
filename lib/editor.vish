@@ -725,11 +725,19 @@ live_refresh() => native "cpp" {
   editor_host->live_refresh();
   return value(int64_t(0));
 };
-// Launch output to the client: more is a continuation of the previous, state - "running", "stopped" or "finished"
-run_output(str text, bool ok, bool more, str state) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known()) return erase(value(int64_t(0)));
-  if(editor_host->now_peer)
-    editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), (a[2]).as<bool>(), std::string((a[3]).as<str_v>().view())});
+// Launch output to the client: more - continuation of the former, state - "running", "stopped" or " (finished)
+// from - out_src on the output lines, now - executable node (empty - no)
+run_output(str text, bool ok, bool more, str state, from, now) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_output out{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), (a[2]).as<bool>(), std::string((a[3]).as<str_v>().view()), {}, s.node_or_none(vm, a[5], where)};
+  auto const & xs = (a[4]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value x = xs.get(k);
+    out.from.push_back({s.node_or_none(vm, s.field(x, "node", where), where), std::string(s.field(x, "label", where).as<str_v>().view())});
+  }
+  if(s.now_peer) s.send(*s.now_peer, out);
   return value(int64_t(0));
 };
 // Start with the track (steps - on it)
@@ -746,7 +754,7 @@ trace_program(str args, str input) => native "cpp" {
 };
 show_output(str text, bool ok) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), false, ""});
+  if(editor_host->now_peer) editor_host->send(*editor_host->now_peer, proto::s_output{std::string((a[0]).as<str_v>().view()), (a[1]).as<bool>(), false, "", {}, node_id{}});
   return value(int64_t(0));
 };
 // name of the program of the session (the way is open)
@@ -3912,9 +3920,30 @@ on_run(str args, str input) {
   finalize_views();
   start_program(args, input);
 }
-// Execution of the launch - as the execution
-on_run_output(str text, bool ok, bool more, str state) {
-  run_output(text, ok, more, state);
+// output of the launch - as the output line is executed - to its print, executable - in code (frame "Run",
+// author's decision 2026-10-26): places from the machine - node representation of the client module and the
+// signature "function: line". My signature.
+struct out_src { code node; str label; }
+on_run_output(str printed, bool ok, bool more, str state, spans, now) {
+  v = -1;
+  for(w : range(views.size)) if((v < 0) && ((views[w].peer == now_peer()) && (given(views[w].root) && (views[w].kind == "module")))) v = w;
+  from = array{};
+  at_now = code();
+  if(v >= 0) {
+    ns = views[v].lay.nodes;
+    array{srcs, froms, tos} = node_spans(ns);
+    for(sp : spans) {
+      k = node_at(ns, srcs, froms, tos, sp);
+      if(k >= 0) {
+        n = node_code(k);
+        f = enclosing_fn(n);
+        from.push(out_src{n, ((if(given(f)) code_name(f) else "") + ":") + text(line_at(v, node_place(v, n)) + 1)});
+      } else from.push(out_src{code(), ""});
+    }
+    k = node_at(ns, srcs, froms, tos, now);
+    if(k >= 0) at_now = node_code(k);
+  }
+  run_output(printed, ok, more, state, from, at_now);
   if(more && (state == "running")) return 0; // The change of state, not every piece.
   if(state == "running") send_status(now_peer(), "run", "исполняется", "⇧F5 остановить")
   else if(!ok) send_status(now_peer(), "error", "ошибка при исполнении", "вывод — в панели запуска")

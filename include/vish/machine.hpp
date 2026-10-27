@@ -292,6 +292,7 @@ struct process_machine {
   address_space * outer_space = machine_space; // level of the car that was before
   m_state & st;
   std::string * captured = nullptr; // output - in line (tests), otherwise stdout
+  std::vector<span> * print_spans = nullptr; // print location of each output line (editor: line → call)
   std::string elab_out; // withdrawal of assistant elaboration (ct modules) to start
 
   // host resources (§9.5 step 12.1): Descriptors and kernel applications are not part of the process.
@@ -658,6 +659,14 @@ struct process_machine {
 
   // --- output ---
 
+  // what is executed: the place of the last problem of the current fiber in the program code (not prelude)
+  span running_span() {
+    if(st.fibers.empty()) return {};
+    auto const & ts = fib().tasks;
+    for(auto it = ts.rbegin(); it != ts.rend(); ++it)
+      if(it->node && (!db.prelude || db[it->node].where.source != db[db.prelude].where.source)) return db[it->node].where;
+    return {};
+  }
   void print(std::vector<mval> const & a) {
     std::string line;
     for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + helper.print_text(to_value(a[i]));
@@ -1994,6 +2003,7 @@ struct process_machine {
 
   mval builtin(std::string_view n, std::vector<mval> const & a, span where) {
     if(n == "print") {
+      if(print_spans) print_spans->push_back(where);
       print(a);
       return mval{m_unit{}};
     }

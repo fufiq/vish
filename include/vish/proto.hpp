@@ -231,12 +231,20 @@ struct s_layers {
 };
 // Startup output: Print the program and error with the track (ok - no error). Start-up is the process of
 // the machine, output as it is executed: more is a continuation of the former, state - "running" (goes),
-// "stopped" (stopped)," - is finished.
+// "stopped" (stopped)," - is finished. From - on the line text: the node of its print and the signature
+// "function: line" (empty - no space); now - what is executed (launched), empty - nothing (frame "Run").
+//
+struct s_src {
+  node_id node;
+  std::string label;
+};
 struct s_output {
   std::string text;
   bool ok;
   bool more;
   std::string state;
+  std::vector<s_src> from;
+  node_id now;
 };
 struct s_saved {
   std::string path;

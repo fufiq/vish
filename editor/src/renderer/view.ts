@@ -134,6 +134,14 @@ export class ViewElement {
 
   #decor: Decor | undefined;
   #peers: Peers | undefined;
+  #running: Element | undefined;
+
+  // Executed by start (frame "Run"): node - backlit string; null - nothing.
+  showRunning(node: NodeId | null): void {
+    this.#running?.removeAttribute('running');
+    this.#running = node === null ? undefined : this.byId.get(node);
+    this.#running?.setAttribute('running', '');
+  }
 
   // Other clients: a carriage with the signature "client N" and a dotted frame around the element he rules
   // with the draft; node is not in the layout - the nearest ancestor (VM has already substituted).

@@ -6,6 +6,9 @@
 open_view module
 run 1.5\s2
 // expect: output text="4\n2.25\n" ok=true
+// output line - to its print, the signature "function: line" (frame "Run")
+// expect: label="main:12"
+// expect: label="main:13" now=·
 // Body editing - the next launch is already with her
 pointer 1 @* 1 1
 key 1 Delete

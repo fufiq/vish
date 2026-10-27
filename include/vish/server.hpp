@@ -1242,6 +1242,7 @@ struct editor_server {
     node_id root;
     std::unique_ptr<process_machine> m;
     std::string out; // quantization
+    std::vector<span> out_at; // print-place
     std::vector<std::string> args, input; // back-up
     peer * who = nullptr; // client running the program
     bool sent = false; // The conclusion has already been sent: the next - the continuation
@@ -1271,6 +1272,7 @@ struct editor_server {
     try {
       live->m = std::make_unique<process_machine>(live->db, live->root, session.name);
       live->m->captured = &live->out;
+      live->m->print_spans = &live->out_at;
       live->m->external_wait = true;
       live->m->start(args, input);
     } catch(diagnostic const & d) {
@@ -1321,20 +1323,26 @@ struct editor_server {
     std::string text;
     bool ok, more;
     std::string state;
+    std::vector<span> at;
+    span now;
   };
   std::vector<run_note> run_notes;
   uint32_t deciding = 0;
   void run_output(std::string_view state) {
     live_run & r = *live;
     bool more = std::exchange(r.sent, true);
-    run_notes.push_back({r.who, std::exchange(r.out, {}), r.ok, more, std::string(state)});
+    span now = state == "running" && r.m ? r.m->running_span() : span{};
+    run_notes.push_back({r.who, std::exchange(r.out, {}), r.ok, more, std::string(state), std::exchange(r.out_at, {}), now});
     if(!deciding) flush_run_notes();
   }
   void flush_run_notes() {
     while(!run_notes.empty()) {
       run_note n = std::move(run_notes.front());
       run_notes.erase(run_notes.begin());
-      decide(n.who, -1, "on_run_output", {value(std::move(n.text)), value(n.ok), value(n.more), value(std::move(n.state))});
+      auto place = [](span w) { return value(array_v::of({value(int64_t(w.source)), value(int64_t(w.begin)), value(int64_t(w.end))})); };
+      std::vector<value> at;
+      for(span w: n.at) at.push_back(place(w));
+      decide(n.who, -1, "on_run_output", {value(std::move(n.text)), value(n.ok), value(n.more), value(std::move(n.state)), value(array_v::of(std::move(at))), place(n.now)});
     }
   }
   void finish_run(std::string_view state) {

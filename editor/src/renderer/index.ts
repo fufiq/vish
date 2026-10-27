@@ -14,6 +14,7 @@ import {
   type ServerMsg,
   type Stops,
   type Peers,
+  type Output,
   type Layers,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
@@ -161,10 +162,7 @@ function receive(m: ServerMsg): void {
       views.get(m.view)?.showCompletion(m);
       return;
     case 's_output': {
-      const text = (m.more ? (runOutput.dataset.text ?? '') : '') + m.text;
-      runOutput.dataset.text = text;
-      runOutput.textContent = text === '' ? '(вывода нет)' : text;
-      runOutput.toggleAttribute('error', !m.ok);
+      showOutput(m);
       return;
     }
     case 's_trace':
@@ -284,6 +282,45 @@ function showStops(m: Stops): void {
   }
   stopsPanel.replaceChildren(head, list);
   list.querySelector('[current]')?.scrollIntoView({ block: 'nearest' });
+}
+
+// Launch output (frame "Run"): a line - with the signature of your print ("main:12", click - to call);
+// executable - backlight in the code. Lines without space (error, run by interpreter) - text.
+let outRows: { text: string; label: string; node: NodeId | null }[] = [];
+function showOutput(m: Output): void {
+  if (!m.more) outRows = [];
+  const lines = m.text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  lines.forEach((text, i) => {
+    const src = m.from.at(i);
+    outRows.push({ text, label: src?.label ?? '', node: src?.node ?? null });
+  });
+  runOutput.toggleAttribute('error', !m.ok);
+  if (outRows.length === 0) runOutput.textContent = '(вывода нет)';
+  else
+    runOutput.replaceChildren(
+      ...outRows.map((r) => {
+        const row = document.createElement('div');
+        row.className = 'out-row';
+        const label = document.createElement('span');
+        label.className = 'out-at';
+        label.textContent = r.label;
+        if (r.node !== null) {
+          const node = r.node;
+          label.classList.add('link');
+          label.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            const v = [...views.values()].find((x) => x.host === app);
+            if (v) send({ type: 'c_open', view: v.data.view, node });
+          });
+        }
+        const text = document.createElement('span');
+        text.textContent = r.text;
+        row.append(label, text);
+        return row;
+      }),
+    );
+  [...views.values()].find((x) => x.host === app)?.showRunning(m.now);
 }
 
 // Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM

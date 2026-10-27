@@ -317,6 +317,28 @@ body {
   overflow: auto;
   font-size: 13px;
 }
+#run-output .out-row {
+  display: flex;
+  gap: 14px;
+}
+#run-output .out-at {
+  flex: none;
+  min-width: 70px;
+  color: var(--vish-detail);
+  font-size: 12px;
+}
+#run-output .out-at.link {
+  cursor: pointer;
+}
+#run-output .out-at.link:hover {
+  color: var(--vish-caret);
+}
+/* исполняемое запуском — зелёной подсветкой (кадр «Запуск») */
+.vish-node[running] {
+  background: color-mix(in srgb, #22c55e 16%, transparent);
+  box-shadow: -4px 0 0 #22c55e;
+  border-radius: 3px;
+}
 #run-output[error] {
   color: var(--vish-error);
 }
