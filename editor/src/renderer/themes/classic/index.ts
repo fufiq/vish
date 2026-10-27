@@ -284,11 +284,8 @@ const theme: Theme = {
       return;
     },
     gutter(el, lines) {
-      if (el.childElementCount === lines) return;
       el.replaceChildren(
-        ...Array.from({ length: lines }, (_, i) =>
-          make('div', '', String(i + 1)),
-        ),
+        ...lines.map((_, i) => make('div', '', String(i + 1))),
       );
     },
   },

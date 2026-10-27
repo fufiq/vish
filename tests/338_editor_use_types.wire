@@ -1,14 +1,17 @@
-// Signatures of types and values for uses (author's decision 2026-10-26, "everywhere, always"):
-// each name of a local variable or parameter has a type and value at that location, if known in
-// compilation; not only for ads.
-//;.
+// Types and values for uses (author's decision 2026-10-27, Laptop frame: icon - only for the ad, use label,
+// signature above node on the cursor line; was 2026-10-26 "everywhere, always"): each name of a local
+// variable or parameter - type and value in this place, if it is known during compilation; the operator -
+// it.
+//.
 // program: editor_use_types.vish
 open_view module
-// declaration k = 0 - the value of the initializer
+// declaration k = 0 - an icon with an initializer value
 // expect: kind="type" text="i64 = 0"
 // The use of k after k = k + 5 is its value at this point.
-// expect: kind="type" text="i64 = 5"
+// expect: kind="use" text="i64 = 5"
 // parameter x in the body scale - type by instance
-// expect: kind="type" text="f64"
+// expect: kind="use" text="f64"
+// operator - signature by himself
+// expect: kind="use" text="+"
 // name of the function called - without signature
 // expect-not: text="scale"

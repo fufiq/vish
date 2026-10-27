@@ -21,6 +21,16 @@ const theme: Theme = {
   css: [css],
   shell: backdrop + header + classicShell,
   panels: {
+    // number - only the lines with the code; empty and comments - without a number, counting (frame "Laptop")
+    gutter(el, lines) {
+      el.replaceChildren(
+        ...lines.map((l, i) => {
+          const d = document.createElement('div');
+          d.textContent = l.code ? String(i + 1) : '\u00a0'; // empty div would collapse
+          return d;
+        }),
+      );
+    },
     header(el, h) {
       const span = (className: string, text = '') => {
         const s = document.createElement('span');

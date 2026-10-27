@@ -3504,13 +3504,23 @@ type_marks(found, i64 v) {
       }
     }
   }
-  // for uses, too (author's decision 2026-10-26, "everywhere, always"): the name of a local
-  // variable or parameter is the type and value, if known in compilation.
-// 
-  // . Not the name of the function being called; the ad is already marked above.
-  for(n : view_nodes(v)) if((code_kind(n) == ast.name) && (!marked_at(found, n) && local_use(n))) {
-    ts = shown_node(n);
-    if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+  // use tag (author's decision 2026-10-27, Laptop frame: icons - only for ads, for uses - with a
+  // signature above node on the cursor line; was 2026-10-26 "everywhere, always"): the name of the local
+  // variable or parameter - type and value, if it is known during compilation; the operator - himself.
+  //
+// Not the name of the function being called; the ad is already marked above.
+  for(n : view_nodes(v)) {
+    k = code_kind(n);
+    if((k == ast.name) && (!marked_at(found, n) && local_use(n))) {
+      ts = shown_node(n);
+      // left part of `t += x` in the body of the structure - there are no observations: name type for the whole
+      // function, without meanings (body for - its area)
+      if(ts == "") ts = join_types(fn_name_types(n, name_of(n)));
+      if(ts != "") found.push(mark{n, "use", ts, 0, 0});
+    } else if((k == ast.operation) && (member_name(n) == "")) {
+      ast.operation{op, xs, _} = n;
+      if(xs.size == 2) found.push(mark{n, "use", op, 0, 0});
+    }
   }
   true
 }
@@ -3526,6 +3536,12 @@ unknown_mark(found, n) {
   for(p : ps) if(has_types(p) || (shown_name(p, code_name(p)) != "")) ran = true;
   if(ran) found.push(mark{n, "unknown", "?", 0, 0});
   0
+}
+fn_name_types(n, str name) {
+  f = enclosing_fn(n);
+  ns = array{};
+  if(given(f)) name_nodes(f, name, ns);
+  types_of_nodes(ns)
 }
 marked_at(found, n) {
   r = false;

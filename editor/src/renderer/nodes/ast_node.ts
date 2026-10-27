@@ -47,6 +47,7 @@ export interface NodeMarks {
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
   diverged?: string;
+  use?: string; // type of use (or operator) - a signature above node on the cursor line
   role?: string; // VM: fn, prelude, native, param N, var N, global N
   spans?: Span[]; // markup of your text (component node)
   unknown?: boolean; // type not deduced - badge "?" // was general, but in general logic it is no longer (checking the consistency of layers)
@@ -57,6 +58,7 @@ badgeSheet.replaceSync(`
   .badge { color: var(--vish-type, gray); font-size: 0.65em; position: relative; top: 0.45em; margin-left: 1px; white-space: nowrap; }
   .badge.value { color: var(--vish-value, gray); }
   .badge.unknown { display: inline-block; min-width: 1.2em; top: 0; margin-left: 2px; padding: 0 0.2em; border: 1px dashed #15803d; border-radius: 4px; background: color-mix(in srgb, #15803d 6%, transparent); color: #15803d; text-align: center; font-weight: 600; line-height: 1.3; }
+  .above { display: none; }
   .layer { display: inline-block; margin-right: 3px; padding: 0 0.35em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; vertical-align: 0.3em; color: var(--vish-value, gray); border: 1px solid color-mix(in srgb, var(--vish-value, gray) 45%, transparent); cursor: pointer; }
   .layer.chosen { margin: 0 0 0 2px; cursor: default; }
   .step { display: inline-block; min-width: 1.35em; margin-right: 2px; padding: 0 0.3em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; text-align: center; vertical-align: 0.3em; color: white; background: color-mix(in srgb, var(--vish-error, #c0392b) calc(30% + var(--step, 1) * 70%), var(--vish-bg, white)); }
@@ -74,6 +76,7 @@ export abstract class ASTNode extends HTMLElement {
   // note VM (cause of the hole) - hint and emphasis, not text
   #note = '';
   #badge: HTMLSpanElement | undefined;
+  #above: HTMLSpanElement | undefined;
   #step: HTMLSpanElement | undefined;
   #layer: HTMLSpanElement | undefined;
   #error = '';
@@ -165,6 +168,17 @@ export abstract class ASTNode extends HTMLElement {
       this.#badge.textContent = text;
       this.badgeRoot().append(this.#badge);
     }
+    // caption above node (laptop frame): visible when the window places node on-line (cursor line)
+    this.#above?.remove();
+    this.#above = undefined;
+    if (m.use !== undefined) {
+      this.#above = document.createElement('span');
+      this.#above.className = 'above';
+      this.#above.part = 'above';
+      this.#above.textContent = m.use;
+      this.badgeRoot().append(this.#above);
+    }
+    this.toggleAttribute('use', m.use !== undefined);
     this.#error = m.error ?? '';
     this.toggleAttribute('error', m.error !== undefined);
     this.toggleAttribute('dead', m.dead === true);

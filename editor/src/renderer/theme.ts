@@ -50,6 +50,11 @@ export interface HeaderView {
   col: number;
 }
 
+// The line of the presentation text for numbers: is there a code in it (not spaces and not a comment).
+export interface GutterLine {
+  code: boolean;
+}
+
 // Panels - draw in their element markup (id from shell) all over again according to the sent.
 export interface Panels {
   status: (el: HTMLElement, s: StatusView, host: Host) => void;
@@ -60,7 +65,7 @@ export interface Panels {
   proposals: (el: HTMLElement, ps: readonly Proposal[], host: Host) => void;
   merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
-  gutter: (el: HTMLElement, lines: number) => void;
+  gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
 }
 
 export interface Theme {

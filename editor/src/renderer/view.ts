@@ -388,7 +388,70 @@ export class ViewElement {
     this.caret.style.top = `${String(box.top)}px`;
     this.caret.style.height = `${String(box.height)}px`;
     this.caret.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    this.#markLine();
     if (this.#selection) this.showSelection(this.#selection);
+  }
+
+  // The cursor line (frame "Laptop"): signatures above node - at the instruction under the cursor: the operator of
+  // the line and its operand closest to the carriage (on the line without an operator - all the string signatures).
+  #markLine(): void {
+    const caret = this.caret.getBoundingClientRect();
+    const line: ASTNode[] = [];
+    for (const el of this.#marked) {
+      el.removeAttribute('on-line');
+      if (!el.hasAttribute('use') || this.caret.hidden) continue;
+      const r = el.getBoundingClientRect();
+      const mid = r.top + Math.min(r.height, caret.height) / 2;
+      if (mid > caret.top && mid < caret.bottom) line.push(el);
+    }
+    const ops = line.filter((el) => el.dataset.kind === 'n_op');
+    const gap = (el: ASTNode) => {
+      const r = el.getBoundingClientRect();
+      return caret.left < r.left
+        ? r.left - caret.left
+        : Math.max(0, caret.left - r.right);
+    };
+    const op = ops.sort((a, b) => gap(a) - gap(b)).at(0);
+    for (const el of line)
+      if (!op || op.contains(el)) el.setAttribute('on-line', '');
+  }
+
+  // Lines of text for numbers: whether there is code in a line - not spaces and not a comment (Span tags
+  // from VM; text sheet - always code).
+  lines(): { code: boolean }[] {
+    const comments = new Map<NodeId, [number, number][]>();
+    for (const m of this.#decor?.marks ?? [])
+      if (m.kind === 'span' && m.text.startsWith('comment')) {
+        const list = comments.get(m.node) ?? [];
+        list.push([m.from, m.to]);
+        comments.set(m.node, list);
+      }
+    const out = [{ code: false }];
+    const walk = (id: NodeId): void => {
+      const n = this.nodes.get(id);
+      if (!n) return;
+      const leaf = n.pieces.every((p) => typeof p === 'string');
+      const cs = comments.get(id) ?? [];
+      let own = 0;
+      for (const p of n.pieces) {
+        if (typeof p !== 'string') {
+          walk(p);
+          continue;
+        }
+        for (const ch of p) {
+          const line = out[out.length - 1];
+          if (ch === '\n') out.push({ code: false });
+          else if (
+            ch.trim() !== '' &&
+            (leaf || !cs.some(([a, b]) => own >= a && own < b))
+          )
+            line.code = true;
+          ++own;
+        }
+      }
+    };
+    walk(this.root?.nodeId ?? this.data.root);
+    return out;
   }
 
   #marked = new Set<ASTNode>();
@@ -446,6 +509,7 @@ export class ViewElement {
       if (m.kind === 'diverged') e.diverged = m.text;
       if (m.kind === 'unknown') e.unknown = true;
       if (m.kind === 'role') e.role = m.text;
+      if (m.kind === 'use') e.use = m.text;
       if (m.kind === 'span')
         (e.spans ??= []).push({ from: m.from, to: m.to, kind: m.text });
       if (m.kind === 'error') {

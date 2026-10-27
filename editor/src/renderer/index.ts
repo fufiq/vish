@@ -184,7 +184,7 @@ function paintHeader(): void {
   );
 }
 function paintGutter(v: ViewElement | undefined): void {
-  if (v) panels.gutter(v.gutter, v.position().line);
+  if (v) panels.gutter(v.gutter, v.lines());
 }
 
 function closeSide(): void {
@@ -240,6 +240,7 @@ function receive(m: ServerMsg): void {
     }
     case 's_decor':
       views.get(m.view)?.showMarks(m);
+      paintGutter(views.get(m.view)); // commentaries
       checks.set(m.view, {
         revision: m.revision,
         errors: m.marks.filter((k) => k.kind === 'error').length,

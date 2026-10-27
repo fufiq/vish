@@ -2,7 +2,7 @@
 // out: 10
 total(xs) {
   s = 0;
-  for(x : xs) s = s + x;
+  for(x : xs) s += x;
   s
 }
 

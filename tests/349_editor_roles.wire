@@ -15,3 +15,6 @@ open_view module
 // expect: kind="span" text="comment"
 // expect: kind="span" text="decl"
 // expect: kind="span" text="field"
+// signature over node on the cursor line (frame "Laptop"): s in `s += x` body for - type over the entire function
+// expect: kind="use" text="i64"
+// expect: kind="use" text="+="
