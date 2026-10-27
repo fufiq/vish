@@ -15,6 +15,7 @@ import {
   type Stops,
   type Peers,
   type Output,
+  type Conflict,
   type Layers,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
@@ -445,9 +446,7 @@ for (const field of [runStdin, runArgs] as HTMLElement[]) {
 // Merger (Ctrl+M): Conflicts are both options nearby; take them or leave mine.
 //
 //
-function showMerge(
-  conflicts: readonly { key: string; mine: string; theirs: string }[],
-): void {
+function showMerge(conflicts: readonly Conflict[]): void {
   mergePanel.hidden = conflicts.length === 0; // The result is in a bang from VM.
   mergePanel.replaceChildren(
     ...conflicts.map((c) => {
@@ -456,24 +455,59 @@ function showMerge(
       const title = document.createElement('div');
       title.className = 'title';
       title.textContent = `конфликт: ${c.key}`;
-      const side = (label: string, text: string, theirs: boolean) => {
+      // Column: name, difference with the base, text with illuminated changed, button (the base does not)
+      const side = (
+        name: string,
+        text: string,
+        note: string,
+        from: number,
+        to: number,
+        take?: { label: string; theirs: boolean },
+      ) => {
         const col = document.createElement('div');
-        const head = document.createElement('button');
-        head.textContent = label;
-        head.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          send({ type: 'c_take', key: c.key, theirs });
-        });
+        col.className = 'side';
+        const head = document.createElement('div');
+        head.className = 'head';
+        const b = document.createElement('b');
+        b.textContent = name;
+        const n = document.createElement('span');
+        n.textContent = note;
+        head.append(b, n);
         const pre = document.createElement('pre');
-        pre.textContent = text === '' ? '— нет —' : text;
+        // eslint-disable-next-line @typescript-eslint/no-misused-spread
+        const cps = [...text];
+        if (text === '') pre.textContent = '— нет —';
+        else if (to > from) {
+          const mark = document.createElement('mark');
+          mark.textContent = cps.slice(from, to).join('');
+          pre.append(cps.slice(0, from).join(''), mark, cps.slice(to).join(''));
+        } else pre.textContent = text;
         col.append(head, pre);
+        if (take) {
+          const btn = document.createElement('button');
+          btn.textContent = take.label;
+          btn.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            send({ type: 'c_take', key: c.key, theirs: take.theirs });
+          });
+          col.append(btn);
+        }
         return col;
       };
-      box.append(
-        title,
-        side('оставить мой', c.mine, false),
-        side('взять их', c.theirs, true),
+      const cols = document.createElement('div');
+      cols.className = 'cols';
+      cols.append(
+        side('база', c.base, 'общее начало', 0, 0),
+        side('мой', c.mine, c.mine_note, c.mine_from, c.mine_to, {
+          label: 'Оставить мой',
+          theirs: false,
+        }),
+        side('их', c.theirs, c.theirs_note, c.theirs_from, c.theirs_to, {
+          label: 'Взять их',
+          theirs: true,
+        }),
       );
+      box.append(title, cols);
       return box;
     }),
   );

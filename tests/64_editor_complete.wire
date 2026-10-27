@@ -28,7 +28,7 @@ key 1 ArrowUp
 key 1 ArrowDown
 key 1 Enter
 // expect: курсор:   print‸
-// expect: selected=0 items=⏎update
+// expect: selected=0 items= preview=""⏎update
 // The typed matched the only option - there is nothing to show
 key 1 ;
 key 1 Enter
@@ -38,7 +38,7 @@ key 1 e
 key 1 a
 key 1 n
 // expect: курсор:   mean‸
-// expect: items=⏎
+// expect: items= preview=""
 key 1 ;
 // expect-not: complete
 // semicolon after print - an empty call becomes a print instruction.
@@ -51,11 +51,11 @@ key 1 \s 2
 // expect: name="while" kind="функция" detail="(c, body)"
 // expect: name="read_floats" kind="функция" detail="(stdin) — VM"
 key 1 Escape
-// expect: items=⏎
+// expect: items= preview=""
 // cursor movement closes the list
 key 1 \s 2
 key 1 ArrowLeft
-// expect: selected=0 items=⏎
+// expect: selected=0 items= preview=""
 // expect: cursor
 // c functions: parameter and declared to the place; parameter of the block of construction for
 pointer 1 @f64 0 0

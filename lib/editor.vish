@@ -291,12 +291,12 @@ send_caret(i64 peer, i64 id, bool selection, i64 n, i64 piece, i64 offset) => na
   return value(int64_t(0));
 };
 // list of additions (completion) at the place (node, piece, displacement); empty - hide
-send_completion_list(i64 peer, i64 id, i64 n, i64 piece, i64 offset, i64 selected, items) => native "cpp" {
+send_completion_list(i64 peer, i64 id, i64 n, i64 piece, i64 offset, i64 selected, items, str preview) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
   int64_t n = (a[2]).as<int64_t>();
-  proto::s_complete out{uint32_t((a[1]).as<int64_t>()), n < 0 ? node_id{} : node_id(uint32_t(n)), uint32_t((a[3]).as<int64_t>()), uint32_t((a[4]).as<int64_t>()), uint32_t((a[5]).as<int64_t>()), {}};
+  proto::s_complete out{uint32_t((a[1]).as<int64_t>()), n < 0 ? node_id{} : node_id(uint32_t(n)), uint32_t((a[3]).as<int64_t>()), uint32_t((a[4]).as<int64_t>()), uint32_t((a[5]).as<int64_t>()), {}, std::string((a[7]).as<str_v>().view())};
   auto const & xs = (a[6]).as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value x = xs.get(k);
@@ -771,8 +771,8 @@ save_program(str path) => native "cpp" {
 // Program session - the number for the Tools module session commands (apply_command ...)
 program_session() => native "cpp" { return value(tools_host->session_of(editor_host->session)); };
 // Merge conflicts (and taken by itself) - to the client: conflicts - conflict tools module
-send_merge_list(taken, conflicts) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
+send_merge_list(taken, conflicts, diffs) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(int64_t(0)));
   auto & h = *editor_host;
   std::vector<std::string> taken;
   for(uint32_t k = 0; k < (a[0]).as<array_v>().size(); ++k) taken.emplace_back((a[0]).as<array_v>().get(k).as<str_v>().view());
@@ -781,6 +781,14 @@ send_merge_list(taken, conflicts) => native "cpp" {
     value c = (a[1]).as<array_v>().get(k);
     auto s = [&](std::string_view f) { return std::string(h.field(c, f, where).as<str_v>().view()); };
     cs.push_back({s("key"), s("base"), s("mine"), s("theirs")});
+    value d = (a[2]).as<array_v>().get(k);
+    auto n = [&](std::string_view f) { return h.field(d, f, where); };
+    cs.back().mine_from = uint32_t(n("mine_from").as<int64_t>());
+    cs.back().mine_to = uint32_t(n("mine_to").as<int64_t>());
+    cs.back().mine_note = std::string(n("mine_note").as<str_v>().view());
+    cs.back().theirs_from = uint32_t(n("theirs_from").as<int64_t>());
+    cs.back().theirs_to = uint32_t(n("theirs_to").as<int64_t>());
+    cs.back().theirs_note = std::string(n("theirs_note").as<str_v>().view());
   }
   h.send_merge(std::move(taken), std::move(cs));
   return value(int64_t(0));
@@ -1139,7 +1147,11 @@ set_typing(i64 v, bool on) {
 // --- Lists: Supplement and transition ---
 send_completion(i64 v) {
   array{n, p, o} = if(views[v].word_begin < places(v)) caret_of(v, views[v].word_begin) else array{-1, 0, 0};
-  send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items);
+  // Preview "will be created" at the item "add" the transition list (frame "Transition"): "I just want to
+  // tell the tuling "I want to add" ... I can write foo(int) and go"
+  k = views[v].selected;
+  preview = if(nav_list(v) && ((k < views[v].targets.size) && (!given(nav_fn(v, k)) && (nav_add(v, k) != "")))) overload_text(nav_add(v, k)) else "";
+  send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview);
 }
 // The list of additions (or transitions) is open and there are options
 completing(i64 v) => views[v].completing && (views[v].items.size > 0);
@@ -3705,7 +3717,8 @@ goto_sig(i64 v, str sig) {
 }
 // Add the internal overload "foo(i64, str)": parameter names - as in overload of the same aricity,
 // otherwise a, b, c...; the body is an empty string to set
-add_overload(str sig) {
+add_overload(str sig) => add_inner(overload_text(sig), sig);
+overload_text(str sig) {
   open = find_text(sig, "(");
   name = slice_text(sig, 0, open);
   inside = slice_text(sig, open + 1, sig.size - 1);
@@ -3728,7 +3741,7 @@ add_overload(str sig) {
   }
   s = name + "(";
   for(k : range(types.size)) s = (((s + (if(k > 0) ", " else "")) + before(types[k], '<')) + " ") + (if(k < names.size) names[k] else text_byte('a' + k));
-  add_inner(s + ") {\n\n}\n", sig);
+  s + ") {\n\n}\n"
 }
 // Item on the transition list: open a function or add a signature
 nav_accept(i64 v) {
@@ -3990,11 +4003,36 @@ merge_from(str path) {
   ""
 }
 send_merge(bool with_taken) {
-  send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts);
+  diffs = array{};
+  for(c : merge_state.conflicts) {
+    m = change_of(c.base, c.mine);
+    t = change_of(c.base, c.theirs);
+    diffs.push(conflict_diff{m.from, m.to, m.note, t.from, t.to, t.note});
+  }
+  send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts, diffs);
   n = merge_state.conflicts.size;
   took = if(with_taken) merge_state.taken.size else 0;
   send_status(now_peer(), "done", if(n > 0) "конфликтов: " + text(n) else "слито", if(took > 0) "взято у них: " + text(took) else "");
   calm_status(now_peer());
+}
+// The difference of the variant with the base (frame "Mingle", author's decision 2026-10-26): the general
+// beginning and end are not changes; the middle of the variant is [from, to] code points, briefly. My area.
+struct text_change { i64 from; i64 to; str note; }
+struct conflict_diff { i64 mine_from; i64 mine_to; str mine_note; i64 theirs_from; i64 theirs_to; str theirs_note; }
+change_of(str base, str other) {
+  if(other == "") return text_change{0, 0, "удалён"};
+  if(base == "") return text_change{0, code_points(other), "новый"};
+  if(base == other) return text_change{0, 0, "как в базе"};
+  p = 0;
+  while((p < base.size) && ((p < other.size) && (base[p] == other[p]))) p += 1;
+  while((p > 0) && ((p < other.size) && ((other[p] & 192) == 128))) p -= 1; // beginning
+  q = 0;
+  while(((q + p) < base.size) && (((q + p) < other.size) && (base[(base.size - 1) - q] == other[(other.size - 1) - q]))) q += 1;
+  while((q > 0) && ((other[other.size - q] & 192) == 128)) q -= 1;
+  removed = slice_text(base, p, base.size - q);
+  added = slice_text(other, p, other.size - q);
+  note = if(removed == "") "+ " + clip(trim_lead(added), 30) else if(added == "") "− " + clip(trim_lead(removed), 30) else (clip(trim_lead(removed), 20) + " → ") + clip(trim_lead(added), 20);
+  text_change{code_points(slice_text(other, 0, p)), code_points(slice_text(other, 0, other.size - q)), note}
 }
 // The conflict is resolved: their version (the base has changed - re-imagining) or mine; false - no such thing.
 take_version(str key, bool theirs) {

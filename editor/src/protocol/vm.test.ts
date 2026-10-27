@@ -82,6 +82,7 @@ describe('живая VM', () => {
       'offset',
       'selected',
       'items',
+      'preview',
     ]);
     expect(fields('s_item')).toEqual(['name', 'kind', 'detail']);
     expect(fields('s_decor')).toEqual(['view', 'revision', 'marks']);

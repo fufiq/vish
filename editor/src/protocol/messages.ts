@@ -212,6 +212,7 @@ export interface Complete {
   offset: number;
   selected: number;
   items: CompletionItem[];
+  preview: string; // Selected to add a transition list - what will be created
 }
 // Verification tags: "type" - types of declared name for all instance, "error" -
 // error in place (with a trace). They come in full after the audit. [from, to] is
@@ -316,13 +317,20 @@ export interface TraceStep {
   output: string;
   error: string;
 }
-// Merger: Taken by itself and conflicts (both options are to drain with your hands).
+// Merger: Taken by itself and conflicts (both options are to drain with your hands). Difference of
+// variants with base: [from, to] - changed (code points), note - short what.
 export interface Conflict {
   type: 's_conflict';
   key: string;
   base: string;
   mine: string;
   theirs: string;
+  mine_from: number;
+  mine_to: number;
+  mine_note: string;
+  theirs_from: number;
+  theirs_to: number;
+  theirs_note: string;
 }
 export interface MergeResult {
   type: 's_merge';

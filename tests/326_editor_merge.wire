@@ -37,5 +37,7 @@ key 1 4
 key 1 Escape
 merge out/merge_theirs.vishdb
 // expect: key="main()"
+// разница с базой — подписью и местом (кадр «Слияние»)
+// expect: mine_from=22 mine_to=23 mine_note="3 → 4"
 take main() 1
 // expect: area(i64 n) => n * n;⏎⏎⏎// их комментарий⏎main() {⏎  print(area(3));

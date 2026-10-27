@@ -115,6 +115,7 @@ describe('представление', () => {
       offset: 0,
       selected: 1,
       items: [item('print'), item('port')],
+      preview: '',
     });
     expect(v.popup.hidden).toBe(false);
     expect(
@@ -129,6 +130,7 @@ describe('представление', () => {
       offset: 0,
       selected: 0,
       items: [],
+      preview: '',
     });
     expect(v.popup.hidden).toBe(true);
   });

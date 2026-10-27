@@ -221,6 +221,34 @@ body {
   white-space: nowrap;
   z-index: 1;
 }
+.vish-preview {
+  position: absolute;
+  margin-top: 2px;
+  width: 280px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 14%, transparent);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.2);
+  z-index: 1;
+  white-space: normal;
+}
+.vish-preview[hidden] {
+  display: none;
+}
+.vish-preview .head,
+.vish-preview .note {
+  color: var(--vish-detail);
+  font:
+    12px system-ui,
+    sans-serif;
+}
+.vish-preview pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--vish-bg);
+}
 .vish-complete li {
   display: flex;
   justify-content: space-between;
@@ -365,14 +393,39 @@ body {
   display: none;
 }
 .conflict {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 16px;
   margin-bottom: 12px;
 }
 .conflict .title {
-  grid-column: 1 / -1;
+  margin-bottom: 6px;
   color: var(--vish-error);
+}
+/* база / мой / их — тремя колонками, у каждой — что изменено относительно базы (кадр «Слияние») */
+.conflict .cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+}
+.conflict .side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.conflict .side .head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.conflict .side .head span {
+  color: var(--vish-detail);
+}
+.conflict pre mark {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--vish-type) 22%, transparent);
+  color: inherit;
+}
+.conflict .side button {
+  margin-top: 6px;
 }
 .conflict pre {
   margin: 4px 0 0;

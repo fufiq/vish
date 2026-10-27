@@ -35,6 +35,8 @@ export class ViewElement {
   readonly hint = document.createElement('div');
   // other clients: their carriages and frame elements in their draft (frame "Two Clients")
   readonly peersLayer = document.createElement('div');
+  // “will be created” - next to the transition list when you select “add” (frame “Transition”)
+  readonly preview = document.createElement('div');
   root: ASTNode | undefined;
 
   readonly nodes = new Map<NodeId, ViewNode>();
@@ -54,6 +56,8 @@ export class ViewElement {
     this.hint.className = 'vish-tip vish-hint';
     this.hint.hidden = true;
     this.peersLayer.className = 'vish-peers';
+    this.preview.className = 'vish-preview';
+    this.preview.hidden = true;
     host.replaceChildren(...this.#chrome(this.root));
   }
 
@@ -64,6 +68,7 @@ export class ViewElement {
       this.peersLayer,
       this.caret,
       this.popup,
+      this.preview,
       this.hint,
       this.tip,
     ];
@@ -398,7 +403,10 @@ export class ViewElement {
     this.#completion = m;
     const box = this.#box(m.node, m.piece, m.offset);
     this.popup.hidden = m.items.length === 0 || !box;
-    if (this.popup.hidden || !box) return;
+    if (this.popup.hidden || !box) {
+      this.preview.hidden = true;
+      return;
+    }
     this.popup.replaceChildren(
       ...m.items.map((item, i) => {
         const li = document.createElement('li');
@@ -418,6 +426,20 @@ export class ViewElement {
     this.popup
       .querySelector('[selected]')
       ?.scrollIntoView({ block: 'nearest' });
+    this.preview.hidden = m.preview === '';
+    if (this.preview.hidden) return;
+    const head = document.createElement('div');
+    head.className = 'head';
+    head.textContent = 'будет создано';
+    const code = document.createElement('pre');
+    code.textContent = m.preview.replace(/\n$/, '');
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent =
+      'Внутренняя: в базе и в исполнении, в модуле не видна. Откроется во второй панели.';
+    this.preview.replaceChildren(head, code, note);
+    this.preview.style.left = `${String(box.left + this.popup.offsetWidth + 8)}px`;
+    this.preview.style.top = `${String(box.top + box.height)}px`;
   }
 
   // Click point → place in the text node (indicator for VM).

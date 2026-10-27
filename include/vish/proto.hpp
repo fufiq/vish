@@ -190,6 +190,8 @@ struct s_complete {
   uint32_t offset;
   uint32_t selected;
   std::vector<s_item> items;
+  // select the item "Add" to the transition list - the text to be created (frame "Transition"); otherwise empty
+  std::string preview;
 };
 // Check (check) on node : kind "type" - types of declared name for all instance (in
 // the layer - in its context), "error" - error in the place of use (with a trace),
@@ -249,14 +251,22 @@ struct s_output {
 struct s_saved {
   std::string path;
 };
-// Merger: taken alone (changed only in them) and conflicts are both options for a
-// person: Empty text - there is no element in this version.
+// Merger: taken alone (changed only in them) and conflicts are both options for a person: Empty text -
+// there is no element in this version. Difference with the base (frame "Merge"): [from, to) - changed in
+// the text of the version, code points; note - short that ("3 → 4", "+ comment").
+//
 //
 struct s_conflict {
   std::string key;
   std::string base;
   std::string mine;
   std::string theirs;
+  uint32_t mine_from = 0;
+  uint32_t mine_to = 0;
+  std::string mine_note;
+  uint32_t theirs_from = 0;
+  uint32_t theirs_to = 0;
+  std::string theirs_note;
 };
 struct s_merge {
   std::vector<std::string> taken;

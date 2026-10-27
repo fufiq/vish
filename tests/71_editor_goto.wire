@@ -23,6 +23,8 @@ key 2 Escape
 // No signature - "add" first
 goto 2 area(str)
 // expect: items=⏎  name="добавить area(str)" kind="добавить" detail="внутренняя перегрузка"
+// Selected "Add" - a preview of what will be created (frame "Transition")
+// expect: preview="area(str n) {\n\n}\n"
 key 2 Enter
 // parameter names - as in overload of the same arity; cursor - in the body
 // expect: текст:⏎area(str n) {⏎  ⏎}
