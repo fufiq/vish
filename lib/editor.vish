@@ -986,7 +986,37 @@ calm_status(i64 peer) {
   k = check_errors();
   if(k == 0) return send_status(peer, "", "", "");
   first = lines_of(check_error_text(0, -1));
-  send_status(peer, "error", first[0], if(k > 1) "ещё ошибок: " + text(k - 1) else "")
+  // "Error": "N error · signature · string L" and "To error" (cursor to place - open node )
+  v = module_view_of(peer);
+  at = if(v >= 0) first_error_node(v) else code();
+  sig = missing_signature(first[0]);
+  short = if(sig != "") sig else first[0];
+  line_no = if(given(at) && (node_place(v, at) >= 0)) count_lines(v, node_place(v, at)) else 0;
+  where_at = short + (if(line_no > 0) " · строка " + text(line_no) else ""); // No hint: name of variable module (O4)
+  send_status_with(peer, "error", errors_word(k), where_at, if(given(at)) "open " + text(code_id(at)) else "", if(given(at)) "К ошибке" else "")
+}
+errors_word(i64 k) {
+  m = k % 10;
+  h = k % 100;
+  w = if((m == 1) && (h != 11)) "ошибка" else if(((m >= 2) && (m <= 4)) && ((h < 12) || (h > 14))) "ошибки" else "ошибок";
+  (text(k) + " ") + w
+}
+// Presentation of the peer client module (-1 - no)
+module_view_of(i64 peer) {
+  r = -1;
+  for(i : range(views.size)) if((r < 0) && ((views[i].peer == peer) && (views[i].kind == "module"))) r = i;
+  r
+}
+first_error_node(i64 v) {
+  es = errors_on(views[v].lay.nodes);
+  if(es.size == 0) code() else es[0][0]
+}
+// line number k (c 1)
+count_lines(i64 v, i64 k) {
+  t = slice_text(views[v].lay.text, 0, byte_of(v, k));
+  n = 1;
+  for(i : range(t.size)) if(t[i] == '\n') n += 1;
+  n
 }
 
 // --- layout: places, bytes, node ---
@@ -3687,10 +3717,21 @@ error_lines(i64 v, n) {
       if(given(m) && on_step(n, m)) on = true;
     }
     if(on) {
-      out.push(line{"ошибка", check_error_text(k, -1), code(), 0, 0});
+      title = check_error_text(k, -1);
+      out.push(line{"ошибка", title, code(), 0, 0});
+      // steps - name and role (insignia), place of error - name of the call (frame "Error", author's decision 2026-10-27)
       for(i : range(steps.size)) {
         array{m, t} = steps[i];
-        out.push(line{"шаг", (text(i + 1) + " · ") + t, m, 0, 0});
+        name = step_name(m, t);
+        out.push(line{"шаг " + step_role(name, m), (text(i + 1) + " · ") + name, m, 0, 0});
+      }
+      array{last, _} = steps[steps.size - 1];
+      for(l : why_lines(last)) out.push(l);
+      sig = missing_signature(title);
+      if(sig != "") out.push(line{"добавить", sig, code(), 0, 0});
+      if(steps.size > 1) {
+        array{prev, pt} = steps[steps.size - 2];
+        if(given(prev)) out.push(line{"к вызову", step_name(prev, pt), prev, 0, 0});
       }
     }
   }
@@ -3824,6 +3865,127 @@ enclosing_fn(n) {
   x = code_parent(n);
   while(given(x) && (code_kind(x) != ast.function)) x = code_parent(x);
   x
+}
+
+// --- Error card (item 6 design, frame "Error with Trace")
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// “That’s why Trace has your guts open... you see a conventional line in the code... and you know
+// what’s required.” parsing “why” is the first challenge argument of which no overload of the same
+// arrogance awaits.
+//
+
+// step name: frame "in f" - f; place of error - name of the called
+step_name(m, str t) {
+  if(starts_with(t, "в ")) return text_from(t, "в ".size);
+  if(given(m) && (code_kind(m) == ast.call)) return name_of(callee_of(m));
+  if(given(m) && (code_kind(m) == ast.operation)) {
+    ast.operation{op, _, _} = m;
+    return op; // place of error - operator
+  }
+  t
+}
+step_role(str name, at) {
+  fs = if(given(at)) declarations(name, at) else array{};
+  native = false;
+  for(bt : vm_builtins()) if(bt[0] == name) native = true;
+  if(fs.size > 0) (if(fiber_fn(fs[0])) "fiber" else fn_role(fs[0])) else if(native) "native" else ""
+}
+// "Unknown range(str) function" is a signature missing (" is not such an error)
+missing_signature(str title) {
+  i = find_text(title, "неизвестная функция ");
+  if(i < 0) "" else first_line(text_from(title, i + "неизвестная функция ".size))
+}
+first_line(str s) {
+  i = find_text(s, "\n");
+  if(i < 0) s else slice_text(s, 0, i)
+}
+struct why { code arg; str type; str value; str expect; str fn; }
+// Why the c challenge didn't fit: the first argument whose type no overload has the same arrogance
+error_why(c) {
+  none = why{code(), "", "", "", ""};
+  if(!given(c) || (code_kind(c) != ast.call)) return none;
+  ast.call{callee, args, _, _, _, _, _} = c;
+  name = name_of(callee);
+  if(name == "") return none;
+  fs = declarations(name, c);
+  sigs = array{}; // Built-in VM: Signature with the string "(i64 n)"
+  for(bt : vm_builtins()) if(bt[0] == name) sigs.push(bt[1]);
+  for(i : range(args.size)) {
+    want = array{};
+    for(f : fs) {
+      ast.function{_, ps, _, _, _, _, _, _, _} = f;
+      if((ps.size == args.size) && (i < ps.size)) {
+        ast.parameter{_, pt, _, _, _, _, _} = ps[i];
+        t = if(given(pt)) print_node(pt) else "";
+        if((t != "") && !has_text(want, t)) want.push(t);
+      }
+    }
+    for(sg : sigs) {
+      t = sig_param_type(sg, i, args.size);
+      if((t != "") && !has_text(want, t)) want.push(t);
+    }
+    ts = node_types(args[i]);
+    fits = want.size == 0;
+    for(t : ts) if(has_text(want, t)) fits = true;
+    if(!fits && (ts.size > 0)) {
+      shown = shown_node(args[i]);
+      eq = find_text(shown, " = ");
+      return why{args[i], join_types(ts), if(eq >= 0) text_from(shown, eq + 3) else "", join_types(want), name};
+    }
+  }
+  none
+}
+// type of parameter i of the signature "(i64 n, x)" with n parameters ("" - wrong or without type)
+sig_param_type(str sg, i64 i, i64 n) {
+  inner = trim(slice_text(sg, 1, find_text(sg, ")")));
+  ps = array{};
+  rest = inner;
+  while(rest != "") {
+    j = find_text(rest, ",");
+    ps.push(trim(if(j < 0) rest else slice_text(rest, 0, j)));
+    rest = if(j < 0) "" else trim(text_from(rest, j + 1));
+  }
+  if((ps.size != n) || (i >= n)) return "";
+  sp = find_text(ps[i], " ");
+  if(sp < 0) "" else slice_text(ps[i], 0, sp)
+}
+why_lines(c) {
+  out = array{};
+  w = error_why(c);
+  if(!given(w.arg)) return out;
+  r = if(code_kind(w.arg) == ast.name) name_role(w.arg, array{}, array{}) else "";
+  out.push(line{"почему имя " + r, print_node(w.arg), w.arg, 0, 0});
+  out.push(line{"почему тип", w.type, code(), 0, 0});
+  if(w.value != "") out.push(line{"почему из", w.value, code(), 0, 0});
+  out.push(line{"почему ждёт", w.expect, code(), 0, 0});
+  out.push(line{"почему функция", w.fn, code(), 0, 0});
+  out
+}
+// Values-Causes of Errors (Mistmatch Label, Text-Type): Argument of the Place of Error and Literals of the
+// Same Type in Challenges on its Way - Where the Meaning Comes From (Frame: n and 10)
+mismatch_marks(found, i64 v) {
+  if(check_errors() == 0) return 0;
+  ns = views[v].lay.nodes;
+  array{srcs, froms, tos} = node_spans(ns);
+  for(k : range(check_errors())) {
+    steps = error_steps(ns, srcs, froms, tos, k);
+    array{last, _} = steps[steps.size - 1];
+    w = error_why(last);
+    if(given(w.arg)) {
+      found.push(mark{w.arg, "mismatch", w.type, 0, 0});
+      for(st : steps) {
+        array{m, _} = st;
+        if(given(m) && (code_kind(m) == ast.call)) {
+          ast.call{_, args, _, _, _, _, _} = m;
+          for(a : args) {
+            ak = code_kind(a);
+            if(((ak == ast.string) || ((ak == ast.int) || (ak == ast.float))) && has_text(node_types(a), w.type)) found.push(mark{a, "mismatch", w.type, 0, 0});
+          }
+        }
+      }
+    }
+  }
+  0
 }
 
 // --- The role of names and markup of your text node (design item 2) ---
@@ -4045,6 +4207,7 @@ send_marks(i64 v) {
   if(view_kind(v) == "fn") overload_marks(found, v) else module_overload_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
   for(m : path_marks(views[v].lay.nodes)) found.push(m);
+  mismatch_marks(found, v);
   // open draft (frame "draft", author's decision 2026-10-27): its elements - label draft
   if(views[v].d.open) for(x : views[v].d.items) found.push(mark{x, "draft", "", 0, 0});
   show_marks(v, found);

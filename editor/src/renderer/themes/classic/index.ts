@@ -64,6 +64,7 @@ const theme: Theme = {
         e.preventDefault();
         if (act === 'reconnect') host.reconnect();
         else if (act.startsWith('goto ')) host.goto(act.slice(5));
+        else if (act.startsWith('open ')) host.open(Number(act.slice(5))); // "To Mistake"
       };
     },
 

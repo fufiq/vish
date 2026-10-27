@@ -220,18 +220,20 @@ function receive(m: ServerMsg): void {
       return;
     case 's_view': {
       // second view of the module (Ctrl+Shift+J) - in the second panel: the same program in another projection
-      const host =
+      const pane =
         views.get(m.view)?.host ?? (m.kind === 'fn' || sideModule ? side : app); // famous
       const fresh = !views.has(m.view);
       if (m.kind === 'module') sideModule = false;
-      sideWrap.hidden = sideWrap.hidden && host !== side;
-      const v = new ViewElement(host, m);
-      v.paintTip = panels.tip;
+      sideWrap.hidden = sideWrap.hidden && pane !== side;
+      const v = new ViewElement(pane, m);
+      v.paintTip = (el, lines, open) => {
+        panels.tip(el, lines, open, host);
+      };
       v.paintComplete = panels.complete;
       views.set(m.view, v);
       paintGutter(v);
       activate(v);
-      if (fresh && host === side && m.kind === 'module') openGoto('projection'); // her projection is the key
+      if (fresh && pane === side && m.kind === 'module') openGoto('projection'); // her projection is the key
       return;
     }
     case 's_update':

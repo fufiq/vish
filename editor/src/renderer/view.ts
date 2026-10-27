@@ -101,7 +101,7 @@ export class ViewElement {
     this.paintTip(this.tip, m.lines, open);
     const origin = this.host.getBoundingClientRect();
     // entity card (frame “cursor on stream”) - above node; other - at the pointer
-    const card = m.lines.some((l) => l.kind === 'имя');
+    const card = m.lines.some((l) => l.kind === 'имя' || l.kind === 'ошибка');
     this.tip.toggleAttribute('card', card);
     const el = m.node === null ? undefined : this.byId.get(m.node);
     if (card && el) {
@@ -450,7 +450,7 @@ export class ViewElement {
 
   // Lines of text for numbers: whether there is code in a line - not spaces and not a comment (Span tags
   // from VM; text sheet - always code).
-  lines(): { code: boolean; draft: boolean }[] {
+  lines(): { code: boolean; draft: boolean; path: number }[] {
     const comments = new Map<NodeId, [number, number][]>();
     for (const m of this.#decor?.marks ?? [])
       if (m.kind === 'span' && m.text.startsWith('comment')) {
@@ -458,17 +458,27 @@ export class ViewElement {
         list.push([m.from, m.to]);
         comments.set(m.node, list);
       }
+    // steps of the error path: node → 1 (step) or 2 (place of error); string - the one where the node begins
+    const steps = new Map<NodeId, number>();
+    for (const m of this.#decor?.marks ?? [])
+      if (m.kind === 'path') {
+        const [i = '', n = ''] = m.text.split('/');
+        steps.set(m.node, i === n ? 2 : 1);
+      }
     const drafts = new Set(
       (this.#decor?.marks ?? [])
         .filter((m) => m.kind === 'draft')
         .map((m) => m.node),
     );
-    const out = [{ code: false, draft: false }];
+    const out = [{ code: false, draft: false, path: 0 }];
     let inDraft = 0;
     const walk = (id: NodeId): void => {
       const n = this.nodes.get(id);
       if (!n) return;
       if (drafts.has(id)) ++inDraft;
+      const step = steps.get(id) ?? 0;
+      const here = out[out.length - 1];
+      if (step > here.path) here.path = step;
       const leaf = n.pieces.every((p) => typeof p === 'string');
       const cs = comments.get(id) ?? [];
       let own = 0;
@@ -480,7 +490,7 @@ export class ViewElement {
         for (const ch of p) {
           const line = out[out.length - 1];
           if (inDraft > 0) line.draft = true;
-          if (ch === '\n') out.push({ code: false, draft: false });
+          if (ch === '\n') out.push({ code: false, draft: false, path: 0 });
           else if (
             ch.trim() !== '' &&
             (leaf || !cs.some(([a, b]) => own >= a && own < b))
@@ -551,6 +561,7 @@ export class ViewElement {
       if (m.kind === 'unknown') e.unknown = true;
       if (m.kind === 'role') e.role = m.text;
       if (m.kind === 'use') e.use = m.text;
+      if (m.kind === 'mismatch') e.mismatch = m.text;
       if (m.kind === 'span')
         (e.spans ??= []).push({ from: m.from, to: m.to, kind: m.text });
       if (m.kind === 'error') {

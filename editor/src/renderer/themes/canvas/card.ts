@@ -3,6 +3,7 @@
 // “circuit” (visuals); there is no form - a line of the scheme list.
 //
 import type { HintLine, NodeId } from '../../../protocol/messages';
+import type { Host } from '../../theme';
 import { renderLines } from '../../view';
 
 type Open = (node: NodeId) => void;
@@ -114,12 +115,103 @@ function doc(
   return p;
 }
 
+// Error card (frame “Trace Error”): header, chain of steps with chips with arrows (tone - from pale to the
+// place of error), “why” in one line, actions “Add Signature” and “To Call”.
+function errorCard(
+  lines: readonly HintLine[],
+  open: Open,
+  host: Host,
+): HTMLElement {
+  const card = make('div', 'card error');
+  const head = make('div', 'head');
+  head.append(
+    make('i', 'dot'),
+    make(
+      'span',
+      'title',
+      lines.find((l) => l.kind === 'ошибка')?.text.split('\n')[0] ?? '',
+    ),
+  );
+  const chain = make('div', 'chain');
+  const steps = lines.filter((l) => l.kind.startsWith('шаг'));
+  for (const [i, st] of steps.entries()) {
+    if (i > 0) chain.append(make('span', 'arrow', '→'));
+    const [n = '', name = ''] = st.text.split(' · ');
+    const chip = make('span', 'step');
+    chip.style.setProperty('--step', String((i + 1) / steps.length));
+    chip.toggleAttribute('place', i === steps.length - 1);
+    const icon = make('i', 'icon');
+    role(icon, st.kind.slice('шаг'.length).trim());
+    chip.append(make('b', 'n', n), icon, name);
+    role(chip, st.kind.slice('шаг'.length).trim());
+    chain.append(link(chip, st.target, open));
+  }
+  card.append(head, chain);
+  const why = (k: string) =>
+    lines.find((l) => l.kind.startsWith(`почему ${k}`));
+  const arg = why('имя');
+  if (arg) {
+    const p = make('div', 'why');
+    const chip = (text: string, cls: string) =>
+      make('span', `chip ${cls}`, text);
+    const name = role(
+      chip(arg.text, 'arg'),
+      arg.kind.slice('почему имя'.length).trim(),
+    );
+    p.append(
+      link(name, arg.target, open),
+      ' — ',
+      chip(why('тип')?.text ?? '', 'bad'),
+    );
+    const from = why('из');
+    if (from) p.append(' из ', chip(from.text, 'origin'));
+    p.append(
+      `, а ${why('функция')?.text ?? ''} ждёт `,
+      chip(why('ждёт')?.text ?? '', 'want'),
+    );
+    card.append(p);
+  }
+  const add = lines.find((l) => l.kind === 'добавить');
+  const back = lines.find((l) => l.kind === 'к вызову');
+  if (add || back) {
+    const acts = make('div', 'actions');
+    if (add) {
+      const b = make('button', 'add');
+      b.append(
+        make('i', 'icon plus'),
+        'Добавить ',
+        make('span', 'sig', add.text),
+        make('span', 'fill'),
+        make('kbd', '', 'F12'),
+      );
+      b.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        host.goto(add.text);
+      });
+      acts.append(b);
+    }
+    if (back) {
+      const b = make('button', 'back');
+      b.append(make('i', 'icon back'), 'К вызову');
+      acts.append(link(b, back.target, open));
+    }
+    card.append(acts);
+  }
+  return card;
+}
+
 export function tip(
   el: HTMLElement,
   lines: readonly HintLine[],
   open: Open,
+  host: Host,
 ): void {
   const name = lines.find((l) => l.kind === 'имя');
+  if (!name && lines.some((l) => l.kind === 'ошибка')) {
+    el.replaceChildren(errorCard(lines, open, host));
+    return;
+  }
   if (!name) {
     renderLines(el, lines, open);
     return;

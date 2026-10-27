@@ -56,6 +56,7 @@ export interface HeaderView {
 export interface GutterLine {
   code: boolean;
   draft: boolean; // Open draft line (tag draft from VM)
+  path: number; // Error path step line: 0 - no, 1 - step, 2 - place of error
 }
 
 // Panels - draw in their element markup (id from shell) all over again according to the sent.
@@ -77,6 +78,7 @@ export interface Panels {
     el: HTMLElement,
     lines: readonly HintLine[],
     open: (node: NodeId) => void,
+    host: Host,
   ) => void;
 }
 

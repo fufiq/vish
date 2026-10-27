@@ -646,3 +646,229 @@ vish-hole {
 .vish-complete:not([hidden]) ~ .vish-hint {
   display: none;
 }
+
+/* Ошибка с трейсом (кадр «Ошибка»): строки пути — красный градиент с полосой слева, место ошибки —
+   ярче и красный номер; шаги — кружки-номера, тон от бледного к месту ошибки */
+.vish-gutter {
+  overflow: visible;
+}
+.vish-gutter [data-path] {
+  position: relative;
+}
+.vish-gutter [data-path]::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  left: 0;
+  top: 0;
+  width: 1100px;
+  height: 100%;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgb(239 68 68 / 0.17),
+    rgb(239 68 68 / 0.05) 70%,
+    rgb(239 68 68 / 0)
+  );
+  box-shadow: inset 3px 0 0 #ef8f8f;
+}
+.vish-gutter [data-path='place'] {
+  color: #dc2626;
+}
+.vish-gutter [data-path='place']::after {
+  background: linear-gradient(
+    90deg,
+    rgb(239 68 68 / 0.26),
+    rgb(239 68 68 / 0.09) 75%,
+    rgb(239 68 68 / 0.03)
+  );
+  box-shadow: inset 4px 0 0 #dc2626;
+}
+.pane {
+  isolation: isolate; /* полосы строк (z-index -1) — под текстом, но над фоном карточки */
+}
+.vish-node::part(step) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  min-width: 0;
+  height: 17px;
+  padding: 0;
+  margin-right: 5px;
+  border-radius: 50%;
+  font: 600 10.5px var(--canvas-ui);
+  vertical-align: 0.15em;
+  color: color-mix(in srgb, #c81e1e calc(30% + var(--step, 1) * 70%), white);
+  background: color-mix(in srgb, #c81e1e calc(var(--step, 1) * 8%), #fffafa);
+  box-shadow: inset 0 0 0 1.5px
+    color-mix(in srgb, #c81e1e calc(25% + var(--step, 1) * 75%), white);
+}
+.vish-node[error-place]::part(step) {
+  color: #fff;
+  background: #c81e1e;
+}
+/* узлы пути — без заливки, кроме места ошибки (чип) */
+.pane[path-focus] .vish-node[path]:not([data-kind='n_fn']) {
+  background: none;
+}
+.vish-node[error-place] {
+  padding: 0 7px 0 4px;
+  border-radius: 7px;
+  background: #fde2e2;
+  box-shadow: inset 0 0 0 1px #f4b4b4;
+}
+/* на фокусе пути прочие элементы модуля приглушены (решение 2026-10-26) */
+.pane[path-focus] vish-module > .vish-node:not([path]):not(:has([path])) {
+  opacity: 0.72;
+}
+/* значение-причина: значок типа красным; у литерала — красный чип */
+.vish-node[mismatch]::part(badge) {
+  color: #b91c1c;
+  opacity: 1;
+}
+vish-str[mismatch],
+vish-int[mismatch],
+vish-float[mismatch] {
+  padding: 0 3px 0 6px;
+  border-radius: 6px;
+  background: #e2f5e8;
+  box-shadow: inset 0 0 0 1px #f4b4b4;
+}
+vish-str[mismatch]::part(badge),
+vish-int[mismatch]::part(badge),
+vish-float[mismatch]::part(badge) {
+  top: 0;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #fde4e4;
+}
+
+/* карточка ошибки */
+.card.error {
+  width: 486px;
+}
+.card.error .head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 14px 8px;
+  font-size: 14px;
+  color: #1c1c1a;
+}
+.card.error .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+.card.error .chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 0 14px 10px;
+}
+.card.error .arrow {
+  color: #c2c0b9;
+  font-size: 12px;
+}
+.card.error .step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 3px;
+  border-radius: 8px;
+  background: #f4f3ef;
+  font-size: 12.5px;
+  color: var(--vish-fn);
+  cursor: pointer;
+}
+.card.error .step[data-role='prelude'],
+.card.error .step[data-role='fiber'],
+.card.error .step[data-role='native'] {
+  color: var(--vish-keyword);
+}
+.card.error .step[place] {
+  background: #fde2e2;
+}
+.card.error .step .n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: color-mix(in srgb, #c81e1e calc(30% + var(--step) * 70%), white);
+  background: color-mix(in srgb, #c81e1e calc(var(--step) * 8%), #fffafa);
+  box-shadow: inset 0 0 0 1.5px
+    color-mix(in srgb, #c81e1e calc(25% + var(--step) * 75%), white);
+}
+.card.error .step[place] .n {
+  color: #fff;
+  background: #c81e1e;
+}
+.card.error .why {
+  padding: 8px 14px 10px;
+  border-top: 1px solid #f0eee9;
+  font-size: 13px;
+  line-height: 1.8;
+  color: #8b8880;
+}
+.card.error .why .chip {
+  padding: 0 7px 0 5px;
+  font-size: 12.5px;
+}
+.card.error .why .bad {
+  --entity: #b91c1c;
+  box-shadow: inset 0 0 0 1px #f6c4c4;
+}
+.card.error .why .origin {
+  --entity: #15803d;
+}
+.card.error .why .want {
+  --entity: #c2410c;
+}
+.card.error .actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid #f0eee9;
+}
+.card.error .actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 10px;
+  background: #f6f5f2;
+  color: #27251f;
+  font: 13px var(--canvas-ui);
+  cursor: pointer;
+}
+.card.error .actions .add {
+  flex: 1;
+}
+.card.error .actions .sig {
+  font: 12px var(--canvas-code);
+}
+.card.error .actions .fill {
+  flex: 1;
+}
+.card.error .actions kbd {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #f1f0ec;
+  color: #57544d;
+  font: 10.5px var(--canvas-ui);
+}
+.card.error .icon.plus {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E");
+}
+.card.error .icon.back {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-4'/%3E%3C/svg%3E");
+}

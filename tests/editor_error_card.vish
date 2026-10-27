@@ -1,0 +1,18 @@
+// Program for 351_editor_error_card.wire script: range("10") via spawn and gen_squares.
+// error: неизвестная функция range(str)
+gen_squares(s, n) {
+  for(i : range(n)) s.write(i * i);
+  s.close();
+}
+
+squares(n) {
+  s = stream(4);
+  spawn { gen_squares(s, "10"); }
+  t = 0;
+  for(x : s) t += x;
+  t
+}
+
+main() {
+  print(squares(10));
+}

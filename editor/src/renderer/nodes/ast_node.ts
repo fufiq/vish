@@ -47,6 +47,7 @@ export interface NodeMarks {
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
   diverged?: string;
+  mismatch?: string; // Value-cause of error: its type (frame "Error")
   use?: string; // type of use (or operator) - a signature above node on the cursor line
   role?: string; // VM: fn, prelude, native, param N, var N, global N
   spans?: Span[]; // markup of your text (component node)
@@ -118,6 +119,7 @@ export abstract class ASTNode extends HTMLElement {
       this.style.setProperty('--step', String(step / total));
     } else this.style.removeProperty('--step');
     this.toggleAttribute('path', m.path !== undefined);
+    this.toggleAttribute('error-place', m.path !== undefined && step === total); // The place of error is the last step
     // layers - overload : ‹i/n› before function (click to second panel), i/n after call
     this.#layer?.remove();
     this.#layer = undefined;
@@ -150,8 +152,9 @@ export abstract class ASTNode extends HTMLElement {
     else this.removeAttribute('line');
     this.#badge?.remove();
     this.#badge = undefined;
+    this.toggleAttribute('mismatch', m.mismatch !== undefined);
     const text = [
-      m.unknown ? '?' : (m.type ?? ''),
+      m.unknown ? '?' : (m.type ?? m.mismatch ?? ''),
       m.value === undefined
         ? ''
         : `${m.type === undefined ? '' : ' '}= ${m.value}`,

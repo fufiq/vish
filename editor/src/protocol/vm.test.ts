@@ -112,7 +112,8 @@ describe('живая VM', () => {
     const sock = join(mkdtempSync(join(tmpdir(), 'vish-')), 's');
     const vm = spawn(vish, ['serve', program, sock], { stdio: 'ignore' });
     try {
-      for (let i = 0; i < 50; ++i) {
+      // up to 5 s: under load check.sh (asan, debug parallel) VM rises longer
+      for (let i = 0; i < 250; ++i) {
         await new Promise((r) => setTimeout(r, 20));
         try {
           readFileSync(sock);

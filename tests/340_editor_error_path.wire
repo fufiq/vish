@@ -13,7 +13,9 @@ open_view module
 // hint at any step: error and steps with links to places
 hover 1 @half:2
 // expect: kind="ошибка" text="оператор / не определён для str и i64"
-// expect: kind="шаг" text="1 · в main" target=#
-// expect: kind="шаг" text="2 · в twice" target=#
-// expect: kind="шаг" text="3 · в half" target=#
-// expect: kind="шаг" text="4 · место ошибки" target=#
+// steps - name and role for the icon (frame "Error", author's decision 2026-10-27), place - operator
+// expect: kind="шаг fn" text="1 · main" target=#
+// expect: kind="шаг fn" text="2 · twice" target=#
+// expect: kind="шаг fn" text="3 · half" target=#
+// expect: kind="шаг " text="4 · /" target=#
+// expect: kind="к вызову" text="half" target=#

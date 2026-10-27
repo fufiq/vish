@@ -32,6 +32,7 @@ const theme: Theme = {
           const d = document.createElement('div');
           d.textContent = l.code ? String(i + 1) : '\u00a0'; // empty div would collapse
           d.toggleAttribute('draft', l.draft); // draft
+          if (l.path > 0) d.dataset.path = l.path === 2 ? 'place' : 'step'; // line
           return d;
         }),
       );
