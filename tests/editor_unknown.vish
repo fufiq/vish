@@ -1,0 +1,11 @@
+// Program for the 346_editor_unknown_type.wire script: range(str) is not - type i is not derived.
+// error: неизвестная функция range(str)
+squares(n) {
+  s = 0;
+  for(i : range(n)) s = s + (i * i);
+  s
+}
+
+main() {
+  print(squares("10"));
+}

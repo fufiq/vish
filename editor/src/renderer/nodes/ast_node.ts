@@ -19,13 +19,15 @@ export interface NodeMarks {
   overloads?: string; // function with overload : "i/n" - which is it from the set (click - open)
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
-  diverged?: string; // It was general, but it is no longer in general logic (checking the consistency of layers).
+  diverged?: string;
+  unknown?: boolean; // type not deduced - badge "?" // was general, but in general logic it is no longer (checking the consistency of layers)
 }
 
 export const badgeSheet = new CSSStyleSheet();
 badgeSheet.replaceSync(`
   .badge { color: var(--vish-type, gray); font-size: 0.65em; position: relative; top: 0.45em; margin-left: 1px; white-space: nowrap; }
   .badge.value { color: var(--vish-value, gray); }
+  .badge.unknown { display: inline-block; min-width: 1.2em; top: 0; margin-left: 2px; padding: 0 0.2em; border: 1px dashed #15803d; border-radius: 4px; background: color-mix(in srgb, #15803d 6%, transparent); color: #15803d; text-align: center; font-weight: 600; line-height: 1.3; }
   .layer { display: inline-block; margin-right: 3px; padding: 0 0.35em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; vertical-align: 0.3em; color: var(--vish-value, gray); border: 1px solid color-mix(in srgb, var(--vish-value, gray) 45%, transparent); cursor: pointer; }
   .layer.chosen { margin: 0 0 0 2px; cursor: default; }
   .step { display: inline-block; min-width: 1.35em; margin-right: 2px; padding: 0 0.3em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; text-align: center; vertical-align: 0.3em; color: white; background: color-mix(in srgb, var(--vish-error, #c0392b) calc(30% + var(--step, 1) * 70%), var(--vish-bg, white)); }
@@ -105,14 +107,19 @@ export abstract class ASTNode extends HTMLElement {
     this.#badge?.remove();
     this.#badge = undefined;
     const text = [
-      m.type ?? '',
+      m.unknown ? '?' : (m.type ?? ''),
       m.value === undefined
         ? ''
         : `${m.type === undefined ? '' : ' '}= ${m.value}`,
     ].join('');
     if (text !== '') {
       this.#badge = document.createElement('span');
-      this.#badge.className = m.value === undefined ? 'badge' : 'badge value';
+      this.#badge.className = m.unknown
+        ? 'badge unknown'
+        : m.value === undefined
+          ? 'badge'
+          : 'badge value';
+      if (m.unknown) this.#badge.title = 'тип не выведен';
       this.#badge.textContent = text;
       this.badgeRoot().append(this.#badge);
     }

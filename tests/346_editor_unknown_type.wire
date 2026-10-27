@@ -1,0 +1,6 @@
+// Type is not derived - badge "?" (author's decision 2026-10-26, frame "Error"): "If you paint -
+// you need to paint everything." range(str) does not exist, i does not; y is str = 10.
+// program: editor_unknown.vish
+open_view module
+// expect: kind="unknown" text="?"
+// expect: kind="type" text="str = \"10\""

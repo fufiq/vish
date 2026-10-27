@@ -3339,11 +3339,11 @@ type_marks(found, i64 v) {
     k = code_kind(n);
     if(k == ast.parameter) {
       ts = shown_name(n, code_name(n));
-      if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+      if(ts != "") found.push(mark{n, "type", ts, 0, 0}) else unknown_mark(found, n);
     } else if(k == ast.variable) {
       ast.variable{vn, _, init, _, _, _, _, _} = n;
       ts = if(given(init)) shown_node(init) else shown_name(n, vn);
-      if(ts != "") found.push(mark{n, "type", ts, 0, 0});
+      if(ts != "") found.push(mark{n, "type", ts, 0, 0}) else unknown_mark(found, n);
     } else if(given(assign_target(n))) {
       // x = e announces if the name is not yet available (author's decision: no auto); the ad has the
       // type and value at that point (initializer), not the future meanings of the name (2026-10-13)
@@ -3367,6 +3367,19 @@ type_marks(found, i64 v) {
     if(ts != "") found.push(mark{n, "type", ts, 0, 0});
   }
   true
+}
+// Type not inferred (author's decision 2026-10-26, frame "Error"): an ad without a type in the function that
+// was executed during the check (its parameters or body were observed) is a badge "?": "If you paint"
+// - paint everything." In a function that was not called, nothing (there are no types in
+// all). * My: * rule was fulfilled.
+unknown_mark(found, n) {
+  f = enclosing_fn(n);
+  if(!given(f)) return 0;
+  ast.function{_, ps, _, body, _, _, _, _, _} = f;
+  ran = given(body) && has_types(body);
+  for(p : ps) if(has_types(p) || (shown_name(p, code_name(p)) != "")) ran = true;
+  if(ran) found.push(mark{n, "unknown", "?", 0, 0});
+  0
 }
 marked_at(found, n) {
   r = false;
