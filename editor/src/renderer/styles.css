@@ -654,9 +654,10 @@ body {
 }
 #ai .log {
   flex: 1;
-  overflow: auto;
+  overflow: hidden auto;
   padding: 8px 10px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere; /* длинные вызовы инструментов — переносом, без прокрутки вбок */
 }
 #ai .log > div {
   margin-bottom: 8px;

@@ -9,6 +9,7 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: { index: 'src/main/index.ts', mcp: 'src/mcp/index.ts' },
+        external: ['electron'], // The electron is a module of the environment, not a package
       },
     },
   },
