@@ -93,6 +93,21 @@ struct editor_server {
     if(node_id f = fn_in(session.root, name, true)) return f;
     return fn_in(editor_module, name, false);
   }
+  // Extension of the editor in the program (card visualizers, visual <name>): its name function with
+  // [[editor]] from node c is an array of lines; no function or error is empty (error is in stderr).
+  value extension(std::string const & name, node_id c) {
+    node_id f = fn_in(session.root, name, true);
+    if(!f) return value(array_v::of({}));
+    try {
+      not_an_edit quiet{*this};
+      interpreter & l = lang_of(session.root);
+      value r = l.analyze_instance(f, {l.code_value(c)});
+      return r.is<array_v>() ? r : value(array_v::of({}));
+    } catch(diagnostic const & d) {
+      put(stderr, cat("редактор: ", render(d, "editor.vish", session.db), "\n"));
+      return value(array_v::of({}));
+    }
+  }
   // Module function interpreter: Editor module - one per server, programs and projection - to edit the base
   interpreter & lang_of(node_id m) {
     for(auto & l: lang_vms)

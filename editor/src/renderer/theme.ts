@@ -9,6 +9,7 @@
 import type {
   ClientMsg,
   Conflict,
+  HintLine,
   Layers,
   NodeId,
   Peers,
@@ -66,6 +67,13 @@ export interface Panels {
   merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
   gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
+  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "schema ..." -
+  // from VM); open - go to node
+  tip: (
+    el: HTMLElement,
+    lines: readonly HintLine[],
+    open: (node: NodeId) => void,
+  ) => void;
 }
 
 export interface Theme {
@@ -126,6 +134,7 @@ export function resolve(
     'merge',
     'header',
     'gutter',
+    'tip',
   ];
   const missing = need.filter((k) => !(k in r.panels));
   if (r.shell === '' || missing.length > 0)

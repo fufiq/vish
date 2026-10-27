@@ -1,0 +1,27 @@
+// Карточка сущности (кадр «курсор на stream», решения пользователя 2026-10-27: по курсору и наведению,
+// чипы — слова-сущности от VM, схема — визуализатор на языке, значок файбера — роль fiber). 
+// 
+//.
+// program: editor_card.vish
+open_view module
+// spawn запускает файбер — роль fiber
+// expect: kind="role" text="fiber"
+hover 1 @stream
+// expect: kind="сигнатура" text="stream(i64 cap) → stream"
+// expect: kind="имя" text="stream"
+// слова документации прелюдии — сущности: параметр cap, функции write, переменная s места
+// expect: kind="чип param" text="cap"
+// expect: kind="чип prelude" text="write"
+// expect: kind="чип var 0" text="s"
+// схема потока: писатель gen и что пишет, ёмкость, читатель for в x
+// expect: kind="схема" text="stream"
+// expect: kind="схема ёмкость" text="2"
+// expect: kind="схема пишет" text="gen"
+// expect: kind="схема значение" text="i * 2"
+// expect: kind="схема читает" text="for"
+// expect: kind="схема в" text="x"
+hover 1 @pair:4
+// expect: kind="документация" text="Пара из двух чисел: first и second."
+// своя схема программы — [[editor]] visual_pair
+// expect: kind="схема" text="pair"
+// expect: kind="схема справа" text="b"

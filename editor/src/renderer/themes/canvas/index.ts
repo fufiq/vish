@@ -9,6 +9,7 @@ import '@fontsource/jetbrains-mono/400.css';
 import '@fontsource/jetbrains-mono/500.css';
 import type { Theme } from '../../theme';
 import classicShell from '../classic/shell.html?raw';
+import { tip } from './card';
 import css from './styles.css?inline';
 
 const backdrop =
@@ -21,6 +22,7 @@ const theme: Theme = {
   css: [css],
   shell: backdrop + header + classicShell,
   panels: {
+    tip,
     // number - only the lines with the code; empty and comments - without a number, counting (frame "Laptop")
     gutter(el, lines) {
       el.replaceChildren(

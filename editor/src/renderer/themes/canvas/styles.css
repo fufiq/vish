@@ -327,3 +327,220 @@ vish-extend::part(keyword) {
   white-space: nowrap;
   pointer-events: none;
 }
+
+/* Значки сущностей (кадр «Стиль · сущности AST»): маска — путь иконки StyleKit, цвет — сущности */
+[data-role] {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='4' y='7' width='16' height='10' rx='3'/%3E%3Cpath d='M8 12h.01'/%3E%3C/svg%3E");
+}
+[data-role='fn'],
+[data-role='prelude'] {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M8 4c-2 0-3 1-3 3v2c0 1-1 3-2 3 1 0 2 2 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1 1 3 2 3-1 0-2 2-2 3v2c0 2-1 3-3 3'/%3E%3C/svg%3E");
+}
+[data-role='native'] {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='5' y='5' width='14' height='14' rx='2'/%3E%3Cpath d='M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3'/%3E%3C/svg%3E");
+}
+[data-role='param'] {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M3 12h4'/%3E%3Crect x='7' y='7' width='14' height='10' rx='3'/%3E%3C/svg%3E");
+}
+[data-role='fiber'] {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M4 6c4 0 4 4 8 4s4-4 8-4M4 12c4 0 4 4 8 4s4-4 8-4M4 18c4 0 4 4 8 4'/%3E%3C/svg%3E");
+}
+.icon {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  mask: var(--icon) center / contain no-repeat;
+}
+/* файбер в коде — значок перед именем (spawn) */
+.vish-node[data-role='fiber'] {
+  color: var(--vish-keyword);
+}
+.vish-node[data-role='fiber']::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  background: currentColor;
+  mask: var(--icon) center / contain no-repeat;
+}
+
+/* карточка сущности (кадр «курсор на stream») */
+.vish-tip[card] {
+  padding: 0;
+  max-width: none;
+  width: min-content;
+  border-radius: 16px;
+  background: #fff;
+  border: 1px solid #e7e5df;
+  box-shadow: 0 12px 30px rgb(20 20 10 / 0.1);
+  white-space: normal;
+  font-family: var(--canvas-ui);
+  line-height: 1.5;
+  resize: both;
+  overflow: auto;
+}
+.card .body {
+  width: 520px;
+  padding: 6px 18px 16px;
+}
+.card .sig {
+  font: 11px var(--canvas-code);
+  color: #8b8880;
+}
+.card .title {
+  margin: 1px 0 6px;
+  font-size: 17px;
+  color: #18181b;
+  letter-spacing: -0.01em;
+}
+.card .doc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #77746c;
+}
+.card .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px 0 5px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--entity, var(--vish-keyword));
+  background: color-mix(in srgb, var(--entity, var(--vish-keyword)) 11%, white);
+  cursor: pointer;
+}
+.card .chip[data-role='fn'] {
+  --entity: var(--vish-fn);
+}
+.card .chip[data-role='native'] {
+  --entity: #57534e;
+}
+.card .chip[data-role='param']:not([data-entity]) {
+  --entity: var(--vish-param);
+}
+.card .more {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #f0eee9;
+  font-size: 12px;
+}
+.card .visual {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 6px;
+  padding: 14px 10px 12px;
+  border-radius: 11px;
+  background: #faf9f6;
+  font-size: 13px;
+  color: #57544d;
+}
+.card .ends {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.card .writer,
+.card .reader {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  color: var(--vish-fn);
+}
+.card .reader {
+  padding: 2px 8px;
+  border-radius: 7px;
+  background: #f3effd;
+  color: var(--vish-keyword);
+}
+.card .pipe {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 5px 12px 9px;
+  border-radius: 10px;
+  background: #e6f4f6;
+  border: 1px solid #c4e5ea;
+}
+.card .pipe .head {
+  font-size: 12px;
+  color: #8b8880;
+  white-space: nowrap;
+}
+.card .pipe .name {
+  color: var(--entity, #0e7490);
+}
+.card .slots {
+  position: relative;
+  display: flex;
+  gap: 5px;
+  padding: 5px 0;
+  border-block: 1.5px solid #9ed3dd;
+}
+.card .slot {
+  width: 34px;
+  height: 22px;
+  box-sizing: border-box;
+  border-radius: 5px;
+  border: 1.5px dashed #b9dde4;
+}
+.card .slot.into {
+  display: inline-grid;
+  place-items: center;
+  width: auto;
+  min-width: 24px;
+  padding: 0 4px;
+  border-color: #f0cf8f;
+  color: #b45309;
+  font: 12px var(--canvas-code);
+}
+/* значения бегут по ячейкам от писателя к читателю */
+.card .value {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: 34px;
+  height: 22px;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: #fdeed2;
+  border: 1px solid #f3d49a;
+  color: #b45309;
+  font: 10px var(--canvas-code);
+  animation: vish-flow 4s linear infinite;
+  animation-delay: calc(
+    var(--i) * -4s / max(1, var(--cap) - 1)
+  ); /* шаг — ячейка */
+}
+@keyframes vish-flow {
+  from {
+    translate: 0 0;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  to {
+    translate: calc((var(--cap) - 1) * 39px) 0;
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card .value {
+    animation: none;
+    translate: calc(var(--i) * 39px) 0;
+  }
+}

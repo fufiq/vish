@@ -828,6 +828,12 @@ send_merge_list(taken, conflicts, diffs) => native "cpp" {
   h.send_merge(std::move(taken), std::move(cs));
   return value(int64_t(0));
 };
+// Extension of the editor in the program: its name function with [[editor]] from the call c (code) is an
+// array of lines; no such one is empty (card visualizers, visual <name>)
+editor_extension(str name, c) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(array_v::of({})));
+  return editor_host->extension(std::string((a[0]).as<str_v>().view()), vm.code_node(a[1], where));
+};
 // program module and prelude
 program() => native "cpp" {
   return vm.code_value(editor_host->session.root);
@@ -2970,10 +2976,173 @@ hover_at(i64 v, n) {
     else if(k == ast.call) name = name_of(callee_of(n));
     if(name != "") {
       call = if(k == ast.call) n else if(called) up else code();
-      declaration_lines(lines, name, if(given(call)) call_targets(call) else array{}, if((k == ast.call) && given(callee_of(n))) callee_of(n) else n);
+      chosen = if(given(call)) call_targets(call) else array{};
+      place = if((k == ast.call) && given(callee_of(n))) callee_of(n) else n;
+      // Card: selected parsing overload call, otherwise first announced
+      fs = if(chosen.size > 0) chosen else declarations(name, place);
+      if((fs.size > 0) && (given(call) || (k == ast.function))) card_lines(lines, fs[0], call, place);
+      declaration_lines(lines, name, chosen, place);
     }
   }
   show_hover(v, n, lines);
+}
+// -- entity card (item 4 design, frame "cursor on stream") ------------------------------- User solutions
+// 2026-10-27: card - by cursor and hover, chips - words-entities from VM, diagram - visualizer on the
+// language. Documentation - concepts, not prompt strings: "signature" (head → result type), "name",
+// "documentation" (doc-comment on the announcement or overload of the same module that has it), "chip <role"
+// - the word of documentation [from, to), which is resolved into the essence of the place (ad parameter,
+// name in the area, function), "schema ..." - visualizer. *Mine: * line composition.
+//
+//
+card_lines(lines, f, call, at) {
+  ast.function{name, _, _, _, _, _, _, _, _} = f;
+  ts = if(given(call)) join_types(node_types(call)) else "";
+  lines.push(line{"сигнатура", head_text(f) + (if(ts == "") "" else " → " + ts), f, 0, 0});
+  lines.push(line{"имя", name, f, 0, 0});
+  doc = doc_of(f, name);
+  if(doc != "") {
+    lines.push(line{"документация", doc, code(), 0, 0});
+    doc_chips(lines, doc, f, at);
+  }
+  for(l : visual_lines(name, call)) lines.push(l);
+  true
+}
+doc_of(f, str name) {
+  lead = note_lead(f);
+  if(lead.size == 0) for(g : declarations(name, f)) if((lead.size == 0) && (code_id(code_module(g)) == code_id(code_module(f)))) lead = note_lead(g);
+  r = "";
+  for(l : lead) {
+    s = if(starts_with(l, "//")) trim(text_from(l, 2)) else trim(l);
+    r = (r + (if((r == "") || (s == "")) "" else " ")) + s;
+  }
+  r
+}
+// the role of the word documentation in the place at: ad parameter f, entity area, function;
+chip_role(str w, f, at, cache) {
+  ast.function{_, ps, _, _, _, _, _, _, _} = f;
+  for(p : ps) if(code_name(p) == w) return "param";
+  g = enclosing_fn(at);
+  bs = scope_list(cache, if(given(g)) g else program());
+  i = name_binder(at, w, bs, g);
+  if(i >= 0) return (if(code_kind(bs[i].node) == ast.parameter) "param " else "var ") + text(i);
+  fs = declarations(w, at);
+  if(fs.size > 0) fn_role(fs[0]) else ""
+}
+doc_chips(lines, str doc, f, at) {
+  cache = array{};
+  i = 0;
+  cp = 0;
+  while(i < doc.size) {
+    if(word_start(doc[i])) {
+      b = i;
+      from = cp;
+      while((i < doc.size) && word_char(doc[i])) {
+        i += 1;
+        cp += 1;
+      }
+      w = slice_text(doc, b, i);
+      r = if(w == code_name(f)) "" else chip_role(w, f, at, cache); // Your name is not a chip
+      if((w.size < 2) && !(starts_with(r, "param") || starts_with(r, "var"))) r = ""; // letter is only entity of space
+      fs = if((r == "fn") || ((r == "prelude") || ((r == "native") || (r == "fiber")))) declarations(w, at) else array{};
+      if(r != "") lines.push(line{"чип " + r, w, if(fs.size > 0) fs[0] else code(), from, cp});
+    } else {
+      if((doc[i] & 192) != 128) cp += 1;
+      i += 1;
+    }
+  }
+  true
+}
+// Call location visualizer (diagram above the card): its function of the program [[editor]] visual
+// <name>(code call) - lines in pairs (view, text; otherwise embedded (stream). The theme draws a diagram from
+// the diagram line with its component. *My: * agreement visual <name>, lines in pairs.
+visual_lines(str name, call) {
+  r = array{};
+  if(!given(call)) return r;
+  ext = editor_extension("visual_" + name, call);
+  if(ext.size > 1) {
+    // the first pair is a type of scheme (the text is empty), then its lines
+    for(k : range(ext.size / 2)) r.push(if(k == 0) line{"схема", ext[0], code(), 0, 0} else line{"схема " + ext[2 * k], ext[(2 * k) + 1], code(), 0, 0});
+    return r;
+  }
+  if(name == "stream") stream_visual(r, call);
+  r
+}
+// Flow s = stream(cap): who writes (functions to which s is transmitted, and their write(p, значение);
+// direct write(s, …)), capacity, who reads (for(x : s), read(s)). Lines: “scheme” stream, “scheme flow”
+// (name, role - in the text “s| role”), “scheme type”, “capacity scheme”, “scheme writes” + “scheme value”,
+// “scheme reads” + “scheme in”.
+stream_visual(r, call) {
+  up = code_parent(call);
+  target = assign_target(up);
+  if(!given(target)) return false;
+  ast.operation{_, xs, _} = up;
+  if(code_id(xs[1]) != code_id(call)) return false;
+  s = name_of(target);
+  ast.call{_, args, _, _, _, _, _} = call;
+  cache = array{};
+  g = enclosing_fn(call);
+  bs = scope_list(cache, if(given(g)) g else program());
+  i = name_binder(target, s, bs, g);
+  role = if(i >= 0) "var " + text(i) else "";
+  r.push(line{"схема", "stream", code(), 0, 0});
+  r.push(line{"схема поток", (s + "|") + role, target, 0, 0});
+  r.push(line{"схема тип", join_types(fn_name_types(target, s)), code(), 0, 0});
+  r.push(line{"схема ёмкость", if(args.size > 0) print_node(args[0]) else "16", code(), 0, 0});
+  if(given(g)) stream_uses(r, g, s);
+  true
+}
+// name
+is_name(c, str name) => given(c) && ((code_kind(c) == ast.name) && (name_of(c) == name));
+stream_uses(r, n, str s) {
+  if(code_kind(n) == ast.call) {
+    ast.call{callee, args, _, _, _, _, _} = n;
+    cn = name_of(callee);
+    reads = false;
+    for(x : args) if(is_name(x, s)) reads = true;
+    if((cn == "for") && reads) {
+      r.push(line{"схема читает", "for", n, 0, 0});
+      x = first_param(n); // design parameter - in the lambda block of the body
+      if(given(x)) r.push(line{"схема в", code_name(x), x, 0, 0});
+    } else if((cn == "read") && ((args.size > 0) && is_name(args[0], s))) r.push(line{"схема читает", "read", n, 0, 0});
+    else if((cn == "write") && ((args.size > 1) && is_name(args[0], s))) {
+      f = enclosing_fn(n);
+      r.push(line{"схема пишет", if(given(f)) code_name(f) else "", f, 0, 0});
+      r.push(line{"схема значение", print_node(args[1]), args[1], 0, 0});
+    } else for(k : range(args.size)) if(is_name(args[k], s)) {
+      fs = declarations(cn, n);
+      if((fs.size > 0) && (fn_role(fs[0]) == "fn")) {
+        ast.function{_, ps, _, body, _, _, _, _, _} = fs[0];
+        if((k < ps.size) && given(body)) stream_writes(r, body, code_name(ps[k]), cn, fs[0]);
+      }
+    }
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) stream_uses(r, c, s);
+  true
+}
+first_param(n) {
+  for(c : code_items(n)) if(code_kind(c) == ast.parameter) return c;
+  for(c : code_items(n)) if(code_kind(c) != ast.function) {
+    p = first_param(c);
+    if(given(p)) return p;
+  }
+  code()
+}
+// write(p, значение) in the body of a writer function (p is its flow parameter)
+stream_writes(r, n, str p, str who, f) {
+  if(code_kind(n) == ast.call) {
+    ast.call{callee, args, _, _, _, _, _} = n;
+    if((name_of(callee) == "write") && ((args.size > 1) && is_name(args[0], p))) {
+      r.push(line{"схема пишет", who, f, 0, 0});
+      r.push(line{"схема значение", print_node(args[1]), args[1], 0, 0});
+    }
+  }
+  for(c : code_items(n)) if(code_kind(c) != ast.function) stream_writes(r, c, p, who, f);
+  true
+}
+// function starts fiber (body - fiber_start): the call role of fiber (the icon "fiber", StyleKit)
+fiber_fn(f) {
+  ast.function{_, _, _, body, _, _, _, _, _} = f;
+  given(body) && ((code_kind(body) == ast.call) && (name_of(callee_of(body)) == "fiber_start"))
 }
 // Signature string: current parameter arg - [from, to] at code points
 signature_line(f, str name, i64 arg) {
@@ -3519,7 +3688,7 @@ type_marks(found, i64 v) {
       if(ts != "") found.push(mark{n, "use", ts, 0, 0});
     } else if((k == ast.operation) && (member_name(n) == "")) {
       ast.operation{op, xs, _} = n;
-      if(xs.size == 2) found.push(mark{n, "use", op, 0, 0});
+      if((xs.size == 2) && (op != "=")) found.push(mark{n, "use", op, 0, 0}); // `=` - Announcement or replacement, no signature required
     }
   }
   true
@@ -3642,7 +3811,7 @@ name_role(n, cache, builtins) {
   i = name_binder(n, name, bs, f);
   if(i >= 0) return (if(!given(f)) "global " else if(code_kind(bs[i].node) == ast.parameter) "param " else "var ") + text(i);
   fs = declarations(name, n);
-  if(fs.size > 0) return fn_role(fs[0]);
+  if(fs.size > 0) return if(fiber_fn(fs[0])) "fiber" else fn_role(fs[0]);
   for(b : builtins) if(b == name) return "native";
   ""
 }

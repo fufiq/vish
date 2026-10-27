@@ -1,6 +1,7 @@
 // The theme “classic” is basic: window markup and all panels. Other themes take it as a basis
 // (base: 'classic') and replace theirs - or ask everything themselves.
 import type { Theme } from '../../theme';
+import { renderLines } from '../../view';
 import css from './styles.css?inline';
 import shell from './shell.html?raw';
 
@@ -283,6 +284,7 @@ const theme: Theme = {
     header() {
       return;
     },
+    tip: renderLines,
     gutter(el, lines) {
       el.replaceChildren(
         ...lines.map((_, i) => make('div', '', String(i + 1))),

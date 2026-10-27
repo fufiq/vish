@@ -45,6 +45,12 @@ export class ViewElement {
   // Line number - draws the theme (panels.gutter), there is only a place in the window
   readonly gutter = document.createElement('div');
   root: ASTNode | undefined;
+  // Draws a hint and a card (theme panel tip)
+  paintTip: (
+    el: HTMLElement,
+    lines: readonly HintLine[],
+    open: (node: NodeId) => void,
+  ) => void = renderLines;
 
   readonly nodes = new Map<NodeId, ViewNode>();
 
@@ -90,8 +96,32 @@ export class ViewElement {
   showHover(m: Hover, x: number, y: number, open: (n: NodeId) => void): void {
     this.tip.hidden = m.lines.length === 0;
     if (this.tip.hidden) return;
-    renderLines(this.tip, m.lines, open);
+    this.paintTip(this.tip, m.lines, open);
     const origin = this.host.getBoundingClientRect();
+    // entity card (frame “cursor on stream”) - above node; other - at the pointer
+    const card = m.lines.some((l) => l.kind === 'имя');
+    this.tip.toggleAttribute('card', card);
+    const el = m.node === null ? undefined : this.byId.get(m.node);
+    if (card && el) {
+      // above node, if there is more space (as in the frame), otherwise under it; not above free space
+      const r = el.getBoundingClientRect();
+      const left = Math.max(
+        8,
+        r.left - origin.left + this.host.scrollLeft - 24,
+      );
+      this.tip.style.left = `${String(left)}px`;
+      const above = r.top - origin.top - 10;
+      const below = origin.bottom - r.bottom - 10;
+      this.tip.style.maxHeight = `${String(Math.max(above, below) - 8)}px`;
+      const h = this.tip.offsetHeight;
+      this.tip.style.top = `${String(
+        above >= below
+          ? r.top - origin.top + this.host.scrollTop - h - 10
+          : r.bottom - origin.top + this.host.scrollTop + 10,
+      )}px`;
+      return;
+    }
+    this.tip.style.maxHeight = '';
     this.tip.style.left = `${String(x - origin.left + this.host.scrollLeft)}px`;
     this.tip.style.top = `${String(y - origin.top + this.host.scrollTop + 18)}px`;
   }
@@ -104,7 +134,7 @@ export class ViewElement {
     const box = this.#box(m.node, m.piece, m.offset);
     this.hint.hidden = m.lines.length === 0 || !box;
     if (this.hint.hidden || !box) return;
-    renderLines(this.hint, m.lines, open);
+    this.paintTip(this.hint, m.lines, open);
     this.hint.style.left = `${String(box.left)}px`;
     this.hint.style.top = `${String(box.top)}px`;
   }

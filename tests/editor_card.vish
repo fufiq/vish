@@ -1,0 +1,19 @@
+// Программа для сценария 350_editor_card.wire: карточка сущности — документация, чипы, схема потока,
+// своя схема программы ([[editor]] visual_<имя>).
+// out: 6
+
+// своя схема карточки вызова pair — строки парами: вид, текст
+[[editor]] visual_pair(c) => array{"pair", "", "слева", "a", "справа", "b"};
+gen(s, i64 n) {
+  for(i : range(n)) write(s, i * 2);
+  close(s);
+}
+// Пара из двух чисел: first и second.
+pair(i64 a, i64 b) => a + b;
+main() {
+  s = stream(2);
+  spawn { gen(s, 2); }
+  t = 0;
+  for(x : s) t += x;
+  print(pair(t, 4));
+}

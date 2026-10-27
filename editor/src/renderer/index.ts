@@ -155,6 +155,21 @@ function requestInspect(): void {
   }, 120);
 }
 
+// Card entity on the cursor (frame "cursor on stream", author's decision 2026-10-27): the cursor
+// stood on the function name - the window asks for a hint of this node; the card collects VM.
+let cardTimer: ReturnType<typeof setTimeout> | undefined;
+const cardRoles = ['fn', 'prelude', 'native', 'fiber'];
+function cursorCard(v: ViewElement | undefined, node: NodeId | null): void {
+  clearTimeout(cardTimer);
+  const el = node === null ? undefined : v?.byId.get(node);
+  if (!v || node === null || !cardRoles.includes(el?.dataset.role ?? ''))
+    return;
+  cardTimer = setTimeout(() => {
+    hoverAt = undefined;
+    send({ type: 'c_hover', view: v.data.view, node });
+  }, 500);
+}
+
 function activate(v: ViewElement | undefined): void {
   active = v;
   (v?.host ?? app).focus();
@@ -211,6 +226,7 @@ function receive(m: ServerMsg): void {
       if (m.kind === 'module') sideModule = false;
       sideWrap.hidden = sideWrap.hidden && host !== side;
       const v = new ViewElement(host, m);
+      v.paintTip = panels.tip;
       views.set(m.view, v);
       paintGutter(v);
       activate(v);
@@ -231,6 +247,7 @@ function receive(m: ServerMsg): void {
       views.get(m.view)?.showCursor(m);
       if (m.node !== null) cursorNode.set(m.view, m.node);
       paintHeader();
+      cursorCard(views.get(m.view), m.node);
       requestInspect();
       return;
     case 's_inspect': {
@@ -295,8 +312,10 @@ function receive(m: ServerMsg): void {
       return;
     case 's_hover': {
       const v = views.get(m.view);
-      if (v && hoverAt)
-        v.showHover(m, hoverAt.x, hoverAt.y, (node) => {
+      // cursor (no hoverAt) - only entity card
+      const card = m.lines.some((l) => l.kind === 'имя');
+      if (v && (hoverAt || card))
+        v.showHover(m, hoverAt?.x ?? 0, hoverAt?.y ?? 0, (node) => {
           v.hideHover();
           send({ type: 'c_open', view: v.data.view, node });
         });
