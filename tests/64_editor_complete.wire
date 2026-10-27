@@ -28,7 +28,7 @@ key 1 ArrowUp
 key 1 ArrowDown
 key 1 Enter
 // expect: курсор:   print‸
-// expect: selected=0 items= preview=""⏎update
+// expect: selected=0 items= preview="" context=""⏎update
 // The typed matched the only option - there is nothing to show
 key 1 ;
 key 1 Enter

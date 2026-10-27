@@ -8,6 +8,7 @@
 // (import.meta.glob), selected -theme <name>. What the theme did not ask - taken from the basic.
 import type {
   ClientMsg,
+  Complete,
   Conflict,
   HintLine,
   Layers,
@@ -54,6 +55,7 @@ export interface HeaderView {
 // The line of the presentation text for numbers: is there a code in it (not spaces and not a comment).
 export interface GutterLine {
   code: boolean;
+  draft: boolean; // Open draft line (tag draft from VM)
 }
 
 // Panels - draw in their element markup (id from shell) all over again according to the sent.
@@ -67,8 +69,10 @@ export interface Panels {
   merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
   gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
-  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "schema ..." -
-  // from VM); open - go to node
+  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "scheme ..." -
+  // from VM); open - go to node items of the add-on list (place and display - at the window)
+  //
+  complete: (el: HTMLElement, m: Complete) => void;
   tip: (
     el: HTMLElement,
     lines: readonly HintLine[],
@@ -135,6 +139,7 @@ export function resolve(
     'header',
     'gutter',
     'tip',
+    'complete',
   ];
   const missing = need.filter((k) => !(k in r.panels));
   if (r.shell === '' || missing.length > 0)

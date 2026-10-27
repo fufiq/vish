@@ -198,6 +198,10 @@ struct s_item {
   std::string name;
   std::string kind;
   std::string detail;
+  std::string result; // Type of function result ("unknown")
+  std::string doc;  // a line of documentation (at the selected; frame "draft")
+  uint32_t from;    // the part of the name (from, to), the code points
+  uint32_t to;
 };
 struct s_complete {
   uint32_t view;
@@ -208,6 +212,8 @@ struct s_complete {
   std::vector<s_item> items;
   // select the item "Add" to the transition list - the text to be created (frame "Transition"); otherwise empty
   std::string preview;
+  // Basement of the list: the recipient after the point, its type and where the selected
+  std::string context;
 };
 // Check (check) on node : kind "type" - types of declared name for all instance (in
 // the layer - in its context), "error" - error in the place of use (with a trace),

@@ -227,6 +227,7 @@ function receive(m: ServerMsg): void {
       sideWrap.hidden = sideWrap.hidden && host !== side;
       const v = new ViewElement(host, m);
       v.paintTip = panels.tip;
+      v.paintComplete = panels.complete;
       views.set(m.view, v);
       paintGutter(v);
       activate(v);

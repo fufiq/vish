@@ -108,6 +108,10 @@ describe('представление', () => {
       name,
       kind: 'функция',
       detail: '(x)',
+      result: '',
+      doc: '',
+      from: 0,
+      to: 0,
     });
     v.showCompletion({
       type: 's_complete',
@@ -118,6 +122,7 @@ describe('представление', () => {
       selected: 1,
       items: [item('print'), item('port')],
       preview: '',
+      context: '',
     });
     expect(v.popup.hidden).toBe(false);
     expect(
@@ -133,6 +138,7 @@ describe('представление', () => {
       selected: 0,
       items: [],
       preview: '',
+      context: '',
     });
     expect(v.popup.hidden).toBe(true);
   });

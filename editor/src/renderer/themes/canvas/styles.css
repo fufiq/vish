@@ -544,3 +544,105 @@ vish-extend::part(keyword) {
     translate: calc(var(--i) * 39px) 0;
   }
 }
+
+/* черновик (кадр «черновик»): строки открытого черновика — сиреневая полоса у номеров; дыра — без цвета */
+.vish-gutter [draft] {
+  box-shadow: inset -2px 0 0 #b9b0f0;
+}
+vish-hole {
+  color: #3f3d38;
+}
+
+/* список дополнения (кадр «черновик») — над строкой */
+.vish-complete {
+  width: 430px;
+  min-width: 0;
+  max-height: 340px;
+  padding: 6px;
+  box-sizing: border-box;
+  border-radius: 18px;
+  background: #f7f6f3;
+  border: 1px solid #e7e5df;
+  box-shadow: 0 18px 40px rgb(20 20 10 / 0.12);
+  font: 14px/1.4 var(--canvas-ui);
+  white-space: normal;
+  z-index: 5;
+}
+.vish-complete li.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  color: #8b8880;
+  background: none;
+}
+.vish-complete li.item[selected] {
+  padding: 8px 10px;
+  background: #ebe8f7;
+  color: #57544d;
+}
+.vish-complete li.item .icon {
+  color: var(--vish-keyword);
+}
+.vish-complete li.item .icon[data-role='param'] {
+  color: var(--vish-param);
+}
+.vish-complete li.item .icon[data-role='var'] {
+  color: #0e7490;
+}
+.vish-complete .name {
+  font-family: var(--canvas-code);
+  white-space: nowrap;
+}
+.vish-complete [selected] .name {
+  color: #8b84b8;
+}
+.vish-complete .name b {
+  font-weight: 400;
+  color: var(--vish-keyword);
+}
+.vish-complete .sig {
+  margin-left: -6px;
+  font-family: var(--canvas-code);
+  color: #b8b5ad;
+  white-space: nowrap;
+}
+.vish-complete .fill {
+  flex: 1;
+}
+.vish-complete .type {
+  font-size: 11.5px;
+  color: #b8b5ad;
+}
+.vish-complete kbd {
+  padding: 2px 7px;
+  border-radius: 7px;
+  background: #fff;
+  color: #3f3e3a;
+  box-shadow: 0 1px 0 #e2e0da;
+  font: 11px var(--canvas-ui);
+}
+.vish-complete li.doc {
+  padding: 8px 12px 6px 36px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #77746c;
+}
+.vish-complete li.foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 7px 10px 3px;
+  border-top: 1px solid #ebe9e3;
+  font-size: 11.5px;
+  color: #a3a19a;
+}
+.vish-complete li.foot .context {
+  flex: 1;
+}
+/* открыт список дополнения — подсказка набора не нужна (кадр «черновик») */
+.vish-complete:not([hidden]) ~ .vish-hint {
+  display: none;
+}

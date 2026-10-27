@@ -13,6 +13,7 @@ const panels: Panels = {
   header: noop,
   gutter: noop,
   tip: noop,
+  complete: noop,
 };
 
 describe('темы', () => {

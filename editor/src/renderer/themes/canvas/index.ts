@@ -10,6 +10,7 @@ import '@fontsource/jetbrains-mono/500.css';
 import type { Theme } from '../../theme';
 import classicShell from '../classic/shell.html?raw';
 import { tip } from './card';
+import { complete } from './complete';
 import css from './styles.css?inline';
 
 const backdrop =
@@ -23,12 +24,14 @@ const theme: Theme = {
   shell: backdrop + header + classicShell,
   panels: {
     tip,
+    complete,
     // number - only the lines with the code; empty and comments - without a number, counting (frame "Laptop")
     gutter(el, lines) {
       el.replaceChildren(
         ...lines.map((l, i) => {
           const d = document.createElement('div');
           d.textContent = l.code ? String(i + 1) : '\u00a0'; // empty div would collapse
+          d.toggleAttribute('draft', l.draft); // draft
           return d;
         }),
       );

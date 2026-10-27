@@ -226,6 +226,10 @@ export interface CompletionItem {
   name: string;
   kind: string;
   detail: string;
+  result: string; // Type of function result ('' - unknown)
+  doc: string; // Documentation line (selected)
+  from: number; // the part of the name (from, to), the code points
+  to: number;
 }
 export interface Complete {
   type: 's_complete';
@@ -236,6 +240,7 @@ export interface Complete {
   selected: number;
   items: CompletionItem[];
   preview: string; // Selected to add a transition list - what will be created
+  context: string; // Basement: Recipient after the point, its type and where it was selected
 }
 // Verification tags: "type" - types of declared name for all instance, "error" -
 // error in place (with a trace). They come in full after the audit. [from, to] is

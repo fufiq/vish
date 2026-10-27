@@ -45,6 +45,8 @@ export class ViewElement {
   // Line number - draws the theme (panels.gutter), there is only a place in the window
   readonly gutter = document.createElement('div');
   root: ASTNode | undefined;
+  // Draws items from the supplement list (theme panel complete)
+  paintComplete: (el: HTMLElement, m: Complete) => void = renderComplete;
   // Draws a hint and a card (theme panel tip)
   paintTip: (
     el: HTMLElement,
@@ -448,7 +450,7 @@ export class ViewElement {
 
   // Lines of text for numbers: whether there is code in a line - not spaces and not a comment (Span tags
   // from VM; text sheet - always code).
-  lines(): { code: boolean }[] {
+  lines(): { code: boolean; draft: boolean }[] {
     const comments = new Map<NodeId, [number, number][]>();
     for (const m of this.#decor?.marks ?? [])
       if (m.kind === 'span' && m.text.startsWith('comment')) {
@@ -456,10 +458,17 @@ export class ViewElement {
         list.push([m.from, m.to]);
         comments.set(m.node, list);
       }
-    const out = [{ code: false }];
+    const drafts = new Set(
+      (this.#decor?.marks ?? [])
+        .filter((m) => m.kind === 'draft')
+        .map((m) => m.node),
+    );
+    const out = [{ code: false, draft: false }];
+    let inDraft = 0;
     const walk = (id: NodeId): void => {
       const n = this.nodes.get(id);
       if (!n) return;
+      if (drafts.has(id)) ++inDraft;
       const leaf = n.pieces.every((p) => typeof p === 'string');
       const cs = comments.get(id) ?? [];
       let own = 0;
@@ -470,7 +479,8 @@ export class ViewElement {
         }
         for (const ch of p) {
           const line = out[out.length - 1];
-          if (ch === '\n') out.push({ code: false });
+          if (inDraft > 0) line.draft = true;
+          if (ch === '\n') out.push({ code: false, draft: false });
           else if (
             ch.trim() !== '' &&
             (leaf || !cs.some(([a, b]) => own >= a && own < b))
@@ -479,6 +489,7 @@ export class ViewElement {
           ++own;
         }
       }
+      if (drafts.has(id)) --inDraft;
     };
     walk(this.root?.nodeId ?? this.data.root);
     return out;
@@ -583,22 +594,15 @@ export class ViewElement {
       this.preview.hidden = true;
       return;
     }
-    this.popup.replaceChildren(
-      ...m.items.map((item, i) => {
-        const li = document.createElement('li');
-        li.toggleAttribute('selected', i === m.selected);
-        const name = document.createElement('span');
-        name.className = 'name';
-        name.textContent = item.name;
-        const detail = document.createElement('span');
-        detail.className = 'detail';
-        detail.textContent = `${item.detail} ${item.kind}`.trim();
-        li.append(name, detail);
-        return li;
-      }),
-    );
+    this.paintComplete(this.popup, m);
     this.popup.style.left = `${String(box.left)}px`;
-    this.popup.style.top = `${String(box.top + box.height)}px`;
+    // The subject can ask for a list above the line (data-place="above", frame "draft"), if there is space there.
+    const above = box.top - this.popup.offsetHeight - 6;
+    this.popup.style.top = `${String(
+      this.popup.dataset.place === 'above' && above >= this.host.scrollTop
+        ? above
+        : box.top + box.height,
+    )}px`;
     this.popup
       .querySelector('[selected]')
       ?.scrollIntoView({ block: 'nearest' });
@@ -638,7 +642,25 @@ export class ViewElement {
 
 export { codePoints, utf16Offset } from './nodes/ast_node';
 
-// Lines of hint: view - signature, link - by click (open).
+// Lines of hint: view - signature, link - by click (open). Items of the supplement
+// list: name, detail and type; selected - by attribute.
+export function renderComplete(el: HTMLElement, m: Complete): void {
+  el.replaceChildren(
+    ...m.items.map((item, i) => {
+      const li = document.createElement('li');
+      li.toggleAttribute('selected', i === m.selected);
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = item.name;
+      const detail = document.createElement('span');
+      detail.className = 'detail';
+      detail.textContent = `${item.detail} ${item.kind}`.trim();
+      li.append(name, detail);
+      return li;
+    }),
+  );
+}
+
 export function renderLines(
   box: HTMLElement,
   lines: readonly HintLine[],

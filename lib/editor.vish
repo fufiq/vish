@@ -294,17 +294,27 @@ send_caret(i64 peer, i64 id, bool selection, i64 n, i64 piece, i64 offset) => na
   else editor_host->send_to((a[0]).as<int64_t>(), proto::s_cursor{id, at, piece, offset});
   return value(int64_t(0));
 };
-// list of additions (completion) at the place (node, piece, displacement); empty - hide
-send_completion_list(i64 peer, i64 id, i64 n, i64 piece, i64 offset, i64 selected, items, str preview) => native "cpp" {
+// a list of additions (completion) at the place (node, piece, offset); empty - hide extra - by
+// items: type of result, documentation, match [from, to) (struct item_extra )
+send_completion_list(i64 peer, i64 id, i64 n, i64 piece, i64 offset, i64 selected, items, str preview, extra, str context) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
   int64_t n = (a[2]).as<int64_t>();
-  proto::s_complete out{uint32_t((a[1]).as<int64_t>()), n < 0 ? node_id{} : node_id(uint32_t(n)), uint32_t((a[3]).as<int64_t>()), uint32_t((a[4]).as<int64_t>()), uint32_t((a[5]).as<int64_t>()), {}, std::string((a[7]).as<str_v>().view())};
+  proto::s_complete out{uint32_t((a[1]).as<int64_t>()), n < 0 ? node_id{} : node_id(uint32_t(n)), uint32_t((a[3]).as<int64_t>()), uint32_t((a[4]).as<int64_t>()), uint32_t((a[5]).as<int64_t>()), {}, std::string((a[7]).as<str_v>().view()), std::string((a[9]).as<str_v>().view())};
   auto const & xs = (a[6]).as<array_v>();
+  auto const & es = (a[8]).as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value x = xs.get(k);
-    out.items.push_back({std::string(s.field(x, "name", where).as<str_v>().view()), std::string(s.field(x, "kind", where).as<str_v>().view()), std::string(s.field(x, "detail", where).as<str_v>().view())});
+    proto::s_item it{std::string(s.field(x, "name", where).as<str_v>().view()), std::string(s.field(x, "kind", where).as<str_v>().view()), std::string(s.field(x, "detail", where).as<str_v>().view()), {}, {}, 0, 0};
+    if(k < es.size()) {
+      value e = es.get(k);
+      it.result = std::string(s.field(e, "type", where).as<str_v>().view());
+      it.doc = std::string(s.field(e, "doc", where).as<str_v>().view());
+      it.from = uint32_t(s.field(e, "from", where).as<int64_t>());
+      it.to = uint32_t(s.field(e, "to", where).as<int64_t>());
+    }
+    out.items.push_back(std::move(it));
   }
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
@@ -1201,7 +1211,90 @@ send_completion(i64 v) {
   // tell the tuling "I want to add" ... I can write foo(int) and go"
   k = views[v].selected;
   preview = if(nav_list(v) && ((k < views[v].targets.size) && (!given(nav_fn(v, k)) && (nav_add(v, k) != "")))) overload_text(nav_add(v, k)) else "";
-  send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview);
+  if(nav_list(v)) return send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview, array{}, "");
+  // addition (frame "draft", author's decision 2026-10-27): the item - the type of the result and the
+  // matching part, the selected - a line of documentation, the list - the recipient after the point
+  k0 = views[v].selected;
+  b = views[v].word_begin;
+  word = text_of(v, b, cursor(v));
+  at = place_node(v, if(b < cursor(v)) b else if(b > 0) b - 1 else b);
+  dot = (b > 0) && (lead(v, b - 1) == '.');
+  recv = if(dot) receiver_text(v, b - 1) else "";
+  rtypes = if(dot) join_types(object_types(v, b - 1)) else "";
+  extra = array{};
+  src = "";
+  for(k : range(views[v].items.size)) {
+    it = views[v].items[k];
+    m = match_range(it.name, word);
+    f = if((it.kind == "функция") && ((k < 12) || (k == k0))) first_decl(it.name, at) else code();
+    doc = if((k == k0) && given(f)) doc_line(f, it.name, rtypes, at) else "";
+    if((k == k0) && given(f)) src = if(in_prelude(f)) "prelude" else if(module_note(f) != "") module_note(f) else "программа";
+    extra.push(item_extra{if(given(f)) result_type(f) else "", doc, m[0], m[1]});
+  }
+  context = if(dot) (((recv + " ") + rtypes) + (if(src == "") "" else " · " + src)) else src;
+  send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview, extra, context);
+}
+struct item_extra { str type; str doc; i64 from; i64 to; }
+// match typed with the name: prefix, substring; otherwise empty (subsequence)
+match_range(str name, str word) {
+  if(word == "") return array{0, 0};
+  i = find_text(name, word);
+  if(i < 0) array{0, 0} else array{code_points(slice_text(name, 0, i)), code_points(slice_text(name, 0, i)) + code_points(word)}
+}
+first_decl(str name, at) {
+  fs = declarations(name, at);
+  if(fs.size > 0) fs[0] else code()
+}
+// function result type: declared, otherwise by body instance
+result_type(f) {
+  ast.function{_, _, rt, body, _, _, _, _, _} = f;
+  if(given(rt)) return print_node(rt);
+  if(given(body)) join_types(node_types(body)) else ""
+}
+// receiver `x.` before dot - name text (like object_types)
+receiver_text(i64 v, i64 dot) {
+  k = dot;
+  while((k > 0) && ident_byte(lead(v, k - 1))) k -= 1;
+  text_of(v, k, dot)
+}
+// a line of paragraph documentation: the first sentence of his doc comment, otherwise - the offer
+// of documentation of the type of recipient (function of the same name, stream), where this name is
+doc_line(f, str name, str rtypes, at) {
+  own = doc_of(f, name);
+  if(own != "") return first_sentence(own, "");
+  base = before(rtypes, '<');
+  tf = if(base != "") first_decl(base, at) else code();
+  if(given(tf)) first_sentence(doc_of(tf, base), name) else ""
+}
+// sentence of text (up to `.` or `;`), where there is the word w ("" - first); ends with a point
+first_sentence(str s, str w) {
+  b = 0;
+  i = 0;
+  while(i <= s.size) {
+    if((i == s.size) || ((s[i] == '.') || (s[i] == ';'))) {
+      part = trim(slice_text(s, b, i));
+      if((part != "") && ((w == "") || has_word(part, w))) return part + ".";
+      b = i + 1;
+    }
+    i += 1;
+  }
+  ""
+}
+has_word(str s, str w) {
+  i = 0;
+  r = false;
+  while(!r && (i < s.size)) {
+    j = find_text(text_from(s, i), w);
+    if(j < 0) i = s.size;
+    else {
+      at = i + j;
+      left = (at == 0) || !word_char(s[at - 1]);
+      right = ((at + w.size) >= s.size) || !word_char(s[at + w.size]);
+      r = left && right;
+      i = at + 1;
+    }
+  }
+  r
 }
 // The list of additions (or transitions) is open and there are options
 completing(i64 v) => views[v].completing && (views[v].items.size > 0);
@@ -1392,7 +1485,8 @@ set_projection(i64 v, str key) {
 object_types(i64 v, i64 dot) {
   n = place_node(v, dot);
   while(given(n)) {
-    if(member_name(n) != "") return node_types(member_object(n));
+    // the node of the draft after the set - without observation, until it was checked: then - by name below
+    if((member_name(n) != "") && (node_types(member_object(n)).size > 0)) return node_types(member_object(n));
     n = code_parent(n);
   }
   k = dot;
@@ -3951,6 +4045,8 @@ send_marks(i64 v) {
   if(view_kind(v) == "fn") overload_marks(found, v) else module_overload_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
   for(m : path_marks(views[v].lay.nodes)) found.push(m);
+  // open draft (frame "draft", author's decision 2026-10-27): its elements - label draft
+  if(views[v].d.open) for(x : views[v].d.items) found.push(mark{x, "draft", "", 0, 0});
   show_marks(v, found);
   calm_status(views[v].peer);
   if(view_kind(v) == "fn") send_layers(v) else 0

@@ -11,7 +11,7 @@ hover 1 @norm2:2
 // F12: overload from the module is - "Add norm2(v2)" is not necessary
 pointer 1 @norm2:2 0 1
 key 1 F12
-// expect: items=⏎  name="norm2(v2 a)" kind="перегрузка" detail="выбрана здесь, модуль geo.vec"⏎  name="norm2(i64 n)" kind="перегрузка" detail=""
+// expect: items=⏎  name="norm2(v2 a)" kind="перегрузка" detail="выбрана здесь, модуль geo.vec" result="" doc="" from=0 to=0⏎  name="norm2(i64 n)" kind="перегрузка" detail=""
 // expect-not: добавить
 // Enter - Module function in the second panel
 key 1 Enter
