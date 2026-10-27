@@ -27,6 +27,18 @@ const api = {
   reconnect(): void {
     ipcRenderer.send('vm:reconnect');
   },
+  // AI: query to your Claude Code and its events - text, tool call, end
+  aiAsk(text: string): void {
+    ipcRenderer.send('ai:ask', text);
+  },
+  aiStop(): void {
+    ipcRenderer.send('ai:stop');
+  },
+  onAi(cb: (kind: string, text: string) => void): void {
+    ipcRenderer.on('ai:event', (_e, kind: string, text: string) => {
+      cb(kind, text);
+    });
+  },
 };
 
 export type VmBridge = typeof api;

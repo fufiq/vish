@@ -178,7 +178,7 @@ export class ViewElement {
       width: r.width,
     });
     for (const p of m.peers) {
-      const name = `клиент ${String(p.client + 1)}`;
+      const name = p.name === '' ? `клиент ${String(p.client + 1)}` : p.name;
       if (p.draft_node !== null) {
         const el = this.byId.get(p.draft_node);
         if (el) {

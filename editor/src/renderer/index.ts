@@ -16,6 +16,7 @@ import {
   type Peers,
   type Output,
   type Conflict,
+  type Proposal,
   type Layers,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
@@ -43,6 +44,11 @@ const layersBar = byId('layers');
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
 const mergePanel = byId('merge');
+const proposalsPanel = byId('proposals');
+const aiPanel = byId('ai');
+const aiLog = aiPanel.querySelector<HTMLElement>('.log') ?? aiPanel;
+const aiForm = byId('ai-form') as HTMLFormElement;
+const aiInput = byId('ai-input') as HTMLTextAreaElement;
 type GotoMode = 'goto' | 'merge' | 'projection' | 'apply';
 let gotoMode: GotoMode = 'goto';
 const statusLine = byId('status');
@@ -180,6 +186,11 @@ function receive(m: ServerMsg): void {
       runOutput.textContent = m.output + (m.error === '' ? '' : `\n${m.error}`);
       runOutput.toggleAttribute('error', m.error !== '');
       return;
+    case 's_proposals':
+      showProposals(m.proposals);
+      return;
+    case 's_items':
+      return;
     case 's_merge':
       showMerge(m.conflicts);
       return;
@@ -227,6 +238,94 @@ function receive(m: ServerMsg): void {
   }
 }
 
+// AI Panel: query to your Claude Code through the main process; in journal, answer, vish tool
+// calls, and end. Changes come in sentences (panel below), accepted by the person.
+//
+function aiLine(kind: string, text: string): void {
+  const row = document.createElement('div');
+  row.className = `ai-${kind}`;
+  row.textContent = text;
+  aiLog.append(row);
+  aiLog.scrollTop = aiLog.scrollHeight;
+}
+let aiBusy = false;
+aiForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = aiInput.value.trim();
+  if (text === '' || aiBusy) return;
+  aiBusy = true;
+  aiForm.toggleAttribute('busy', true);
+  aiLine('user', text);
+  aiInput.value = '';
+  window.vm.aiAsk(text);
+});
+aiInput.addEventListener('keydown', (e) => {
+  e.stopPropagation(); // field keys - not to the editor
+  if (e.key === 'Enter' && e.ctrlKey) aiForm.requestSubmit();
+  if (e.key === 'Escape' && aiBusy) window.vm.aiStop();
+});
+window.vm.onAi((kind, text) => {
+  if (kind === 'done' || kind === 'error') {
+    aiBusy = false;
+    aiForm.toggleAttribute('busy', false);
+  }
+  if (kind !== 'done' || text !== '') aiLine(kind, text);
+});
+
+// Proposals of edits (AI): element, who and why, current text and proposed with a marked difference;
+// "Accept" - one edit, "Reject" - remove (decides VM).
+function showProposals(ps: readonly Proposal[]): void {
+  proposalsPanel.hidden = ps.length === 0;
+  proposalsPanel.replaceChildren(
+    ...ps.map((p) => {
+      const box = document.createElement('div');
+      box.className = 'proposal';
+      const head = document.createElement('div');
+      head.className = 'title';
+      head.textContent = `${p.from} предлагает: ${p.key} — ${p.why}`;
+      const cols = document.createElement('div');
+      cols.className = 'cols';
+      const col = (name: string, text: string, from: number, to: number) => {
+        const c = document.createElement('div');
+        c.className = 'side';
+        const h = document.createElement('div');
+        h.className = 'head';
+        h.textContent = name;
+        const pre = document.createElement('pre');
+        // eslint-disable-next-line @typescript-eslint/no-misused-spread
+        const cps = [...text];
+        if (text === '') pre.textContent = '— нет —';
+        else if (to > from) {
+          const mark = document.createElement('mark');
+          mark.textContent = cps.slice(from, to).join('');
+          pre.append(cps.slice(0, from).join(''), mark, cps.slice(to).join(''));
+        } else pre.textContent = text;
+        c.append(h, pre);
+        return c;
+      };
+      cols.append(
+        col('сейчас', p.base, 0, 0),
+        col(`предложено · ${p.note}`, p.text, p.text_from, p.text_to),
+      );
+      const buttons = document.createElement('div');
+      buttons.className = 'buttons';
+      const button = (label: string, accept: boolean) => {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.toggleAttribute('accept', accept);
+        b.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          send({ type: 'c_decide', id: p.id, accept });
+        });
+        return b;
+      };
+      buttons.append(button('Принять', true), button('Отклонить', false));
+      box.append(head, cols, buttons);
+      return box;
+    }),
+  );
+}
+
 // Other clients: each has where the cursor is and what rules (frame
 // "Two clients"); no one - no panel.
 function showClients(m: Peers): void {
@@ -242,10 +341,11 @@ function showClients(m: Peers): void {
       row.className = 'client';
       const avatar = document.createElement('span');
       avatar.className = 'avatar';
-      avatar.textContent = 'К';
+      avatar.textContent = p.name === '' ? 'К' : (p.name.at(0) ?? 'К');
       const text = document.createElement('span');
       const name = document.createElement('b');
-      name.textContent = `клиент ${String(p.client + 1)}`;
+      name.textContent =
+        p.name === '' ? `клиент ${String(p.client + 1)}` : p.name;
       const where = document.createElement('span');
       where.textContent =
         p.draft === ''
@@ -667,6 +767,13 @@ for (const pane of [app, side]) {
       e.preventDefault();
       sideModule = true;
       send({ type: 'c_open_view', kind: 'module' });
+      return;
+    }
+    // Ctrl+I - “AI” panel (your Claude Code, edits - sentences)
+    if (e.ctrlKey && (e.key === 'i' || e.key === 'ш')) {
+      e.preventDefault();
+      aiPanel.hidden = !aiPanel.hidden;
+      if (!aiPanel.hidden) aiInput.focus();
       return;
     }
     if (e.ctrlKey && e.key === 'j') {

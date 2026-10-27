@@ -131,7 +131,23 @@ struct c_apply {
 struct c_trace_step {
   uint32_t step;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step>;
+// AI: Agent-client VM. The name of the client (in the list of customers), the module elements (key and
+// text), the suggestion of editing the element by key (the whole text, why) and the decision of the person
+// on the proposal.
+struct c_name {
+  std::string name;
+};
+struct c_items {};
+struct c_propose {
+  std::string key;
+  std::string text;
+  std::string why;
+};
+struct c_decide {
+  uint32_t id;
+  bool accept;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_propose, c_decide>;
 
 // --- VM customer ---
 
@@ -380,6 +396,7 @@ struct s_stops {
 //.
 struct s_peer {
   uint32_t client;
+  std::string name;
   node_id node;
   uint32_t piece;
   uint32_t offset;
@@ -391,7 +408,32 @@ struct s_peers {
   uint32_t view;
   std::vector<s_peer> peers;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers>;
+// Elements of the program module: key (signature), text, internal
+struct s_element {
+  std::string key;
+  std::string text;
+  bool inner;
+};
+struct s_items {
+  std::vector<s_element> items;
+};
+// Proposals for edits (AI): number, element key, current text (empty - new element), proposed why, from
+// which client; the difference with the current - place and signature, as in a merger.
+struct s_proposal {
+  uint32_t id;
+  std::string key;
+  std::string base;
+  std::string text;
+  std::string why;
+  std::string from;
+  uint32_t text_from = 0;
+  uint32_t text_to = 0;
+  std::string note;
+};
+struct s_proposals {
+  std::vector<s_proposal> proposals;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_proposals>;
 
 // --- staff ---
 

@@ -1,0 +1,25 @@
+// AI - VM client, edits - suggestions
+//.
+// program: editor_overload_layers.vish
+open_view module
+[2] open_view module
+[2] name ИИ
+// The first client has a second client with a name.
+// expect: name="ИИ"
+// Agent takes module elements: key and text
+[2] items
+// expect: items items=
+// expect: key="norm(f64)" text="norm(f64 x) {\n  y = x * x;\n  y + 0.5\n}" inner=false
+// offers to edit the element by key - see all customers, with a difference against the current text
+[2] propose norm(f64) norm(f64\sx)\s{\n\s\sy\s=\sx\s*\sx;\n\s\sy\s+\s0.25\n} половина\sмало
+// expect: proposals proposals=
+// expect: key="norm(f64)"
+// expect: why="половина мало" from="ИИ"
+// expect: note="+ 2"
+// person accepts - the element is replaced by one edit
+decide 1 1
+// expect: status kind="done" text="принято: norm(f64)"
+// expect: y + 0.25
+// This overload is replaced by the total norm(x).
+// expect: norm(x) {⏎  y = x * x;⏎  y + 1⏎}
+// expect: proposals proposals=⏎

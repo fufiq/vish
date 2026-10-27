@@ -7,7 +7,7 @@ open_view module
 [2] pointer 1 @print 0 2
 // expect: другому клиенту:
 // expect: peers view=1 peers=
-// expect: client=1 node=#
+// expect: client=1 name="" node=#
 // expect: offset=2 where="main, строка 14" draft=""
 // The second type - the first one sees its draft (main element)
 [2] key 1 x

@@ -130,6 +130,25 @@ export interface TraceStepAsk {
   type: 'c_trace_step';
   step: number;
 }
+// AI is a VM client: name, module elements, suggestion of editing, human decision.
+export interface NameAsk {
+  type: 'c_name';
+  name: string;
+}
+export interface ItemsAsk {
+  type: 'c_items';
+}
+export interface ProposeAsk {
+  type: 'c_propose';
+  key: string;
+  text: string;
+  why: string;
+}
+export interface DecideAsk {
+  type: 'c_decide';
+  id: number;
+  accept: boolean;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -151,7 +170,11 @@ export type ClientMsg =
   | InspectAsk
   | Apply
   | Stop
-  | TraceStepAsk;
+  | TraceStepAsk
+  | NameAsk
+  | ItemsAsk
+  | ProposeAsk
+  | DecideAsk;
 
 export interface ServerHello {
   type: 's_hello';
@@ -289,6 +312,7 @@ export interface Peers {
   peers: {
     type: 's_peer';
     client: number;
+    name: string;
     node: NodeId | null;
     piece: number;
     offset: number;
@@ -421,7 +445,31 @@ export type ServerMsg =
   | Inspect
   | Status
   | Stops
-  | Peers;
+  | Peers
+  | Items
+  | Proposals;
+// Elements of the module: key (signature), text, internal
+export interface Items {
+  type: 's_items';
+  items: { type: 's_element'; key: string; text: string; inner: boolean }[];
+}
+// Proposals for edits (AI): current text proposed, why, from whom; the difference is place.
+export interface Proposal {
+  type: 's_proposal';
+  id: number;
+  key: string;
+  base: string;
+  text: string;
+  why: string;
+  from: string;
+  text_from: number;
+  text_to: number;
+  note: string;
+}
+export interface Proposals {
+  type: 's_proposals';
+  proposals: Proposal[];
+}
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;
 

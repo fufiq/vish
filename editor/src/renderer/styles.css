@@ -631,6 +631,120 @@ body {
   color: white;
   font-weight: 600;
 }
+/* ИИ: журнал разговора и поле запроса (Ctrl+I) */
+#ai {
+  width: 360px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 30px;
+  border-left: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
+  font:
+    13px system-ui,
+    sans-serif;
+}
+#ai[hidden] {
+  display: none;
+}
+#ai .head {
+  padding: 6px 10px;
+  color: var(--vish-status);
+  border-bottom: 1px solid color-mix(in srgb, var(--vish-fg) 10%, transparent);
+}
+#ai .log {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+#ai .log > div {
+  margin-bottom: 8px;
+}
+#ai .ai-user {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--vish-popup);
+}
+#ai .ai-tool {
+  color: var(--vish-detail);
+  font:
+    11.5px ui-monospace,
+    monospace;
+}
+#ai .ai-error {
+  color: var(--vish-error);
+}
+#ai form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 10%, transparent);
+}
+#ai form[busy] button {
+  opacity: 0.5;
+}
+#ai textarea {
+  font: inherit;
+  resize: vertical;
+}
+/* предложения правок (ИИ): сейчас / предложено, принять / отклонить */
+#proposals {
+  border-top: 1px solid color-mix(in srgb, var(--vish-fg) 12%, transparent);
+  padding: 8px 24px;
+  max-height: 40vh;
+  overflow: auto;
+}
+#proposals[hidden] {
+  display: none;
+}
+.proposal .title {
+  margin-bottom: 6px;
+  color: var(--vish-value);
+}
+.proposal .cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.proposal .side .head {
+  font-size: 12px;
+  color: var(--vish-detail);
+}
+.proposal pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background: var(--vish-popup);
+  border-radius: 4px;
+  font-size: 13px;
+  overflow: auto;
+}
+.proposal pre mark {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--vish-value) 22%, transparent);
+  color: inherit;
+}
+.proposal .buttons {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.proposal button {
+  font:
+    12px system-ui,
+    sans-serif;
+  padding: 3px 12px;
+  border: none;
+  border-radius: 6px;
+  background: var(--vish-selected);
+  color: var(--vish-fg);
+  cursor: pointer;
+}
+.proposal button[accept] {
+  background: #0f766e;
+  color: white;
+}
 /* остановки трассы: глубина вызова — сдвиг и направляющие */
 #stops {
   width: 300px;

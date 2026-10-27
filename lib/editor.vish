@@ -102,7 +102,7 @@ struct view {
   str peers_sent;    // Signing the latest list of other customers (do not submit the same)
 }
 // client: watches the launch track (step keys - debugger) and its step
-struct client { bool debugging; i64 trace_pos; }
+struct client { bool debugging; i64 trace_pos; str name; }
 // Edit the author in coordinates node (up to parsing): cursors of other clients in the same piece are
 // shifted by it, as in a conventional editor.
 struct edit_hint { i64 node; i64 piece; i64 offset; i64 removed; i64 inserted; bool valid; }
@@ -115,6 +115,8 @@ merge_state = no_merge(); // conflicts of the last merger before the decision of
 struct shared_seen { i64 fn; array texts; }
 seen_shared = array{};
 cursors_moved = false; // The cursor moved - send to other customers at the end of the decision
+proposals = array{}; // Proposals of edits (AI) - before the decision of the person
+next_proposal = 0;
 migrate_needed = ""; // process got up: struct without migrate (its type) - bangs with "Add migrate"
 migrate_said = "";
 
@@ -393,6 +395,35 @@ send_stops(i64 peer, i64 current, stops) => native "cpp" {
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
 };
+// Module elements - the client whose message is served (element)
+send_items_list(xs) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_items out;
+  auto const & ys = (a[0]).as<array_v>();
+  for(uint32_t k = 0; k < ys.size(); ++k) {
+    value y = ys.get(k);
+    out.items.push_back({std::string(s.field(y, "key", where).as<str_v>().view()), std::string(s.field(y, "text", where).as<str_v>().view()), s.field(y, "inner", where).as<bool>()});
+  }
+  if(s.now_peer) s.send(*s.now_peer, out);
+  return value(int64_t(0));
+};
+// Edit proposals to peer client (proposal + difference)
+send_proposals_list(i64 peer, ps, diffs) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_proposals out;
+  auto const & xs = (a[1]).as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    value x = xs.get(k);
+    value d = (a[2]).as<array_v>().get(k);
+    auto t = [&](value const & v, std::string_view f) { return std::string(s.field(v, f, where).as<str_v>().view()); };
+    out.proposals.push_back({uint32_t(s.field(x, "id", where).as<int64_t>()), t(x, "key"), t(x, "base"), t(x, "text"), t(x, "why"), t(x, "from"), uint32_t(s.field(d, "from", where).as<int64_t>()), uint32_t(s.field(d, "to", where).as<int64_t>()), t(d, "note")});
+  }
+  s.send_to((a[0]).as<int64_t>(), out);
+  return value(int64_t(0));
+};
 // Other clients - id peer client representation (peer_info)
 send_peers_list(i64 peer, i64 id, peers) => native "cpp" {
   for(auto & x: a)
@@ -402,7 +433,7 @@ send_peers_list(i64 peer, i64 id, peers) => native "cpp" {
   auto const & xs = (a[2]).as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value x = xs.get(k);
-    out.peers.push_back({uint32_t(s.field(x, "client", where).as<int64_t>()), s.node_or_none(vm, s.field(x, "node", where), where), uint32_t(s.field(x, "piece", where).as<int64_t>()), uint32_t(s.field(x, "offset", where).as<int64_t>()), std::string(s.field(x, "where", where).as<str_v>().view()), std::string(s.field(x, "draft", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "draft_node", where), where)});
+    out.peers.push_back({uint32_t(s.field(x, "client", where).as<int64_t>()), std::string(s.field(x, "name", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "node", where), where), uint32_t(s.field(x, "piece", where).as<int64_t>()), uint32_t(s.field(x, "offset", where).as<int64_t>()), std::string(s.field(x, "where", where).as<str_v>().view()), std::string(s.field(x, "draft", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "draft_node", where), where)});
   }
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
@@ -894,7 +925,7 @@ view_draft(i64 id) {
 }
 // client k (increases as calls are made)
 client_of(i64 p) {
-  while(clients.size <= p) clients.push(client{false, 0});
+  while(clients.size <= p) clients.push(client{false, 0, ""});
   p
 }
 debugging() => clients[client_of(now_peer())].debugging;
@@ -1080,7 +1111,7 @@ send_cursor(i64 v) {
 // journal and synchronization. Each view is the cursors of other clients' views; node is not in its layout -
 // the closest ancestor. The same list is not sent a second time. My:* composition (where that rules).
 //
-struct peer_info { i64 client; code node; i64 piece; i64 offset; str where; str draft; code draft_node; }
+struct peer_info { i64 client; str name; code node; i64 piece; i64 offset; str where; str draft; code draft_node; }
 share_cursors() {
   if(!cursors_moved) return 0;
   cursors_moved = false;
@@ -1092,7 +1123,7 @@ share_cursors() {
       seen.push(views[u].peer); // Customer - once (first presentation)
       info = peer_at(w, u);
       ps.push(info);
-      sig = (((((sig + text(info.client)) + ":") + text(code_id(info.node))) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
+      sig = ((((((sig + text(info.client)) + info.name) + ":") + text(code_id(info.node))) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
     }
     if(sig != views[w].peers_sent) {
       views[w].peers_sent = sig;
@@ -1126,7 +1157,7 @@ peer_at(i64 w, i64 u) {
       if(!given(dn) && (layout_of(w, x) >= 0)) dn = x;
     }
   }
-  peer_info{views[u].peer, if(given(shown)) shown else code(), p, o, where, draft, dn}
+  peer_info{views[u].peer, clients[client_of(views[u].peer)].name, if(given(shown)) shown else code(), p, o, where, draft, dn}
 }
 // row number k (from zero)
 line_at(i64 v, i64 k) {
@@ -4061,6 +4092,78 @@ change_of(str base, str other) {
   added = slice_text(other, p, other.size - q);
   note = if(removed == "") "+ " + clip(trim_lead(added), 30) else if(added == "") "− " + clip(trim_lead(removed), 30) else (clip(trim_lead(removed), 20) + " → ") + clip(trim_lead(added), 20);
   text_change{code_points(slice_text(other, 0, p)), code_points(slice_text(other, 0, other.size - q)), note}
+}
+// --- The AI decision is made by a person, the AI only offers) - so the editing of the agent into the
+// program does not go by itself: all clients see the proposal, the person accepts (with one edit journal, as
+// editing a function). The whole device.
+//
+struct proposal { i64 id; str key; str base; str text; str why; str from; }
+struct element { str key; str text; bool inner; }
+on_name(str name) {
+  clients[client_of(now_peer())].name = name;
+  cursors_moved = true;
+  0
+}
+on_items() {
+  xs = array{};
+  for(it : module_items(0, -1, array{})) xs.push(element{it.key, it.text, it.inner});
+  send_items_list(xs);
+}
+on_propose(str key, str body, str why) {
+  it = find_key(module_items(0, -1, array{}), key);
+  who = clients[client_of(now_peer())].name;
+  next_proposal += 1;
+  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, if(who == "") "клиент " + text(now_peer() + 1) else who});
+  share_proposals();
+}
+// Human decision: Accept - the key element is replaced by text (no - added), with hot replacement in a
+// live process (edit_command, as vish vm edit); reject - remove
+on_decide(i64 id, bool accept) {
+  k = -1;
+  for(i : range(proposals.size)) if(proposals[i].id == id) k = i;
+  if(k < 0) return report("нет такого предложения");
+  p = proposals[k];
+  rest = array{};
+  for(i : range(proposals.size)) if(i != k) rest.push(proposals[i]);
+  proposals = rest;
+  if(accept) {
+    finalize_everyone();
+    r = apply_proposal(p.key, p.text);
+    refresh_all();
+    if(contains(r, "отклонена") || contains(r, "нет ")) send_status(now_peer(), "error", ("не принято: " + p.key) + " — " + trim(r), "")
+    else send_status(now_peer(), "done", "принято: " + p.key, "");
+  }
+  share_proposals();
+}
+// sentence - to the program: the element with this key (overload - it is not the first with a name) is replaced
+// by text, id node is saved; no key, struct - the general way edit_command (vish vm edit)
+apply_proposal(str key, str body) {
+  s = program_session();
+  v = vm_version(s);
+  name = before(key, '(');
+  it = find_key(module_items(v, -1, array{}), key);
+  if(!it.present) return edit_command(s, name, body);
+  array{errors, got} = vm_parse_at(s, it.node, name, body);
+  if(errors != "") return errors + "правка отклонена\n";
+  fresh = -1;
+  for(n : got) if(is_fn_named(v, n, name)) fresh = n;
+  if(fresh < 0) return edit_command(s, name, body);
+  vm_replace(s, it.node, fresh);
+  if(vm_proc_alive(s)) {
+    e = vm_proc_refresh(s);
+    if(e != "") return e;
+  }
+  ("функция " + key) + " заменена\n"
+}
+share_proposals() {
+  diffs = array{};
+  for(p : proposals) diffs.push(change_of(p.base, p.text));
+  sent = array{};
+  for(w : range(views.size)) if(given(views[w].root) && !holds_int(sent, views[w].peer)) {
+    sent.push(views[w].peer);
+    send_proposals_list(views[w].peer, proposals, diffs);
+  }
+  0
 }
 // The conflict is resolved: their version (the base has changed - re-imagining) or mine; false - no such thing.
 take_version(str key, bool theirs) {
