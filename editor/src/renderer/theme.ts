@@ -9,6 +9,7 @@
 import type {
   ClientMsg,
   Complete,
+  Inspect,
   Conflict,
   HintLine,
   Layers,
@@ -60,6 +61,13 @@ export interface GutterLine {
   layer: string; // Instruction overload: 'common' - as in general logic, 'own' - own, '' - no
 }
 
+// What an inspector tree line can do: a rule reference, a node cursor, node backlight in the code.
+export interface InspectActions {
+  open(node: NodeId): void;
+  place(node: NodeId): void;
+  mark(node: NodeId | null): void;
+}
+
 // Panels - draw in their element markup (id from shell) all over again according to the sent.
 export interface Panels {
   status: (el: HTMLElement, s: StatusView, host: Host) => void;
@@ -71,9 +79,18 @@ export interface Panels {
   merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
   gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
-  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "scheme ..." - from VM);
-  // open - go to node transition palette (Ctrl+P, F12): list from VM (null - empty) under the input line, preview
-  // "will be created"
+  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "scheme ..." -
+  // from VM); open - go to node inspector: tree (focus and path to it are highlighted) and full focus
+  // disclosure (in the panel)
+  inspect: (
+    tree: HTMLElement,
+    expand: HTMLElement,
+    m: Inspect,
+    act: InspectActions,
+  ) => void;
+  // Disclosure of focus under node in the code (frame "Tree Inspector")
+  expansion: (el: HTMLElement, m: Inspect, act: InspectActions) => void;
+  // Transition palette (Ctrl+P, F12): list from VM (null - empty) under the input bar, preview "will be created"
   palette: (el: HTMLElement, m: Complete | null, host: Host) => void;
   // Items of the supplement list (place and display - at the window)
   complete: (el: HTMLElement, m: Complete) => void;
@@ -146,6 +163,8 @@ export function resolve(
     'tip',
     'complete',
     'palette',
+    'inspect',
+    'expansion',
   ];
   const missing = need.filter((k) => !(k in r.panels));
   if (r.shell === '' || missing.length > 0)

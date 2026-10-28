@@ -286,6 +286,58 @@ const theme: Theme = {
       return;
     },
     tip: renderLines,
+    // inspector: tree lines - place, view, text, types, rule (link); disclosure - in rows
+    inspect(tree, expand, m, act) {
+      const path = new Set<number>();
+      const stack: (typeof m.nodes)[number][] = [];
+      for (const n of m.nodes) {
+        stack.length = n.depth;
+        stack.push(n);
+        if (n.id === m.focus) for (const x of stack) path.add(x.id);
+      }
+      tree.replaceChildren(
+        ...m.nodes.map((n) => {
+          const row = make('div', 'row');
+          row.style.paddingLeft = `${String(8 + n.depth * 14)}px`;
+          row.toggleAttribute('path', path.has(n.id));
+          row.toggleAttribute('focus', n.id === m.focus);
+          const add = (cls: string, text: string) => {
+            if (text !== '') row.append(make('span', cls, text));
+          };
+          add('role', n.role);
+          add('kind', n.kind);
+          add('text', n.text);
+          add('types', n.types === '' ? '' : `: ${n.types}`);
+          if (n.rule !== '') {
+            const rule = make('span', 'rule', `← ${n.rule}`);
+            const at = n.rule_at;
+            if (at !== null)
+              press(rule, () => {
+                act.open(at);
+              });
+            row.append(rule);
+          }
+          row.addEventListener('mouseenter', () => {
+            act.mark(n.id);
+          });
+          row.addEventListener('mouseleave', () => {
+            act.mark(null);
+          });
+          press(row, () => {
+            act.place(n.id);
+          });
+          return row;
+        }),
+      );
+      renderLines(expand, m.expand, (node) => {
+        act.place(node);
+      });
+    },
+    expansion(el, m, act) {
+      renderLines(el, m.expand, (node) => {
+        act.place(node);
+      });
+    },
     complete: renderComplete,
     // Transition palette: points and preview "will be created" with explanation from VM
     palette(el, m) {

@@ -12,6 +12,7 @@ import classicShell from '../classic/shell.html?raw';
 import { tip } from './card';
 import { complete } from './complete';
 import { palette } from './palette';
+import { expansion, inspect } from './inspector';
 import css from './styles.css?inline';
 
 const backdrop =
@@ -27,6 +28,8 @@ const theme: Theme = {
     tip,
     complete,
     palette,
+    inspect,
+    expansion,
     // number - only the lines with the code; empty and comments - without a number, counting (frame "Laptop")
     gutter(el, lines) {
       el.replaceChildren(

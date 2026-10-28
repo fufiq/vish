@@ -42,6 +42,8 @@ export class ViewElement {
   readonly preview = document.createElement('div');
   // revealing the inspector's node with a ghost string under it (frame "Simple Disclosure")
   readonly ghost = document.createElement('div');
+  // revealing the inspector's node with a block under it (frame "Tree Inspector"); draws a topic
+  readonly block = document.createElement('div');
   // Line number - draws the theme (panels.gutter), there is only a place in the window
   readonly gutter = document.createElement('div');
   root: ASTNode | undefined;
@@ -75,6 +77,8 @@ export class ViewElement {
     this.preview.hidden = true;
     this.ghost.className = 'vish-ghost';
     this.ghost.hidden = true;
+    this.block.className = 'vish-expansion';
+    this.block.hidden = true;
     this.gutter.className = 'vish-gutter';
     host.replaceChildren(...this.#chrome(this.root));
   }
@@ -89,6 +93,7 @@ export class ViewElement {
       this.popup,
       this.preview,
       this.ghost,
+      this.block,
       this.hint,
       this.tip,
     ];
@@ -229,6 +234,19 @@ export class ViewElement {
     this.ghost.textContent = `⤷ ${text}`;
     this.ghost.style.left = `${String(r.left - origin.left + this.host.scrollLeft)}px`;
     this.ghost.style.top = `${String(r.bottom - origin.top + this.host.scrollTop)}px`;
+  }
+
+  // Disclosure under node (null - remove); the content draws paint.
+  showBlock(node: NodeId | null, paint: (el: HTMLElement) => void): void {
+    const el = node === null ? undefined : this.byId.get(node);
+    this.block.hidden = !el;
+    if (!el) return;
+    paint(this.block);
+    const origin = this.host.getBoundingClientRect();
+    // under the first line of node (multi-line call is not at its end)
+    const r = el.getClientRects().item(0) ?? el.getBoundingClientRect();
+    this.block.style.left = `${String(r.left - origin.left + this.host.scrollLeft - 8)}px`;
+    this.block.style.top = `${String(r.bottom - origin.top + this.host.scrollTop + 4)}px`;
   }
 
   // Executed by start (frame "Run"): node - backlit string; null - nothing.

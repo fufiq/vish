@@ -123,30 +123,36 @@ panes.addEventListener('vish-open', (e) => {
   if (v && e instanceof CustomEvent)
     send({ type: 'c_open', view: v.data.view, node: e.detail as NodeId });
 });
-const inspector = new Inspector(byId('ast'), {
-  open(v, node) {
-    send({ type: 'c_open', view: v.data.view, node });
-  },
-  place(v, node) {
-    // cursor - at the beginning of its first text node (or its first descendant)
-    const first = (id: NodeId): { node: NodeId; piece: number } | undefined => {
-      const n = v.nodes.get(id);
-      if (!n) return undefined;
-      for (const [i, p] of n.pieces.entries()) {
-        if (typeof p === 'string') {
-          if (p !== '') return { node: id, piece: i };
-        } else {
-          const got = first(p);
-          if (got) return got;
+const inspector = new Inspector(
+  byId('ast'),
+  {
+    open(v, node) {
+      send({ type: 'c_open', view: v.data.view, node });
+    },
+    place(v, node) {
+      // cursor - at the beginning of its first text node (or its first descendant)
+      const first = (
+        id: NodeId,
+      ): { node: NodeId; piece: number } | undefined => {
+        const n = v.nodes.get(id);
+        if (!n) return undefined;
+        for (const [i, p] of n.pieces.entries()) {
+          if (typeof p === 'string') {
+            if (p !== '') return { node: id, piece: i };
+          } else {
+            const got = first(p);
+            if (got) return got;
+          }
         }
-      }
-      return undefined;
-    };
-    const at = first(node);
-    if (at) send({ type: 'c_pointer', view: v.data.view, ...at, offset: 0 });
-    activate(v);
+        return undefined;
+      };
+      const at = first(node);
+      if (at) send({ type: 'c_pointer', view: v.data.view, ...at, offset: 0 });
+      activate(v);
+    },
   },
-});
+  panels,
+);
 const cursorNode = new Map<number, NodeId>();
 let inspectTimer: ReturnType<typeof setTimeout> | undefined;
 function structure(): boolean {
@@ -609,7 +615,10 @@ for (const pane of [app, side]) {
       e.preventDefault();
       byId('ast').hidden = !byId('ast').hidden;
       if (byId('ast').hidden)
-        for (const w of views.values()) w.showGhost(null, '');
+        for (const w of views.values()) {
+          w.showGhost(null, '');
+          w.showBlock(null, () => undefined);
+        }
       requestInspect();
       return;
     }

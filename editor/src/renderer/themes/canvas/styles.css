@@ -1172,3 +1172,239 @@ vish-float[mismatch]::part(badge) {
   vertical-align: 2px;
   white-space: nowrap;
 }
+
+/* Инспектор (кадры «Инспектор дерева», «простое раскрытие») */
+#ast {
+  font: 13px/1.5 var(--canvas-ui);
+  background: rgb(255 255 255 / 0.55);
+  border-left: 1px solid var(--canvas-line);
+}
+#ast > .head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  font-size: 11.5px;
+  color: #a3a19a;
+}
+#ast .head .title {
+  display: none;
+}
+#ast .head .modes button {
+  font: 12px var(--canvas-ui);
+  border-radius: 7px;
+  padding: 2px 8px;
+}
+#ast .head .modes button[selected] {
+  background: #f1f0ec;
+  border-color: transparent;
+}
+#ast .ihead {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 14px 2px;
+}
+#ast .ihead .title {
+  font-size: 14px;
+  color: #1c1c1a;
+}
+#ast .ihead .of {
+  font: 12px var(--canvas-code);
+  color: #8b8880;
+}
+#ast .legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 4px 14px 8px;
+  border-bottom: 1px solid #f0eee9;
+  font-size: 11.5px;
+}
+#ast .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding-right: 12px;
+  border-radius: 7px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#ast .row[path] {
+  background: none;
+}
+#ast .row[focus] {
+  background: #ebe8f7;
+}
+#ast .row:hover {
+  background: #f4f3ef;
+}
+#ast .row .arrow {
+  width: 10px;
+  font-size: 10px;
+  color: #a3a19a;
+}
+#ast .row .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--vish-fn);
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='4' y='4' width='16' height='16' rx='3'/%3E%3C/svg%3E");
+}
+#ast .row .icon[data-kind='ast.call'],
+#ast .row .icon[data-kind='ast.if'] {
+  color: var(--vish-keyword);
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M4 7h7M4 12h11M4 17h7'/%3E%3Cpath d='M17 5l3 3-3 3'/%3E%3C/svg%3E");
+}
+#ast .row .icon[data-kind='ast.name'] {
+  color: #0e7490;
+}
+#ast .row .kind {
+  font: 12px var(--canvas-code);
+  color: #57544d;
+}
+#ast .row .text {
+  font: 12.5px var(--canvas-code);
+  color: var(--vish-fn);
+}
+#ast .place,
+#ast .legend .place {
+  font-size: 11.5px;
+  color: #8b8880;
+}
+#ast .param,
+#ast .legend .param {
+  font-size: 11.5px;
+  color: #0f766e;
+}
+#ast .rule,
+#ast .legend .rule {
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--vish-keyword);
+  background: #f3effd;
+}
+#ast .row .fill {
+  flex: 1;
+}
+#ast .types,
+#ast .legend .types {
+  font: 11.5px var(--canvas-code);
+  color: #b45309;
+}
+#ast .expand {
+  border-top: 1px solid #f0eee9;
+  padding: 8px 14px;
+}
+#ast .expand .xhead {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: #8b8880;
+}
+#ast .expand .xhead .decl {
+  font: 12px var(--canvas-code);
+  color: var(--vish-fn);
+}
+/* раскрытие блоком под узлом */
+.vish-expansion {
+  min-width: 340px;
+  padding: 0;
+  border: 1px solid #e7e5df;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgb(20 20 10 / 0.1);
+  font: 13px/1.5 var(--canvas-ui);
+  white-space: normal;
+}
+.vish-expansion .bhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  font-size: 12px;
+  color: #8b8880;
+}
+.vish-expansion .bhead .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--vish-keyword);
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M4 7h7M4 12h11M4 17h7'/%3E%3Cpath d='M17 5l3 3-3 3'/%3E%3C/svg%3E");
+}
+.vish-expansion .bhead .kind {
+  font-family: var(--canvas-code);
+}
+.vish-expansion .bhead .rule {
+  color: var(--vish-keyword);
+}
+.vish-expansion .bbody {
+  padding: 4px 12px 10px;
+}
+.vish-expansion .brow {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.vish-expansion .pname {
+  padding: 0 6px;
+  border-radius: 6px;
+  background: #d5f0ea;
+  color: #0f766e;
+  font: 12.5px var(--canvas-code);
+}
+.vish-expansion .eq {
+  color: #a3a19a;
+}
+.vish-expansion .code {
+  font: 14px var(--canvas-code);
+  color: #1c1c1a;
+  white-space: pre;
+}
+.vish-expansion .into {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #e7e5df;
+}
+.vish-expansion .into .code {
+  color: var(--vish-keyword);
+}
+.vish-expansion .label {
+  margin-left: 10px;
+  font-size: 11.5px;
+  color: #a3a19a;
+}
+.vish-expansion .decl {
+  gap: 8px;
+}
+.vish-expansion .decl .label {
+  margin: 0;
+}
+.vish-expansion .decl .code {
+  font-size: 12px;
+  color: #77746c;
+}
+.vish-expansion .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.vish-expansion .chip {
+  padding: 0 7px;
+  border-radius: 7px;
+  font: 12px var(--canvas-code);
+  color: #0f766e;
+  background: #e6f4f1;
+}
+/* призрак строкой — одной строкой, не налезая */
+.vish-ghost {
+  padding: 0 10px;
+  border-radius: 8px;
+  background: #f3effd;
+  color: var(--vish-keyword);
+  font: 13px/24px var(--canvas-code);
+  z-index: 3;
+}

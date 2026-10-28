@@ -910,3 +910,36 @@ body {
 .vish-gutter {
   display: none;
 }
+/* раскрытие узла инспектора блоком под ним */
+.vish-expansion {
+  position: absolute;
+  z-index: 3;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--vish-popup);
+  border: 1px solid color-mix(in srgb, var(--vish-fg) 14%, transparent);
+  white-space: pre;
+  font-size: 0.9em;
+}
+.vish-expansion[hidden] {
+  display: none;
+}
+#ast .head .modes {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+#ast .head .modes button {
+  font: inherit;
+  font-size: 11px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--vish-status);
+  cursor: pointer;
+}
+#ast .head .modes button[selected] {
+  border-color: color-mix(in srgb, var(--vish-fg) 20%, transparent);
+  color: var(--vish-fg);
+}

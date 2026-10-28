@@ -15,6 +15,8 @@ const panels: Panels = {
   tip: noop,
   complete: noop,
   palette: noop,
+  inspect: noop,
+  expansion: noop,
 };
 
 describe('темы', () => {
