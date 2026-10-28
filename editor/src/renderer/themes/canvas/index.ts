@@ -13,6 +13,7 @@ import { tip } from './card';
 import { complete } from './complete';
 import { palette } from './palette';
 import { expansion, inspect } from './inspector';
+import { merge, mergeNotes } from './merge';
 import { runHead, stops, traceBar } from './run';
 import css from './styles.css?inline';
 
@@ -34,6 +35,70 @@ const theme: Theme = {
     runHead,
     traceBar,
     stops,
+    merge,
+    mergeNotes,
+    // One VM - several clients (frame “Two clients”): you, others (where the cursor is, what rules), explanation
+    clients(el, m) {
+      el.hidden = m.peers.length === 0;
+      const make = (tag: string, className: string, text = '') => {
+        const e = document.createElement(tag);
+        e.className = className;
+        e.textContent = text;
+        return e;
+      };
+      const row = (who: string, letter: string, sub: string, me: boolean) => {
+        const r = make('div', me ? 'client me' : 'client');
+        const text = make('span', 'text');
+        text.append(make('b', '', who), make('span', 'sub', sub));
+        r.append(make('span', 'avatar', letter), text);
+        return r;
+      };
+      const head = make('div', 'head');
+      head.append(
+        make('i', 'icon peers'),
+        m.peers.length === 1
+          ? 'Одна VM — два клиента'
+          : `Одна VM — клиентов: ${String(m.peers.length + 1)}`,
+      );
+      el.replaceChildren(
+        head,
+        row('вы', 'В', `курсор в ${m.me}`, true),
+        ...m.peers.map((p) => {
+          const name =
+            p.name === '' ? `клиент ${String(p.client + 1)}` : p.name;
+          return row(
+            name,
+            name.at(0)?.toUpperCase() ?? 'К',
+            p.draft === ''
+              ? `курсор в ${p.where}`
+              : `черновик ${p.draft} — набирает`,
+            false,
+          );
+        }),
+        make(
+          'div',
+          'note',
+          'Состояние одно, на сервере. Пока элемент в чужом черновике, ваши правки в нём отклоняются; остальной код правится свободно. Закончит — изменение придёт вам.',
+        ),
+      );
+    },
+    // panel cap (frame "projection"): the same program next to it - which is projection, edit - its records
+    paneHead(el, p) {
+      el.hidden = !p.twin;
+      const key = document.createElement('span');
+      key.className = p.projection === '' ? 'key default' : 'key';
+      key.textContent = p.projection === '' ? 'по умолчанию' : p.projection;
+      const note = document.createElement('span');
+      note.className = 'note';
+      note.textContent =
+        p.projection === ''
+          ? p.active
+            ? 'активна'
+            : ''
+          : `${p.active ? 'активна · ' : ''}правка разбирается её записями`;
+      el.replaceChildren(key, note);
+      el.toggleAttribute('active', p.active);
+    },
     // number - only the lines with the code; empty and comments - without a number, counting (frame "Laptop")
     gutter(el, lines) {
       el.replaceChildren(
@@ -41,6 +106,7 @@ const theme: Theme = {
           const d = document.createElement('div');
           d.textContent = l.code ? String(i + 1) : '\u00a0'; // empty div would collapse
           d.toggleAttribute('draft', l.draft); // draft
+          d.toggleAttribute('conflict', l.conflict); // fusion
           if (l.path > 0) d.dataset.path = l.path === 2 ? 'place' : 'step'; // line
           if (l.layer !== '') d.dataset.layer = l.layer; // Instruction overload: General or Own
           d.toggleAttribute('running', l.running); // here is the launch.
@@ -69,6 +135,14 @@ const theme: Theme = {
           ? 'ok'
           : 'error';
       check.prepend(span('dot'));
+      if (h.conflicts > 0) {
+        // “Merge”: while conflicts are not resolved, they are the main thing
+        check.dataset.state = 'error';
+        check.replaceChildren(
+          span('dot'),
+          `слияние · ${String(h.conflicts)} ${h.conflicts === 1 ? 'конфликт' : h.conflicts < 5 ? 'конфликта' : 'конфликтов'}`,
+        );
+      }
       if (h.running) check.append(' · ', span('running', '▶ идёт')); // "Run" shot.
       el.replaceChildren(
         span('brand', 'VISH'),

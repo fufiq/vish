@@ -39,6 +39,7 @@ describe('живая VM', () => {
       'revision',
       'nodes',
       'kind',
+      'projection',
     ]);
     expect(fields('c_goto')).toEqual(['view', 'text']);
     expect(fields('c_layer')).toEqual(['view', 'key']);

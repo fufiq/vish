@@ -21,6 +21,7 @@ const view: View = {
   type: 's_view',
   view: 1,
   root: 10,
+  projection: '',
   revision: 1,
   kind: 'module',
   nodes: [
@@ -186,6 +187,7 @@ describe('представление', () => {
       type: 's_view',
       view: 1,
       root: 20,
+      projection: '',
       revision: 1,
       kind: 'module',
       nodes: [

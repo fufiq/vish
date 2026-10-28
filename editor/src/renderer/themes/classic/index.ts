@@ -237,10 +237,10 @@ const theme: Theme = {
 
     // Merger (Ctrl+M): Conflicts are the base, mine and them next to the difference; "take them" or
     // "leave mine."
-    merge(el, conflicts, host) {
-      el.hidden = conflicts.length === 0; // The result is in a bang from VM.
+    merge(el, m, host) {
+      el.hidden = m.conflicts.length === 0; // The result is in a bang from VM.
       el.replaceChildren(
-        ...conflicts.map((c) => {
+        ...m.conflicts.map((c) => {
           const side = (
             name: string,
             text: string,
@@ -281,6 +281,14 @@ const theme: Theme = {
       );
     },
 
+    // There is no classic panel cap
+    paneHead(el) {
+      el.hidden = true;
+    },
+    // in the classic itself - only in the bangs
+    mergeNotes(el) {
+      el.hidden = true;
+    },
     // in classic: there is no start cap (stdin, arguments, conclusion), the track is in the bangs
     runHead() {
       return;

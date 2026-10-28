@@ -154,8 +154,9 @@ take_theirs(i64 v, i64 root, base_items, str id, item theirs) {
 // Conflict is both options for a person: the text of the common base, mine, them (there is no element in the
 // version) and their element with a layout - for "take them."
 struct conflict { str id; str key; str base; str mine; str theirs; item their; }
-struct merge_result { array taken; array conflicts; array base_items; }
-no_merge() => merge_result{array{}, array{}, array{}};
+// taken_why - to the self-taken: from where and whether it is visible in the module (frame "Merge")
+struct merge_result { array taken; array taken_why; array conflicts; array base_items; }
+no_merge() => merge_result{array{}, array{}, array{}, array{}};
 
 // The three-way merging of their version into mine (mine changes on the spot): what is changed is taken by
 // themselves, and conflict is different in both.
@@ -182,6 +183,7 @@ merge_versions(i64 mine, i64 theirs) {
       if(same_state(mi, bi)) { // They are only changed by themselves.
         take_theirs(mine, -1, base_items, id, ti);
         r.taken.push(name);
+        r.taken_why.push(if(ti.inner) "взята из их копии — внутренняя, в модуле не видна" else "взята из их копии");
       } else r.conflicts.push(conflict{id, name, bi.text, mi.text, ti.text, ti});
     }
   }

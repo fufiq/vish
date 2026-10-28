@@ -21,7 +21,7 @@ save_to out/merge_theirs.vishdb
 reopen out/merge_base.vishdb
 open_view module
 merge out/merge_theirs.vishdb
-// expect: merge taken=["main()" "area(str)"] conflicts=
+// expect: merge path="out/merge_theirs.vishdb" taken=["main()" "area(str)"] taken_why=["взята из их копии" "взята из их копии — внутренняя, в модуле не видна"] conflicts=
 // expect: area(i64 n) => n * n;⏎⏎⏎// их комментарий⏎main() {
 // внутренняя — внутренней: не в представлении модуля, переход её находит
 // expect-not: area(str n)
@@ -39,5 +39,8 @@ merge out/merge_theirs.vishdb
 // expect: key="main()"
 // разница с базой — подписью и местом (кадр «Слияние»)
 // expect: mine_from=22 mine_to=23 mine_note="3 → 4"
+// expect: why="изменён у обоих по-разному"
+// метка в коде — у элемента с конфликтом (кадр «Слияние»)
+// expect: kind="conflict" text="конфликт"
 take main() 1
 // expect: area(i64 n) => n * n;⏎⏎⏎// их комментарий⏎main() {⏎  print(area(3));

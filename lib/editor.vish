@@ -111,6 +111,7 @@ views = array{};   // All representations of all customers: number - place in th
 clients = array{}; // client number
 hint = edit_hint{-1, 0, 0, 0, 0, false};
 merge_state = no_merge(); // conflicts of the last merger before the decision of the person
+merge_path = ""; // from where the leaked (frame "Merge": in the panel cap)
 // O12: overload instructions shared with most general overload (in function)
 struct shared_seen { i64 fn; array texts; }
 seen_shared = array{};
@@ -152,6 +153,11 @@ print_view(root, bool as_module, projection, i64 at, i64 count, i64 source, i64 
   for(auto & x: a)
     if(!x.known()) return erase(value(array_v::of({})));
   return editor_host->print_view(vm, vm.code_node(a[0], where), (a[1]).as<bool>(), editor_host->node_or_none(vm, a[2], where), (a[3]).as<int64_t>(), (a[4]).as<int64_t>(), (a[5]).as<int64_t>(), (a[6]).as<int64_t>());
+};
+// node printed by projection itself: pairs [node, record signature] (frame "projection")
+projection_records(root, bool as_module, projection) => native "cpp" {
+  if(!(a[0]).known() || !(a[2]).known()) return erase(value(array_v::of({})));
+  return editor_host->projection_records(vm, vm.code_node(a[0], where), (a[1]).as<bool>(), editor_host->node_or_none(vm, a[2], where));
 };
 // The draft module is corrected in place: print only its area (elements [at, at + count) text as typed,
 // source) and paste in the former lay layout printed with a draft of old elements. VISH_SPLICE_CHECK = 1 is a
@@ -268,13 +274,15 @@ projection_of(str key) => native "cpp" {
   return value(array_v::of({vm.code_value(m), value(std::move(error))}));
 };
 
-// --- Primitives: sending to the client the whole presentation: node layouts in order
-//
-send_view(i64 peer, i64 id, root, str kind, layout lay) => native "cpp" {
+// --- Primitives: sending to the client the whole: node layout in order; projection - the name of its
+// module
+send_view(i64 peer, i64 id, root, str kind, layout lay, projection) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
-  s.send_to((a[0]).as<int64_t>(), proto::s_view{uint32_t((a[1]).as<int64_t>()), vm.code_node(a[2], where), s.session.db.revision, s.wire_nodes(a[4], {}, where), std::string((a[3]).as<str_v>().view())});
+  node_id p = s.node_or_none(vm, a[5], where);
+  std::string key = p ? std::string(s.session.db.strings.text(s.session.db.as<n_module>(p).name)) : "";
+  s.send_to((a[0]).as<int64_t>(), proto::s_view{uint32_t((a[1]).as<int64_t>()), vm.code_node(a[2], where), s.session.db.revision, s.wire_nodes(a[4], {}, where), std::string((a[3]).as<str_v>().view()), std::move(key)});
   return value(int64_t(0));
 };
 // subtree node at - replaced (id at saved, children new)
@@ -437,12 +445,12 @@ send_proposals_list(i64 peer, ps, diffs) => native "cpp" {
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
 };
-// Other clients - id peer client representation (peer_info)
-send_peers_list(i64 peer, i64 id, peers) => native "cpp" {
+// other clients - view id client peer (peer_info); me - where its own cursor
+send_peers_list(i64 peer, i64 id, peers, str me) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
-  proto::s_peers out{uint32_t((a[1]).as<int64_t>()), {}};
+  proto::s_peers out{uint32_t((a[1]).as<int64_t>()), {}, std::string((a[3]).as<str_v>().view())};
   auto const & xs = (a[2]).as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value x = xs.get(k);
@@ -833,17 +841,20 @@ save_program(str path) => native "cpp" {
 // Program session - the number for the Tools module session commands (apply_command ...)
 program_session() => native "cpp" { return value(tools_host->session_of(editor_host->session)); };
 // Merge conflicts (and taken by itself) - to the client: conflicts - conflict tools module
-send_merge_list(taken, conflicts, diffs) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(int64_t(0)));
+send_merge_list(str path, taken, why, conflicts, diffs) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known() || !(a[4]).known()) return erase(value(int64_t(0)));
   auto & h = *editor_host;
-  std::vector<std::string> taken;
-  for(uint32_t k = 0; k < (a[0]).as<array_v>().size(); ++k) taken.emplace_back((a[0]).as<array_v>().get(k).as<str_v>().view());
+  auto strs = [](value const & xs) {
+    std::vector<std::string> r;
+    for(uint32_t k = 0; k < xs.as<array_v>().size(); ++k) r.emplace_back(xs.as<array_v>().get(k).as<str_v>().view());
+    return r;
+  };
   std::vector<proto::s_conflict> cs;
-  for(uint32_t k = 0; k < (a[1]).as<array_v>().size(); ++k) {
-    value c = (a[1]).as<array_v>().get(k);
+  for(uint32_t k = 0; k < (a[3]).as<array_v>().size(); ++k) {
+    value c = (a[3]).as<array_v>().get(k);
     auto s = [&](std::string_view f) { return std::string(h.field(c, f, where).as<str_v>().view()); };
     cs.push_back({s("key"), s("base"), s("mine"), s("theirs")});
-    value d = (a[2]).as<array_v>().get(k);
+    value d = (a[4]).as<array_v>().get(k);
     auto n = [&](std::string_view f) { return h.field(d, f, where); };
     cs.back().mine_from = uint32_t(n("mine_from").as<int64_t>());
     cs.back().mine_to = uint32_t(n("mine_to").as<int64_t>());
@@ -851,8 +862,9 @@ send_merge_list(taken, conflicts, diffs) => native "cpp" {
     cs.back().theirs_from = uint32_t(n("theirs_from").as<int64_t>());
     cs.back().theirs_to = uint32_t(n("theirs_to").as<int64_t>());
     cs.back().theirs_note = std::string(n("theirs_note").as<str_v>().view());
+    cs.back().why = std::string(n("why").as<str_v>().view());
   }
-  h.send_merge(std::move(taken), std::move(cs));
+  h.send_merge(std::string((a[0]).as<str_v>().view()), strs(a[1]), strs(a[2]), std::move(cs));
   return value(int64_t(0));
 };
 // Extension of the editor in the program: its name function with [[editor]] from the call c (code) is an
@@ -999,7 +1011,7 @@ show_trace(bool active, i64 step, i64 total, n, stack, str out, str error) {
 calm_status(i64 peer) {
   if(clients[client_of(peer)].debugging || program_running()) return 0;
   // process got up: struct without migrate - error with action until it was added (frame "Service States")
-  if(migrate_needed != "") return send_status_with(peer, "error", migrate_said, "", ("goto migrate(" + migrate_needed) + ")", "Добавить migrate");
+  if(migrate_needed != "") return send_status_with(peer, "error", migrate_said, "правка во время запуска (F5): без migrate процесс не продолжит", ("goto migrate(" + migrate_needed) + ")", "Добавить migrate");
   k = check_errors();
   if(k == 0) return send_status(peer, "", "", "");
   first = lines_of(check_error_text(0, -1));
@@ -1190,10 +1202,21 @@ share_cursors() {
       ps.push(info);
       sig = ((((((sig + text(info.client)) + info.name) + ":") + text(code_id(info.node))) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
     }
+    me = if(ps.size > 0) peer_at(w, w).where else ""; // One - the line "you" is not needed
+    if(ps.size > 0) sig = (sig + "@") + me;
     if(sig != views[w].peers_sent) {
       views[w].peers_sent = sig;
-      send_peers_list(views[w].peer, views[w].id, ps);
+      send_peers_list(views[w].peer, views[w].id, ps, me);
     }
+  }
+  0
+}
+// key in someone else's draft is not applied (frame "Two clients"): whose draft and when will open
+locked_status(i64 v) {
+  for(u : range(views.size)) if((views[u].peer != views[v].peer) && (given(views[u].root) && views[u].d.open)) {
+    info = peer_at(v, u);
+    who = if(info.name == "") "клиент " + text(info.client + 1) else info.name;
+    return send_status(views[v].peer, "locked", "элемент правит другой клиент", ((("ваша клавиша не применена — " + info.draft) + " откроется, когда ") + who) + " закончит");
   }
   0
 }
@@ -1212,7 +1235,7 @@ peer_at(i64 w, i64 u) {
     p = 0;
     o = 0;
   }
-  f = enclosing_fn(at);
+  f = if(given(at)) enclosing_fn(at) else code();
   where = (if(given(f)) code_name(f) + ", " else "") + ("строка " + text(line_at(u, views[u].cursor) + 1));
   draft = "";
   dn = code();
@@ -1716,7 +1739,7 @@ refresh_changed() {
 show_view_of(i64 v, bool fresh) {
   recheck(); // elaboration - to layout: ct-code mutations are visible immediately
   if(fresh) relayout(v);
-  send_view(views[v].peer, views[v].id, views[v].root, views[v].kind, views[v].lay);
+  send_view(views[v].peer, views[v].id, views[v].root, views[v].kind, views[v].lay, views[v].projection);
   send_cursor(v);
   recheck();
   send_marks(v);
@@ -1986,6 +2009,7 @@ draft_edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
   array{state, r} = open_draft(v, a, b);
   if(state < 0) {
     report("элемент правит другой клиент");
+    locked_status(v);
     return -1;
   }
   if(state == 0) return 0;
@@ -4360,6 +4384,8 @@ send_marks(i64 v) {
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
   for(m : path_marks(views[v].lay.nodes)) found.push(m);
   mismatch_marks(found, v);
+  conflict_marks(found, v);
+  record_marks(found, v);
   // open draft (frame "draft", author's decision 2026-10-27): its elements - label draft
   if(views[v].d.open) for(x : views[v].d.items) found.push(mark{x, "draft", "", 0, 0});
   show_marks(v, found);
@@ -4852,13 +4878,19 @@ on_trace_run(i64 id, str args, str input) {
   trace_program(args, input);
   on_trace(v);
 }
+// filename
+file_of(str path) {
+  slash = -1;
+  for(k : range(path.size)) if(path[k] == '/') slash = k;
+  slice_text(path, slash + 1, path.size)
+}
 // .vishdb next to the program: stats.vish → stats.vishdb §3.1)
 on_save() {
   finalize_views();
   name = program_name();
   path = if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb";
   save_program(path);
-  send_status(now_peer(), "done", "сохранено: " + path, "");
+  send_status(now_peer(), "done", "сохранено: " + file_of(path), (("база — рядом с программой: " + file_of(name)) + " → ") + file_of(path));
   calm_status(now_peer());
 }
 // function of editing the program: drafts - to the canon, edits - to the base, presentations - again
@@ -4885,9 +4917,9 @@ send_merge(bool with_taken) {
   for(c : merge_state.conflicts) {
     m = change_of(c.base, c.mine);
     t = change_of(c.base, c.theirs);
-    diffs.push(conflict_diff{m.from, m.to, m.note, t.from, t.to, t.note});
+    diffs.push(conflict_diff{m.from, m.to, m.note, t.from, t.to, t.note, conflict_why(c)});
   }
-  send_merge_list(if(with_taken) merge_state.taken else array{}, merge_state.conflicts, diffs);
+  send_merge_list(merge_path, if(with_taken) merge_state.taken else array{}, if(with_taken) merge_state.taken_why else array{}, merge_state.conflicts, diffs);
   n = merge_state.conflicts.size;
   took = if(with_taken) merge_state.taken.size else 0;
   send_status(now_peer(), "done", if(n > 0) "конфликтов: " + text(n) else "слито", if(took > 0) "взято у них: " + text(took) else "");
@@ -4896,7 +4928,36 @@ send_merge(bool with_taken) {
 // The difference of the variant with the base (frame "Mingle", author's decision 2026-10-26): the general
 // beginning and end are not changes; the middle of the variant is [from, to] code points, briefly. My area.
 struct text_change { i64 from; i64 to; str note; }
-struct conflict_diff { i64 mine_from; i64 mine_to; str mine_note; i64 theirs_from; i64 theirs_to; str theirs_note; }
+struct conflict_diff { i64 mine_from; i64 mine_to; str mine_note; i64 theirs_from; i64 theirs_to; str theirs_note; str why; }
+// projection (frame “projection”: one tree, two texts): node printed with projection records is a record
+// label with the signature of the record; in another representation of the same tree, the same client has
+// twin (same color).
+record_marks(found, i64 v) {
+  for(w : range(views.size)) {
+    same = (w == v) || ((views[w].peer == views[v].peer) && (given(views[w].root) && (code_id(views[w].root) == code_id(views[v].root))));
+    if(same && given(views[w].projection))
+      for(r : projection_records(views[w].root, views[w].kind == "module", views[w].projection)) {
+        array{n, label} = r;
+        if(layout_of(v, n) >= 0) found.push(mark{n, if(w == v) "record" else "twin", label, 0, 0});
+      }
+  }
+  true
+}
+// What Happened to the Element of Two (Conflict Cap)
+conflict_why(c) => if(c.base == "") "добавлен у обоих по-разному" else if(c.mine == "") "удалён у меня, изменён у них" else if(c.theirs == "") "изменён у меня, удалён у них" else "изменён у обоих по-разному";
+// merging conflict in code: an element of my version is the conflict label
+conflict_marks(found, i64 v) {
+  if(merge_state.conflicts.size == 0) return false;
+  items = module_items(0, -1, array{});
+  for(c : merge_state.conflicts) {
+    it = find_key(items, c.key);
+    if(it.present) {
+      n = node_code(it.node);
+      if(layout_of(v, n) >= 0) found.push(mark{n, "conflict", "конфликт", 0, 0});
+    }
+  }
+  true
+}
 change_of(str base, str other) {
   if(other == "") return text_change{0, 0, "удалён"};
   if(base == "") return text_change{0, code_points(other), "новый"};
@@ -4995,10 +5056,8 @@ take_version(str key, bool theirs) {
   rest = array{};
   for(j : range(merge_state.conflicts.size)) if(j != k) rest.push(merge_state.conflicts[j]);
   merge_state.conflicts = rest;
-  if(theirs) {
-    take_theirs(0, -1, merge_state.base_items, c.id, c.their);
-    refresh_all();
-  }
+  if(theirs) take_theirs(0, -1, merge_state.base_items, c.id, c.their);
+  refresh_all(); // and the mark of conflict goes away
   send_merge(false);
   true
 }
@@ -5006,6 +5065,9 @@ take_version(str key, bool theirs) {
 on_apply(str fn) {
   r = apply_edit(fn);
   show_output(r, starts_with(r, "применена"));
+  // Frame "Official States": the result - and in the bangs
+  if(starts_with(r, "применена")) send_status(now_peer(), "done", before(r, '\n'), "функция правки программы — правки сразу в базу, представления заново");
+  calm_status(now_peer());
 }
 // merging: the path relative to the program
 on_merge(str path) {
@@ -5017,6 +5079,7 @@ on_merge(str path) {
     for(k : range(name.size)) if(name[k] == '/') slash = k;
     if(slash >= 0) full = slice_text(name, 0, slash + 1) + path;
   }
+  merge_path = path; // dial-up
   error = merge_from(full);
   if(error != "") report("слияние: " + error) else 0
 }
@@ -5059,6 +5122,9 @@ on_projection(i64 id, str key) {
   if(error != "") return report(error);
   set_cursor(v, 0);
   show_view(v);
+  // The same tree for this client is projection recording colors (twin label)
+  for(w : range(views.size)) if((w != v) && ((views[w].peer == views[v].peer) && given(views[w].root))) send_marks(w);
+  0
 }
 // open the node: function - in the second panel, otherwise - cursor on it
 on_open(i64 id, n) {

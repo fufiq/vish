@@ -18,11 +18,14 @@ const api = {
     });
     ipcRenderer.send('vm:ask');
   },
-  // Lost - communication with VM is lost (Connect button)
-  onStatus(cb: (text: string, lost: boolean) => void): void {
-    ipcRenderer.on('vm:status', (_e, text: string, lost?: boolean) => {
-      cb(text, lost === true);
-    });
+  // Lost - communication with VM is lost (Connect button); hint - explanation (Scane “Status”)
+  onStatus(cb: (text: string, lost: boolean, hint: string) => void): void {
+    ipcRenderer.on(
+      'vm:status',
+      (_e, text: string, lost?: boolean, hint?: string) => {
+        cb(text, lost === true, hint ?? '');
+      },
+    );
   },
   reconnect(): void {
     ipcRenderer.send('vm:reconnect');

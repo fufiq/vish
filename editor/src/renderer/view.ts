@@ -24,9 +24,22 @@ import {
 import { RecordNode } from './nodes/record_node';
 import { tagOf } from './nodes/index';
 
+// projection signature tone: one signature - one color in both texts; frequent views - their own
+const tones: Record<string, number> = {
+  'ast.function': 0,
+  'ast.loop': 1,
+  'ast.if': 2,
+};
+function tone(label: string): number {
+  let h = 0;
+  for (const c of label) h = (h * 31 + (c.codePointAt(0) ?? 0)) % 997;
+  return tones[label] ?? 3 + (h % 3);
+}
+
 // Representation of the module in the window: node elements on the pieces sent, the
 // cursor is where the VM holds it. The item is addressed directly to node_id:
 // - there's no model at the window.
+
 export class ViewElement {
   readonly byId = new Map<NodeId, ASTNode>();
   readonly caret = document.createElement('div');
@@ -46,6 +59,12 @@ export class ViewElement {
   readonly block = document.createElement('div');
   // Line number - draws the theme (panels.gutter), there is only a place in the window
   readonly gutter = document.createElement('div');
+  // lines under the module code (frame "Mingle": taken by itself) - draws the theme panel
+  readonly foot = document.createElement('div');
+  // panel cap (frame "projection": which projection ) - draws the theme
+  readonly head = document.createElement('div');
+  // Signatures of elements at the end of their first line (frame "Mingle": "conflict") - on top of the code
+  readonly chips = document.createElement('div');
   root: ASTNode | undefined;
   // Draws items from the supplement list (theme panel complete)
   paintComplete: (el: HTMLElement, m: Complete) => void = renderComplete;
@@ -80,14 +99,22 @@ export class ViewElement {
     this.block.className = 'vish-expansion';
     this.block.hidden = true;
     this.gutter.className = 'vish-gutter';
+    this.foot.className = 'vish-foot';
+    this.foot.hidden = true;
+    this.chips.className = 'vish-chips';
+    this.head.className = 'vish-pane-head';
+    this.head.hidden = true;
     host.replaceChildren(...this.#chrome(this.root));
   }
 
   #chrome(root: ASTNode): Node[] {
     return [
+      this.head,
       this.gutter,
       this.selectionLayer,
       root,
+      this.foot,
+      this.chips,
       this.peersLayer,
       this.caret,
       this.popup,
@@ -256,8 +283,16 @@ export class ViewElement {
     this.#running?.setAttribute('running', '');
   }
 
-  // Other clients: a carriage with the signature "client N" and a dotted frame around the element he rules
-  // with the draft; node is not in the layout - the nearest ancestor (VM has already substituted).
+  // Other clients: a carriage with the signature "client N" and a dotted frame around the element he rules with
+  // the draft; node is not in the layout - the nearest ancestor (VM has already substituted). cursor of another
+  // panel on the same tree (frame "projection": the cursor is on the same node in both texts)
+  #twinCursor: Element | undefined;
+  showTwinCursor(id: NodeId | null): void {
+    this.#twinCursor?.removeAttribute('twin-cursor');
+    this.#twinCursor = id === null ? undefined : this.byId.get(id);
+    this.#twinCursor?.setAttribute('twin-cursor', '');
+  }
+
   showPeers(m: Peers): void {
     this.#peers = m;
     const out: HTMLElement[] = [];
@@ -483,6 +518,7 @@ export class ViewElement {
   lines(): {
     code: boolean;
     draft: boolean;
+    conflict: boolean;
     path: number;
     layer: string;
     running: boolean;
@@ -510,15 +546,29 @@ export class ViewElement {
         .filter((m) => m.kind === 'draft')
         .map((m) => m.node),
     );
+    const conflicts = new Set(
+      (this.#decor?.marks ?? [])
+        .filter((m) => m.kind === 'conflict')
+        .map((m) => m.node),
+    );
+    let inConflict = 0;
     const running = this.#running;
     const out = [
-      { code: false, draft: false, path: 0, layer: '', running: false },
+      {
+        code: false,
+        draft: false,
+        conflict: false,
+        path: 0,
+        layer: '',
+        running: false,
+      },
     ];
     let inDraft = 0;
     const walk = (id: NodeId): void => {
       const n = this.nodes.get(id);
       if (!n) return;
       if (drafts.has(id)) ++inDraft;
+      if (conflicts.has(id)) ++inConflict;
       const step = steps.get(id) ?? 0;
       const here = out[out.length - 1];
       if (step > here.path) here.path = step;
@@ -536,10 +586,12 @@ export class ViewElement {
         for (const ch of p) {
           const line = out[out.length - 1];
           if (inDraft > 0) line.draft = true;
+          if (inConflict > 0) line.conflict = true;
           if (ch === '\n')
             out.push({
               code: false,
               draft: false,
+              conflict: false,
               path: 0,
               layer: '',
               running: false,
@@ -553,6 +605,7 @@ export class ViewElement {
         }
       }
       if (drafts.has(id)) --inDraft;
+      if (conflicts.has(id)) --inConflict;
     };
     walk(this.root?.nodeId ?? this.data.root);
     return out;
@@ -595,6 +648,9 @@ export class ViewElement {
     for (const el of this.#marked) {
       el.setMarks({});
       el.removeAttribute('error-range');
+      el.removeAttribute('conflict');
+      delete el.dataset.record;
+      delete el.dataset.tone;
     }
     this.#marked.clear();
     const by = new Map<NodeId, NodeMarks>();
@@ -648,6 +704,43 @@ export class ViewElement {
         if (m.kind === 'error' && m.to > m.from)
           this.byId.get(m.node)?.setAttribute('error-range', '');
     }
+    // projection recording (frame "projection"): node - the signature of the record and tone (one node -
+    // one color in both texts: record - in projection, twin - in another representation of the same tree)
+    for (const m of d.marks) {
+      if (m.kind !== 'record' && m.kind !== 'twin') continue;
+      const el = this.byId.get(m.node);
+      if (!el) continue;
+      el.dataset.record = m.text;
+      el.dataset.tone = String(tone(m.text));
+      this.#marked.add(el);
+    }
+    // merging conflict and projection recording: signature at the end of the first line of the element (first line
+    // is the first rectangle of the lowercase element); conflict - and attribute (string stripes - in numbers)
+    const origin = this.host.getBoundingClientRect();
+    this.chips.replaceChildren(
+      ...d.marks.flatMap((m) => {
+        if (m.kind !== 'conflict' && m.kind !== 'record') return [];
+        const el = this.byId.get(m.node);
+        if (m.kind === 'conflict') el?.setAttribute('conflict', '');
+        // The first line is rectangles with the top of the first; the end is the rightmost of them.
+        const rs = el ? [...el.getClientRects()] : [];
+        const r = rs.at(0);
+        if (!el || !r) return [];
+        const right = Math.max(
+          ...rs.filter((x) => x.top < r.bottom - 1).map((x) => x.right),
+        );
+        this.#marked.add(el);
+        const chip = document.createElement('span');
+        chip.className = 'chip';
+        chip.dataset.kind = m.kind;
+        if (m.kind === 'record') chip.dataset.tone = String(tone(m.text));
+        chip.textContent = m.text;
+        chip.style.left = `${String(right - origin.left + this.host.scrollLeft)}px`;
+        chip.style.top = `${String(r.top - origin.top + this.host.scrollTop)}px`;
+        chip.style.setProperty('--line', `${String(r.height)}px`);
+        return [chip];
+      }),
+    );
     // icons shift text - cursor and list are put again
     if (this.#cursor) this.showCursor(this.#cursor);
     if (this.#completion) this.showCompletion(this.#completion);

@@ -10,6 +10,8 @@ const panels: Panels = {
   output: noop,
   proposals: noop,
   merge: noop,
+  mergeNotes: noop,
+  paneHead: noop,
   header: noop,
   gutter: noop,
   tip: noop,

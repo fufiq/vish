@@ -5,6 +5,8 @@ open_view module
 [2] open_view module
 apply refactor
 // expect: output text="применена refactor: правок 2\n" ok=true
+// result - and in bangs (frame "Official States")
+// expect: status kind="done" text="применена refactor: правок 2" hint="функция правки программы — правки сразу в базу, представления заново"
 // expect: square(x) => x * x;
 // expect:   a = square(3);
 // expect-not:   print(debug);

@@ -1814,3 +1814,478 @@ body:has(#trace-bar:not([hidden])) #run {
 #stops .summary {
   margin-bottom: 52px; /* над полосой трассы */
 }
+
+/* Слияние (кадр «Ноутбук · слияние версий»): карточка справа поверх кода; в коде — полоса строк
+   элемента с конфликтом и подпись «конфликт»; под кодом — взятое само */
+#merge {
+  position: fixed;
+  z-index: 8;
+  top: 64px;
+  bottom: 52px;
+  right: calc(clamp(16px, 6.7vw, 96px) + 20px);
+  width: min(660px, 52vw);
+  max-height: none;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid #ebe9e3;
+  border-radius: 18px;
+  background: rgb(255 255 255 / 0.97);
+  box-shadow:
+    0 1px 2px rgb(20 20 10 / 0.04),
+    0 18px 40px rgb(20 20 10 / 0.08);
+  overflow: hidden;
+}
+#merge[hidden] {
+  display: none;
+}
+#merge .mhead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #efede8;
+}
+#merge .mhead .title {
+  font-size: 14px;
+  color: #1c1c1a;
+}
+#merge .mhead .path {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 9px;
+  background: #f6f5f2;
+  box-shadow: inset 0 0 0 1px #e7e5df;
+  font: 13px var(--canvas-code);
+  color: #27251f;
+}
+#merge kbd {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font: 10.5px var(--canvas-code);
+  color: #57544d;
+  box-shadow:
+    0 1px 0 #e2e0da,
+    inset 0 0 0 1px #ebe9e3;
+}
+#merge .icon {
+  width: 14px;
+  height: 14px;
+}
+#merge .icon.merge {
+  width: 17px;
+  height: 17px;
+  color: #27251f;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9'%3E%3Ccircle cx='6' cy='6' r='2.5'/%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Ccircle cx='18' cy='12' r='2.5'/%3E%3Cpath d='M6 8.5v7M8.3 7c4 1 7 2 7.4 3.4M8.3 17c4-1 7-2 7.4-3.4'/%3E%3C/svg%3E");
+}
+#merge .icon.ok,
+.vish-foot .icon.ok {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4'%3E%3Cpath d='M5 12l5 5 9-10'/%3E%3C/svg%3E");
+}
+#merge .icon.warn {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2'%3E%3Cpath d='M12 3l9 16H3z'/%3E%3Cpath d='M12 10v4M12 17v.01'/%3E%3C/svg%3E");
+}
+#merge .icon.fn {
+  color: var(--vish-fn);
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M8 4c-2 0-3 1-3 3v2c0 1-1 3-2 3 1 0 2 2 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1 1 3 2 3-1 0-2 2-2 3v2c0 2-1 3-3 3'/%3E%3C/svg%3E");
+}
+#merge .chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+}
+#merge .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+#merge .chip code {
+  font-family: var(--canvas-code);
+}
+#merge .chip.taken {
+  background: #dcfce7;
+  color: #15803d;
+}
+#merge .chip.clash {
+  background: #fde4e4;
+  color: #b91c1c;
+}
+#merge .chips .fill {
+  flex: 1;
+}
+#merge .chips .base {
+  font-size: 12px;
+  color: #a3a19a;
+}
+#merge .list {
+  flex: 1;
+  overflow: auto;
+}
+#merge .conflict {
+  margin: 0 16px 12px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #fffafa;
+  box-shadow: inset 0 0 0 1px #f5c2c2;
+}
+#merge .chead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+#merge .chead .key {
+  font-family: var(--canvas-code);
+  color: var(--vish-fn);
+}
+#merge .chead .why {
+  color: #8b8880;
+}
+#merge .side .stop {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+#merge .side .stop b {
+  font-weight: 600;
+  color: #77746c;
+}
+#merge .side[data-side='mine'] .stop b {
+  color: #1d4ed8;
+}
+#merge .side[data-side='theirs'] .stop b {
+  color: #0f766e;
+}
+#merge .side .note {
+  font-size: 11.5px;
+  color: #a3a19a;
+}
+#merge .side pre {
+  flex: 1;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #f7f6f2;
+  font: 14px/24px var(--canvas-code);
+  color: #1c1c1a;
+  white-space: pre;
+  overflow: auto;
+}
+#merge .side .diff {
+  padding: 0 2px;
+  border-radius: 4px;
+}
+#merge .side[data-side='mine'] .diff {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+#merge .side[data-side='theirs'] .diff {
+  background: #d5f0ea;
+  color: #0f766e;
+}
+#merge .side button {
+  height: 34px;
+  margin-top: 10px;
+  border: none;
+  border-radius: 10px;
+  font: 13px var(--canvas-ui);
+  cursor: pointer;
+}
+#merge .side[data-side='mine'] button {
+  background: #fff;
+  color: #1d4ed8;
+  box-shadow: inset 0 0 0 1.5px #93c5fd;
+}
+#merge .side[data-side='theirs'] button {
+  background: #0f766e;
+  color: #fff;
+}
+#merge > .note {
+  padding: 12px 16px;
+  border-top: 1px solid #efede8;
+  font-size: 12px;
+  line-height: 18px;
+  color: #8b8880;
+}
+.vish-gutter [conflict] {
+  position: relative;
+}
+.vish-gutter [conflict]::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  left: 0;
+  top: 0;
+  width: 1100px;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgb(239 68 68 / 0.1),
+    rgb(239 68 68 / 0) 70%
+  );
+  box-shadow: inset 3px 0 0 #ef4444;
+}
+.vish-chips {
+  position: absolute;
+  inset: 0 auto auto 0;
+  pointer-events: none;
+}
+.vish-chips .chip {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+}
+.vish-chips .chip[data-kind='conflict'] {
+  margin-left: 14px;
+  font: 12px var(--canvas-ui);
+  color: #b91c1c;
+  padding: 0 8px;
+  height: 22px !important;
+  translate: 0 calc((var(--line, 33px) - 22px) / 2);
+  border-radius: 6px;
+  background: #fde4e4;
+}
+.vish-foot {
+  padding: 8px 0 0;
+}
+.vish-foot .taken {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  font: 12.5px var(--canvas-ui);
+  color: #15803d;
+}
+.vish-foot .taken code {
+  font-family: var(--canvas-code);
+  color: var(--vish-fn);
+}
+
+/* Проекция (кадр «Ноутбук · проекция»): одно дерево — два текста; узел, напечатанный записью
+   проекции, — тоном подписи записи в обоих (record — в проекции, с подписью в конце строки; twin —
+   в другой панели); курсор другой панели — рамкой на том же узле */
+[data-tone='0'] {
+  --tone: #1e3a8a;
+  --tone-bg: #e6eefc;
+  --tone-line: #bcd0f7;
+}
+[data-tone='1'] {
+  --tone: #6d28d9;
+  --tone-bg: #efe9fd;
+  --tone-line: #d8cffa;
+}
+[data-tone='2'] {
+  --tone: #b45309;
+  --tone-bg: #fdeed2;
+  --tone-line: #f3c98a;
+}
+[data-tone='3'] {
+  --tone: #0f766e;
+  --tone-bg: #d5f0ea;
+  --tone-line: #9fd8cb;
+}
+[data-tone='4'] {
+  --tone: #be185d;
+  --tone-bg: #fce7f3;
+  --tone-line: #f5b8d6;
+}
+[data-tone='5'] {
+  --tone: #4d7c0f;
+  --tone-bg: #ecf7d9;
+  --tone-line: #c3e29a;
+}
+.vish-node[data-record]::part(syntax) {
+  border-radius: 5px;
+  background: var(--tone-bg);
+  box-shadow: inset 0 0 0 1px var(--tone-line);
+}
+.vish-chips .chip[data-kind='record'] {
+  gap: 4px;
+  margin-left: 12px;
+  padding: 0 7px;
+  height: 20px !important;
+  translate: 0 calc((var(--line, 33px) - 20px) / 2);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px var(--tone-line);
+  font: 11px var(--canvas-code);
+  color: var(--tone);
+}
+.vish-node[twin-cursor] {
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1.5px #33278f;
+}
+.vish-pane-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 34px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 16px 6px;
+  font: 13px var(--canvas-ui);
+  color: #27251f;
+}
+.vish-pane-head[hidden] {
+  display: none;
+}
+.vish-pane-head .key:not(.default) {
+  font-family: var(--canvas-code);
+  color: #4338ca;
+}
+.vish-pane-head .note {
+  font-size: 12px;
+  color: #a3a19a;
+}
+#goto-body .icon.proj {
+  width: 15px;
+  height: 15px;
+  color: #4338ca;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='3' y='5' width='8' height='14' rx='2'/%3E%3Crect x='13' y='5' width='8' height='14' rx='2'/%3E%3C/svg%3E");
+}
+#goto-body .proj {
+  font-family: var(--canvas-code);
+}
+/* шапка в потоке сдвигает текст — номера строк за ней */
+.vish-pane-head:not([hidden]) + .vish-gutter {
+  top: calc(22px + 34px);
+}
+#goto[data-mode='projection'] #goto-card::after {
+  content: 'проекция   Ctrl J';
+}
+#goto[data-mode='merge'] #goto-card::after {
+  content: 'слияние   Ctrl M';
+}
+#goto[data-mode='apply'] #goto-card::after {
+  content: 'функция правки';
+}
+
+/* Два клиента (кадр «Ноутбук · два клиента»): карточка клиентов справа сверху; клавиша в чужом
+   черновике — карточкой с замком вместо чёлки */
+#clients {
+  position: fixed;
+  top: 64px;
+  right: calc(clamp(16px, 6.7vw, 96px) + 20px);
+  bottom: auto;
+  width: 300px;
+  height: auto;
+  box-sizing: border-box;
+  padding: 14px 8px 10px;
+  border: 1px solid #ebe9e3;
+  border-radius: 18px;
+  background: rgb(255 255 255 / 0.97);
+  box-shadow: 0 18px 40px rgb(20 20 10 / 0.08);
+}
+#clients .head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 8px;
+  font-size: 13.5px;
+  font-weight: 400;
+  color: #1c1c1a;
+}
+#clients .icon.peers {
+  width: 16px;
+  height: 16px;
+  color: #27251f;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.9'%3E%3Crect x='4' y='4' width='16' height='6' rx='2'/%3E%3Crect x='4' y='14' width='16' height='6' rx='2'/%3E%3Cpath d='M8 7h.01M8 17h.01'/%3E%3C/svg%3E");
+}
+#clients .client {
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+#clients .client.me {
+  background: #f6f5f2;
+}
+#clients .client .text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#clients .client b {
+  font-weight: 400;
+  font-size: 13.5px;
+  color: #1c1c1a;
+}
+#clients .client .sub {
+  font-size: 12px;
+  color: #8b8880;
+}
+#clients .avatar {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  font-size: 12px;
+}
+#clients .client.me .avatar {
+  background: #dc2626;
+}
+#clients .note {
+  margin: 8px 8px 0;
+  padding-top: 10px;
+  border-top: 1px solid #efede8;
+  font-size: 12px;
+  line-height: 18px;
+  color: #8b8880;
+}
+.peer-draft span {
+  display: inline-flex;
+  top: 8px;
+  height: 24px;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 7px;
+  font: 12.5px var(--canvas-ui);
+}
+#status[kind='locked'] {
+  height: auto;
+  padding: 9px 14px 9px 10px;
+  border: 1px solid #f5c2c2;
+  border-radius: 12px;
+  background: #fff;
+  color: #27251f;
+  box-shadow: 0 14px 30px rgb(120 20 20 / 0.12);
+  display: grid;
+  grid-template-columns: 26px auto;
+  column-gap: 10px;
+  align-items: center;
+}
+#status[kind='locked']::before {
+  content: '';
+  grid-row: 1 / 3;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23b91c1c' stroke-width='2.2'%3E%3Crect x='5' y='11' width='14' height='10' rx='2.5'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E")
+      center / 14px no-repeat,
+    #fde4e4;
+}
+#status[kind='locked'] #status-text {
+  font: 13.5px var(--canvas-ui);
+  color: #27251f;
+}
+#status[kind='locked'] #status-hint {
+  font: 12px var(--canvas-ui);
+  color: #8b8880;
+}
+/* рамка чужого черновика — до правого края текста, подпись справа (кадр «Два клиента») */
+.peer-draft {
+  right: 40px;
+  width: auto !important;
+}

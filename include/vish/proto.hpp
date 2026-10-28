@@ -172,6 +172,7 @@ struct s_view {
   uint64_t revision;
   std::vector<s_node> nodes;
   std::string kind;
+  std::string projection; // projection - Record Module (§4.4); Empty - by default
 };
 // node node subtree replaced (id node saved, children new). It is sent to all
 // customers - one state.
@@ -289,9 +290,13 @@ struct s_conflict {
   uint32_t theirs_from = 0;
   uint32_t theirs_to = 0;
   std::string theirs_note;
+  std::string why; // what happened
 };
+// path - fused copy; taken_why - to the self taken (from where, whether visible in the module)
 struct s_merge {
+  std::string path;
   std::vector<std::string> taken;
+  std::vector<std::string> taken_why;
   std::vector<s_conflict> conflicts;
 };
 // Route step: number of all, current instruction, call stack (from inside out), program
@@ -418,6 +423,7 @@ struct s_peer {
 struct s_peers {
   uint32_t view;
   std::vector<s_peer> peers;
+  std::string me; // where the cursor of the client (frame "Two clients": line "you")
 };
 // Elements of the program module: key (signature), text, internal
 struct s_element {

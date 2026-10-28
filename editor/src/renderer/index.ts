@@ -206,11 +206,13 @@ function activate(v: ViewElement | undefined): void {
   active = v;
   (v?.host ?? app).focus();
   paintHeader();
+  paintPaneHeads();
 }
 
 // Header and line numbers (draws the theme): the program file, the result of checking the module, the position
 // of the cursor of the active panel. Checked - the marks came to the last edit; errors - error marks.
 const checks = new Map<number, { revision: number; errors: number }>();
+let conflicts = 0; // unresolved conflicts of the last merger
 function paintHeader(): void {
   if (!header) return;
   const main = mainView();
@@ -227,6 +229,7 @@ function paintHeader(): void {
       line: at.line,
       col: at.col,
       running: runState.state === 'running',
+      conflicts,
     },
     host,
   );
@@ -266,6 +269,8 @@ function receive(m: ServerMsg): void {
       views.set(m.view, v);
       paintGutter(v);
       activate(v);
+      if (m.projection !== '') projections.add(m.projection);
+      paintPaneHeads();
       if (fresh && pane === side && m.kind === 'module') openGoto('projection'); // her projection is the key
       return;
     }
@@ -281,6 +286,12 @@ function receive(m: ServerMsg): void {
       return;
     case 's_cursor':
       views.get(m.view)?.showCursor(m);
+      for (const w of views.values())
+        if (
+          w.data.view !== m.view &&
+          w.data.root === views.get(m.view)?.data.root
+        )
+          w.showTwinCursor(m.node);
       if (m.node !== null) cursorNode.set(m.view, m.node);
       paintHeader();
       cursorCard(views.get(m.view), m.node);
@@ -344,9 +355,14 @@ function receive(m: ServerMsg): void {
       return;
     case 's_items':
       return;
-    case 's_merge':
-      panels.merge(mergePanel, m.conflicts, host);
+    case 's_merge': {
+      conflicts = m.conflicts.length;
+      panels.merge(mergePanel, m, host);
+      const main = mainView();
+      if (main) panels.mergeNotes(main.foot, m);
+      paintHeader();
       return;
+    }
     case 's_saved': // VM sends a bang (s_status)
       return;
     case 's_stops':
@@ -489,18 +505,18 @@ window.vm.onData((bytes) => {
     receive(decodeServer(body));
   });
 });
-window.vm.onStatus((text, lost) => {
+window.vm.onStatus((text, lost, hint) => {
   // communication with VM - to s_hello; disconnected - “Connect” button
   showStatus(
     lost
       ? {
           kind: 'error',
           text,
-          hint: '',
+          hint,
           action: 'reconnect',
           label: 'Подключить',
         }
-      : { kind: 'vm', text, hint: '' },
+      : { kind: 'vm', text, hint },
   );
 });
 window.vm.onReady(() => {
@@ -538,9 +554,59 @@ for (const field of [runStdin, runArgs] as HTMLElement[]) {
   });
 }
 
+// Panel caps (frame "projection"): the same tree in two panels - which projection in which.
+function paintPaneHeads(): void {
+  const shown = [...views.values()];
+  for (const v of shown)
+    panels.paneHead(v.head, {
+      projection: v.data.projection,
+      active: v === active,
+      twin: shown.some((w) => w !== v && w.data.root === v.data.root),
+    });
+}
+// projection found in this window (and typed) is a list of Ctrl+J; *my*: VM does not send a list.
+const projections = new Set<string>();
+function projectionList(): void {
+  const keys = ['', ...projections];
+  const now = active?.data.projection ?? '';
+  const typed = gotoInput.value.trim();
+  const shown = keys.filter((k) => typed === '' || k.includes(typed));
+  panels.palette(
+    gotoBody,
+    {
+      type: 's_complete',
+      view: active?.data.view ?? 0,
+      node: null,
+      piece: 0,
+      offset: 0,
+      selected: Math.max(0, shown.indexOf(typed === '' ? now : typed)),
+      items: shown.map((k) => ({
+        type: 's_item',
+        name: k === '' ? 'по умолчанию' : k,
+        kind: 'проекция',
+        detail:
+          k === ''
+            ? 'прелюдия, C-подобная'
+            : k === now
+              ? 'сейчас · модуль записей'
+              : 'модуль записей',
+        result: '',
+        doc: '',
+        from: 0,
+        to: 0,
+      })),
+      preview: '',
+      context:
+        'Проекция — модуль записей syntax: по ним и печать, и разбор правок.',
+    },
+    host,
+  );
+}
+
 // Ctrl+P is the signature string; it is sent by Enter, Escape is closed.
 function openGoto(mode: GotoMode = 'goto'): void {
   gotoMode = mode;
+  gotoForm.dataset.mode = mode; // theme signs a line on the regime
   gotoInput.placeholder =
     mode === 'goto'
       ? 'перейти или добавить: foo(i64)'
@@ -553,6 +619,7 @@ function openGoto(mode: GotoMode = 'goto'): void {
   gotoInput.value = '';
   paletteItems = 0;
   panels.palette(gotoBody, null, host);
+  if (mode === 'projection') projectionList();
   gotoInput.focus();
 }
 function closeGoto(): void {
@@ -564,6 +631,7 @@ function closeGoto(): void {
 // Live palette: each line edit is a list from VM
 // 
 gotoInput.addEventListener('input', () => {
+  if (gotoMode === 'projection') projectionList();
   if (gotoMode !== 'goto' || !active) return;
   const text = gotoInput.value.trim();
   if (text === '') {
@@ -589,10 +657,11 @@ gotoForm.addEventListener('submit', (e) => {
     send({ type: 'c_merge', path: gotoInput.value.trim() });
   } else if (gotoMode === 'projection' && active) {
     // projection Presentation (§4.4): Print Records and parsing Rules - Key Module
+    const key = gotoInput.value.trim();
     send({
       type: 'c_projection',
       view: active.data.view,
-      key: gotoInput.value.trim(),
+      key: key === 'по умолчанию' ? '' : key,
     });
   } else if (active && gotoInput.value.trim() !== '') {
     send({ type: 'c_goto', view: active.data.view, text: gotoInput.value });
@@ -601,6 +670,21 @@ gotoForm.addEventListener('submit', (e) => {
 });
 gotoInput.addEventListener('keydown', (e) => {
   e.stopPropagation(); // line keys - not to the editor
+  // projection : ↑ ↓ - by list, in line - key
+  if (
+    gotoMode === 'projection' &&
+    (e.key === 'ArrowDown' || e.key === 'ArrowUp')
+  ) {
+    e.preventDefault();
+    const keys = ['', ...projections];
+    const at = keys.indexOf(gotoInput.value.trim());
+    const next =
+      (Math.max(at, 0) + (e.key === 'ArrowDown' ? 1 : keys.length - 1)) %
+      keys.length;
+    gotoInput.value = keys[next] ?? '';
+    projectionList();
+    return;
+  }
   if (gotoMode === 'goto' && paletteItems > 0) {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();

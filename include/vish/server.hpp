@@ -494,6 +494,30 @@ struct editor_server {
     return layout_value(vm, p);
   }
 
+  // node printed with projection entries (frame "projection": one node - one color in both texts): pairs
+  // [node, record signature] - type node (ast.loop), the call - the name of the record.
+  value projection_records(interpreter & vm, node_id root, bool module, node_id projection) {
+    auto const & db = session.db;
+    array_v out;
+    if(!projection) return value(std::move(out));
+    std::vector<node_layout> ls;
+    printer pr(db, module ? printer::filter([&](node_id n) { return !unseen(n); }) : printer::filter{});
+    pr.layouts = &ls;
+    pr.projection = projection;
+    pr.print(root);
+    for(auto && l: ls) {
+      auto const * r = pr.record_for(l.node);
+      if(!r) continue;
+      node_id at = r->first;
+      while(at && at != projection) at = db[at].parent;
+      if(!at) continue;
+      // Signature - node (ast.function), the call - the name of the record
+      std::string label = db.is<n_call>(l.node) ? std::string(db.strings.text(db.as<n_fn>(r->first).name)) : std::string(lang_kind_of(db[l.node]));
+      out.push(value(array_v::of({vm.code_value(l.node), value(std::move(label))})));
+    }
+    return value(std::move(out));
+  }
+
   // Draft module after editing - print only its area and paste in the former layout lay (printed with a
   // draft [at, at + old_count ), its elements - old):
 // 
@@ -1445,8 +1469,8 @@ struct editor_server {
   }
 
   // merger conflicts (and self-contained) to the client
-  void send_merge(std::vector<std::string> taken, std::vector<proto::s_conflict> conflicts) {
-    if(now_peer) send(*now_peer, proto::s_merge{std::move(taken), std::move(conflicts)});
+  void send_merge(std::string path, std::vector<std::string> taken, std::vector<std::string> why, std::vector<proto::s_conflict> conflicts) {
+    if(now_peer) send(*now_peer, proto::s_merge{std::move(path), std::move(taken), std::move(why), std::move(conflicts)});
   }
 
   vm_session & session;

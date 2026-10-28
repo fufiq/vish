@@ -10,6 +10,7 @@ describe('кодек по схеме', () => {
       root: 7,
       revision: 42,
       kind: 'module',
+      projection: '',
       nodes: [
         {
           type: 's_node',

@@ -207,6 +207,7 @@ export interface View {
   nodes: ViewNode[];
   // Module without internal elements; fn - one function (second panel)
   kind: string;
+  projection: string; // projection - Record Module (§4.4); '' - by default
 }
 export interface Cursor {
   type: 's_cursor';
@@ -329,6 +330,7 @@ export interface Peers {
     draft: string;
     draft_node: NodeId | null;
   }[];
+  me: string; // where the cursor of the client (line "you")
 }
 // Status bangs: kind - 'error', 'trace', 'run', 'done' (event) or '' (hide); text collects VM,
 // the client only draws. action - action of the button (“goto signature”), label - its
@@ -367,10 +369,14 @@ export interface Conflict {
   theirs_from: number;
   theirs_to: number;
   theirs_note: string;
+  why: string; // what happened
 }
+// path - a merged copy; taken_why - to the taken itself: from where, is it visible in the module.
 export interface MergeResult {
   type: 's_merge';
+  path: string;
   taken: string[];
+  taken_why: string[];
   conflicts: Conflict[];
 }
 // Exclusion: second end (first - cursor); node null - no allocation.

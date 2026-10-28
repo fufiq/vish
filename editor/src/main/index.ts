@@ -33,8 +33,8 @@ function toWindow(channel: string, ...args: unknown[]): void {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
 
-function status(text: string, lost = false): void {
-  toWindow('vm:status', text, lost);
+function status(text: string, lost = false, hint = ''): void {
+  toWindow('vm:status', text, lost, hint);
 }
 
 function tryConnect(): Promise<Socket> {
@@ -54,7 +54,11 @@ async function connectVm(): Promise<Socket> {
     const code = (e as NodeJS.ErrnoException).code;
     if (!program || (code !== 'ENOENT' && code !== 'ECONNREFUSED')) throw e;
   }
-  status(`запуск VM: ${vishBin} serve ${program} ${socketPath}`);
+  status(
+    `запуск VM: ${vishBin} serve ${program} ${socketPath}`,
+    false,
+    'VM нет на сокете — редактор её запускает',
+  );
   vm = spawn(vishBin, ['serve', program, socketPath], {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -105,12 +109,20 @@ async function attach(): Promise<void> {
     status(`нет VM: ${(e as Error).message}`, true);
     return;
   }
-  status(`VM: ${socketPath}`);
+  status(
+    `VM: ${socketPath} подключён`,
+    false,
+    'к одной VM могут подключаться несколько редакторов',
+  );
   socket.on('data', (d: Buffer) => {
     toWindow('vm:data', new Uint8Array(d));
   });
   socket.on('close', () => {
-    status('VM отключилась', true);
+    status(
+      'VM отключилась',
+      true,
+      'сокет закрыт — правки не уходят, пока VM не вернётся',
+    );
   });
   toWindow('vm:ready');
 }

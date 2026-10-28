@@ -52,11 +52,13 @@ export function palette(el: HTMLElement, m: Complete | null): void {
   const list = make('div', 'list');
   for (const [i, it] of m.items.entries()) {
     const add = it.kind === 'добавить';
+    const proj = it.kind === 'проекция'; // Ctrl+J: projection (frame "projection")
     const row = make('div', add ? 'row add' : 'row');
     row.toggleAttribute('selected', i === m.selected);
-    row.append(make('i', add ? 'icon plus' : 'icon fn'));
+    row.append(make('i', add ? 'icon plus' : proj ? 'icon proj' : 'icon fn'));
     const text = make('span', 'text');
-    if (add) {
+    if (proj) text.append(make('span', 'proj', it.name));
+    else if (add) {
       text.append(
         make('span', 'verb', 'добавить '),
         signature(it.name.replace(/^добавить /, ''), true),
@@ -69,6 +71,20 @@ export function palette(el: HTMLElement, m: Complete | null): void {
   }
   const body = make('div', 'body');
   body.append(list);
+  // projection : Explanation - line below list
+  if (m.items.at(0)?.kind === 'проекция') {
+    const foot = make('div', 'foot');
+    foot.append(
+      make('span', '', m.context),
+      make('span', 'fill'),
+      kbd('↑↓'),
+      kbd('↵'),
+      make('span', '', 'выбрать'),
+      kbd('Esc'),
+    );
+    el.append(body, foot);
+    return;
+  }
   if (m.preview !== '') {
     const side = make('div', 'side');
     const head = make('div', 'head');

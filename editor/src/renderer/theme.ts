@@ -11,7 +11,7 @@ import type {
   Complete,
   Inspect,
   TraceStep,
-  Conflict,
+  MergeResult,
   HintLine,
   Layers,
   NodeId,
@@ -60,14 +60,23 @@ export interface HeaderView {
   errors: number;
   checked: boolean;
   running: boolean; // is launching (frame “Run”: “ → is coming”)
+  conflicts: number; // Unresolved merger conflicts (frame "Merge")
   line: number;
   col: number;
+}
+
+// Panel cap: projection ('' - default), whether active, open the same tree nearby.
+export interface PaneHead {
+  projection: string;
+  active: boolean;
+  twin: boolean;
 }
 
 // The line of the presentation text for numbers: is there a code in it (not spaces and not a comment).
 export interface GutterLine {
   code: boolean;
   draft: boolean; // Open draft line (tag draft from VM)
+  conflict: boolean; // a line of element with a fusion conflict (tag conflict)
   path: number; // Error path step line: 0 - no, 1 - step, 2 - place of error
   layer: string; // Instruction overload: 'common' - as in general logic, 'own' - own, '' - no
   running: boolean; // here is the launch.
@@ -88,7 +97,11 @@ export interface Panels {
   stops: (el: HTMLElement, m: Stops, host: Host) => void;
   output: (el: HTMLElement, rows: readonly OutRow[], host: Host) => void;
   proposals: (el: HTMLElement, ps: readonly Proposal[], host: Host) => void;
-  merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
+  merge: (el: HTMLElement, m: MergeResult, host: Host) => void;
+  // Viewbar cap when the same tree is open in another (frame "projection")
+  paneHead: (el: HTMLElement, p: PaneHead) => void;
+  // taken by merging itself - rows under the module code (frame "Merge")
+  mergeNotes: (el: HTMLElement, m: MergeResult) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
   gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
   // Start panel header: status, buttons (frame "Run")
@@ -174,6 +187,8 @@ export function resolve(
     'output',
     'proposals',
     'merge',
+    'mergeNotes',
+    'paneHead',
     'header',
     'gutter',
     'tip',

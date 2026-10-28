@@ -14,7 +14,7 @@ input 1 i64\sy;\s
 // expect-not: error
 key 1 Escape
 // a new y field with no default value - autotransfer (O8) would make up the data: you need migrate
-// expect: status kind="error" text="struct pt изменён, а живой процесс держит значений старой раскладки: 1 — у нового поля y нет значения по умолчанию — нужна migrate(pt old) => pt{…}; процесс остановлен"
+// expect: status kind="error" text="struct pt изменён, а живой процесс держит значений старой раскладки: 1 — у нового поля y нет значения по умолчанию — нужна migrate(pt old) => pt{…}; процесс остановлен" hint="правка во время запуска (F5): без migrate процесс не продолжит"
 // button in bangs - the transition list from "Add migrate(pt)" (frame "Office status")
 // expect: action="goto migrate(pt)" label="Добавить migrate"
 // expect: output text="" ok=true more=true state="stopped"
