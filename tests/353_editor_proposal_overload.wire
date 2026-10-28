@@ -1,0 +1,22 @@
+// The new overload from the sentence does not replace the existing one with the same name.
+// program: editor_proposals.vish
+open_view module
+[2] open_view module
+[2] name ИИ
+[2] propose f(str) f(str\sx)\s=>\sx; новая\sперегрузка
+decide 1 1
+// expect: status kind="done" text="принято: f(str)"
+items
+// expect: key="f(_)" text="f(x) => x + 1;"
+// expect: key="f(str)" text="f(str x) => x;"
+// The mismatched signature does not apply; the sentence remains until the person decides.
+[2] propose f(i64) f(f64\sx)\s=>\sx; неверный\sключ
+decide 2 1
+// expect: status kind="error" text="не принято: f(i64)"
+// expect: сигнатура в тексте не совпадает с ключом предложения
+// expect: id=2 key="f(i64)"
+items
+// expect: key="f(_)" text="f(x) => x + 1;"
+// expect-not: key="f(f64)"
+decide 2 0
+// expect: proposals proposals=⏎

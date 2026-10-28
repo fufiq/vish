@@ -1,0 +1,35 @@
+// Human rights after the AI proposal is not lost when the old proposal is adopted.
+// program: editor_proposals.vish
+open_view module
+[2] open_view module
+[2] name ИИ
+[2] propose f(_) f(x)\s=>\sx\s+\s3; правка
+pointer 1 @1 0 0
+key 1 Delete
+input 1 9
+// Acceptance completes and checks the person’s still-open draft.
+decide 1 1
+// expect: status kind="error" text="не принято: f(_)"
+// expect: элемент изменился после предложения
+// expect: id=1 key="f(_)"
+items
+// expect: key="f(_)" text="f(x) => x + 9;"
+decide 1 0
+// expect: proposals proposals=⏎
+// The new proposal applies to the current version and is accepted.
+[2] propose f(_) f(x)\s=>\sx\s+\s4; новая\sправка
+decide 2 1
+// expect: status kind="done" text="принято: f(_)"
+items
+// expect: key="f(_)" text="f(x) => x + 4;"
+// The addition proposal also becomes obsolete if a person has already created this overload.
+[2] propose f(str) f(str\sx)\s=>\sx; добавление
+goto 1 f(str)
+key 1 Enter
+decide 3 1
+// expect: status kind="error" text="не принято: f(str)"
+// expect: элемент изменился после предложения
+// expect: id=3 key="f(str)"
+items
+// expect: key="f(_)" text="f(x) => x + 4;"
+// expect-not: text="f(str x) => x;"

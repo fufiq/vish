@@ -22,6 +22,7 @@ import { defineNodes } from './nodes/index';
 import {
   resolve,
   type Host,
+  type NodeActions,
   type OutRow,
   type RunState,
   type StatusView,
@@ -140,6 +141,52 @@ function paintRun(): void {
 // Inspector AST (F2 - wood panel, Ctrl+Shift+A - frame node in the text): the element tree
 // under the cursor, places node and by whom they are disassembled - from VM.
 const panes = byId('panes');
+// The first proper place is node; if there is no text of its own, the place of the first descendant.
+function firstPlace(
+  v: ViewElement,
+  node: NodeId,
+): { node: NodeId; piece: number } | undefined {
+  const n = v.nodes.get(node);
+  if (!n) return undefined;
+  for (const [piece, p] of n.pieces.entries()) {
+    if (typeof p === 'string') {
+      if (p !== '') return { node, piece };
+    } else {
+      const at = firstPlace(v, p);
+      if (at) return at;
+    }
+  }
+  return undefined;
+}
+
+function nodeActions(v: ViewElement, node: NodeId): NodeActions {
+  const point = () => {
+    v.hideBar();
+    floatBar.hidden = true;
+    activate(v);
+    const at = firstPlace(v, node);
+    if (at) send({ type: 'c_pointer', view: v.data.view, ...at, offset: 0 });
+  };
+  return {
+    overloads() {
+      point();
+      send({ type: 'c_key', view: v.data.view, key: 'F12', mods: 0 });
+    },
+    inspect() {
+      v.hideBar();
+      floatBar.hidden = true;
+      activate(v);
+      byId('ast').hidden = false;
+      clearTimeout(inspectTimer);
+      send({ type: 'c_inspect', view: v.data.view, node });
+    },
+    goto(text) {
+      point();
+      if (text === undefined) openGoto();
+      else send({ type: 'c_goto', view: v.data.view, text });
+    },
+  };
+}
 // ‹i/n› function with overload - open it in the second panel (there is a switch) › function
 // with overload - show the neighboring in place (frame “Layers”)
 panes.addEventListener('vish-layer', (e) => {
@@ -159,23 +206,7 @@ const inspector = new Inspector(
       send({ type: 'c_open', view: v.data.view, node });
     },
     place(v, node) {
-      // cursor - at the beginning of its first text node (or its first descendant)
-      const first = (
-        id: NodeId,
-      ): { node: NodeId; piece: number } | undefined => {
-        const n = v.nodes.get(id);
-        if (!n) return undefined;
-        for (const [i, p] of n.pieces.entries()) {
-          if (typeof p === 'string') {
-            if (p !== '') return { node: id, piece: i };
-          } else {
-            const got = first(p);
-            if (got) return got;
-          }
-        }
-        return undefined;
-      };
-      const at = first(node);
+      const at = firstPlace(v, node);
       if (at) send({ type: 'c_pointer', view: v.data.view, ...at, offset: 0 });
       activate(v);
     },
@@ -248,7 +279,10 @@ function showFloat(m: Hover): boolean {
   if (f.menu) {
     floatTip.hidden = true;
     const add = m.lines.filter((l) => l.kind === 'добавить');
-    panels.cursorBar(floatBar, [...bar, ...add], host);
+    const v = views.get(m.view);
+    const node = bar.at(0)?.target ?? m.node;
+    if (!v) return true;
+    panels.cursorBar(floatBar, [...bar, ...add], nodeActions(v, node));
     place(floatBar);
     return true;
   }
@@ -314,7 +348,7 @@ function activate(v: ViewElement | undefined): void {
 const checks = new Map<number, { revision: number; errors: number }>();
 let conflicts = 0; // unresolved conflicts of the last merger
 // right-click node: VM's answer to it is the "Edit" panel (frame "1 · Edit"), not a hint
-let barFor: NodeId | null = null;
+let barFor: { view: number; node: NodeId } | undefined;
 let typedAt = 0; // the last set from the keyboard (set hint - only when dialing)
 // function under the cursor: the name of its announcement (the first word of the syntax)
 function fnAt(v: ViewElement | undefined): string {
@@ -505,12 +539,13 @@ function receive(m: ServerMsg): void {
       // lines - only her
       const card = m.lines.some((l) => l.kind === 'имя');
       const bar = m.lines.filter((l) => l.kind.startsWith('панель'));
-      if (v && barFor !== null && m.node === barFor) {
-        barFor = null;
+      if (v && barFor?.view === m.view && m.node === barFor.node) {
+        barFor = undefined;
         // No overload - in the bar and add (same line as the error card)
         const add = m.lines.filter((l) => l.kind === 'добавить');
-        v.showBar(bar.at(0)?.target ?? m.node, (b) => {
-          panels.cursorBar(b, [...bar, ...add], host);
+        const node = bar.at(0)?.target ?? m.node;
+        v.showBar(node, (b) => {
+          panels.cursorBar(b, [...bar, ...add], nodeActions(v, node));
         });
         return;
       }
@@ -592,8 +627,19 @@ aiForm.addEventListener('submit', (e) => {
 });
 aiInput.addEventListener('keydown', (e) => {
   e.stopPropagation(); // field keys - not to the editor
-  if (e.key === 'Enter' && e.ctrlKey) aiForm.requestSubmit();
-  if (e.key === 'Escape' && aiBusy) window.vm.aiStop();
+  if (e.key === 'Enter' && e.ctrlKey) {
+    e.preventDefault();
+    aiForm.requestSubmit();
+  }
+  const toggle = e.ctrlKey && !e.shiftKey && (e.key === 'i' || e.key === 'ш');
+  if (toggle || e.key === 'Escape') {
+    e.preventDefault();
+    if (!toggle && aiBusy) window.vm.aiStop();
+    else {
+      aiPanel.hidden = true;
+      activate(active);
+    }
+  }
 });
 window.vm.onAi((kind, text) => {
   if (kind === 'done' || kind === 'error') {
@@ -927,7 +973,7 @@ for (const pane of [app, side]) {
     if (!v || node === null) return;
     e.preventDefault();
     v.hideHover();
-    barFor = node;
+    barFor = { view: v.data.view, node };
     send({ type: 'c_hover', view: v.data.view, node });
   });
   pane.addEventListener('mousedown', (e) => {

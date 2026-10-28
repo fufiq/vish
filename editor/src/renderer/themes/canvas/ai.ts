@@ -55,7 +55,7 @@ export function proposals(
       const cols = make('div', 'cols');
       const now = make('div', 'side');
       now.dataset.side = 'now';
-      now.append(make('div', 'label', 'сейчас'), marked(p.base, 0, 0));
+      now.append(make('div', 'label', 'исходная версия'), marked(p.base, 0, 0));
       const next = make('div', 'side');
       next.dataset.side = 'next';
       next.append(

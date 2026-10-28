@@ -1,0 +1,13 @@
+// The “overload+” in the panel of the selected operator is its overload, like F12 at the call.
+// program: editor_operator_goto.vish
+open_view module
+pointer 1 @+ 1 1
+key 1 F12
+// expect: name="+(i64 a, i64 b)"
+// expect-not: name="print(
+// expect-not: name="prefix_sum(
+// expect-not: F12: курсор не на вызове функции
+key 1 Escape
+// A common name with the beginning of prefix does not become a sign of the operator.
+goto 1 prefix_sum
+// expect: name="prefix_sum(x)"

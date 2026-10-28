@@ -86,7 +86,7 @@ const theme: Theme = {
     },
     // Panel at the cursor (frame "Edit"): expression with type, step and instance from VM; overload (F12), node
     // in the inspector (F2), still - transition by signature (Ctrl+P)
-    cursorBar(el, lines, host) {
+    cursorBar(el, lines, actions) {
       const main = lines.find((l) => l.kind === 'панель');
       el.hidden = !main;
       if (!main) return;
@@ -102,6 +102,7 @@ const theme: Theme = {
         b.className = className;
         b.addEventListener('mousedown', (e) => {
           e.preventDefault();
+          e.stopPropagation(); // Panel - not the place of installation of the cursor in the code
           f();
         });
         return b;
@@ -121,23 +122,23 @@ const theme: Theme = {
           ? button(
               `Добавить ${add.text}`,
               () => {
-                host.goto(add.text);
+                actions.goto(add.text);
               },
               'strong add',
             )
           : button(
               'Перегрузки +',
               () => {
-                host.key('F12');
+                actions.overloads();
               },
               'strong',
             ),
         button('Узел', () => {
-          host.press('F2');
+          actions.inspect();
         }),
         span('sep'),
         button('⋯', () => {
-          host.press('p', 2);
+          actions.goto();
         }),
       );
     },

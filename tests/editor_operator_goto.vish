@@ -1,0 +1,4 @@
+// Nested operator: the transition leads to +, not to prefix_sum or print.
+// out: 3
+prefix_sum(x) => x;
+main() => print(prefix_sum(1 + 2));

@@ -1200,7 +1200,7 @@ share_cursors() {
       seen.push(views[u].peer); // Customer - once (first presentation)
       info = peer_at(w, u);
       ps.push(info);
-      sig = ((((((sig + text(info.client)) + info.name) + ":") + text(code_id(info.node))) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
+      sig = ((((((sig + text(info.client)) + info.name) + ":") + text(if(given(info.node)) code_id(info.node) else -1)) + ":") + text(info.offset)) + (((info.where + "|") + info.draft) + ";");
     }
     me = if(ps.size > 0) peer_at(w, w).where else ""; // One - the line "you" is not needed
     if(ps.size > 0) sig = (sig + "@") + me;
@@ -4495,12 +4495,21 @@ send_marks(i64 v) {
 // overload names visible at (module, its use, prelude), without syntax records
 overloads(str name, at) {
   found = array{};
-  for(f : declarations(name, at)) if(!is_record(f)) found.push(f);
+  names = array{name};
+  // In AST entity, operators are referred to as infix+/prefix-/postfix++; the
+  // user and the panel are simply labeled.
+  if((name != "") && !word_start(name[0])) names = array{"infix" + name, "prefix" + name, "postfix" + name};
+  for(lookup : names) for(f : declarations(lookup, at)) if(!is_record(f)) found.push(f);
   found
+}
+operator_spelling(str name) {
+  for(role : array{"infix", "prefix", "postfix"})
+    if(starts_with(name, role) && ((name.size > role.size) && !word_start(name[role.size]))) return text_from(name, role.size);
+  name
 }
 signature(f) {
   ast.function{name, ps, _, _, _, _, _, _, _} = f;
-  s = name + "(";
+  s = operator_spelling(name) + "(";
   for(k : range(ps.size)) {
     ast.parameter{pn, pt, _, _, _, _, _} = ps[k];
     if(k > 0) s = s + ", ";
@@ -4547,23 +4556,41 @@ prepend(xs, x) {
   for(y : xs) r.push(y);
   r
 }
-// F12: Calling in place of cursor - its overload
+// F12: Call or operator in place of the cursor is its overload. The operator is selected
+// before the external call: the `print(a + b)` panel on `+` refers to `+`, not to print.
 goto_call(i64 v) {
   at = if(cursor(v) < places(v)) cursor(v) else 0;
   call = code();
   for(k : array{at, if(at > 0) at - 1 else at}) {
     n = if(given(call)) code() else place_node(v, k);
     while(given(n) && !given(call)) {
-      callee = callee_of(n);
-      if(given(callee) && ((code_kind(callee) == ast.name) || (member_name(callee) != ""))) call = n;
+      if(code_kind(n) == ast.operation) {
+        ast.operation{op, _, _} = n;
+        if(overloads(op, n).size > 0) call = n;
+      } else {
+        fn = callee_of(n);
+        if(given(fn) && ((code_kind(fn) == ast.name) || (member_name(fn) != ""))) call = n;
+      }
       n = code_parent(n);
     }
   }
   if(!given(call)) return report("F12: курсор не на вызове функции");
-  ast.call{callee, given_args, _, _, _, _, _} = call;
+  callee = call;
+  given_args = array{};
+  name = "";
+  operator_call = code_kind(call) == ast.operation;
+  if(operator_call) {
+    ast.operation{op, operands, _} = call;
+    name = op;
+    given_args = operands;
+  } else {
+    ast.call{fn, operands, _, _, _, _, _} = call;
+    callee = fn;
+    given_args = operands;
+    name = name_of(callee);
+  }
   args = array{};
-  name = name_of(callee);
-  if(code_kind(callee) != ast.name) { // a.f(b) f(a, b) (§4.5); geo.vec.norm(b) is the name of the module
+  if(!operator_call && (code_kind(callee) != ast.name)) { // a.f(b) f(a, b) (§4.5); geo.vec.norm(b) is the name of the module
     name = member_name(callee);
     if(!given(qualified_module(callee))) args.push(member_object(callee));
   }
@@ -5088,7 +5115,7 @@ change_of(str base, str other) {
 // program does not go by itself: all clients see the proposal, the person accepts (with one edit journal, as
 // editing a function). The whole device.
 //
-struct proposal { i64 id; str key; str base; str text; str why; str from; }
+struct proposal { i64 id; str key; str base; str text; str why; str from; i64 node; }
 struct element { str key; str text; bool inner; }
 on_name(str name) {
   clients[client_of(now_peer())].name = name;
@@ -5104,7 +5131,7 @@ on_propose(str key, str body, str why) {
   it = find_key(module_items(0, -1, array{}), key);
   who = clients[client_of(now_peer())].name;
   next_proposal += 1;
-  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, if(who == "") "клиент " + text(now_peer() + 1) else who});
+  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, if(who == "") "клиент " + text(now_peer() + 1) else who, it.node});
   share_proposals();
 }
 // Human decision: Accept - the key element is replaced by text (no - added), with hot replacement in a
@@ -5114,39 +5141,64 @@ on_decide(i64 id, bool accept) {
   for(i : range(proposals.size)) if(proposals[i].id == id) k = i;
   if(k < 0) return report("нет такого предложения");
   p = proposals[k];
+  failure = "";
+  if(accept) {
+    finalize_everyone();
+    // VM's checking. My sentence refers to the original element; a new human amendment requires a
+    // new sentence.
+    current_item = find_key(module_items(0, -1, array{}), p.key);
+    if((current_item.node != p.node) || (current_item.text != p.base)) {
+      send_status(now_peer(), "error", "не принято: " + p.key, "элемент изменился после предложения — запросите новую правку");
+      share_proposals();
+      return 0;
+    }
+    array{accepted, message} = apply_proposal(p.key, p.text);
+    if(!accepted) {
+      send_status(now_peer(), "error", "не принято: " + p.key, message);
+      share_proposals();
+      return 0;
+    }
+    failure = message;
+  }
   rest = array{};
   for(i : range(proposals.size)) if(i != k) rest.push(proposals[i]);
   proposals = rest;
   if(accept) {
-    finalize_everyone();
-    r = apply_proposal(p.key, p.text);
     // accepted overload - show in place (frame "Layers": folded otherwise not visible)
     for(fs : overload_groups()) for(f : fs) if(fn_key(f) == p.key) pick_overload(f);
     refresh_all();
-    if(contains(r, "отклонена") || contains(r, "нет ")) send_status(now_peer(), "error", ("не принято: " + p.key) + " — " + trim(r), "")
+    if(failure != "") send_status(now_peer(), "error", "принято: " + p.key, failure)
     else send_status(now_peer(), "done", "принято: " + p.key, "");
   }
   share_proposals();
 }
-// sentence - to the program: the element with this key (overload - it is not the first with a name) is replaced
-// by text, id node is saved; no key, struct - the general way edit_command (vish vm edit)
+// sentence - to the program: the element with this key (overload - it is not the first with a name) is
+// replaced by text, id node is saved. The key is not to add this overload, not to replace the first with
+// the same name. Bottom line: array {применено, ошибка}.
 apply_proposal(str key, str body) {
   s = program_session();
   v = vm_version(s);
   name = before(key, '(');
   it = find_key(module_items(v, -1, array{}), key);
-  if(!it.present) return edit_command(s, name, body);
-  array{errors, got} = vm_parse_at(s, it.node, name, body);
-  if(errors != "") return errors + "правка отклонена\n";
+  array{errors, got} = vm_parse_at(s, if(it.present) it.node else -1, name, body);
+  if(errors != "") return array{false, errors};
   fresh = -1;
   for(n : got) if(is_fn_named(v, n, name)) fresh = n;
-  if(fresh < 0) return edit_command(s, name, body);
-  vm_replace(s, it.node, fresh);
+  if(fresh < 0) return array{false, "в тексте правки нет функции " + name};
+  if(got.size != 1) return array{false, "предложение должно содержать один элемент"};
+  if(it.present) vm_replace(s, it.node, fresh)
+  else {
+    if(item_key(v, fresh, body) != key) return array{false, "сигнатура в тексте не совпадает с ключом предложения"};
+    items = version_nodes(v, -1);
+    items.push(fresh);
+    vm_set_items(s, items);
+    if(vm_proc_live(s)) vm_proc_register(s, fresh);
+  }
   if(vm_proc_alive(s)) {
     e = vm_proc_refresh(s);
-    if(e != "") return e;
+    if(e != "") return array{true, e};
   }
-  ("функция " + key) + " заменена\n"
+  array{true, ""}
 }
 share_proposals() {
   diffs = array{};

@@ -94,6 +94,13 @@ export interface InspectActions {
   menu(node: NodeId, x: number, y: number): void;
 }
 
+// The actions of the panel refer to node, for which VM sent its lines.
+export interface NodeActions {
+  overloads(): void;
+  inspect(): void;
+  goto(text?: string): void;
+}
+
 // Panels - draw in their element markup (id from shell) all over again according to the sent.
 export interface Panels {
   status: (el: HTMLElement, s: StatusView, host: Host) => void;
@@ -106,7 +113,11 @@ export interface Panels {
   // Viewbar cap when the same tree is open in another (frame "projection")
   paneHead: (el: HTMLElement, p: PaneHead) => void;
   // black panel "Edit" (frame "1 · Edit") - by right click: lines "panel" from VM
-  cursorBar: (el: HTMLElement, lines: readonly HintLine[], host: Host) => void;
+  cursorBar: (
+    el: HTMLElement,
+    lines: readonly HintLine[],
+    actions: NodeActions,
+  ) => void;
   // taken by merging itself - rows under the module code (frame "Merge")
   mergeNotes: (el: HTMLElement, m: MergeResult) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
