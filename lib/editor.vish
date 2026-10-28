@@ -4479,6 +4479,7 @@ send_marks(i64 v) {
   mismatch_marks(found, v);
   conflict_marks(found, v);
   record_marks(found, v);
+  proposal_marks(found, v);
   // open draft (frame "draft", author's decision 2026-10-27): its elements - label draft
   if(views[v].d.open) for(x : views[v].d.items) found.push(mark{x, "draft", "", 0, 0});
   show_marks(v, found);
@@ -5036,6 +5037,21 @@ record_marks(found, i64 v) {
   }
   true
 }
+// proposed by the agent editing (panel "AI", the author's decision 2026-10-28 - in journal and in the
+// code): element - the label proposal "edit offers AI", until the person decides
+proposal_marks(found, i64 v) {
+  if(proposals.size == 0) return false;
+  items = module_items(0, -1, array{});
+  for(p : proposals) {
+    // element folded (overload not in place, frame "Layers") - shown by overload of the same name
+    shown = code();
+    it = find_key(items, p.key);
+    if(it.present && (layout_of(v, node_code(it.node)) >= 0)) shown = node_code(it.node);
+    for(x : items) if(!given(shown) && (starts_with(x.key, before(p.key, '(') + "(") && (layout_of(v, node_code(x.node)) >= 0))) shown = node_code(x.node);
+    if(given(shown)) found.push(mark{shown, "proposal", "правку предлагает " + p.from, 0, 0});
+  }
+  true
+}
 // What Happened to the Element of Two (Conflict Cap)
 conflict_why(c) => if(c.base == "") "добавлен у обоих по-разному" else if(c.mine == "") "удалён у меня, изменён у них" else if(c.theirs == "") "изменён у меня, удалён у них" else "изменён у обоих по-разному";
 // merging conflict in code: an element of my version is the conflict label
@@ -5138,6 +5154,7 @@ share_proposals() {
     sent.push(views[w].peer);
     send_proposals_list(views[w].peer, proposals, diffs);
   }
+  for(w : range(views.size)) if(given(views[w].root)) send_marks(w); // proposal tag - again
   0
 }
 // The conflict is resolved: their version (the base has changed - re-imagining) or mine; false - no such thing.

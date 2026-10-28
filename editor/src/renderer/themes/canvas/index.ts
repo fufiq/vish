@@ -13,6 +13,7 @@ import { tip } from './card';
 import { complete } from './complete';
 import { palette } from './palette';
 import { expansion, inspect } from './inspector';
+import { proposals } from './ai';
 import { merge, mergeNotes } from './merge';
 import { runHead, stops, traceBar } from './run';
 import css from './styles.css?inline';
@@ -37,6 +38,7 @@ const theme: Theme = {
     stops,
     merge,
     mergeNotes,
+    proposals,
     // One VM - several clients (frame “Two clients”): you, others (where the cursor is, what rules), explanation
     clients(el, m) {
       el.hidden = m.peers.length === 0;

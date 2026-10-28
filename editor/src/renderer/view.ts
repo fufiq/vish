@@ -803,7 +803,12 @@ export class ViewElement {
     const origin = this.host.getBoundingClientRect();
     this.chips.replaceChildren(
       ...d.marks.flatMap((m) => {
-        if (m.kind !== 'conflict' && m.kind !== 'record') return [];
+        if (
+          m.kind !== 'conflict' &&
+          m.kind !== 'record' &&
+          m.kind !== 'proposal'
+        )
+          return [];
         const el = this.byId.get(m.node);
         if (m.kind === 'conflict') el?.setAttribute('conflict', '');
         // The first line is rectangles with the top of the first; the end is the rightmost of them.

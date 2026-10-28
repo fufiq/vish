@@ -16,6 +16,8 @@ open_view module
 // expect: key="norm(f64)"
 // expect: why="половина мало" from="ИИ"
 // expect: note="+ 2"
+// an element in the code is labeled until the person decides
+// expect: kind="proposal" text="правку предлагает ИИ"
 // person accepts - the element is replaced by one edit
 decide 1 1
 // expect: status kind="done" text="принято: norm(f64)"

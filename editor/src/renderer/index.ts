@@ -315,6 +315,7 @@ function receive(m: ServerMsg): void {
       return;
     case 's_cursor':
       views.get(m.view)?.showCursor(m);
+      if (!aiPanel.hidden) paintAiContext();
       for (const w of views.values())
         if (
           w.data.view !== m.view &&
@@ -465,15 +466,43 @@ function aiLine(kind: string, text: string): void {
   aiLog.scrollTop = aiLog.scrollHeight;
 }
 let aiBusy = false;
+// Context of the query (AI-2, author’s decision 2026-10-28 - a chip with a cross): the element under the
+// cursor and the string; click - remove or return. The agent gets it in a line after the question. My lineup.
+const aiContext = byId('ai-context');
+let aiContextOff = false;
+function aiPlace(): string {
+  const { fn } = fnAt(active);
+  const at = active?.cursor ? active.position(active.cursor) : undefined;
+  if (fn === '' && !at) return '';
+  return [fn, at ? `строка ${String(at.line)}` : '']
+    .filter((x) => x !== '')
+    .join(', ');
+}
+function paintAiContext(): void {
+  const place = aiPlace();
+  aiContext.hidden = place === '';
+  aiContext.textContent = `контекст: ${place}`;
+  aiContext.toggleAttribute('off', aiContextOff);
+}
+aiContext.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  aiContextOff = !aiContextOff;
+  paintAiContext();
+});
 aiForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = aiInput.value.trim();
   if (text === '' || aiBusy) return;
   aiBusy = true;
   aiForm.toggleAttribute('busy', true);
-  aiLine('user', text);
+  const place = aiContextOff ? '' : aiPlace();
+  aiLine('user', place === '' ? text : `${text}\n· ${place}`);
   aiInput.value = '';
-  window.vm.aiAsk(text);
+  window.vm.aiAsk(
+    place === ''
+      ? text
+      : `${text}\n\n[редактор vish: курсор в элементе ${place} — вопрос, скорее всего, о нём]`,
+  );
 });
 aiInput.addEventListener('keydown', (e) => {
   e.stopPropagation(); // field keys - not to the editor
@@ -848,6 +877,7 @@ for (const pane of [app, side]) {
     if (e.ctrlKey && (e.key === 'i' || e.key === 'ш')) {
       e.preventDefault();
       aiPanel.hidden = !aiPanel.hidden;
+      paintAiContext();
       if (!aiPanel.hidden) aiInput.focus();
       return;
     }
