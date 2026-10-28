@@ -191,7 +191,7 @@ const inspector = new Inspector(
         clearTimeout(floatHide);
         floatFor = { view: v.data.view, node, x, y, menu: false };
         send({ type: 'c_hover', view: v.data.view, node });
-      }, 400);
+      }, 60);
     },
     menu(v, node, x, y) {
       clearTimeout(floatTimer);
@@ -299,7 +299,7 @@ function cursorCard(v: ViewElement | undefined, node: NodeId | null): void {
   cardTimer = setTimeout(() => {
     hoverAt = undefined;
     send({ type: 'c_hover', view: v.data.view, node });
-  }, 500);
+  }, 150);
 }
 
 function activate(v: ViewElement | undefined): void {
@@ -517,6 +517,8 @@ function receive(m: ServerMsg): void {
           v.hideHover();
           send({ type: 'c_open', view: v.data.view, node });
         });
+      // countdown - from where it opened
+      if (v && hoverAt) tipDist = distTo(v.tip, hoverAt.x, hoverAt.y);
       return;
     }
     case 's_hint': {
@@ -874,7 +876,31 @@ gotoInput.addEventListener('keydown', (e) => {
 let hoverAt: { x: number; y: number } | undefined;
 let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 let hoverNode = -1;
-let hideTimer: ReturnType<typeof setTimeout> | undefined;
+let tipDist = Infinity; // The distance of the pointer to the open prompt (does it go to it)
+// distance from the point to the rectangle of the element (0 - inside)
+function distTo(el: Element, x: number, y: number): number {
+  const r = el.getBoundingClientRect();
+  const dx = Math.max(r.left - x, 0, x - r.right);
+  const dy = Math.max(r.top - y, 0, y - r.bottom);
+  return Math.hypot(dx, dy);
+}
+// Tips go out when you click past, walk out the window and scroll
+function hideHovers(): void {
+  clearTimeout(hoverTimer);
+  hoverNode = -1;
+  for (const v of views.values()) v.hideHover();
+  floatTip.hidden = true;
+}
+document.addEventListener('mousedown', (e) => {
+  const path = e.composedPath();
+  if (
+    ![...views.values()].some((v) => path.includes(v.tip)) &&
+    !path.includes(floatTip)
+  )
+    hideHovers();
+});
+window.addEventListener('blur', hideHovers);
+document.addEventListener('scroll', hideHovers, true);
 // Keys - VM (except for developer tools and Ctrl+P - signature strings). Two projections are next: the
 // node under the pointer - and in another panel (the same node of the tree, id common).
 let twin: Element | undefined;
@@ -1045,19 +1071,21 @@ for (const pane of [app, side]) {
     const v = [...views.values()].find((x) => x.host === pane);
     if (!v || dragging) return;
     if (e.composedPath().includes(v.tip)) {
-      clearTimeout(hoverTimer);
-      clearTimeout(hideTimer); // The pointer reached the tip - holds
+      clearTimeout(hoverTimer); // pointer
+      tipDist = 0;
       return;
     }
     const n = ViewElement.nodeOf(e);
     v.pointPath(n);
-    // left with node - the hint does not immediately fade: it can be reached by a pointer through neighboring node
-    if (n?.nodeId !== hoverNode && !v.tip.hidden) {
-      clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => {
-        hoverNode = -1;
-        v.hideHover();
-      }, 450);
+    // a hint is opened: the pointer goes to it (closer than it was) - holds, through neighboring node;
+    // otherwise - immediately goes out, and a hint of the new node is shown
+    if (!v.tip.hidden && n?.nodeId !== hoverNode) {
+      const d = distTo(v.tip, e.clientX, e.clientY);
+      const toward = d < tipDist - 0.5;
+      tipDist = d;
+      if (toward) return;
+      hoverNode = -1;
+      v.hideHover();
     }
     clearTimeout(hoverTimer);
     if (!n) {
@@ -1065,12 +1093,12 @@ for (const pane of [app, side]) {
       return;
     }
     if (n.nodeId === hoverNode && !v.tip.hidden) return; // The same clue is already open.
+    // without delay: only rattle, so as not to ask VM for each pixel
     hoverTimer = setTimeout(() => {
-      clearTimeout(hideTimer);
       hoverNode = n.nodeId;
       hoverAt = { x: e.clientX, y: e.clientY };
       send({ type: 'c_hover', view: v.data.view, node: n.nodeId });
-    }, 400);
+    }, 60);
   });
   // Structure mode: view and place of node under the pointer, path in the state bar
   pane.addEventListener('mousemove', (e) => {
@@ -1097,13 +1125,17 @@ for (const pane of [app, side]) {
       e.clientY,
     );
   });
-  pane.addEventListener('mouseleave', () => {
+  pane.addEventListener('mouseleave', (e) => {
     inspector.showLabel('', 0, 0);
     clearTimeout(hoverTimer);
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(() => {
-      hoverNode = -1;
-      for (const v of views.values()) if (v.host === pane) v.hideHover();
-    }, 450);
+    // left the panel not to the hint - fade
+    const to = e.relatedTarget;
+    if (
+      to instanceof Node &&
+      [...views.values()].some((v) => v.tip.contains(to))
+    )
+      return;
+    hoverNode = -1;
+    for (const v of views.values()) if (v.host === pane) v.hideHover();
   });
 }
