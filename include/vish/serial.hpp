@@ -71,7 +71,8 @@ struct reader {
     } else if constexpr(is_vector<T>::value) {
       uint32_t n = get<uint32_t>();
       T v;
-      v.reserve(n);
+      // Do not allocate memory by untrusted length before reading elements.
+      v.reserve(std::min<std::size_t>(n, in.size() - pos));
       for(uint32_t i = 0; i < n; ++i) v.push_back(get<typename T::value_type>());
       return v;
     } else if constexpr(is_variant<T>::value) {
@@ -94,7 +95,7 @@ struct reader {
   }
 
   void need(std::size_t n) const {
-    if(pos + n > in.size()) throw diagnostic("журнал повреждён: неожиданный конец", {});
+    if(n > in.size() - pos) throw diagnostic("журнал повреждён: неожиданный конец", {});
   }
 
   void raw(void * p, std::size_t n) {

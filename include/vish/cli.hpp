@@ -30,6 +30,7 @@ struct cli_program {
   std::vector<diagnostic> errors;
   std::string path;
   std::optional<vm_session> session;
+  std::optional<repository_state> repository;
 
   std::string const & src() const { return db->source((*db)[root].where.source); }
   int report(diagnostic const & d) const {
@@ -50,7 +51,13 @@ struct cli_host {
   int64_t open(std::string const & path) {
     cli_program & p = programs.emplace_back();
     p.path = path;
-    if(path.ends_with(".vishdb") || path.ends_with(".tzdb")) { // .tzdb - before renaming the language
+    if(path.ends_with(".vishrepo")) {
+      auto file = repository_load(path);
+      p.db = &p.own.emplace();
+      p.db->replay(file.journal); // repository_load has already tested the structure.
+      p.root = file.root;
+      p.repository = std::move(file.state);
+    } else if(path.ends_with(".vishdb") || path.ends_with(".tzdb")) { // .tzdb - before renaming the language
       p.db = &p.own.emplace();
       p.root = load_db(*p.db, path);
     } else {
@@ -83,7 +90,10 @@ struct cli_host {
   }
   vm_session & session(int64_t h) {
     cli_program & p = at(h);
-    if(!p.session) p.session.emplace(*p.db, p.root, p.path);
+    if(!p.session) {
+      p.session.emplace(*p.db, p.root, p.path);
+      p.session->repository = p.repository;
+    }
     return *p.session;
   }
   // vish run: interpreter (with JIT, AArch64 in qemu); output code

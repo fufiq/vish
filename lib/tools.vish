@@ -10,6 +10,42 @@
 // The chains of one associative operator (a + b + c) are bracketed as in editor.vish.
 module tools;
 
+// The repository container is host primitives. The program and the limited AI sample
+// don't get that capability; the history decisions are in versions.
+repository_raw(i64 s, str op, str key, str text, i64 number, i64 other) => native "cpp" {
+  for(auto & v: a) if(!v.known()) return erase(value(array_v::of({value(false), value(std::string()), value(int64_t(0)), value(array_v::of({}))})));
+  return repository_primitive(vm, a[0].as<int64_t>(), std::string(a[1].as<str_v>().view()), std::string(a[2].as<str_v>().view()), std::string(a[3].as<str_v>().view()), a[4].as<int64_t>(), a[5].as<int64_t>());
+};
+// The exact structure of the written subtree: comparison, not hash with collisions.
+version_structure(i64 v, i64 n) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(std::string()));
+  auto * x = tools_host->at(a[0].as<int64_t>());
+  node_id root{uint32_t(a[1].as<int64_t>())};
+  if(!x || root.value >= x->db->size()) return value(std::string());
+  writer out;
+  auto walk = [&](auto const & self, node_id node) -> void {
+    out.put(node);
+    out.put((*x->db)[node].kind);
+    out.put(x->db->note_of(node) ? *x->db->note_of(node) : node_note{});
+    x->db->for_each_child(node, [&](node_id child) { self(self, child); });
+  };
+  walk(walk, root);
+  return value(std::move(out.bytes));
+};
+version_module_meta(i64 v, i64 n) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(std::string()));
+  auto * x = tools_host->at(a[0].as<int64_t>());
+  node_id n{uint32_t(a[1].as<int64_t>())};
+  if(!x || n.value >= x->db->size() || !x->db->is<n_module>(n)) return value(std::string());
+  auto mod = x->db->as<n_module>(n);
+  uint32_t tail = mod.blank.size() > mod.items.size() ? mod.blank.back() : 0;
+  mod.items.clear(); mod.inner.clear(); mod.blank = {tail};
+  writer out;
+  out.put(mod);
+  out.put(x->db->note_of(n) ? *x->db->note_of(n) : node_note{});
+  return value(std::move(out.bytes));
+};
+
 // --- Primitives: the output of the command (VM) ----------------------------------------------- the
 // output of the command (VM) - in stdout and stderr as is (without translating the line)
 write_out(str s) => native "cpp" {

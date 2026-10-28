@@ -21,6 +21,7 @@
 #include "os.hpp"
 #include "parser.hpp"
 #include "printer.hpp"
+#include "repository.hpp"
 #include "store.hpp"
 #include "views.hpp"
 
@@ -282,6 +283,7 @@ struct vm_session {
     db.link_parents(root);
   }
 
+  std::optional<repository_state> repository;
   ast_db & db;
   node_id root;
   std::string name;

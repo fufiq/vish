@@ -592,6 +592,17 @@ struct ast_db {
           rollback(m.source);
           break;
         }
+    // Filmed children no longer belong to this node; playback replace does the same,
+    // so backlinks match once downloaded.
+    std::visit([&](auto const & old) {
+      auto detach = [&](node_id child) {
+        bool retained = false;
+        auto find = [&](node_id x) { retained = retained || x == child; };
+        std::visit([&](auto const & next) { for_each_child_of(next, find); }, k);
+        if(!retained && nodes[child].parent == n) nodes[child].parent = {};
+      };
+      for_each_child_of(old, detach);
+    }, nodes[n].kind);
     ++revision;
     ++edits;
     nodes[n].kind = std::move(k);

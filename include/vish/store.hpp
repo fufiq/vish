@@ -17,7 +17,71 @@ void save_db(ast_db const & db, node_id root, std::string const & path) {
   for(char c: vishdb_magic) w.put(c);
   w.put(root.value);
   for(auto const & e: db.journal()) w.put(e);
-  os::write_file(path, w.bytes);
+  os::write_file_atomic(path, w.bytes);
+}
+
+// journal live prefix state; all numbers belong to the same database. The caller ensures no
+// competitive operations and selects only its modules.
+void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> const & module_roots, std::vector<node_id> const & selected = {}) {
+  auto reject = [] { throw diagnostic("несовместимая история базы или дерево модулей", {}); };
+  auto a = target.journal();
+  auto b = live.journal();
+  if(a.size() > b.size() || target.size() > live.size() || target.strings.size() > live.strings.size() || target.sources.size() > live.sources.size()) reject();
+  for(std::size_t i = 0; i < a.size(); ++i) {
+    writer x, y;
+    x.put(a[i]);
+    y.put(b[i]);
+    if(x.bytes != y.bytes) reject();
+  }
+  struct saved { node_id id; node_kind kind; span where; node_note note; };
+  std::vector<saved> copies;
+  std::vector<uint8_t> seen(target.size(), 0);
+  std::vector<node_id> todo;
+  for(auto root: module_roots) {
+    if(!root || root.value >= target.size() || !target.is<n_module>(root)) reject();
+    if(selected.empty()) todo.push_back(root);
+  }
+  for(auto n: selected) {
+    if(!n || n.value >= target.size()) reject();
+    node_id owner = n;
+    while(target[owner].parent) owner = target[owner].parent;
+    if(!std::ranges::contains(module_roots, owner)) reject();
+    todo.push_back(n);
+  }
+  while(!todo.empty()) {
+    node_id n = todo.back();
+    todo.pop_back();
+    if(!n || n.value >= target.size() || n.value >= live.size() || seen[n.value]) reject();
+    seen[n.value] = 1;
+    auto const & node = target[n];
+    if(node.where.source >= target.sources.size() && !target.sources.empty()) reject();
+    if(auto ref = std::get_if<n_ref>(&node.kind); ref && ref->target >= target.size()) reject();
+    std::visit([&](auto const & kind) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(kind)>>()) {
+        using F = [:std::meta::type_of(m):];
+        if constexpr(std::is_same_v<F, symbol>)
+          if(kind.[:m:] && kind.[:m:].value >= target.strings.size()) reject();
+      }
+    }, node.kind);
+    if(live.installed(n)) {
+      node_id owner = n;
+      while(live[owner].parent) owner = live[owner].parent;
+      if(!std::ranges::contains(module_roots, owner) && live.is<n_module>(owner)) {
+        auto name = live.as<n_module>(owner).name;
+        auto key = name ? live.strings.text(name) : std::string_view();
+        if(key == "prelude" || key == "editor" || key == "tools" || key == "versions" || key == "cli" || key == "tests") reject();
+      }
+    }
+    copies.push_back({n, node.kind, node.where, target.note_of(n) ? *target.note_of(n) : node_note{}});
+    target.for_each_child(n, [&](node_id child) { todo.push_back(child); });
+  }
+  live.rollback(0);
+  for(auto & x: copies) {
+    live.replace(x.id, std::move(x.kind));
+    live.place(x.id, x.where);
+    live.set_note(x.id, std::move(x.note));
+  }
+  for(auto root: module_roots) live.link_parents(root);
 }
 
 std::vector<journal_entry> read_journal(std::string const & path, node_id & root) {

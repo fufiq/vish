@@ -19,7 +19,7 @@
 
 namespace vish::proto {
 
-constexpr uint32_t version = 7;
+constexpr uint32_t version = 8;
 
 // --- client ---
 
@@ -164,7 +164,14 @@ struct c_workspace {
   std::string input;
   std::string expected;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_propose, c_decide, c_context, c_check, c_workspace>;
+struct c_repository {
+  uint32_t request;
+  std::string action; // info/init/module/open/snapshot/diff/restore/fork/checkout/merge/save
+  std::string key;
+  std::string text;
+  uint64_t revision;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
 
 // --- VM customer ---
 
@@ -477,7 +484,28 @@ struct s_agent {
   bool ok;
   std::string text;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_proposals, s_agent>;
+struct repository_entry {
+  std::string kind; // current/module/snapshot/branch
+  uint64_t id;
+  uint64_t parent;
+  node_id node;
+  std::string name;
+  std::string detail;
+  uint64_t head; // second parent of the image or head branch
+};
+struct s_repository {
+  uint32_t request;
+  bool ok;
+  uint64_t revision;
+  std::string path;
+  std::string branch;
+  uint64_t head;
+  bool dirty;
+  std::string message;
+  std::string diff;
+  std::vector<repository_entry> entries;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_proposals, s_agent, s_repository>;
 
 // --- staff ---
 

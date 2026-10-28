@@ -76,6 +76,44 @@ void write_file(std::string const & path, std::string_view bytes) {
   ::close(fd);
 }
 
+// Atomic Replacement: A temporary file is created in the same directory.
+void write_file_atomic(std::string const & path, std::string_view bytes) {
+  auto slash = path.rfind('/');
+  std::string dir = slash == std::string::npos ? "." : slash == 0 ? "/" : path.substr(0, slash);
+  std::string temp = dir + "/.vish-tmp-XXXXXX";
+  int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if(dfd < 0) throw diagnostic(cat("не могу открыть каталог ", dir), {});
+  int fd = ::mkstemp(temp.data());
+  if(fd < 0) {
+    ::close(dfd);
+    throw diagnostic(cat("не могу записать ", path), {});
+  }
+  bool renamed = false;
+  auto fail = [&] {
+    if(fd >= 0) ::close(fd);
+    if(!renamed) ::unlink(temp.c_str());
+    ::close(dfd);
+    throw diagnostic(cat("не могу записать ", path), {});
+  };
+  while(!bytes.empty()) {
+    auto n = ::write(fd, bytes.data(), bytes.size());
+    if(n < 0 && errno == EINTR) continue;
+    if(n <= 0) fail();
+    bytes.remove_prefix(std::size_t(n));
+  }
+  int rc;
+  do rc = ::fsync(fd); while(rc < 0 && errno == EINTR);
+  if(rc < 0) fail();
+  rc = ::close(fd);
+  fd = -1;
+  if(rc < 0) fail();
+  if(::rename(temp.c_str(), path.c_str()) < 0) fail();
+  renamed = true;
+  do rc = ::fsync(dfd); while(rc < 0 && errno == EINTR);
+  if(rc < 0) fail();
+  if(::close(dfd) < 0) throw diagnostic(cat("не могу закрыть каталог ", dir), {});
+}
+
 // Descriptor lines (stdin host): your buffer, read in chunks.
 struct line_reader {
   int fd = 0;

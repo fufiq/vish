@@ -840,6 +840,23 @@ save_program(str path) => native "cpp" {
 };
 // Program session - the number for the Tools module session commands (apply_command ...)
 program_session() => native "cpp" { return value(tools_host->session_of(editor_host->session)); };
+send_repository(i64 request, bool ok, str message, str diff, str path, str branch, i64 head, bool dirty, rows) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & h = *editor_host;
+  proto::s_repository out;
+  out.request = uint32_t(a[0].as<int64_t>()); out.ok = a[1].as<bool>();
+  out.revision = h.session.db.edits + 1;
+  out.message = a[2].as<str_v>().view(); out.diff = a[3].as<str_v>().view();
+  out.path = a[4].as<str_v>().view(); out.branch = a[5].as<str_v>().view();
+  out.head = uint64_t(a[6].as<int64_t>()); out.dirty = a[7].as<bool>();
+  auto const & xs = a[8].as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    auto const & row = xs.get(k).as<array_v>();
+    out.entries.push_back({std::string(row.get(0).as<str_v>().view()), uint64_t(row.get(1).as<int64_t>()), uint64_t(row.get(2).as<int64_t>()), node_id(uint32_t(row.get(3).as<int64_t>())), std::string(row.get(4).as<str_v>().view()), std::string(row.get(5).as<str_v>().view()), uint64_t(row.get(6).as<int64_t>())});
+  }
+  if(h.now_peer) h.send(*h.now_peer, out);
+  return value(int64_t(0));
+};
 // Merge conflicts (and taken by itself) - to the client: conflicts - conflict tools module
 send_merge_list(str path, taken, why, conflicts, diffs) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known() || !(a[3]).known() || !(a[4]).known()) return erase(value(int64_t(0)));
@@ -1032,6 +1049,7 @@ plural(i64 k, str one, str few, str many) {
   if((m == 1) && (h != 11)) one else if(((m >= 2) && (m <= 4)) && ((h < 12) || (h > 14))) few else many
 }
 // Presentation of the peer client module (-1 - no)
+view_module(i64 v) => if(views[v].kind == "module") views[v].root else code_module(views[v].root);
 module_view_of(i64 peer) {
   r = -1;
   for(i : range(views.size)) if((r < 0) && ((views[i].peer == peer) && (views[i].kind == "module"))) r = i;
@@ -1100,7 +1118,7 @@ place_at(i64 v, i64 n, i64 piece, i64 offset, bool exact) {
 }
 // Number of the first draft element in the module elements (empty - insertion place).
 group_at(i64 v) {
-  items = code_items(program());
+  items = code_items(view_module(v));
   first = if(views[v].d.items.size > 0) views[v].d.items[0] else views[v].d.next;
   if(given(first)) for(k : range(items.size)) if(code_id(items[k]) == code_id(first)) return k;
   k = 0; // In the end, before the internal elements.
@@ -1831,6 +1849,10 @@ idle() {
       if(migrate_needed != "") calm_status(now_peer()) else report(said);
     }
   }
+  if(repo_branch(program_session()) != "") {
+    r = repository_raw(program_session(), "save", "", "", 0, 0);
+    if(!r[0]) report("автосохранение: " + r[1]);
+  }
   0
 }
 any_draft_open() {
@@ -1916,7 +1938,7 @@ unit_of(i64 v, i64 place) {
   }
   if(k < 0) {
     if(any || (views[v].d.open && (views[v].lay.draft_begin < views[v].lay.draft_end))) return no_region(); // module-cap
-    items = code_items(program());
+    items = code_items(view_module(v));
     at = 0;
     while((at < items.size) && !is_inner(items[at])) at += 1;
     e = place_of_byte(v, views[v].lay.items_end);
@@ -1944,7 +1966,7 @@ open_draft(i64 v, i64 a, i64 b) {
   r = region{true, lesser(ra.from, rb.from), greater(ra.to, rb.to), lesser(ra.k0, rb.k0), greater(ra.k1, rb.k1), ra.last || rb.last};
   group = array{};
   if(views[v].kind == "module") {
-    items = code_items(program());
+    items = code_items(view_module(v));
     for(k : range(r.k1 - r.k0)) group.push(items[r.k0 + k]);
   } else group.push(views[v].root);
   for(w : range(views.size)) if((w != v) && (given(views[w].root) && views[w].d.open)) {
@@ -1975,7 +1997,7 @@ open_draft(i64 v, i64 a, i64 b) {
   views[v].d.open = true; // new draft or extension of the open
   views[v].d.items = group;
   if(views[v].kind == "module") {
-    items = code_items(program());
+    items = code_items(view_module(v));
     views[v].d.next = if((r.k1 < items.size) && !is_inner(items[r.k1])) items[r.k1] else code();
   }
   array{1, r}
@@ -2308,7 +2330,7 @@ undo_closed(i64 v, bool again) {
   if(views[v].kind != "module") return report("откат принятого — в представлении модуля");
   e = if(again) views[v].undone[n - 1] else views[v].done[n - 1];
   if(again) views[v].undone = without_last(views[v].undone) else views[v].done = without_last(views[v].done);
-  items = code_items(program());
+  items = code_items(view_module(v));
   at = 0;
   if(e.items.size > 0) {
     i = index_of(items, e.items[0]);
@@ -2362,11 +2384,11 @@ units_around(i64 v, i64 a, i64 b) {
     }
     k = views[v].lay.up[k];
   }
-  for(item : code_items(program())) {
+  for(item : code_items(view_module(v))) {
     ki = layout_of(v, item);
     if((ki >= 0) && ((a >= range_from(v, ki)) && (b <= range_to(v, ki)))) found.push(edit_unit{item, 1, range_from(v, ki), range_to(v, ki)});
   }
-  if(views[v].kind == "module") found.push(edit_unit{program(), 2, range_from(v, 0), range_to(v, 0)});
+  if(views[v].kind == "module") found.push(edit_unit{view_module(v), 2, range_from(v, 0), range_to(v, 0)});
   found
 }
 // Editing within the unit (in places from its beginning): [from, to] replaced by inserted code points.
@@ -2518,7 +2540,7 @@ edit_raw(i64 v, i64 a, i64 b, str ins, i64 caret) {
 }
 // Place container: the smallest block, inside the brackets of which is edited, otherwise the module.
 container_of(i64 v, i64 a, i64 b) {
-  r = program();
+  r = view_module(v);
   done = false;
   for(u : units_around(v, a, b)) if(!done && (u.kind == 0)) {
     r = u.node;
@@ -2530,7 +2552,7 @@ container_of(i64 v, i64 a, i64 b) {
 // spaces and comments (§4.0), `//` - to the end of the line.
 in_comment(i64 v, c, i64 k, i64 a) {
   items = items_of(c);
-  from = if(k > 0) range_to(v, layout_of(v, items[k - 1])) else (if(code_id(c) == code_id(program())) 0 else range_from(v, layout_of(v, c)) + 1);
+  from = if(k > 0) range_to(v, layout_of(v, items[k - 1])) else (if(code_id(c) == code_id(view_module(v))) 0 else range_from(v, layout_of(v, c)) + 1);
   t = text_of(v, from, a);
   in_line = false;
   in_block = false;
@@ -2554,7 +2576,7 @@ in_comment(i64 v, c, i64 k, i64 a) {
 // - to outer brackets.
 edit_line(i64 v, i64 a, i64 b, str ins, i64 caret) {
   c = container_of(v, a, b);
-  module_level = code_id(c) == code_id(program());
+  module_level = code_id(c) == code_id(view_module(v));
   if(module_level && (views[v].kind != "module")) return false; // header of a function in its representation - through a unit-function
   items = items_of(c);
   // element whose text is edited (end inclusive: set before `;`)
@@ -3317,7 +3339,7 @@ entity_lines(lines, i64 v, n, k) {
   if(k == ast.name) {
     name = name_of(n);
     f = enclosing_fn(n);
-    bs = binders_of(if(given(f)) f else program());
+    bs = binders_of(if(given(f)) f else view_module(v));
     i = name_binder(n, name, bs, f);
     if(i < 0) return false;
     decl = bs[i].node;
@@ -4421,7 +4443,7 @@ role_marks(found, i64 v) {
       if(r != "") found.push(mark{n, "role", r, 0, 0});
     } else if(kind == ast.parameter) {
       f = enclosing_fn(n);
-      scope = if(given(f)) f else program();
+      scope = if(given(f)) f else view_module(v);
       i = binder_index(scope_list(cache, scope), n);
       if(i >= 0) found.push(mark{n, "role", "param " + text(i), 0, 0});
     }
@@ -5014,11 +5036,50 @@ file_of(str path) {
 // .vishdb next to the program: stats.vish → stats.vishdb §3.1)
 on_save() {
   finalize_views();
+  if(repo_branch(program_session()) != "") {
+    r = repository_command(program_session(), "save", "", "");
+    return repository_reply(0, r[0], r[1], r[2]);
+  }
   name = program_name();
   path = if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb";
   save_program(path);
   send_status(now_peer(), "done", "сохранено: " + file_of(path), (("база — рядом с программой: " + file_of(name)) + " → ") + file_of(path));
   calm_status(now_peer());
+}
+repository_reply(i64 request, bool ok, str message, str diff) {
+  s = program_session();
+  info = repo_op(s, "state", "", "", 0, 0);
+  send_repository(request, ok, message, diff, info[1], repo_branch(s), info[2], repo_dirty(s) || any_draft_open(), info[3])
+}
+on_repository(i64 request, str action, str key, str body, i64 wanted) {
+  if(action != "info") {
+    finalize_everyone();
+    if(wanted != program_revision()) return repository_reply(request, false, "ревизия изменилась — обновите состояние репозитория", "");
+  }
+  if(action == "open") {
+    s = program_session();
+    node = -1;
+    for(m : repo_modules(s, 0)) if(text(m.node) == key) node = m.node;
+    if(node < 0) return repository_reply(request, false, "нет модуля", "");
+    v = module_view_of(now_peer());
+    if(v < 0) { on_open_view(); v = module_view_of(now_peer()); }
+    views[v].root = node_code(node);
+    views[v].d = empty_draft();
+    views[v].done = array{}; views[v].undone = array{};
+    set_cursor(v, 0);
+    show_view(v);
+    return repository_reply(request, true, "модуль открыт", "");
+  }
+  r = repository_command(program_session(), action, key, body);
+  if(r[0] && (action != "info") && (action != "diff")) {
+    modules = repo_modules(program_session(), 0);
+    for(w : range(views.size)) if(given(views[w].root)) {
+      if((views[w].kind == "module") && (repo_mod_of(modules, code_id(views[w].root)).node < 0)) views[w].root = program();
+      views[w].done = array{}; views[w].undone = array{};
+    }
+    refresh_all();
+  }
+  repository_reply(request, r[0], r[1], r[2])
 }
 // function of editing the program: drafts - to the canon, edits - to the base, presentations - again
 apply_edit(str fn) {

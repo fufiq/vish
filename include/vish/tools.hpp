@@ -11,6 +11,7 @@
 #include "prelude.hpp"
 #include "printer.hpp"
 #include "store.hpp"
+#include "session.hpp"
 
 #include <deque>
 
@@ -192,6 +193,28 @@ struct tools_context {
 // the context of tuling, whose work goes on: primitives of the tool module (native "cpp") - to it
 thread_local tools_context * tools_host = nullptr;
 
+// Repository is a host editor/CLI capability, non-native program access to disk.
+vm_session & repository_session(interpreter & vm, int64_t id) {
+  if(!tools_host || vm.fuel || !vm.db.is<n_module>(vm.mod)) throw diagnostic("репозиторий доступен только хосту", {});
+  auto name = vm.db.as<n_module>(vm.mod).name;
+  auto key = name ? vm.db.strings.text(name) : std::string_view();
+  if(key != "cli" && key != "editor" && key != "versions" && key != "tools") throw diagnostic("репозиторий доступен только хосту", {});
+  return tools_host->session(id);
+}
+
+repository_snapshot const & repository_at(vm_session const & s, uint32_t id) {
+  if(s.repository) for(auto const & snap: s.repository->snapshots) if(snap.id == id) return snap;
+  throw diagnostic("нет снимка репозитория", {});
+}
+
+int64_t repository_version(vm_session & s, uint32_t id) {
+  auto const & snap = repository_at(s, id);
+  auto entries = s.db.journal();
+  if(snap.end > entries.size()) throw diagnostic("повреждена граница снимка", {});
+  entries.resize(snap.end);
+  return tools_host->add_copy(std::move(entries), s.root);
+}
+
 // language arrays; language arrays
 std::vector<std::string> strings_of(value const & a) {
   std::vector<std::string> out;
@@ -296,6 +319,153 @@ void remove_item(ast_db & db, node_id m, node_id n) {
   std::erase(mod.inner, n.value);
   db.replace(m, mod);
   db.link_parents(m);
+}
+
+// Low-level container operations. Common base selection, dirty/checkout, diff, merging
+// solutions and response texts - lib/versions.vish, like the previous version *.
+value repository_primitive(interpreter & vm, int64_t sid, std::string const & op, std::string const & key, std::string const & text, int64_t number, int64_t other) {
+  std::vector<value> rows;
+  auto row = [&](std::string kind, int64_t id, int64_t parent, int64_t node, std::string name, std::string detail, int64_t head) {
+    rows.push_back(value(array_v::of({value(std::move(kind)), value(id), value(parent), value(node), value(std::move(name)), value(std::move(detail)), value(head)})));
+  };
+  int64_t result = 0;
+  std::string detail;
+  try {
+    auto & s = repository_session(vm, sid);
+    if(op == "init") {
+      if(s.repository) throw diagnostic("репозиторий уже открыт", {});
+      auto created = repository_create(s.db, s.root, key);
+      repository_save(created, s.db, s.root);
+      s.repository = std::move(created);
+    } else if(op == "live") {
+      s.db.rollback(0);
+      tools_host->versions[0].db = &s.db;
+      tools_host->versions[0].root = s.root;
+    }
+    if(!s.repository) {
+      if(op != "state" && op != "live") throw diagnostic("сначала создайте репозиторий", {});
+      row("module", 0, 0, s.root.value, "main", "", 0);
+    } else {
+      auto & r = *s.repository;
+      auto catalog = r.modules;
+      std::set<std::string> names;
+      for(auto & m: catalog) {
+        auto name = s.db.as<n_module>(m.node).name;
+        m.name = name ? std::string(s.db.strings.text(name)) : "main";
+        if(repository_builtin(m.name) || !names.insert(m.name).second) throw diagnostic("недопустимое или повторное имя модуля", {});
+      }
+      r.modules = std::move(catalog);
+      detail = r.path;
+      if(op == "save") repository_save(r, s.db, s.root);
+      else if(op == "version") result = repository_version(s, uint32_t(number));
+      else if(op == "capture") {
+        if(key.empty()) throw diagnostic("нужно имя снимка", {});
+        if(r.snapshots.size() >= 4096) throw diagnostic("не больше 4096 снимков", {});
+        s.db.rollback(0); // A snapshot of what was written; ct overlays will be calculated again
+        std::vector<uint32_t> parents;
+        for(auto p: {number, other}) if(p > 0) { repository_at(s, uint32_t(p)); parents.push_back(uint32_t(p)); }
+        result = r.next_id++;
+        r.snapshots.push_back({uint32_t(result), std::move(parents), key, r.modules, s.db.journal().size()});
+      } else if(op == "branch") {
+        if(key.empty() || key.size() > 128) throw diagnostic("неверное имя ветки", {});
+        if(number > 0) repository_at(s, uint32_t(number));
+        auto found = std::ranges::find(r.branches, key, &repository_branch::name);
+        if(found == r.branches.end()) r.branches.push_back({key, uint32_t(number)});
+        else found->head = uint32_t(number);
+        if(other) r.branch = key;
+      } else if(op == "module") {
+        if(key.empty() || repository_builtin(key)) throw diagnostic("недопустимое имя модуля", {});
+        for(char c: key) if(!lexer::is_ident(c) && c != '.') throw diagnostic("недопустимое имя модуля", {});
+        if(!lexer::is_ident_start(key[0])) throw diagnostic("недопустимое имя модуля", {});
+        for(auto const & m: r.modules) if(m.name == key) throw diagnostic("модуль уже есть", {});
+        // No preload_uses/paths: Use resolution is in the already open AST directory.
+        parser p(s.db, cat("module ", key, ";\n", text), cat("<модуль ", key, ">"));
+        node_id m = p.parse_module();
+        if(!p.errors().empty() || !s.db.is<n_module>(m) || !s.db.as<n_module>(m).name || s.db.strings.text(s.db.as<n_module>(m).name) != key) {
+          s.db.replace(m, n_module{});
+          throw diagnostic("не удалось разобрать модуль", {});
+        }
+        s.db.link_parents(m);
+        r.modules.push_back({m, key});
+        result = m.value;
+      } else if(op == "restore") {
+        auto const snap = repository_at(s, uint32_t(number));
+        int64_t v = repository_version(s, snap.id);
+        struct release { int64_t v; ~release() { tools_host->close(v); } } done{v};
+        auto const & target = *tools_host->at(v)->db;
+        std::vector<node_id> roots;
+        for(auto const & m: snap.modules) roots.push_back(m.node);
+        restore_nodes(s.db, target, roots);
+        for(auto const & m: r.modules) if(!std::ranges::contains(roots, m.node)) s.db.replace(m.node, n_module{});
+        r.modules = snap.modules;
+      } else if(op == "take-module" || op == "take-item") {
+        auto const snap = repository_at(s, uint32_t(number));
+        int64_t v = repository_version(s, snap.id);
+        struct release { int64_t v; ~release() { tools_host->close(v); } } done{v};
+        auto const & target = *tools_host->at(v)->db;
+        node_id n{uint32_t(other)};
+        if(op == "take-module") {
+          auto it = std::ranges::find(snap.modules, n, &repository_module::node);
+          if(it == snap.modules.end()) {
+            if(n == s.root) throw diagnostic("нельзя удалить корневой модуль", {});
+            s.db.replace(n, n_module{});
+            std::erase_if(r.modules, [&](auto const & m) { return m.node == n; });
+          } else {
+            for(auto const & m: r.modules) if(m.node != n && m.name == it->name) throw diagnostic("конфликт имён модулей", {});
+            restore_nodes(s.db, target, {n});
+            auto live = std::ranges::find(r.modules, n, &repository_module::node);
+            if(live == r.modules.end()) r.modules.push_back(*it); else *live = *it;
+          }
+        } else {
+          uint32_t mid = 0;
+          auto parsed = std::from_chars(key.data(), key.data() + key.size(), mid);
+          node_id m(mid);
+          if(parsed.ec != std::errc{} || parsed.ptr != key.data() + key.size() || !std::ranges::contains(r.modules, m, &repository_module::node) || !target.is<n_module>(m)) throw diagnostic("нет модуля слияния", {});
+          auto const & tm = target.as<n_module>(m);
+          auto pos = std::ranges::find(tm.items, n);
+          if(pos == tm.items.end()) remove_item(s.db, m, n);
+          else {
+            restore_nodes(s.db, target, {m}, {n});
+            auto lm = s.db.as<n_module>(m);
+            auto old = std::ranges::find(lm.items, n);
+            if(old != lm.items.end()) {
+              auto at = std::size_t(old - lm.items.begin());
+              lm.items.erase(old);
+              if(at < lm.blank.size()) lm.blank.erase(lm.blank.begin() + at);
+            }
+            auto at = std::size_t(pos - tm.items.begin());
+            std::size_t insert = 0;
+            for(std::size_t k = 0; k < at; ++k) {
+              auto prev = std::ranges::find(lm.items, tm.items[k]);
+              if(prev != lm.items.end()) insert = std::size_t(prev - lm.items.begin()) + 1;
+            }
+            lm.blank.resize(lm.items.size() + 1);
+            lm.items.insert(lm.items.begin() + insert, n);
+            lm.blank.insert(lm.blank.begin() + insert, at < tm.blank.size() ? tm.blank[at] : 0);
+            std::erase(lm.inner, n.value);
+            if(std::ranges::contains(tm.inner, n.value)) lm.inner.push_back(n.value);
+            s.db.replace(m, std::move(lm));
+            s.db.link_parents(m);
+          }
+        }
+      }
+      if(op == "state") {
+        row("current", 0, 0, s.root.value, r.branch, r.path, 0);
+        for(auto const & m: r.modules) row("module", 0, 0, m.node.value, m.name, "", 0);
+        for(auto const & snap: r.snapshots) row("snapshot", snap.id, snap.parents.empty() ? 0 : snap.parents[0], 0, snap.name, "", snap.parents.size() > 1 ? snap.parents[1] : 0);
+        for(auto const & b: r.branches) {
+          row("branch", 0, 0, 0, b.name, "", b.head);
+          if(b.name == r.branch) result = b.head;
+        }
+      } else if(op == "modules") {
+        auto const & ms = number ? repository_at(s, uint32_t(number)).modules : r.modules;
+        for(auto const & m: ms) row("module", 0, 0, m.node.value, m.name, "", 0);
+      }
+    }
+    return value(array_v::of({value(true), value(std::move(detail)), value(result), value(array_v::of(std::move(rows)))}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(false), value(std::string(d.what())), value(int64_t(0)), value(array_v::of({}))}));
+  }
 }
 
 } // namespace vish

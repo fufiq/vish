@@ -26,6 +26,15 @@ prog_open(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(-1)));
   return value(cli_now->open(std::string((a[0]).as<str_v>().view())));
 };
+prog_empty() => native "cpp" {
+  auto & p = cli_now->programs.emplace_back();
+  p.db = &p.own.emplace();
+  load_prelude(*p.db);
+  parser parse(*p.db, "", "<новая программа>");
+  p.root = parse.parse_module();
+  p.path = "<новая программа>";
+  return value(int64_t(cli_now->programs.size() - 1));
+};
 prog_errors(i64 p) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
   return value(cli_now->errors((a[0]).as<int64_t>()));
@@ -150,6 +159,15 @@ cli(args) {
   }
   if(args.size < 2) return usage();
   cmd = args[0];
+  if(cmd == "repo") {
+    if(args.size < 3) return usage();
+    action = args[1];
+    p = if(action == "new") prog_empty() else prog_open(args[2]);
+    key = if(args.size > 3) args[3] else "";
+    body = if(args.size > 4) args[4] else "";
+    if(action == "new") { action = "init"; key = args[2]; }
+    return run_module("versions", "repository_cli", array{text(prog_session(p)), action, key, body});
+  }
   at = 1;
   projection = ""; // vish fmt --projection <key> <program>: projection - record module (§4.4)
   if((cmd == "fmt") && (args[1] == "--ct")) { // vish fmt --ct <program >>
@@ -207,7 +225,7 @@ cli(args) {
     } else return usage();
   }
   if(at >= args.size) return usage();
-  if((cmd == "serve") && !ends_with(args[at], ".vishdb") && !ends_with(args[at], ".tzdb")) load_editor_module();
+  if((cmd == "serve") && !ends_with(args[at], ".vishdb") && !ends_with(args[at], ".tzdb") && !ends_with(args[at], ".vishrepo")) load_editor_module();
   p = prog_open(args[at]);
   at += 1;
   write_err(prog_errors(p));
