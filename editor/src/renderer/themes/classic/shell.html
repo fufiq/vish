@@ -30,7 +30,10 @@
 <section id="merge" hidden></section>
 <section id="proposals" hidden></section>
 <form id="goto" hidden>
-  <input id="goto-input" placeholder="перейти или добавить: foo(i64)" />
+  <div id="goto-card">
+    <input id="goto-input" spellcheck="false" placeholder="перейти или добавить: foo(i64)" />
+    <div id="goto-body"></div>
+  </div>
 </form>
 <div id="status" kind="vm">
   <span id="status-text">подключение к VM…</span><span id="status-hint"></span

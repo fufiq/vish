@@ -14,6 +14,7 @@ const panels: Panels = {
   gutter: noop,
   tip: noop,
   complete: noop,
+  palette: noop,
 };
 
 describe('темы', () => {

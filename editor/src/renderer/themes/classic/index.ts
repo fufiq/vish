@@ -287,6 +287,23 @@ const theme: Theme = {
     },
     tip: renderLines,
     complete: renderComplete,
+    // Transition palette: points and preview "will be created" with explanation from VM
+    palette(el, m) {
+      el.replaceChildren();
+      if (!m || m.items.length === 0) return;
+      const list = make('ul', 'vish-complete');
+      renderComplete(list, m);
+      el.append(list);
+      if (m.preview !== '') {
+        const p = make('div', 'vish-preview');
+        p.append(
+          make('div', 'head', 'будет создано'),
+          make('pre', '', m.preview.replace(/\n$/, '')),
+          make('div', 'note', m.context),
+        );
+        el.append(p);
+      }
+    },
     gutter(el, lines) {
       el.replaceChildren(
         ...lines.map((_, i) => make('div', '', String(i + 1))),

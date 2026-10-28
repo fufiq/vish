@@ -68,6 +68,8 @@ const header = document.getElementById('header'); // The hat may not be (classic
 const params = new URLSearchParams(location.search);
 const gotoForm = byId('goto') as HTMLFormElement;
 const gotoInput = byId('goto-input') as HTMLInputElement;
+const gotoBody = document.getElementById('goto-body') ?? gotoForm; // palette body (list, preview)
+let paletteItems = 0; // in the palette - items on the transition list (Enter and arrows - VM)
 const mergePanel = byId('merge');
 const proposalsPanel = byId('proposals');
 const aiPanel = byId('ai');
@@ -276,9 +278,29 @@ function receive(m: ServerMsg): void {
     case 's_layers':
       panels.layers(layersBar, m, host);
       return;
-    case 's_complete':
+    case 's_complete': {
+      // transition list (Ctrl+P, F12) - in the palette (frame "Transition"); addition - at the cursor
+      const nav = m.items.some(
+        (i) => i.kind === 'перегрузка' || i.kind === 'добавить',
+      );
+      const palette = gotoMode === 'goto' && !gotoForm.hidden;
+      if (nav || (palette && m.items.length === 0)) {
+        if (nav && gotoForm.hidden) {
+          // F12 on call: same palette, missing signature (or first)
+          openGoto('goto');
+          const add = m.items.find((i) => i.kind === 'добавить');
+          gotoInput.value = add
+            ? add.name.replace(/^добавить /, '')
+            : (m.items[0]?.name ?? '');
+        }
+        paletteItems = m.items.length;
+        panels.palette(gotoBody, m.items.length > 0 ? m : null, host);
+        views.get(m.view)?.showCompletion({ ...m, items: [] });
+        return;
+      }
       views.get(m.view)?.showCompletion(m);
       return;
+    }
     case 's_output': {
       showOutput(m);
       return;
@@ -488,7 +510,32 @@ function openGoto(mode: GotoMode = 'goto'): void {
           : 'проекция: ключ модуля записей (пусто — по умолчанию)';
   gotoForm.hidden = false;
   gotoInput.value = '';
+  paletteItems = 0;
+  panels.palette(gotoBody, null, host);
   gotoInput.focus();
+}
+function closeGoto(): void {
+  gotoForm.hidden = true;
+  paletteItems = 0;
+  panels.palette(gotoBody, null, host);
+  activate(active);
+}
+// Live palette: each line edit is a list from VM
+// 
+gotoInput.addEventListener('input', () => {
+  if (gotoMode !== 'goto' || !active) return;
+  const text = gotoInput.value.trim();
+  if (text === '') {
+    if (paletteItems > 0) sendKey('Escape');
+    paletteItems = 0;
+    panels.palette(gotoBody, null, host);
+    return;
+  }
+  send({ type: 'c_goto', view: active.data.view, text });
+});
+// palette list keys - VM (select, accept, close)
+function sendKey(key: string): void {
+  if (active) send({ type: 'c_key', view: active.data.view, key, mods: 0 });
 }
 gotoForm.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -512,9 +559,23 @@ gotoForm.addEventListener('submit', (e) => {
   activate(active);
 });
 gotoInput.addEventListener('keydown', (e) => {
+  e.stopPropagation(); // line keys - not to the editor
+  if (gotoMode === 'goto' && paletteItems > 0) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      sendKey(e.key);
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendKey('Enter'); // Open or add (nav_accept)
+      closeGoto();
+      return;
+    }
+  }
   if (e.key !== 'Escape') return;
-  gotoForm.hidden = true;
-  activate(active);
+  if (paletteItems > 0) sendKey('Escape');
+  closeGoto();
 });
 
 // Guidance: Node under the pointer after pause - VM responds with a hint (type, value,

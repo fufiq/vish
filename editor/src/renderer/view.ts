@@ -431,6 +431,18 @@ export class ViewElement {
     const line: ASTNode[] = [];
     for (const el of this.#marked) {
       el.removeAttribute('on-line');
+      // key prompt - at the call, in whose text the carriage (frame "Transition")
+      if (el.hasAttribute('keyhint')) {
+        const r = el.getBoundingClientRect();
+        el.toggleAttribute(
+          'at-caret',
+          !this.caret.hidden &&
+            caret.left >= r.left - 1 &&
+            caret.left <= r.right + 1 &&
+            caret.top < r.bottom &&
+            caret.bottom > r.top,
+        );
+      }
       if (!el.hasAttribute('use') || this.caret.hidden) continue;
       const r = el.getBoundingClientRect();
       const mid = r.top + Math.min(r.height, caret.height) / 2;
@@ -569,6 +581,7 @@ export class ViewElement {
       if (m.kind === 'role') e.role = m.text;
       if (m.kind === 'use') e.use = m.text;
       if (m.kind === 'mismatch') e.mismatch = m.text;
+      if (m.kind === 'keyhint') e.keyhint = m.text;
       if (m.kind === 'other') e.other = true;
       if (m.kind === 'own-part') e.ownPart = true;
       if (m.kind === 'span')

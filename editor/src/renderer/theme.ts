@@ -71,9 +71,11 @@ export interface Panels {
   merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
   gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
-  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "scheme ..." -
-  // from VM); open - go to node items of the add-on list (place and display - at the window)
-  //
+  // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "scheme ..." - from VM);
+  // open - go to node transition palette (Ctrl+P, F12): list from VM (null - empty) under the input line, preview
+  // "will be created"
+  palette: (el: HTMLElement, m: Complete | null, host: Host) => void;
+  // Items of the supplement list (place and display - at the window)
   complete: (el: HTMLElement, m: Complete) => void;
   tip: (
     el: HTMLElement,
@@ -143,6 +145,7 @@ export function resolve(
     'gutter',
     'tip',
     'complete',
+    'palette',
   ];
   const missing = need.filter((k) => !(k in r.panels));
   if (r.shell === '' || missing.length > 0)

@@ -49,6 +49,7 @@ export interface NodeMarks {
   chosen?: string; // the call selects overload shown in the second panel ("i/n")
   line?: 'common' | 'own'; // Instruction overload: as in general logic or its own
   diverged?: string;
+  keyhint?: string; // call key prompt (F12 - overload), visible at cursor line
   mismatch?: string; // Value-cause of error: its type (frame "Error")
   use?: string; // type of use (or operator) - a signature above node on the cursor line
   role?: string; // VM: fn, prelude, native, param N, var N, global N
@@ -62,6 +63,7 @@ badgeSheet.replaceSync(`
   .badge.value { color: var(--vish-value, gray); }
   .badge.unknown { display: inline-block; min-width: 1.2em; top: 0; margin-left: 2px; padding: 0 0.2em; border: 1px dashed #15803d; border-radius: 4px; background: color-mix(in srgb, #15803d 6%, transparent); color: #15803d; text-align: center; font-weight: 600; line-height: 1.3; }
   .above { display: none; }
+  .keyhint { display: none; }
   .layer { display: inline-block; margin-right: 3px; padding: 0 0.35em; border-radius: 999px; font-size: 0.65em; line-height: 1.5; vertical-align: 0.3em; color: var(--vish-value, gray); border: 1px solid color-mix(in srgb, var(--vish-value, gray) 45%, transparent); cursor: pointer; }
   .layer.chosen { margin: 0 0 0 2px; cursor: default; }
   .switch { display: inline-flex; gap: 3px; align-items: center; margin-right: 4px; font-size: 0.7em; color: var(--vish-value, gray); }
@@ -82,6 +84,7 @@ export abstract class ASTNode extends HTMLElement {
   #note = '';
   #badge: HTMLSpanElement | undefined;
   #above: HTMLSpanElement | undefined;
+  #keyhint: HTMLSpanElement | undefined;
   #step: HTMLSpanElement | undefined;
   #layer: HTMLSpanElement | undefined;
   #error = '';
@@ -218,6 +221,16 @@ export abstract class ASTNode extends HTMLElement {
       this.badgeRoot().append(this.#above);
     }
     this.toggleAttribute('use', m.use !== undefined);
+    this.#keyhint?.remove();
+    this.#keyhint = undefined;
+    if (m.keyhint !== undefined) {
+      this.#keyhint = document.createElement('span');
+      this.#keyhint.className = 'keyhint';
+      this.#keyhint.part = 'keyhint';
+      this.#keyhint.textContent = m.keyhint;
+      this.badgeRoot().append(this.#keyhint);
+    }
+    this.toggleAttribute('keyhint', m.keyhint !== undefined);
     this.#error = m.error ?? '';
     this.toggleAttribute('error', m.error !== undefined);
     this.toggleAttribute('dead', m.dead === true);

@@ -976,3 +976,199 @@ vish-float[mismatch]::part(badge) {
   color: #8b8880;
   background: linear-gradient(#0f766e, #0f766e) left center / 3px 16px no-repeat;
 }
+
+/* Палитра перехода (кадр «Переход»): по центру поверх приглушённого кода */
+#goto {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  padding: 0;
+  border: none;
+  background: rgb(246 245 242 / 0.45);
+}
+#goto-card {
+  position: absolute;
+  left: 50%;
+  top: 92px;
+  translate: -50% 0;
+  width: min(860px, calc(100vw - 32px));
+  border-radius: 18px;
+  background: rgb(255 255 255 / 0.98);
+  border: 1px solid #e7e5df;
+  box-shadow:
+    0 1px 2px rgb(20 20 10 / 0.05),
+    0 30px 70px rgb(20 20 10 / 0.18);
+  font-family: var(--canvas-ui);
+  line-height: 1.4;
+}
+#goto-card::after {
+  content: 'перегрузки по сигнатуре   Ctrl P';
+  position: absolute;
+  right: 16px;
+  top: 18px;
+  font-size: 12px;
+  color: #a3a19a;
+  white-space: pre;
+  pointer-events: none;
+}
+#goto-input {
+  box-sizing: border-box;
+  height: 54px;
+  padding: 0 210px 0 42px;
+  border: none;
+  border-bottom: 1px solid #efede8;
+  border-radius: 18px 18px 0 0;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='17' height='17' viewBox='0 0 24 24' fill='none' stroke='%238b8880' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E")
+    16px center no-repeat;
+  font: 17px var(--canvas-code);
+  color: var(--vish-fn);
+}
+#goto-body .body {
+  display: flex;
+}
+#goto-body .list {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+}
+#goto-body .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 11px;
+}
+#goto-body .row[selected] {
+  background: #f4f3ef;
+}
+#goto-body .row.add[selected] {
+  background: #eef6f4;
+  box-shadow: inset 0 0 0 1px #c9e6df;
+}
+#goto-body .row .text {
+  flex: 1;
+  font: 14.5px var(--canvas-code);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#goto-body .verb {
+  color: #0f766e;
+}
+#goto-body .sig .fn {
+  color: var(--vish-fn);
+}
+#goto-body .sig .punct {
+  color: var(--vish-syntax);
+}
+#goto-body .sig .type {
+  color: #0f766e;
+}
+#goto-body .row.add .sig .type {
+  color: #15803d;
+}
+#goto-body .sig .param {
+  color: var(--vish-param);
+}
+#goto-body .why {
+  font-size: 12px;
+  color: #8b8880;
+  white-space: nowrap;
+}
+#goto-body .sep {
+  height: 1px;
+  margin: 6px 12px;
+  background: #efede8;
+}
+#goto-body .icon.fn {
+  width: 15px;
+  height: 15px;
+  color: var(--vish-fn);
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M8 4c-2 0-3 1-3 3v2c0 1-1 3-2 3 1 0 2 2 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1 1 3 2 3-1 0-2 2-2 3v2c0 2-1 3-3 3'/%3E%3C/svg%3E");
+}
+#goto-body .icon.plus {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: #0f766e
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.6'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E")
+    center no-repeat;
+  mask: none;
+}
+#goto-body .side {
+  width: 300px;
+  flex: none;
+  padding: 14px 16px;
+  border-left: 1px solid #efede8;
+  background: #fbfaf7;
+}
+#goto-body .side .head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #8b8880;
+}
+#goto-body .icon.eye {
+  width: 13px;
+  height: 13px;
+  color: #8b8880;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E");
+}
+#goto-body .side .code {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #ebe9e3;
+  font: 14px/24px var(--canvas-code);
+  color: var(--vish-fn);
+}
+#goto-body .side .note {
+  margin-top: 12px;
+  font-size: 12.5px;
+  line-height: 19px;
+  color: #77746c;
+}
+#goto-body .foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 16px;
+  border-top: 1px solid #efede8;
+  font-size: 12px;
+  color: #8b8880;
+}
+#goto-body .foot .fill {
+  flex: 1;
+}
+#goto-body kbd,
+.vish-node::part(keyhint) {
+  font: 11px var(--canvas-code);
+}
+#goto-body kbd {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: #fff;
+  color: #57544d;
+  box-shadow:
+    0 1px 0 #e2e0da,
+    inset 0 0 0 1px #ebe9e3;
+}
+/* подсказка клавиши у вызова под курсором */
+.vish-node[at-caret]::part(keyhint) {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  margin-left: 16px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background: #f1f0ec;
+  color: #77746c;
+  font: 12.5px var(--canvas-ui);
+  vertical-align: 2px;
+  white-space: nowrap;
+}

@@ -20,6 +20,13 @@ layer 1 next:@norm
 // expect: kind="common"
 // expect: kind="own"
 // expect: kind="own-part"
+// Transition palette (frame "Transition", author's decision 2026-10-27): reasons from VM, "add" -
+// explanation to "will be created" (where the name of the parameter, what is internal)
+goto 1 norm(str)
+// expect: name="добавить norm(str)" kind="добавить"
+// expect: name="norm(x)" kind="перегрузка" detail="подходит: без типа"
+// expect: context="Имя параметра — как у norm(x). Внутренняя: в базе и в исполнении, в модуле не видна. Откроется во второй панели."
+key 1 Escape
 // second panel still: overload f64 - switch and "shared / own" against the most common
 goto 1 norm(f64)
 key 1 Enter

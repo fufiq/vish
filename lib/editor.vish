@@ -1259,7 +1259,7 @@ send_completion(i64 v) {
   // tell the tuling "I want to add" ... I can write foo(int) and go"
   k = views[v].selected;
   preview = if(nav_list(v) && ((k < views[v].targets.size) && (!given(nav_fn(v, k)) && (nav_add(v, k) != "")))) overload_text(nav_add(v, k)) else "";
-  if(nav_list(v)) return send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview, array{}, "");
+  if(nav_list(v)) return send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview, array{}, if(preview != "") add_note(nav_add(v, k)) else "");
   // addition (frame "draft", author's decision 2026-10-27): the item - the type of the result and the
   // matching part, the selected - a line of documentation, the list - the recipient after the point
   k0 = views[v].selected;
@@ -1637,6 +1637,7 @@ module_overload_marks(found, i64 v) {
           i = code_index(fs, hit);
           // "i| signature" - chip selected overload (color - by number); call another, not shown - other
           found.push(mark{n, "chosen", (text(i + 1) + "|") + overload_label(hit, fs), 0, 0});
+          found.push(mark{n, "keyhint", "F12 — перегрузки этого вызова", 0, 0}); // at the cursor is a key
           if(code_id(hit) != code_id(shown_overload(fs))) found.push(mark{n, "other", "", 0, 0});
         }
       }
@@ -3277,7 +3278,13 @@ card_lines(lines, f, call, at) {
 }
 doc_of(f, str name) {
   lead = note_lead(f);
-  if(lead.size == 0) for(g : declarations(name, f)) if((lead.size == 0) && (code_id(code_module(g)) == code_id(code_module(f)))) lead = note_lead(g);
+  // overload without its own - a comment of the first overload group of the same module (the description of the group
+  // is written above it, as in the stream); signatures of other overloads ("fractional input") - not documentation
+  if(lead.size == 0) {
+    first = code();
+    for(g : declarations(name, f)) if(!given(first) && (code_id(code_module(g)) == code_id(code_module(f)))) first = g;
+    if(given(first) && (code_id(first) != code_id(f))) lead = note_lead(first);
+  }
   r = "";
   for(l : lead) {
     s = if(starts_with(l, "//")) trim(text_from(l, 2)) else trim(l);
@@ -4414,8 +4421,9 @@ add_text(str name, types) {
 }
 // note: selected here, internal, prelude
 with_note(str detail, str note) => if(detail == "") note else (detail + ", ") + note;
-// transition list; empty to say
-nav(i64 v, items, targets) => if(items.size == 0) report("переход: ничего не найдено") else show_nav(v, items, targets);
+// transition list; empty - to say empty: palette live (set for each key) - the list is closed
+// without a message
+nav(i64 v, items, targets) => if(items.size == 0) close_completion(v) else show_nav(v, items, targets);
 // “Add” to the beginning of the list
 prepend(xs, x) {
   r = array{x};
@@ -4522,7 +4530,8 @@ goto_sig(i64 v, str sig) {
   items = array{};
   targets = array{};
   for(f : fns) {
-    detail = if(typed && exact(f, types)) "точно" else if(typed && accepts(f, types)) "подходит" else "";
+    // reason (frame "Transition", author's decision 2026-10-27: from VM): exactly or fits without type
+    detail = if(typed && exact(f, types)) "точно" else if(typed && accepts(f, types)) "подходит: без типа" else "";
     if(is_inner(f)) detail = with_note(detail, "внутренняя");
     if(module_note(f) != "") detail = with_note(detail, module_note(f));
     items.push(completion{signature(f), "перегрузка", detail, 0});
@@ -4535,6 +4544,22 @@ goto_sig(i64 v, str sig) {
     targets = prepend(targets, array{code(), add_text(name, types)});
   }
   nav(v, items, targets);
+}
+// Explanation to "will be created" (frame "Transition"): where are the names of the parameters and what is the internal
+add_note(str sig) {
+  open = find_text(sig, "(");
+  name = slice_text(sig, 0, open);
+  n = 0;
+  inside = trim(slice_text(sig, open + 1, sig.size - 1));
+  if(inside != "") n = 1;
+  for(i : range(inside.size)) if(inside[i] == ',') n += 1;
+  src = "";
+  for(f : overloads(name, program())) if(src == "") {
+    ast.function{_, ps, _, _, _, _, _, _, _} = f;
+    if(ps.size == n) src = signature(f);
+  }
+  head = if(src == "") "" else ((if(n > 1) "Имена параметров — как у " else "Имя параметра — как у ") + src) + ". ";
+  head + "Внутренняя: в базе и в исполнении, в модуле не видна. Откроется во второй панели."
 }
 // Add the internal overload "foo(i64, str)": parameter names - as in overload of the same aricity,
 // otherwise a, b, c...; the body is an empty string to set
