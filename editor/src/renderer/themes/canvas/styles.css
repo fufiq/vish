@@ -2714,3 +2714,27 @@ body:has(#trace-bar:not([hidden])) #run {
 #layers:empty {
   display: none;
 }
+/* шаг пути ошибки из другого места — чипом у головы функции (кадр «Ошибка с трейсом») */
+.vish-chips .chip[data-kind='from'] {
+  gap: 6px;
+  margin-left: 14px;
+  padding: 0 9px 0 4px;
+  height: 22px !important;
+  translate: 0 calc((var(--line, 33px) - 22px) / 2);
+  border-radius: 999px;
+  background: #fdecec;
+  color: #8b8880;
+  font: 12px var(--canvas-ui);
+}
+.vish-chips .chip[data-kind='from'] .step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #f4a4a4;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+}

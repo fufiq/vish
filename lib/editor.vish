@@ -3916,16 +3916,46 @@ error_steps(ns, srcs, froms, tos, i64 k) {
   out.push(array{if(n >= 0) node_code(n) else code(), "место ошибки"});
   out
 }
-// The steps of all errors on node ns
-path_marks(ns) {
+// A step that is not in this view (function in the second panel, a place outside the module screen) is a
+// chip at the head of the next step function: (frame “Trace Error”); a line is as in the representation
+// of the module of the same client.
+//
+module_line(i64 v, n) {
+  for(w : range(views.size)) if((views[w].peer == views[v].peer) && (given(views[w].root) && (views[w].kind == "module"))) {
+    at = node_place(w, n);
+    if(at >= 0) return line_at(w, at) + 1;
+  }
+  0
+}
+// The node is shown in the view (root - too)
+in_view(i64 v, n) => given(n) && ((layout_of(v, n) >= 0) || (code_id(n) == code_id(views[v].root)));
+fn_name(f) {
+  ast.function{name, _, _, _, _, _, _, _, _} = f;
+  name
+}
+path_marks(i64 v) {
   out = array{};
   if(check_errors() == 0) return out;
+  // steps - on the node module (in the second panel - one function, there are no other steps in it)
+  mv = v;
+  for(w : range(views.size)) if((views[w].peer == views[v].peer) && (given(views[w].root) && (views[w].kind == "module"))) mv = w;
+  ns = views[mv].lay.nodes;
   array{srcs, froms, tos} = node_spans(ns);
   for(k : range(check_errors())) {
     steps = error_steps(ns, srcs, froms, tos, k);
     for(i : range(steps.size)) {
       array{n, _} = steps[i];
-      if(given(n)) out.push(mark{n, "path", (text(i + 1) + "/") + text(steps.size), 0, 0});
+      host = code();
+      if(given(n) && (!in_view(v, n) && ((i + 1) < steps.size))) {
+        array{nxt, _} = steps[i + 1];
+        if(given(nxt) && in_view(v, nxt)) host = if(code_kind(nxt) == ast.function) nxt else enclosing_fn(nxt);
+      }
+      if(given(host)) {
+        f = if(code_kind(n) == ast.function) n else enclosing_fn(n);
+        fname = if(given(f)) fn_name(f) else "";
+        line = module_line(v, n);
+        out.push(mark{host, "from", ((text(i + 1) + "|из ") + fname) + (if(line > 0) " · " + text(line) else ""), 0, 0});
+      } else if(given(n) && in_view(v, n)) out.push(mark{n, "path", (text(i + 1) + "/") + text(steps.size), 0, 0});
     }
   }
   out
@@ -4441,7 +4471,7 @@ send_marks(i64 v) {
   role_marks(found, v);
   if(view_kind(v) == "fn") overload_marks(found, v) else module_overload_marks(found, v);
   for(e : error_marks(v)) found.push(mark{e[0], "error", e[1], e[2], e[3]});
-  for(m : path_marks(views[v].lay.nodes)) found.push(m);
+  for(m : path_marks(v)) found.push(m);
   mismatch_marks(found, v);
   conflict_marks(found, v);
   record_marks(found, v);

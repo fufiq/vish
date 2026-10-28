@@ -387,6 +387,9 @@ function receive(m: ServerMsg): void {
     }
     case 's_update':
       views.get(m.view)?.update(m);
+      // editing in response to your set - a draft strip immediately, up to VM marks
+      if (Date.now() - typedAt < 1500 && views.get(m.view) === active)
+        active?.markTyped(m.node);
       paintGutter(views.get(m.view));
       checks.set(m.view, {
         revision: -1,

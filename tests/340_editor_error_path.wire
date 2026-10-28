@@ -19,3 +19,7 @@ hover 1 @half:2
 // expect: kind="шаг fn" text="3 · half" target=#
 // expect: kind="шаг " text="4 · /" target=#
 // expect: kind="к вызову" text="half" target=#
+// function in the second panel: step out of view - chip at the head of the next step function, with a
+// module bar (frame "Trace error": "1 of main · 137")
+open 1 @half
+// expect: kind="from" text="3|из twice · 5"

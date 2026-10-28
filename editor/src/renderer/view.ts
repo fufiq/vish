@@ -260,8 +260,17 @@ export class ViewElement {
     return { line, col };
   }
 
-  // Edit from VM: the node subtree is reassembled and replaced by the old (the same
-  // slot parent); the rest of the DOM is left unmoved.
+  // Edit from VM: the node subtree is reassembled and replaced by the old (the same slot parent); the rest of
+  // the DOM is left unmoved. Element, corrected by the set before the arrival of the labels (frame
+  // "Chernovik": strip - immediately when dialing); VM tags (draft) replace it. typing - the edit came in
+  // response to the set in this window.
+  #pendingDraft: NodeId | undefined;
+  markTyped(node: NodeId): void {
+    let el: Element | null = this.byId.get(node) ?? null;
+    while (el && el.parentElement !== this.root) el = el.parentElement;
+    const id = el?.getAttribute('data-id');
+    this.#pendingDraft = id == null ? undefined : Number(id);
+  }
   update(u: Update): void {
     for (const n of u.nodes) this.nodes.set(n.id, n);
     const old = this.byId.get(u.node);
@@ -295,15 +304,45 @@ export class ViewElement {
     this.ghost.style.top = `${String(r.bottom - origin.top + this.host.scrollTop)}px`;
   }
 
-  // Disclosure under node (null - remove); the content draws paint.
+  // Disclosure under node (null - remove); the content draws paint. Disclosure block - insertion in the text
+  // (frame "Tree Inspector"): at the end of the last line node - invisible spacer height from the block, the
+  // lines below move, the block rises into the lumen; the number of this line receives the same indentation.
+  //
+  #spacer: HTMLElement | undefined;
+  #spacerRow: HTMLElement | undefined;
   showBlock(node: NodeId | null, paint: (el: HTMLElement) => void): void {
+    this.#spacer?.remove();
+    this.#spacer = undefined;
+    if (this.#spacerRow) this.#spacerRow.style.marginBottom = '';
+    this.#spacerRow = undefined;
     const el = node === null ? undefined : this.byId.get(node);
     this.block.hidden = !el;
     if (!el) return;
     paint(this.block);
     const origin = this.host.getBoundingClientRect();
-    // under the first line of node (multi-line call is not at its end)
-    const r = el.getClientRects().item(0) ?? el.getBoundingClientRect();
+    const rects = el.getClientRects();
+    const r = rects.item(rects.length - 1) ?? el.getBoundingClientRect();
+    const gap = this.block.offsetHeight + 12;
+    const row = [...this.gutter.children].find(
+      (x): x is HTMLElement =>
+        x instanceof HTMLElement &&
+        Math.abs(x.getBoundingClientRect().top - r.top) < r.height / 2,
+    );
+    const spacer = document.createElement('span');
+    spacer.className = 'vish-spacer';
+    // line height - by line number (or by window font): spacer = line + lumen
+    const rowH = row?.getBoundingClientRect().height ?? 0;
+    const fontH = parseFloat(getComputedStyle(this.host).lineHeight);
+    const line = rowH > 0 ? rowH : Number.isNaN(fontH) ? r.height : fontH;
+    spacer.style.cssText = `display:inline-block;width:0;vertical-align:top;height:${String(line + gap)}px`;
+    if (el.shadowRoot) {
+      el.shadowRoot.append(spacer);
+      this.#spacer = spacer;
+      if (row) {
+        row.style.marginBottom = `${String(gap)}px`;
+        this.#spacerRow = row;
+      }
+    }
     this.block.style.left = `${String(r.left - origin.left + this.host.scrollLeft - 8)}px`;
     this.block.style.top = `${String(r.bottom - origin.top + this.host.scrollTop + 4)}px`;
   }
@@ -642,6 +681,7 @@ export class ViewElement {
         .filter((m) => m.kind === 'draft')
         .map((m) => m.node),
     );
+    if (this.#pendingDraft !== undefined) drafts.add(this.#pendingDraft);
     const conflicts = new Set(
       (this.#decor?.marks ?? [])
         .filter((m) => m.kind === 'conflict')
@@ -750,6 +790,7 @@ export class ViewElement {
   // string.
   showMarks(d: Decor): string | undefined {
     this.#decor = d;
+    this.#pendingDraft = undefined; // Tags draft from VM - more precisely
     for (const el of this.#marked) {
       el.setMarks({});
       el.removeAttribute('error-range');
@@ -827,7 +868,8 @@ export class ViewElement {
         if (
           m.kind !== 'conflict' &&
           m.kind !== 'record' &&
-          m.kind !== 'proposal'
+          m.kind !== 'proposal' &&
+          m.kind !== 'from'
         )
           return [];
         const el = this.byId.get(m.node);
@@ -844,7 +886,14 @@ export class ViewElement {
         chip.className = 'chip';
         chip.dataset.kind = m.kind;
         if (m.kind === 'record') chip.dataset.tone = String(tone(m.text));
-        chip.textContent = m.text;
+        // Step of the way from another place (frame "Error"): "3| from twice · 5" - circle of the step and from where
+        const [step = '', from = ''] = m.text.split('|');
+        if (m.kind === 'from') {
+          const n = document.createElement('span');
+          n.className = 'step';
+          n.textContent = step;
+          chip.append(n, from);
+        } else chip.textContent = m.text;
         chip.style.left = `${String(right - origin.left + this.host.scrollLeft)}px`;
         chip.style.top = `${String(r.top - origin.top + this.host.scrollTop)}px`;
         chip.style.setProperty('--line', `${String(r.height)}px`);
