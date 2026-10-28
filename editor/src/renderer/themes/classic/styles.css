@@ -731,6 +731,12 @@ body {
   gap: 8px;
   margin: 8px 0 12px;
 }
+.proposal .checks {
+  max-height: 125px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .proposal button {
   font:
     12px system-ui,

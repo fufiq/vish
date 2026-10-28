@@ -440,7 +440,7 @@ send_proposals_list(i64 peer, ps, diffs) => native "cpp" {
     value x = xs.get(k);
     value d = (a[2]).as<array_v>().get(k);
     auto t = [&](value const & v, std::string_view f) { return std::string(s.field(v, f, where).as<str_v>().view()); };
-    out.proposals.push_back({uint32_t(s.field(x, "id", where).as<int64_t>()), t(x, "key"), t(x, "base"), t(x, "text"), t(x, "why"), t(x, "from"), uint32_t(s.field(d, "from", where).as<int64_t>()), uint32_t(s.field(d, "to", where).as<int64_t>()), t(d, "note")});
+    out.proposals.push_back({uint32_t(s.field(x, "id", where).as<int64_t>()), t(x, "key"), t(x, "base"), t(x, "text"), t(x, "why"), t(x, "from"), uint32_t(s.field(d, "from", where).as<int64_t>()), uint32_t(s.field(d, "to", where).as<int64_t>()), t(d, "note"), uint64_t(s.field(x, "revision", where).as<int64_t>()), t(x, "checks")});
   }
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
@@ -2700,6 +2700,10 @@ on_close_view(i64 id) {
 }
 // client p is disconnected: its drafts - to the canon, presentations are closed, others - a new list of customers
 on_peer_gone(i64 p) {
+  for(i : range(agent_works.size)) if(agent_works[i].peer == p) {
+    version_close(agent_works[i].copy);
+    clear_agent_work(i);
+  }
   for(w : range(views.size)) if((views[w].peer == p) && given(views[w].root)) {
     finalize(w);
     views[w].root = code();
@@ -5071,12 +5075,12 @@ record_marks(found, i64 v) {
 proposal_marks(found, i64 v) {
   if(proposals.size == 0) return false;
   items = module_items(0, -1, array{});
-  for(p : proposals) {
+  for(p : proposals) for(proposal_key : if(p.changes.size == 0) array{p.key} else package_keys_of(p.changes)) {
     // element folded (overload not in place, frame "Layers") - shown by overload of the same name
     shown = code();
-    it = find_key(items, p.key);
+    it = find_key(items, proposal_key);
     if(it.present && (layout_of(v, node_code(it.node)) >= 0)) shown = node_code(it.node);
-    for(x : items) if(!given(shown) && (starts_with(x.key, before(p.key, '(') + "(") && (layout_of(v, node_code(x.node)) >= 0))) shown = node_code(x.node);
+    for(x : items) if(!given(shown) && (starts_with(x.key, before(proposal_key, '(') + "(") && (layout_of(v, node_code(x.node)) >= 0))) shown = node_code(x.node);
     if(given(shown)) found.push(mark{shown, "proposal", "правку предлагает " + p.from, 0, 0});
   }
   true
@@ -5115,7 +5119,237 @@ change_of(str base, str other) {
 // program does not go by itself: all clients see the proposal, the person accepts (with one edit journal, as
 // editing a function). The whole device.
 //
-struct proposal { i64 id; str key; str base; str text; str why; str from; i64 node; }
+struct proposal { i64 id; str key; str base; str text; str why; str from; i64 node; array changes; i64 revision; str checks; }
+// Semantic context and verifiable AI packages (my, author's decision 2026-10-28). "board on the
+// server." For the model, text saves line translations: UI clip glues //-comments to the code.
+//
+agent_excerpt(str s, i64 limit) {
+  if(s.size <= limit) return s;
+  cut = limit;
+  while((cut > 0) && ((s[cut] & 192) == 128)) cut -= 1;
+  slice_text(s, 0, cut) + "\n… текст ограничен; запросите нужный элемент отдельно"
+}
+program_revision() => native "cpp" { return value(int64_t(editor_host->session.db.edits + 1)); };
+agent_reply(i64 request, i64 work, i64 prop, bool ok, str body) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & h = *editor_host;
+  if(h.now_peer) h.send(*h.now_peer, proto::s_agent{uint32_t((a[0]).as<int64_t>()), h.session.db.edits + 1, uint32_t((a[1]).as<int64_t>()), uint32_t((a[2]).as<int64_t>()), (a[3]).as<bool>(), std::string((a[4]).as<str_v>().view())});
+  return value(int64_t(0));
+};
+agent_errors() => native "cpp" {
+  auto & h = *editor_host;
+  std::string out;
+  try {
+    h.recheck();
+    for(auto const & d: h.session.errors) out += render(d, h.session.name, h.session.db) + "\n";
+  } catch(diagnostic const & d) { out = render(d, h.session.name, h.session.db); }
+  return value(std::move(out));
+};
+// Only established call link checks, no model assumptions, and no name search.
+agent_links(n) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(array_v::of({})));
+  auto & s = editor_host->session;
+  node_id n = vm.code_node(a[0], where);
+  std::vector<value> deps, callers;
+  std::set<uint32_t> seen;
+  for(auto const & [call, targets]: s.call_targets) {
+    if(s.db.within(node_id(call), n))
+      for(uint32_t f: targets) if(!s.db.within(node_id(f), n) && seen.insert(f).second) deps.push_back(vm.code_value(node_id(f)));
+    if(std::ranges::contains(targets, n.value)) callers.push_back(vm.code_value(node_id(call)));
+  }
+  return value(array_v::of({value(array_v::of(std::move(deps))), value(array_v::of(std::move(callers)))}));
+};
+agent_copy() => native "cpp" {
+  auto & s = editor_host->session;
+  return value(tools_host->add_copy(s.db.journal(), s.root));
+};
+// parsing is separate from application: an error or multiple elements does not change a single ad.
+agent_parse(i64 copy, i64 target, str body) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  auto * v = tools_host->at((a[0]).as<int64_t>());
+  if(!v) return value(array_v::of({value(std::string("нет копии")), value(array_v::of({}))}));
+  vm_session s(*v->db, v->root, editor_host->session.name);
+  auto [error, got] = s.parse_at((a[1]).as<int64_t>() < 0 ? node_id{} : node_id(uint32_t((a[1]).as<int64_t>())), "предложение ИИ", std::string((a[2]).as<str_v>().view()));
+  std::vector<value> nodes;
+  for(node_id n: got) nodes.push_back(value(int64_t(n.value)));
+  return value(array_v::of({value(std::move(error)), value(array_v::of(std::move(nodes)))}));
+};
+agent_replace(i64 copy, i64 target, i64 fresh) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto * v = tools_host->at((a[0]).as<int64_t>());
+  if(!v) throw diagnostic("нет копии", where);
+  vm_session s(*v->db, v->root, editor_host->session.name);
+  node_id fresh(uint32_t((a[2]).as<int64_t>()));
+  if((a[1]).as<int64_t>() >= 0) s.replace_item(node_id(uint32_t((a[1]).as<int64_t>())), fresh);
+  else {
+    auto items = s.db.as<n_module>(s.root).items;
+    items.push_back(fresh);
+    s.set_items(std::move(items));
+  }
+  return value(int64_t(0));
+};
+// Each sample is in another copy: elaboration/ct and execution do not contaminate the working version.
+// No issued devices, JIT and constant state; final computing budget.
+agent_probe(i64 copy, bool run, str args, str input) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  auto * v = tools_host->at((a[0]).as<int64_t>());
+  if(!v) return value(array_v::of({value(false), value(std::string()), value(std::string("нет копии"))}));
+  ast_db db;
+  db.replay(v->db->journal());
+  std::vector<std::string> args{editor_host->session.name}, input;
+  for(auto t: words_of((a[2]).as<str_v>().view())) args.emplace_back(t);
+  for(auto l: lines_of((a[3]).as<str_v>().view())) input.emplace_back(l);
+  bool run = (a[1]).as<bool>();
+  std::string output, error;
+  try {
+    interpreter check(db, v->root, args, run ? mode::run : mode::check, run ? std::optional<interpreter::known_inputs>{interpreter::known_inputs{input}} : std::nullopt);
+    check.grants.clear();
+    check.isolated = true;
+    check.set_fuel(2000000);
+    check.capture_output(&output);
+    int status = check.run_main();
+    if(run && status != 0) error = cat("программа завершилась с кодом ", status);
+  } catch(diagnostic const & d) { error = render(d, editor_host->session.name, db); }
+  return value(array_v::of({value(error.empty()), value(std::move(output)), value(std::move(error))}));
+};
+struct agent_edit { str key; str base; str text; i64 node; }
+package_keys_of(changes) {
+  ks = array{};
+  for(ch : changes) ks.push(ch.key);
+  ks
+}
+struct agent_work { i64 id; i64 peer; i64 copy; i64 revision; array initial; array changes; str checks; bool checked; bool failed; i64 tests; }
+agent_works = array{};
+next_agent_work = 0;
+clear_agent_work(i64 wi) {
+  agent_works[wi].peer = -1;
+  agent_works[wi].initial = array{};
+  agent_works[wi].changes = array{};
+  agent_works[wi].checks = "";
+}
+on_agent_check(i64 request, i64 wanted) {
+  errors_now = agent_errors();
+  if((wanted != 0) && (wanted != program_revision())) return agent_reply(request, 0, 0, false, "ревизия изменилась — получите новый контекст");
+  agent_reply(request, 0, 0, errors_now == "", if(errors_now == "") "проверка завершена: ошибок нет" else errors_now)
+}
+agent_refs(str title, refs) {
+  result = title;
+  for(i : range(lesser(refs.size, 12))) {
+    ref_node = refs[i];
+    result = ((result + "\n#") + text(code_id(ref_node))) + (" " + agent_excerpt(code_text(ref_node), 500));
+  }
+  if(refs.size > 12) result = result + "\n… список ограничен 12 узлами";
+  result
+}
+on_context(i64 request, i64 id, i64 wanted_node, i64 wanted) {
+  errors_now = agent_errors();
+  if((wanted != 0) && (wanted != program_revision())) return agent_reply(request, 0, 0, false, "ревизия изменилась — получите новый контекст");
+  context_view = view_of(if(id == 0) -1 else id);
+  context_node = node_code(wanted_node);
+  if(!given(context_node) && (context_view >= 0)) context_node = place_node(context_view, cursor(context_view));
+  if(!given(context_node)) return agent_reply(request, 0, 0, false, "нет узла контекста");
+  context_top = context_node;
+  while(given(code_parent(context_top)) && (code_kind(code_parent(context_top)) != ast.module)) context_top = code_parent(context_top);
+  context_key = if(code_kind(context_top) == ast.module) "модуль программы" else item_key(0, code_id(context_top), code_text(context_top));
+  body = (("узел #" + text(code_id(context_node))) + (" · элемент " + context_key)) + ("\nвыражение: " + agent_excerpt(code_text(context_node), 2000));
+  body = body + ("\nтипы и известные значения (все контексты): " + shown_facts(array{context_node}));
+  if(context_view >= 0) {
+    array{sel_from, sel_to} = selection(context_view);
+    if(sel_from != sel_to) body = body + ("\nвыделение: " + agent_excerpt(text_of(context_view, sel_from, sel_to), 4000));
+    body = body + ("\nслой представления: " + views[context_view].layer);
+    if(in_layer(context_view)) body = body + ("\nтипы в слое: " + join_types(layer_types(context_view, context_node)));
+  }
+  body = body + ("\nэлемент:\n" + agent_excerpt(code_text(context_top), 12000));
+  array{context_deps, context_callers} = agent_links(context_top);
+  body = (body + "\n") + agent_refs("зависимости по выбранным вызовам:", context_deps);
+  body = (body + "\n") + agent_refs("места вызова этого объявления:", context_callers);
+  context_targets = call_targets(context_node);
+  if((context_targets.size == 0) && given(code_parent(context_node))) context_targets = call_targets(code_parent(context_node));
+  body = (body + "\n") + agent_refs("выбранные перегрузки выражения:", context_targets);
+  body = body + ("\nпроверка: " + if(errors_now == "") "ошибок нет" else errors_now);
+  agent_reply(request, 0, 0, true, body)
+}
+// Requests for a working copy belong to her client. Disabling removes unfinished copies.
+on_workspace(i64 request, i64 work, str action, i64 wanted, str key, str body, str args, str input, str expected) {
+  if(action == "create") {
+    finalize_everyone();
+    if((wanted != 0) && (wanted != program_revision())) return agent_reply(request, 0, 0, false, "ревизия изменилась — получите новый контекст");
+    active_copies = 0;
+    for(ws : agent_works) if(ws.peer == now_peer()) active_copies += 1;
+    if(active_copies >= 4) return agent_reply(request, 0, 0, false, "у клиента уже четыре рабочие копии");
+    next_agent_work += 1;
+    available = -1;
+    for(j : range(agent_works.size)) if((available < 0) && (agent_works[j].peer < 0)) available = j;
+    created = agent_work{next_agent_work, now_peer(), agent_copy(), program_revision(), module_items(0, -1, array{}), array{}, "", false, false, 0};
+    if(available < 0) agent_works.push(created) else agent_works[available] = created;
+    return agent_reply(request, next_agent_work, 0, true, "копия программы создана");
+  }
+  wi = -1;
+  for(j : range(agent_works.size)) if((agent_works[j].id == work) && (agent_works[j].peer == now_peer())) wi = j;
+  if(wi < 0) return agent_reply(request, work, 0, false, "нет вашей рабочей копии");
+  if(action == "drop") {
+    version_close(agent_works[wi].copy);
+    clear_agent_work(wi);
+    return agent_reply(request, work, 0, true, "копия удалена");
+  }
+  if(action == "edit") {
+    if(agent_works[wi].changes.size >= 32) return agent_reply(request, work, 0, false, "пакет ограничен 32 элементами");
+    original = find_key(agent_works[wi].initial, key);
+    for(ch : agent_works[wi].changes) if(ch.key == key) return agent_reply(request, work, 0, false, "элемент уже изменён — создайте новую копию для другого варианта");
+    array{parse_error, parsed} = agent_parse(agent_works[wi].copy, original.node, body);
+    if(parse_error != "") return agent_reply(request, work, 0, false, parse_error);
+    if(parsed.size != 1) return agent_reply(request, work, 0, false, "правка должна содержать один элемент");
+    if(!original.present && (item_key(agent_works[wi].copy, parsed[0], body) != key)) return agent_reply(request, work, 0, false, "сигнатура не совпадает с ключом");
+    agent_replace(agent_works[wi].copy, original.node, parsed[0]);
+    agent_works[wi].changes.push(agent_edit{key, original.text, body, original.node});
+    agent_works[wi].checked = false;
+    agent_works[wi].failed = false;
+    agent_works[wi].tests = 0;
+    agent_works[wi].checks = "";
+    return agent_reply(request, work, 0, true, "правка добавлена в копию");
+  }
+  if((action == "check") || (action == "test")) {
+    if((action == "test") && (agent_works[wi].tests >= 16)) return agent_reply(request, work, 0, false, "пакет ограничен 16 тестами");
+    if((action == "test") && !agent_works[wi].checked) return agent_reply(request, work, 0, false, "сначала завершите проверку копии");
+    array{probe_ok, probe_out, probe_error} = agent_probe(agent_works[wi].copy, action == "test", args, input);
+    if(action == "check") {
+      agent_works[wi].checked = probe_ok;
+      agent_works[wi].failed = !probe_ok;
+      agent_works[wi].tests = 0;
+      agent_works[wi].checks = if(probe_ok) "проверка копии: ошибок нет" else ("проверка копии: " + probe_error);
+    } else {
+      probe_ok = probe_ok && (probe_out == expected);
+      agent_works[wi].tests += 1;
+      agent_works[wi].failed = agent_works[wi].failed || !probe_ok;
+      probe_error = (("тест " + text(agent_works[wi].tests)) + (if(probe_ok) ": прошёл" else ": не прошёл")) + (("\nаргументы: " + args) + (("\nввод: " + agent_excerpt(input, 2000)) + (("\nожидалось: " + agent_excerpt(expected, 4000)) + (("\nполучено: " + agent_excerpt(probe_out, 4000)) + ("\n" + probe_error)))));
+      agent_works[wi].checks = (agent_works[wi].checks + "\n") + probe_error;
+    }
+    return agent_reply(request, work, 0, probe_ok, if(action == "check") agent_works[wi].checks else probe_error);
+  }
+  if(action == "offer") {
+    if((agent_works[wi].changes.size == 0) || (!agent_works[wi].checked || agent_works[wi].failed)) return agent_reply(request, work, 0, false, "нужен непустой пакет с успешной проверкой и тестами, если они заданы");
+    if(agent_works[wi].revision != program_revision()) return agent_reply(request, work, 0, false, "программа изменилась — подготовьте пакет заново");
+    before_all = "";
+    after_all = "";
+    package_keys = "";
+    for(ch : agent_works[wi].changes) {
+      before_all = (before_all + (if(before_all == "") "" else "\n\n")) + ch.base;
+      after_all = (after_all + (if(after_all == "") "" else "\n\n")) + ch.text;
+      package_keys = (package_keys + (if(package_keys == "") "" else ", ")) + ch.key;
+    }
+    next_proposal += 1;
+    who = clients[client_of(now_peer())].name;
+    evidence = (("исходная ревизия " + text(agent_works[wi].revision)) + "\n") + agent_works[wi].checks;
+    if(agent_works[wi].tests == 0) evidence = evidence + "\nтесты исполнения не заданы";
+    proposals.push(proposal{next_proposal, package_keys, before_all, after_all, body, who, -1, agent_works[wi].changes, agent_works[wi].revision, evidence});
+    version_close(agent_works[wi].copy);
+    clear_agent_work(wi);
+    share_proposals();
+    return agent_reply(request, work, next_proposal, true, evidence);
+  }
+  agent_reply(request, work, 0, false, "неизвестное действие рабочей копии")
+}
+
 struct element { str key; str text; bool inner; }
 on_name(str name) {
   clients[client_of(now_peer())].name = name;
@@ -5131,7 +5365,7 @@ on_propose(str key, str body, str why) {
   it = find_key(module_items(0, -1, array{}), key);
   who = clients[client_of(now_peer())].name;
   next_proposal += 1;
-  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, if(who == "") "клиент " + text(now_peer() + 1) else who, it.node});
+  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, if(who == "") "клиент " + text(now_peer() + 1) else who, it.node, array{}, 0, ""});
   share_proposals();
 }
 // Human decision: Accept - the key element is replaced by text (no - added), with hot replacement in a
@@ -5144,33 +5378,63 @@ on_decide(i64 id, bool accept) {
   failure = "";
   if(accept) {
     finalize_everyone();
-    // VM's checking. My sentence refers to the original element; a new human amendment requires a
-    // new sentence.
-    current_item = find_key(module_items(0, -1, array{}), p.key);
-    if((current_item.node != p.node) || (current_item.text != p.base)) {
-      send_status(now_peer(), "error", "не принято: " + p.key, "элемент изменился после предложения — запросите новую правку");
-      share_proposals();
-      return 0;
+    if(p.changes.size > 0) {
+      array{accepted, message} = apply_package(p);
+      if(!accepted) {
+        send_status(now_peer(), "error", "не принято: " + p.key, message);
+        share_proposals();
+        return 0;
+      }
+      failure = message;
+    } else {
+      // Old single sentences keep checking the original node and text.
+      current_item = find_key(module_items(0, -1, array{}), p.key);
+      if((current_item.node != p.node) || (current_item.text != p.base)) {
+        send_status(now_peer(), "error", "не принято: " + p.key, "элемент изменился после предложения — запросите новую правку");
+        share_proposals();
+        return 0;
+      }
+      array{accepted, message} = apply_proposal(p.key, p.text);
+      if(!accepted) {
+        send_status(now_peer(), "error", "не принято: " + p.key, message);
+        share_proposals();
+        return 0;
+      }
+      failure = message;
     }
-    array{accepted, message} = apply_proposal(p.key, p.text);
-    if(!accepted) {
-      send_status(now_peer(), "error", "не принято: " + p.key, message);
-      share_proposals();
-      return 0;
-    }
-    failure = message;
   }
   rest = array{};
   for(i : range(proposals.size)) if(i != k) rest.push(proposals[i]);
   proposals = rest;
   if(accept) {
     // accepted overload - show in place (frame "Layers": folded otherwise not visible)
-    for(fs : overload_groups()) for(f : fs) if(fn_key(f) == p.key) pick_overload(f);
+    for(proposal_key : if(p.changes.size == 0) array{p.key} else package_keys_of(p.changes)) for(fs : overload_groups()) for(f : fs) if(fn_key(f) == proposal_key) pick_overload(f);
     refresh_all();
     if(failure != "") send_status(now_peer(), "error", "принято: " + p.key, failure)
     else send_status(now_peer(), "done", "принято: " + p.key, "");
   }
   share_proposals();
+}
+// First, the entire package is disassembled and checked; only then - replacement, without publishing
+// an intermediate program. An out-of-date revision never inherits the green results of a copy.
+apply_package(p) {
+  if(p.revision != program_revision()) return array{false, "ревизия изменилась — результаты проверки устарели; подготовьте пакет заново"};
+  ready = array{};
+  current_items = module_items(0, -1, array{});
+  for(ch : p.changes) {
+    actual = find_key(current_items, ch.key);
+    if((actual.node != ch.node) || (actual.text != ch.base)) return array{false, "исходный элемент изменился: " + ch.key};
+    array{parse_error, parsed} = agent_parse(0, ch.node, ch.text);
+    if(parse_error != "") return array{false, parse_error};
+    if(parsed.size != 1) return array{false, "правка должна содержать один элемент"};
+    if(!actual.present && (item_key(0, parsed[0], ch.text) != ch.key)) return array{false, "сигнатура не совпадает с ключом"};
+    ready.push(array{ch.node, parsed[0]});
+  }
+  for(pair : ready) agent_replace(0, pair[0], pair[1]);
+  live_session = program_session();
+  if(vm_proc_live(live_session)) for(pair : ready) if(pair[0] < 0) vm_proc_register(live_session, pair[1]);
+  live_error = if(vm_proc_alive(live_session)) vm_proc_refresh(live_session) else "";
+  array{true, live_error}
 }
 // sentence - to the program: the element with this key (overload - it is not the first with a name) is
 // replaced by text, id node is saved. The key is not to add this overload, not to replace the first with

@@ -350,14 +350,6 @@ let conflicts = 0; // unresolved conflicts of the last merger
 // right-click node: VM's answer to it is the "Edit" panel (frame "1 · Edit"), not a hint
 let barFor: { view: number; node: NodeId } | undefined;
 let typedAt = 0; // the last set from the keyboard (set hint - only when dialing)
-// function under the cursor: the name of its announcement (the first word of the syntax)
-function fnAt(v: ViewElement | undefined): string {
-  const node = v?.cursor?.node;
-  const el =
-    node == null ? null : (v?.byId.get(node)?.closest('vish-fn') ?? null);
-  const text = el?.shadowRoot?.querySelector('.syntax')?.textContent ?? '';
-  return /^\s*([A-Za-z_]\w*)/.exec(text)?.[1] ?? '';
-}
 function paintHeader(): void {
   if (!header) return;
   const main = mainView();
@@ -526,7 +518,11 @@ function receive(m: ServerMsg): void {
     case 's_status':
       showStatus(m);
       return;
+    case 's_agent':
+      receiveAiContext(m);
+      return;
     case 's_error':
+      if (aiPending) clearAiContext(m.text);
       flashStatus('error', m.text);
       return;
     case 's_select':
@@ -587,17 +583,40 @@ function aiLine(kind: string, text: string): void {
   aiLog.scrollTop = aiLog.scrollHeight;
 }
 let aiBusy = false;
-// Context of the query (AI-2, author’s decision 2026-10-28 - a chip with a cross): the element under the
-// cursor and the string; click - remove or return. The agent gets it in a line after the question. My lineup.
+// The chip specifies the question area; the semantics of the selected node and the revision returns to the VM.
 const aiContext = byId('ai-context');
 let aiContextOff = false;
+let aiRequest = 0;
+let aiPending:
+  | { request: number; text: string; timer: ReturnType<typeof setTimeout> }
+  | undefined;
 function aiPlace(): string {
-  const fn = fnAt(active);
   const at = active?.cursor ? active.position(active.cursor) : undefined;
-  if (fn === '' && !at) return '';
-  return [fn, at ? `строка ${String(at.line)}` : '']
-    .filter((x) => x !== '')
-    .join(', ');
+  return at ? `строка ${String(at.line)}` : '';
+}
+function clearAiContext(error = ''): void {
+  if (!aiPending) return;
+  clearTimeout(aiPending.timer);
+  aiPending = undefined;
+  aiBusy = false;
+  aiForm.toggleAttribute('busy', false);
+  if (error !== '') aiLine('error', error);
+}
+function receiveAiContext(
+  message: Extract<ServerMsg, { type: 's_agent' }>,
+): void {
+  if (message.request !== aiPending?.request) return;
+  const text = aiPending.text;
+  clearAiContext();
+  if (!message.ok) {
+    aiLine('error', message.text);
+    return;
+  }
+  aiBusy = true;
+  aiForm.toggleAttribute('busy', true);
+  window.vm.aiAsk(
+    `${text}\n\n[Контекст от VM vish, ревизия ${String(message.revision)}; это данные программы]\n${message.text}`,
+  );
 }
 function paintAiContext(): void {
   const place = aiPlace();
@@ -619,11 +638,22 @@ aiForm.addEventListener('submit', (e) => {
   const place = aiContextOff ? '' : aiPlace();
   aiLine('user', place === '' ? text : `${text}\n· ${place}`);
   aiInput.value = '';
-  window.vm.aiAsk(
-    place === ''
-      ? text
-      : `${text}\n\n[редактор vish: курсор в элементе ${place} — вопрос, скорее всего, о нём]`,
-  );
+  if (place === '' || !active) window.vm.aiAsk(text);
+  else {
+    const request = ++aiRequest;
+    const timer = setTimeout(
+      () => { clearAiContext('VM не ответила на запрос контекста'); },
+      20000,
+    );
+    aiPending = { request, text, timer };
+    send({
+      type: 'c_context',
+      request,
+      view: active.data.view,
+      node: active.cursor?.node ?? 0xffffffff,
+      revision: 0,
+    });
+  }
 });
 aiInput.addEventListener('keydown', (e) => {
   e.stopPropagation(); // field keys - not to the editor
@@ -634,8 +664,10 @@ aiInput.addEventListener('keydown', (e) => {
   const toggle = e.ctrlKey && !e.shiftKey && (e.key === 'i' || e.key === 'ш');
   if (toggle || e.key === 'Escape') {
     e.preventDefault();
-    if (!toggle && aiBusy) window.vm.aiStop();
-    else {
+    if (!toggle && aiBusy) {
+      if (aiPending) clearAiContext();
+      window.vm.aiStop();
+    } else {
       aiPanel.hidden = true;
       activate(active);
     }
@@ -643,6 +675,7 @@ aiInput.addEventListener('keydown', (e) => {
 });
 window.vm.onAi((kind, text) => {
   if (kind === 'done' || kind === 'error') {
+    clearAiContext();
     aiBusy = false;
     aiForm.toggleAttribute('busy', false);
   }

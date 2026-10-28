@@ -19,7 +19,7 @@
 
 namespace vish::proto {
 
-constexpr uint32_t version = 6;
+constexpr uint32_t version = 7;
 
 // --- client ---
 
@@ -147,7 +147,24 @@ struct c_decide {
   uint32_t id;
   bool accept;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_propose, c_decide>;
+// The AI receives facts from the VM: the exact node and explicit verification response associated with editing
+// the program (the node derivatives and rendering of this counter do not change). revision=0 is current.
+struct c_context { uint32_t request; uint32_t view; node_id node; uint64_t revision; };
+struct c_check { uint32_t request; uint64_t revision; };
+// Copy of the program: create, edit, check, test, offer, drop. All fields are scalar - the same
+// protocol is available in .wire scripts; the packet is assembled in VM, not applied in parts.
+struct c_workspace {
+  uint32_t request;
+  uint32_t workspace;
+  std::string action;
+  uint64_t revision;
+  std::string key;
+  std::string text;
+  std::string args;
+  std::string input;
+  std::string expected;
+};
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_propose, c_decide, c_context, c_check, c_workspace>;
 
 // --- VM customer ---
 
@@ -446,11 +463,21 @@ struct s_proposal {
   uint32_t text_from = 0;
   uint32_t text_to = 0;
   std::string note;
+  uint64_t revision = 0;
+  std::string checks;
 };
 struct s_proposals {
   std::vector<s_proposal> proposals;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_proposals>;
+struct s_agent {
+  uint32_t request;
+  uint64_t revision;
+  uint32_t workspace;
+  uint32_t proposal;
+  bool ok;
+  std::string text;
+};
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_proposals, s_agent>;
 
 // --- staff ---
 

@@ -77,7 +77,9 @@ export function proposals(
       }
       box.append(head);
       if (p.why !== '') box.append(make('div', 'why', p.why));
-      box.append(cols, buttons);
+      box.append(cols);
+      if (p.checks !== '') box.append(make('pre', 'why verification', p.checks));
+      box.append(buttons);
       return box;
     }),
   );

@@ -149,6 +149,39 @@ export interface DecideAsk {
   id: number;
   accept: boolean;
 }
+export interface ContextAsk {
+  type: 'c_context';
+  request: number;
+  view: number;
+  node: NodeId;
+  revision: number;
+}
+export interface CheckAsk {
+  type: 'c_check';
+  request: number;
+  revision: number;
+}
+export interface WorkspaceAsk {
+  type: 'c_workspace';
+  request: number;
+  workspace: number;
+  action: string;
+  revision: number;
+  key: string;
+  text: string;
+  args: string;
+  input: string;
+  expected: string;
+}
+export interface AgentResult {
+  type: 's_agent';
+  request: number;
+  revision: number;
+  workspace: number;
+  proposal: number;
+  ok: boolean;
+  text: string;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -174,7 +207,10 @@ export type ClientMsg =
   | NameAsk
   | ItemsAsk
   | ProposeAsk
-  | DecideAsk;
+  | DecideAsk
+  | ContextAsk
+  | CheckAsk
+  | WorkspaceAsk;
 
 export interface ServerHello {
   type: 's_hello';
@@ -462,7 +498,8 @@ export type ServerMsg =
   | Stops
   | Peers
   | Items
-  | Proposals;
+  | Proposals
+  | AgentResult;
 // Elements of the module: key (signature), text, internal
 export interface Items {
   type: 's_items';
@@ -480,6 +517,8 @@ export interface Proposal {
   text_from: number;
   text_to: number;
   note: string;
+  revision: number;
+  checks: string;
 }
 export interface Proposals {
   type: 's_proposals';

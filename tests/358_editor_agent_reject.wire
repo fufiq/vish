@@ -1,0 +1,34 @@
+// Unsuccessful/obsolete packages and other people’s copies do not change the program.
+// program: editor_proposals.vish
+open_view module
+[2] open_view module
+[2] workspace 1 0 create
+workspace 2 1 edit 0 f(_) f(x)\s=>\s99;
+// expect: нет вашей рабочей копии
+[2] workspace 3 1 edit 0 f(_) f(x)\s=>\smissing;
+[2] workspace 4 1 check
+// expect: неизвестное имя missing
+[2] workspace 5 1 offer 0 - нельзя
+// expect: нужен непустой пакет с успешной проверкой
+[2] workspace 6 1 drop
+[2] workspace 7 0 create
+[2] workspace 8 2 edit 0 f(_) f(x)\s=>\sx\s+\s3;
+[2] workspace 9 2 check
+[2] workspace 10 2 test 0 - - \s \s 99\n
+// expect: тест 1: не прошёл
+[2] workspace 11 2 offer 0 - нельзя
+// expect: нужен непустой пакет с успешной проверкой
+[2] workspace 12 2 drop
+[2] workspace 13 0 create
+[2] workspace 14 3 edit 0 f(_) f(x)\s=>\sx\s+\s3;
+[2] workspace 15 3 check
+[2] workspace 16 3 offer 0 - пакет
+pointer 1 @1 0 0
+key 1 Delete
+input 1 9
+decide 1 1
+// expect: результаты проверки устарели
+// expect: id=1 key="f(_)"
+items
+// expect: key="f(_)" text="f(x) => x + 9;"
+// expect-not: text="f(x) => x + 3;"

@@ -1,0 +1,19 @@
+// Fresh validation and accurate context of node, including overload and communications.
+// program: editor_proposals.vish
+open_view module
+check 1 0
+// expect: проверка завершена: ошибок нет
+pointer 1 @2 0 0
+context 2 1 4294967295 0
+// expect: элемент main()
+// expect: зависимости по выбранным вызовам:
+// expect: f(x) => x + 1;
+// expect: места вызова этого объявления:
+context 3 1 @2 999999
+// expect: ревизия изменилась — получите новый контекст
+pointer 1 @1 0 0
+key 1 Delete
+input 1 missing
+check 4 0
+// expect: неизвестное имя missing
+// expect-not: request=4 revision=0

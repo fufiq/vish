@@ -1142,6 +1142,7 @@ struct interpreter {
 
   void declare_state(node_id item) {
     auto const & v = db.as<n_var>(item);
+    if(vm_root->isolated && !checking()) fail("изолированный запуск: постоянное состояние недоступно", db[item].where);
     if(checking() || !vm_root->owns_state) { // parsing - run-time (value from past launches); assistants (compiler in language) - without a file
       flow f = eval(v.init, globals, 0);
       if(f.kind == flow_kind::thr) uncaught(f);
@@ -1965,13 +1966,13 @@ struct interpreter {
   }
 
   flow eval(node_id n, scope * env, uint32_t frame) {
+    if(fuel && (*fuel == 0 || --*fuel == 0)) fail(checking() ? "бюджет статического разбора исчерпан" : "бюджет исполнения исчерпан", db[n].where);
     if(!checking()) {
       if(!tracer) return std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
       flow f = std::visit([&](auto const & k) { return eval_node(n, k, env, frame); }, db[n].kind);
       trace_step(n, f);
       return f;
     }
-    if(fuel && --*fuel == 0) fail("бюджет статического разбора исчерпан", db[n].where);
     // Check mode: observation - what value the node received and whether there was a
     // runtime effect (necessary for residual program, §13.2)
     uint64_t effects_before = effects, checks_before = checks;
@@ -6419,6 +6420,7 @@ struct interpreter {
       if(r.kind == flow_kind::thr) record_throw(r.v);
       return ok(value(agg_v{types.named("process"), {{sym("id"), erase(value(int64_t(0)))}}}));
     }
+    if(vm_root->isolated) fail("изолированный запуск: фоновые процессы недоступны", where);
     std::vector<value> vals;
     for(node_id a: rest) {
       VISH_TRY(v, eval(a, env, frame));
@@ -8905,6 +8907,8 @@ struct interpreter {
       std::string line;
       for(uint32_t i = 0; i < a.size(); ++i) line += (i ? " " : "") + print_text(a[i]);
       lane_guard g(out_lock); // line
+      if(captured && vm_root->isolated && captured->size() + line.size() + 1 > 1024 * 1024)
+        fail("изолированный запуск: вывод больше 1 МиБ", where);
       if(captured) *captured += line + "\n";
       else put(stdout, cat(line, "\n"));
       return {};
@@ -9574,6 +9578,7 @@ struct interpreter {
   std::unordered_map<uint64_t, bool> definition_assoc; // (operator, module with control) → [[associative]] in its definition context
   std::optional<diagnostic> setup_error; // error of modules during creation - thrown during elaboration
   std::optional<uint64_t> fuel;
+  bool isolated = false; // copy for AI: without issuing devices and a permanent state
   std::vector<std::pair<uint32_t, bool>> frame_floors; // (The first frame of the call was a return to the outside)
   std::vector<std::vector<report_event> *> recording;
   std::vector<std::map<uint32_t, uint64_t>> deps;

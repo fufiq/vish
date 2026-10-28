@@ -382,6 +382,9 @@ struct editor_server {
   void handle(peer & p, proto::c_items const &) { decide(&p, -1, "on_items", {}); }
   void handle(peer & p, proto::c_propose const & m) { decide(&p, -1, "on_propose", {value(m.key), value(m.text), value(m.why)}); }
   void handle(peer & p, proto::c_decide const & m) { decide(&p, -1, "on_decide", {value(int64_t(m.id)), value(m.accept)}); }
+  void handle(peer & p, proto::c_context const & m) { decide(&p, m.view, "on_context", {value(int64_t(m.request)), value(int64_t(m.view)), value(int64_t(m.node.value)), value(int64_t(m.revision))}); }
+  void handle(peer & p, proto::c_check const & m) { decide(&p, -1, "on_agent_check", {value(int64_t(m.request)), value(int64_t(m.revision))}); }
+  void handle(peer & p, proto::c_workspace const & m) { decide(&p, -1, "on_workspace", {value(int64_t(m.request)), value(int64_t(m.workspace)), value(m.action), value(int64_t(m.revision)), value(m.key), value(m.text), value(m.args), value(m.input), value(m.expected)}); }
   void handle(peer & p, proto::c_merge const & m) { decide(&p, -1, "on_merge", {value(m.path)}); }
   void handle(peer & p, proto::c_take const & m) { decide(&p, -1, "on_take", {value(m.key), value(m.theirs)}); }
 

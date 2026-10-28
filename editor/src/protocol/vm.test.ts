@@ -41,6 +41,45 @@ describe('живая VM', () => {
       'kind',
       'projection',
     ]);
+    expect(fields('c_context')).toEqual([
+      'request',
+      'view',
+      'node',
+      'revision',
+    ]);
+    expect(fields('c_check')).toEqual(['request', 'revision']);
+    expect(fields('c_workspace')).toEqual([
+      'request',
+      'workspace',
+      'action',
+      'revision',
+      'key',
+      'text',
+      'args',
+      'input',
+      'expected',
+    ]);
+    expect(fields('s_agent')).toEqual([
+      'request',
+      'revision',
+      'workspace',
+      'proposal',
+      'ok',
+      'text',
+    ]);
+    expect(fields('s_proposal')).toEqual([
+      'id',
+      'key',
+      'base',
+      'text',
+      'why',
+      'from',
+      'text_from',
+      'text_to',
+      'note',
+      'revision',
+      'checks',
+    ]);
     expect(fields('c_goto')).toEqual(['view', 'text']);
     expect(fields('c_layer')).toEqual(['view', 'key']);
     expect(fields('c_run')).toEqual(['stdin_text', 'args']);

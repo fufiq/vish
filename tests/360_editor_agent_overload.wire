@@ -1,0 +1,22 @@
+// The context receives the selected i64-overload, and the package adds a new one without changing the old ones.
+// program: editor_agent.vish
+open_view module
+pointer 1 @2 0 0
+context 1 1 4294967295 0
+// expect: элемент main()
+// expect: f(i64 x) => x + 1;
+// expect-not: f(str x)
+workspace 2 0 create
+workspace 3 1 edit 0 f(bool) f(bool\sx)\s=>\sif(x)\s1\selse\s0;
+workspace 4 1 edit 0 main() main()\s=>\sprint(f(true));
+workspace 5 1 check
+// expect: проверка копии: ошибок нет
+workspace 6 1 test 0 - - \s \s 1\n
+// expect: тест 1: прошёл
+workspace 7 1 offer 0 - новая\sперегрузка
+decide 1 1
+// expect: status kind="done"
+items
+// expect: key="f(str)" text="f(str x) => x;"
+// expect: key="f(i64)" text="f(i64 x) => x + 1;"
+// expect: key="f(bool)" text="f(bool x) => if(x) 1 else 0;"

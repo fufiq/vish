@@ -1,0 +1,19 @@
+// Trial run limits output and does not run background processes off budget.
+// program: editor_proposals.vish
+open_view module
+workspace 1 0 create
+workspace 2 1 edit 0 main() main()\s{\sn\s=\si64(read_floats(stdin)[0]);\sxs\s=\sfill(1000,\s1);\sfor(i\s:\srange(n))\sprint(xs);\s}
+workspace 3 1 check
+// expect: проверка копии: ошибок нет
+workspace 4 1 test 0 - - \s 1000 -
+// expect: вывод больше 1 МиБ
+workspace 5 1 drop
+workspace 6 0 create
+workspace 7 2 edit 0 main() main()\s=>\sprocess(f,\s1);
+workspace 8 2 check
+// expect: проверка копии: ошибок нет
+workspace 9 2 test 0 - - \s \s -
+// expect: фоновые процессы недоступны
+workspace 10 2 drop
+items
+// expect: key="main()" text="main() => print(f(2));"

@@ -1,0 +1,19 @@
+// The launch budget is limited; the offer does not run user effects in the original.
+// program: editor_proposals.vish
+open_view module
+workspace 1 0 create
+workspace 2 1 edit 0 main() main()\s{\sn\s=\sread_floats(stdin)[0];\swhile(n\s>\s0.0)\sn\s+=\s1.0;\s}
+workspace 3 1 check
+workspace 4 1 test 0 - - \s 1 -
+// expect: бюджет исполнения исчерпан
+workspace 5 1 offer 0 - нельзя
+// expect: нужен непустой пакет с успешной проверкой
+workspace 6 1 drop
+workspace 7 0 create
+workspace 8 2 edit 0 main() main()\s=>\sfile_create("/tmp/vish-agent-must-not-create");
+workspace 9 2 check
+workspace 10 2 test 0 - - \s \s -
+// expect: файловая система программе не дана
+workspace 11 2 drop
+items
+// expect: key="main()" text="main() => print(f(2));"

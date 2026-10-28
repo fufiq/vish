@@ -20,6 +20,7 @@ let receive: (bytes: Uint8Array) => void;
 let aiEvent: (kind: string, text: string) => void;
 const sent: ClientMsg[] = [];
 const stop = vi.fn();
+const ask = vi.fn();
 
 function emit(m: ServerMsg): void {
   receive(frame(schema, schema.server, m as unknown as Value));
@@ -69,7 +70,7 @@ beforeAll(async () => {
     onReady: () => undefined,
     onStatus: () => undefined,
     reconnect: () => undefined,
-    aiAsk: () => undefined,
+    aiAsk: ask,
     aiStop: stop,
   };
   window.vm = bridge;
@@ -118,6 +119,7 @@ beforeEach(() => {
   element('#ai').hidden = true;
   sent.length = 0;
   stop.mockClear();
+  ask.mockClear();
   aiEvent('done', '');
 });
 afterEach(() => {
@@ -262,5 +264,65 @@ describe('клавиатура панели ИИ', () => {
     key(element('#ai-input'), 'Escape');
     expect(stop).toHaveBeenCalledOnce();
     expect(element('#ai').hidden).toBe(false);
+  });
+});
+
+describe('точный контекст ИИ', () => {
+  function requestContext(): Extract<ClientMsg, { type: 'c_context' }> {
+    key(element('#side'), 'i', true);
+    emit({ type: 's_cursor', view: 2, node: 20, piece: 0, offset: 0 });
+    (element('#ai-input') as HTMLTextAreaElement).value = 'объясни';
+    (element('#ai-form') as HTMLFormElement).requestSubmit();
+    const request = sent.findLast((m) => m.type === 'c_context');
+    if (request?.type !== 'c_context') throw new Error('нет запроса контекста');
+    return request;
+  }
+  it('запрашивает точный узел и передаёт подтверждённую VM ревизию', () => {
+    const request = requestContext();
+    expect(request).toMatchObject({ type: 'c_context', view: 2, node: 20 });
+    expect(ask).not.toHaveBeenCalled();
+    emit({
+      type: 's_agent',
+      request: request.request + 1,
+      revision: 10,
+      workspace: 0,
+      proposal: 0,
+      ok: true,
+      text: 'чужой ответ',
+    });
+    expect(ask).not.toHaveBeenCalled();
+    emit({
+      type: 's_agent',
+      request: request.request,
+      revision: 42,
+      workspace: 0,
+      proposal: 0,
+      ok: true,
+      text: 'элемент other(i64); точный контекст',
+    });
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining('ревизия 42'));
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining('other(i64)'));
+  });
+  it('отмена не запускает агента поздним ответом контекста', () => {
+    const request = requestContext();
+    key(element('#ai-input'), 'Escape');
+    emit({
+      type: 's_agent',
+      request: request.request,
+      revision: 42,
+      workspace: 0,
+      proposal: 0,
+      ok: true,
+      text: 'поздний ответ',
+    });
+    expect(ask).not.toHaveBeenCalled();
+    expect(element('#ai-form').hasAttribute('busy')).toBe(false);
+  });
+  it('таймаут контекста завершает ожидание с ошибкой', () => {
+    requestContext();
+    vi.advanceTimersByTime(20000);
+    expect(ask).not.toHaveBeenCalled();
+    expect(element('#ai-form').hasAttribute('busy')).toBe(false);
+    expect(element('#ai .log').textContent).toContain('VM не ответила');
   });
 });

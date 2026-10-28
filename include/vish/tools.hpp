@@ -136,12 +136,16 @@ struct tools_context {
     return add_copy(std::move(entries), root);
   }
   int64_t add_copy(std::vector<journal_entry> entries, node_id root) {
-    version & x = versions.emplace_back();
+    // Closed copies are reused: AI queries do not hoard arenas and empty version slots.
+    std::size_t slot = 1;
+    while(slot < versions.size() && versions[slot].db) ++slot;
+    if(slot == versions.size()) versions.emplace_back();
+    version & x = versions[slot];
     x.db = &x.own.emplace();
     x.db->replay(entries);
     x.journal = std::move(entries);
     x.root = root;
-    return int64_t(versions.size() - 1);
+    return int64_t(slot);
   }
   // Alien base (live F5 launch process) - version, no copy; same - same number.
   int64_t adopt(ast_db & db, node_id root) {

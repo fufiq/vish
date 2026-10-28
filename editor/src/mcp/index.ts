@@ -16,9 +16,11 @@ import {
   type ClientMsg,
   type Items,
   type Output,
-  type Proposals,
   type ServerMsg,
-  type View,
+  type AgentResult,
+  type WorkspaceAsk,
+  type ContextAsk,
+  type CheckAsk,
 } from '../protocol/messages';
 
 function arg(name: string): string | undefined {
@@ -31,19 +33,50 @@ const vm = connect(socketPath);
 const split = new FrameSplitter();
 const send = (m: ClientMsg) => vm.write(encodeClient(m));
 
-// state sent by VM: module representation (for presentation number) and error tag
-let view: View | undefined;
-let errors: string[] = [];
-const waiters: ((m: ServerMsg) => boolean)[] = [];
-
+// All expectations have a deadline and are deleted upon completion, timeout and loss of VM.
+interface Waiter {
+  accept: (m: ServerMsg) => boolean;
+  fail: (error: Error) => void;
+}
+const waiters = new Set<Waiter>();
+function await_<T>(
+  pick: (m: ServerMsg) => T | undefined,
+  ms = 20000,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timer);
+      waiters.delete(waiter);
+    };
+    const waiter: Waiter = {
+      accept(m) {
+        if (m.type === 's_error') {
+          waiter.fail(new Error(m.text));
+          return true;
+        }
+        const result = pick(m);
+        if (result === undefined) return false;
+        finish();
+        resolve(result);
+        return true;
+      },
+      fail(error) {
+        finish();
+        reject(error);
+      },
+    };
+    const timer = setTimeout(() => {
+      waiter.fail(new Error('VM не ответила'));
+    }, ms);
+    waiters.add(waiter);
+  });
+}
+const ready = await_((m) => (m.type === 's_view' ? true : undefined));
+void ready.catch(() => undefined); // The error message will receive a waiting tool/call
 vm.on('data', (chunk: Buffer) => {
   split.push(new Uint8Array(chunk), (body) => {
-    const m = decodeServer(body);
-    if (m.type === 's_view' && m.kind === 'module') view = m;
-    if (m.type === 's_decor' && m.view === view?.view)
-      errors = m.marks.filter((k) => k.kind === 'error').map((k) => k.text);
-    for (const [i, w] of [...waiters.entries()].reverse())
-      if (w(m)) waiters.splice(i, 1);
+    const message = decodeServer(body);
+    for (const waiter of [...waiters]) waiter.accept(message);
   });
 });
 vm.on('connect', () => {
@@ -51,27 +84,48 @@ vm.on('connect', () => {
   send({ type: 'c_name', name: 'ИИ' });
   send({ type: 'c_open_view', kind: 'module' });
 });
-vm.on('error', (e) => {
-  process.stderr.write(`vish mcp: нет VM на ${socketPath}: ${e.message}\n`);
-  process.exit(1);
+function disconnected(error: Error): void {
+  for (const waiter of [...waiters]) waiter.fail(error);
+}
+vm.on('error', disconnected);
+vm.on('close', () => {
+  disconnected(new Error('VM отключилась'));
 });
-
-// wait for the VM message for which the pick will return the value (not undefined)
-function await_<T>(
-  pick: (m: ServerMsg) => T | undefined,
-  ms = 20000,
-): Promise<T> {
-  return new Promise((ok, fail) => {
-    const timer = setTimeout(() => {
-      fail(new Error('VM не ответила'));
-    }, ms);
-    waiters.push((m) => {
-      const v = pick(m);
-      if (v === undefined) return false;
-      clearTimeout(timer);
-      ok(v);
-      return true;
-    });
+let nextRequest = 0;
+async function agentCall(
+  message:
+    | Omit<ContextAsk, 'request'>
+    | Omit<CheckAsk, 'request'>
+    | Omit<WorkspaceAsk, 'request'>,
+): Promise<AgentResult> {
+  const request = ++nextRequest;
+  const result = await_((m) =>
+    m.type === 's_agent' && m.request === request ? m : undefined,
+  );
+  send({ ...message, request });
+  return result;
+}
+function agentText(result: AgentResult): string {
+  const text = JSON.stringify(result);
+  if (!result.ok) throw new Error(text);
+  return text;
+}
+async function workspace(
+  work: number,
+  action: string,
+  fields: Partial<WorkspaceAsk> = {},
+): Promise<AgentResult> {
+  return agentCall({
+    type: 'c_workspace',
+    workspace: work,
+    action,
+    revision: 0,
+    key: '',
+    text: '',
+    args: '',
+    input: '',
+    expected: '',
+    ...fields,
   });
 }
 
@@ -83,6 +137,8 @@ interface Tool {
 }
 
 const str = (x: unknown) => (typeof x === 'string' ? x : '');
+const num = (x: unknown) =>
+  typeof x === 'number' && Number.isSafeInteger(x) && x >= 0 ? x : 0;
 
 const tools: Tool[] = [
   {
@@ -91,30 +147,59 @@ const tools: Tool[] = [
       'Элементы модуля программы vish: ключ (сигнатура, например area(i64)) и текст каждого. Ключ нужен для vish_propose.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        key: {
+          type: 'string',
+          description: 'Точный ключ элемента, если нужен один',
+        },
+      },
       additionalProperties: false,
     },
-    async run() {
+    async run(input) {
       const got = await_((m) => (m.type === 's_items' ? m : undefined));
       send({ type: 'c_items' });
       const r: Items = await got;
       return r.items
+        .filter((x) => str(input.key) === '' || x.key === input.key)
         .map((x) => `${x.key}${x.inner ? ' (внутренний)' : ''}\n${x.text}`)
         .join('\n\n');
     },
   },
   {
-    name: 'vish_check',
+    name: 'vish_context',
     description:
-      'Ошибки проверки программы (разбор и инстанцирование) с трейсом — последние, что прислала VM. Пусто — ошибок нет.',
+      'Точный узел AST, его элемент и сигнатура, типы и установленные VM связи вызовов. Возвращает ревизию программы. Не выбирай перегрузку по одному имени.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        node: { type: 'integer', minimum: 0 },
+        revision: { type: 'integer', minimum: 0 },
+      },
       additionalProperties: false,
     },
-    run() {
-      return Promise.resolve(
-        errors.length === 0 ? 'ошибок нет' : errors.join('\n\n'),
+    async run(input) {
+      return agentText(
+        await agentCall({
+          type: 'c_context',
+          view: 0,
+          node: typeof input.node === 'number' ? num(input.node) : 0xffffffff,
+          revision: num(input.revision),
+        }),
+      );
+    },
+  },
+  {
+    name: 'vish_check',
+    description:
+      'Дождаться завершённой проверки текущей программы. Возвращает ревизию и ошибки; ошибка или устаревшая ревизия — isError. Проверяет исходную программу, а предложения проверяет vish_propose в отдельной копии.',
+    inputSchema: {
+      type: 'object',
+      properties: { revision: { type: 'integer', minimum: 0 } },
+      additionalProperties: false,
+    },
+    async run(input) {
+      return agentText(
+        await agentCall({ type: 'c_check', revision: num(input.revision) }),
       );
     },
   },
@@ -155,31 +240,102 @@ const tools: Tool[] = [
   {
     name: 'vish_propose',
     description:
-      'Предложить правку элемента модуля: ключ из vish_items (новый ключ — новый элемент) и его текст целиком. В программу сама не идёт — принимает человек в редакторе.',
+      'Подготовить проверяемый пакет изменений в копии программы. Нужна ревизия из vish_context/check. changes — ключи исходных элементов и полный новый текст; для одного элемента допустимы key/text. tests — запуски main с точным ожидаемым stdout. Проверка и все заданные тесты должны пройти до предложения человеку. Без тестов это явно отмечено. Каноническая программа не меняется.',
     inputSchema: {
       type: 'object',
       properties: {
-        key: {
-          type: 'string',
-          description: 'ключ элемента, например area(i64)',
+        revision: { type: 'integer', minimum: 1 },
+        key: { type: 'string' },
+        text: { type: 'string' },
+        changes: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 32,
+          items: {
+            type: 'object',
+            properties: { key: { type: 'string' }, text: { type: 'string' } },
+            required: ['key', 'text'],
+            additionalProperties: false,
+          },
         },
-        text: { type: 'string', description: 'текст элемента целиком' },
-        why: { type: 'string', description: 'зачем — одной строкой' },
+        tests: {
+          type: 'array',
+          maxItems: 16,
+          items: {
+            type: 'object',
+            properties: {
+              args: { type: 'string' },
+              stdin: { type: 'string' },
+              expected: { type: 'string' },
+            },
+            required: ['expected'],
+            additionalProperties: false,
+          },
+        },
+        why: { type: 'string' },
       },
-      required: ['key', 'text', 'why'],
+      required: ['revision', 'why'],
       additionalProperties: false,
     },
     async run(input) {
-      const key = str(input.key);
-      const text = str(input.text);
-      const got = await_((m) => {
-        if (m.type !== 's_proposals') return undefined;
-        const ps: Proposals = m;
-        return ps.proposals.find((p) => p.key === key && p.text === text);
+      const records = (value: unknown): Record<string, unknown>[] => {
+        if (!Array.isArray(value)) return [];
+        return value.map((item: unknown) => {
+          if (typeof item !== 'object' || item === null || Array.isArray(item))
+            throw new Error('нужен объект');
+          return item as Record<string, unknown>;
+        });
+      };
+      const changes =
+        input.changes === undefined
+          ? [{ key: input.key, text: input.text }]
+          : records(input.changes);
+      const tests = records(input.tests);
+      if (
+        num(input.revision) === 0 ||
+        changes.length === 0 ||
+        changes.length > 32 ||
+        tests.length > 16
+      )
+        throw new Error('нужна ревизия, 1–32 правки и не более 16 тестов');
+      if (
+        changes.some(
+          (change) => str(change.key) === '' || str(change.text) === '',
+        ) ||
+        tests.some((test) => typeof test.expected !== 'string')
+      )
+        throw new Error('нужны ключи, тексты правок и ожидаемый вывод тестов');
+      const created = await workspace(0, 'create', {
+        revision: num(input.revision),
       });
-      send({ type: 'c_propose', key, text, why: str(input.why) });
-      const p = await got;
-      return `предложение #${String(p.id)} (${p.note}) ждёт решения человека в редакторе`;
+      agentText(created);
+      let work = created.workspace;
+      try {
+        for (const change of changes)
+          agentText(
+            await workspace(work, 'edit', {
+              key: str(change.key),
+              text: str(change.text),
+            }),
+          );
+        agentText(await workspace(work, 'check'));
+        for (const test of tests)
+          agentText(
+            await workspace(work, 'test', {
+              args: str(test.args),
+              input: str(test.stdin),
+              expected: str(test.expected),
+            }),
+          );
+        const offered = await workspace(work, 'offer', {
+          text: str(input.why),
+        });
+        const text = agentText(offered);
+        work = 0;
+        return text;
+      } finally {
+        if (work !== 0) await workspace(work, 'drop').catch(() => undefined);
+      }
     },
   },
 ];
@@ -224,6 +380,8 @@ async function handle(r: Request): Promise<void> {
       return;
     }
     try {
+      await ready;
+      if (vm.destroyed) throw new Error('VM отключилась');
       const text = await t.run(
         (r.params?.arguments ?? {}) as Record<string, unknown>,
       );
@@ -238,7 +396,12 @@ async function handle(r: Request): Promise<void> {
   else fail(r.id, `нет метода ${r.method}`);
 }
 
+let calls = Promise.resolve();
 createInterface({ input: process.stdin }).on('line', (line) => {
   if (line.trim() === '') return;
-  void handle(JSON.parse(line) as Request);
+  const request = JSON.parse(line) as Request;
+  // Old items/run do not have a request-id: their answers should not be mixed.
+  if (request.method === 'tools/call')
+    calls = calls.then(() => handle(request));
+  else void handle(request);
 });

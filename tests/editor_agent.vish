@@ -1,0 +1,4 @@
+// out: 3
+f(str x) => x;
+f(i64 x) => x + 1;
+main() => print(f(2));

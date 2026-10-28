@@ -2570,6 +2570,13 @@ body:has(#trace-bar:not([hidden])) #run {
   font-size: 12.5px;
   color: #57544d;
 }
+#proposals .verification {
+  max-height: 125px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
 #proposals .cols {
   display: grid;
   grid-template-columns: 1fr 1fr;

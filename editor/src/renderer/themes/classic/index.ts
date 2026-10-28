@@ -211,7 +211,7 @@ const theme: Theme = {
           };
           const cols = make('div', 'cols');
           cols.append(
-            col('сейчас', p.base, 0, 0),
+            col('исходная версия', p.base, 0, 0),
             col(`предложено · ${p.note}`, p.text, p.text_from, p.text_to),
           );
           const button = (label: string, accept: boolean) => {
@@ -230,6 +230,8 @@ const theme: Theme = {
             cols,
             buttons,
           );
+          if (p.checks !== '')
+            box.insertBefore(make('pre', 'checks', p.checks), buttons);
           return box;
         }),
       );
