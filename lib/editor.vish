@@ -1301,12 +1301,31 @@ send_completion(i64 v) {
     f = if((it.kind == "функция") && ((k < 12) || (k == k0))) first_decl(it.name, at) else code();
     doc = if((k == k0) && given(f)) doc_line(f, it.name, rtypes, at) else "";
     if((k == k0) && given(f)) src = if(in_prelude(f)) "prelude" else if(module_note(f) != "") module_note(f) else "программа";
-    extra.push(item_extra{if(given(f)) result_type(f) else "", doc, m[0], m[1]});
+    // name in the area - its type (frame "Addition": "s : f64")
+    local = (k < 12) && ((it.kind == "переменная") || (it.kind == "параметр"));
+    extra.push(item_extra{if(given(f)) result_type(f) else if(local) join_types(name_types(at, it.name)) else "", doc, m[0], m[1]});
   }
-  context = if(dot) (((recv + " ") + rtypes) + (if(src == "") "" else " · " + src)) else src;
+  // Basement: after the point - the recipient and from where; otherwise - the place of recruitment
+  here = if(views[v].items.size > 0) place_context(at) else "";
+  context = if(dot) (((recv + " ") + rtypes) + (if(src == "") "" else " · " + src)) else if(here != "") (here + (if(src == "") "" else " · " + src)) else src;
   send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview, extra, context);
 }
 struct item_extra { str type; str doc; i64 from; i64 to; }
+// place of set: function and the nearest construction block around
+place_context(at) {
+  if(!given(at)) return "";
+  f = enclosing_fn(at);
+  if(!given(f)) return "";
+  ast.function{fname, _, _, _, _, _, _, _, _} = f;
+  blk = "";
+  x = at;
+  while(given(x) && ((blk == "") && (code_id(x) != code_id(f)))) {
+    up = code_parent(x);
+    if(given(up) && ((code_kind(x) == ast.block) && (code_kind(up) == ast.call))) blk = "блок " + name_of(callee_of(up));
+    x = up;
+  }
+  ("контекст: " + fname) + (if(blk == "") "" else " → " + blk)
+}
 // match typed with the name: prefix, substring; otherwise empty (subsequence)
 match_range(str name, str word) {
   if(word == "") return array{0, 0};
@@ -3259,6 +3278,8 @@ hover_at(i64 v, n) {
     if((ts != "") && !called) lines.push(line{"тип", ts, code(), 0, 0});
     lit = layer_literal(v, n);
     if(lit != "") lines.push(line{"значение", lit, code(), 0, 0});
+    if(!called) entity_lines(lines, v, n, k);
+    bar_lines(lines, n);
     for(e : error_lines(v, n)) lines.push(e);
     // function or design name - ads with links (selected in instance - first)
     name = "";
@@ -3279,6 +3300,78 @@ hover_at(i64 v, n) {
     }
   }
   show_hover(v, n, lines);
+}
+// Floating panel at the cursor (frame "Edka"): the expression around the place with the type - "s + x : f64",
+// step and how much instance function. The subject shows it on the cursor, not the pointer. *My expression is
+// a parent-operation or call with a type (otherwise the node itself).
+bar_lines(lines, n) {
+  up = code_parent(n);
+  x = if(given(up) && (((code_kind(up) == ast.operation) || (code_kind(up) == ast.call)) && has_types(up))) up else n;
+  if(!has_types(x) || (code_kind(x) == ast.block)) return false; // The whole block is not an expression in the cursor
+  ts = join_types(node_types(x));
+  if((ts == "") || (ts == "unit")) return false; // instruction without value - no panel
+  lines.push(line{"панель", (clip(print_node(x), 40) + " : ") + ts, x, 0, 0});
+  f = enclosing_fn(x);
+  if(given(f)) {
+    runs = 0;
+    consts = 0;
+    for(l : fn_layers(f)) {
+      array{_, stage} = l;
+      if(stage == "кт") consts += 1 else runs += 1;
+    }
+    if((runs + consts) > 0) lines.push(line{"панель этап", (((if(runs == 0) "кт" else if(consts == 0) "рт" else "кт/рт") + " · ") + text(runs + consts)) + " экз.", code(), 0, 0});
+  }
+  true
+}
+// entity under the index (frame "Hiding"): name, declaration by reference ("mean(xs) - line 9"), type and value
+// in each instance function, the result is whether one type and when the value is known. ;
+//
+// 
+// . *My: * Composition and lines.
+entity_lines(lines, i64 v, n, k) {
+  decl = n;
+  name = "";
+  if(k == ast.name) {
+    name = name_of(n);
+    f = enclosing_fn(n);
+    bs = binders_of(if(given(f)) f else program());
+    i = name_binder(n, name, bs, f);
+    if(i < 0) return false;
+    decl = bs[i].node;
+  } else if(k == ast.parameter) {
+    ast.parameter{pn, _, _, _, _, _, _} = n;
+    name = pn;
+  } else if(k == ast.variable) {
+    ast.variable{vn, _, _, _, _, _, _, _} = n;
+    name = vn;
+  } else return false;
+  f = enclosing_fn(decl);
+  lines.push(line{"сущность", name, code(), 0, 0});
+  what = if(code_kind(decl) == ast.parameter) "Параметр" else "Переменная";
+  at = node_place(v, decl);
+  lines.push(line{"объявление", ((what + (if(given(f)) " " + head_text(f) else "")) + (if(at >= 0) " — строка " + text(line_at(v, at) + 1) else "")), decl, 0, 0});
+  if(!given(f)) return true;
+  first = "";
+  same = true;
+  lits = 0;
+  count = 0;
+  for(l : fn_layers(f)) {
+    array{key, stage} = l;
+    ts = join_types(layer_types_of(f, key, n));
+    if(ts != "") {
+      lit = layer_literal_of(f, key, n);
+      lines.push(line{"экземпляр " + stage, (key + " = ") + (if(lit != "") (ts + " = ") + lit else ts), code(), 0, 0});
+      if(first == "") first = ts else if(ts != first) same = false;
+      if(lit != "") lits += 1;
+      count += 1;
+    }
+  }
+  if(count > 0) {
+    kinds = if(same) (if(count == 1) "Тип в единственном экземпляре" else "Один тип во всех экземплярах") else "Тип зависит от экземпляра";
+    when = if(lits == 0) "значение известно только при исполнении" else if(lits == count) "значение известно при компиляции" else "значение известно при компиляции не во всех экземплярах";
+    lines.push(line{"итог", (kinds + ": ") + when, code(), 0, 0});
+  }
+  true
 }
 // -- entity card (item 4 design, frame "cursor on stream") ------------------------------- User solutions
 // 2026-10-27: card - by cursor and hover, chips - words-entities from VM, diagram - visualizer on the

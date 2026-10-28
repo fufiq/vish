@@ -28,6 +28,7 @@ export interface Host {
   reconnect(): void;
   goto(text: string): void;
   key(key: string, mods?: number): void; // key to active presentation (track steps)
+  press(key: string, mods?: number): void; // key to the window as from the keyboard (F2 - inspector, Ctrl+P)
   run(): void; // F5 - Launch with arguments and stdin panel
   stop(): void; // Shift+F5
 }
@@ -61,6 +62,10 @@ export interface HeaderView {
   checked: boolean;
   running: boolean; // is launching (frame “Run”: “ → is coming”)
   conflicts: number; // Unresolved merger conflicts (frame "Merge")
+  fn: string; // function under the cursor ('' - outside the function)
+  fnNode: number | null; // its node (the "Layers" tab opens it in the second panel)
+  draft: boolean; // playback
+  focus: string; // expression type at the cursor (panel at the cursor), '' - unknown
   line: number;
   col: number;
 }
@@ -100,6 +105,8 @@ export interface Panels {
   merge: (el: HTMLElement, m: MergeResult, host: Host) => void;
   // Viewbar cap when the same tree is open in another (frame "projection")
   paneHead: (el: HTMLElement, p: PaneHead) => void;
+  // floating panel at the cursor (frame "Edit"): lines "panel" from VM; empty - hide
+  cursorBar: (el: HTMLElement, lines: readonly HintLine[], host: Host) => void;
   // taken by merging itself - rows under the module code (frame "Merge")
   mergeNotes: (el: HTMLElement, m: MergeResult) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
@@ -189,6 +196,7 @@ export function resolve(
     'merge',
     'mergeNotes',
     'paneHead',
+    'cursorBar',
     'header',
     'gutter',
     'tip',

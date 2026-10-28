@@ -2289,3 +2289,211 @@ body:has(#trace-bar:not([hidden])) #run {
   right: 40px;
   width: auto !important;
 }
+
+/* Наведение (кадр «Наведение»): все упоминания сущности — подложкой, наведённое — темнее; карточка —
+   тёмная рамка, внутри белая: имя, тип, этап, ячейки по экземплярам, объявление; под ней — итог */
+.vish-node[same] {
+  border-radius: 3px;
+  background: #dbeafe;
+}
+.vish-node[same='here'] {
+  background: #bfdbfe;
+}
+.vish-tip:has(> .entity) {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.entity {
+  width: 330px;
+  box-sizing: border-box;
+  padding: 10px 10px 0;
+  border-radius: 22px;
+  background: #121418;
+  box-shadow: 0 24px 50px rgb(10 12 20 / 0.3);
+  font: 13px var(--canvas-ui);
+}
+.entity .inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 15px;
+  background: #fff;
+  color: #18181b;
+}
+.entity .head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.entity .head .name {
+  font: 600 17px var(--canvas-code);
+}
+.entity .head .type {
+  font: 15px var(--canvas-code);
+  color: #2563eb;
+}
+.entity .head .fill {
+  flex: 1;
+}
+.entity .head .stage {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  background: #dbeafe;
+  color: #1e40af;
+}
+.entity .cells {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.entity .cell {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f4f4f5;
+  font-size: 12.5px;
+  color: #52525b;
+  min-width: 0;
+}
+.entity .cell .key {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #a1a1aa;
+}
+.entity .cell .val {
+  font-family: var(--canvas-code);
+}
+.entity .decl {
+  font-size: 13px;
+  color: #2563eb;
+  cursor: pointer;
+}
+.entity .sum {
+  margin: 0;
+  padding: 12px 10px 14px;
+  text-align: center;
+  font-size: 13.5px;
+  line-height: 19px;
+  color: #e4e4e7;
+}
+/* дополнение (кадр «Дополнение»): тип у имени и итог функции — приглушённо после имени */
+.vish-complete li.item .result {
+  color: #71717a;
+  white-space: nowrap;
+}
+/* подсказка набора (кадр «Дополнение»): сигнатура тёмной плашкой над местом, текущий параметр — светлее */
+.vish-hint:has(> .sigs) {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.vish-hint .sigs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.vish-hint .sigtag {
+  padding: 6px 11px;
+  border-radius: 10px;
+  background: #18181b;
+  color: #f4f4f5;
+  font: 12.5px var(--canvas-code);
+  white-space: pre;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
+}
+.vish-hint .sigtag .now {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: #3f3f46;
+}
+
+/* Панель у курсора (кадр «Правка»): тёмная, под строкой узла, со стрелкой вверх */
+.vish-bar {
+  position: absolute;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 14px;
+  background: #1c1c20;
+  color: #f4f4f5;
+  font: 13px var(--canvas-ui);
+  white-space: nowrap;
+  box-shadow: 0 14px 30px rgb(15 15 25 / 0.25);
+}
+.vish-bar[hidden] {
+  display: none;
+}
+.vish-bar .arrow {
+  position: absolute;
+  left: 24px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  background: #1c1c20;
+  transform: rotate(45deg);
+}
+.vish-bar .what {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font: 12.5px var(--canvas-code);
+}
+.vish-bar .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34d399;
+}
+.vish-bar .sep {
+  width: 1px;
+  height: 18px;
+  background: #3f3f46;
+}
+.vish-bar .stage {
+  padding: 6px 10px;
+}
+.vish-bar button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.vish-bar button.strong,
+.vish-bar button:hover {
+  background: #33333a;
+}
+
+/* Типы у строк элемента под курсором (кадр «Правка»): чипы в конце строк объявлений; подписи-индексы
+   у этого элемента не нужны */
+.vish-line-types {
+  position: absolute;
+  inset: 0 auto auto 0;
+  pointer-events: none;
+}
+.vish-line-types .chip {
+  position: absolute;
+  margin-left: 18px;
+  padding: 3px 8px;
+  translate: 0 calc((var(--line, 33px) - 24px) / 2);
+  border-radius: 7px;
+  background: #f2f2f4;
+  color: #71717a;
+  font: 11.5px/18px var(--canvas-code);
+  white-space: nowrap;
+}
+[typed] .vish-node::part(badge),
+[typed]::part(badge) {
+  display: none;
+}

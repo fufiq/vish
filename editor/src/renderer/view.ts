@@ -61,6 +61,10 @@ export class ViewElement {
   readonly gutter = document.createElement('div');
   // lines under the module code (frame "Mingle": taken by itself) - draws the theme panel
   readonly foot = document.createElement('div');
+  // types of item ads under the cursor - chips at the end of the lines (frame "Edit")
+  readonly lineTypes = document.createElement('div');
+  // floating panel at the cursor (frame "Edit") - under the line node; draws the topic
+  readonly bar = document.createElement('div');
   // panel cap (frame "projection": which projection ) - draws the theme
   readonly head = document.createElement('div');
   // Signatures of elements at the end of their first line (frame "Mingle": "conflict") - on top of the code
@@ -103,6 +107,9 @@ export class ViewElement {
     this.foot.hidden = true;
     this.chips.className = 'vish-chips';
     this.head.className = 'vish-pane-head';
+    this.bar.className = 'vish-bar';
+    this.lineTypes.className = 'vish-line-types';
+    this.bar.hidden = true;
     this.head.hidden = true;
     host.replaceChildren(...this.#chrome(this.root));
   }
@@ -115,6 +122,7 @@ export class ViewElement {
       root,
       this.foot,
       this.chips,
+      this.lineTypes,
       this.peersLayer,
       this.caret,
       this.popup,
@@ -122,6 +130,7 @@ export class ViewElement {
       this.ghost,
       this.block,
       this.hint,
+      this.bar,
       this.tip,
     ];
   }
@@ -132,8 +141,11 @@ export class ViewElement {
     if (this.tip.hidden) return;
     this.paintTip(this.tip, m.lines, open);
     const origin = this.host.getBoundingClientRect();
-    // entity card (frame “cursor on stream”) - above node; other - at the pointer
-    const card = m.lines.some((l) => l.kind === 'имя' || l.kind === 'ошибка');
+    // entity card (frame "cursor on stream") - above node; the rest - at the entity pointer
+    // (frame "Hiding") - also at node, under it, if it is placed
+    const entity = m.lines.some((l) => l.kind === 'сущность');
+    const card =
+      entity || m.lines.some((l) => l.kind === 'имя' || l.kind === 'ошибка');
     this.tip.toggleAttribute('card', card);
     const el = m.node === null ? undefined : this.byId.get(m.node);
     if (card && el) {
@@ -148,8 +160,9 @@ export class ViewElement {
       const below = origin.bottom - r.bottom - 10;
       this.tip.style.maxHeight = `${String(Math.max(above, below) - 8)}px`;
       const h = this.tip.offsetHeight;
+      const up = entity ? below < h + 8 && above > below : above >= below;
       this.tip.style.top = `${String(
-        above >= below
+        up
           ? r.top - origin.top + this.host.scrollTop - h - 10
           : r.bottom - origin.top + this.host.scrollTop + 10,
       )}px`;
@@ -161,6 +174,20 @@ export class ViewElement {
   }
   hideHover(): void {
     this.tip.hidden = true;
+  }
+  // panel at the cursor: under the first line node node, on the left - at its beginning
+  showBar(node: NodeId | null, paint: (el: HTMLElement) => void): void {
+    const el = node === null ? undefined : this.byId.get(node);
+    const r = el?.getClientRects()[0];
+    this.bar.hidden = !r;
+    if (!r) return;
+    paint(this.bar);
+    const origin = this.host.getBoundingClientRect();
+    this.bar.style.left = `${String(r.left - origin.left + this.host.scrollLeft)}px`;
+    this.bar.style.top = `${String(r.bottom - origin.top + this.host.scrollTop + 10)}px`;
+  }
+  hideBar(): void {
+    this.bar.hidden = true;
   }
 
   // The tip of the set is above the place (the beginning of the word or call name).
@@ -283,9 +310,65 @@ export class ViewElement {
     this.#running?.setAttribute('running', '');
   }
 
-  // Other clients: a carriage with the signature "client N" and a dotted frame around the element he rules with
-  // the draft; node is not in the layout - the nearest ancestor (VM has already substituted). cursor of another
-  // panel on the same tree (frame "projection": the cursor is on the same node in both texts)
+  // Other clients: a carriage with the signature "client N" and a dotted frame around the element he rules
+  // with the draft; node is not in the layout - the nearest ancestor (VM has already substituted). Types of
+  // ads of the module element under the cursor (frame "Edit"; author's decision 2026-10-28 - at the lines of
+  // the element under the cursor): "name: type" by type labels from VM, at the end of the ad line; the element
+  // itself - by typed attribute (the topic hides its index signatures).
+  #typed: Element | undefined;
+  #lineTypes(node: NodeId | null): void {
+    this.#typed?.removeAttribute('typed');
+    this.#typed = undefined;
+    this.lineTypes.replaceChildren();
+    let item: Element | null =
+      node === null ? null : (this.byId.get(node) ?? null);
+    while (item && item.parentElement !== this.root) item = item.parentElement;
+    if (!item || !this.#decor) return;
+    this.#typed = item;
+    item.setAttribute('typed', '');
+    const origin = this.host.getBoundingClientRect();
+    const lines = [...item.getClientRects()];
+    const rows = new Map<
+      number,
+      { right: number; top: number; height: number; texts: string[] }
+    >();
+    for (const m of this.#decor.marks) {
+      if (m.kind !== 'type') continue;
+      const el = this.byId.get(m.node);
+      if (!el || !item.contains(el)) continue;
+      const r = el.getClientRects().item(0);
+      if (!r) continue;
+      // name - your text node (component - the first piece of syntax; in the shadow of the index signatures)
+      const own =
+        el.shadowRoot?.querySelector('.syntax')?.textContent ?? el.textContent;
+      const name = /^\s*([A-Za-z_]\w*)/.exec(own)?.[1] ?? '';
+      // end of the line is the rightmost piece of the element in the same band
+      const band = lines.filter(
+        (x) => x.bottom > r.top + 2 && x.top < r.bottom - 2,
+      );
+      const right = Math.max(r.right, ...band.map((x) => x.right));
+      const key = Math.round(r.top);
+      const row = rows.get(key) ?? {
+        right,
+        top: r.top,
+        height: r.height,
+        texts: [],
+      };
+      row.texts.push(name === '' ? m.text : `${name} : ${m.text}`);
+      rows.set(key, row);
+    }
+    for (const row of rows.values()) {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = row.texts.join(', ');
+      chip.style.left = `${String(row.right - origin.left + this.host.scrollLeft)}px`;
+      chip.style.top = `${String(row.top - origin.top + this.host.scrollTop)}px`;
+      chip.style.setProperty('--line', `${String(row.height)}px`);
+      this.lineTypes.append(chip);
+    }
+  }
+
+  // cursor of another panel on the same tree (frame "projection": the cursor is on the same node in both texts)
   #twinCursor: Element | undefined;
   showTwinCursor(id: NodeId | null): void {
     this.#twinCursor?.removeAttribute('twin-cursor');
@@ -474,6 +557,7 @@ export class ViewElement {
     this.caret.style.height = `${String(box.height)}px`;
     this.caret.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     this.#markLine();
+    this.#lineTypes(c.node);
     if (this.#selection) this.showSelection(this.#selection);
   }
 

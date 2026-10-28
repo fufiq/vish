@@ -12,6 +12,7 @@ const panels: Panels = {
   merge: noop,
   mergeNotes: noop,
   paneHead: noop,
+  cursorBar: noop,
   header: noop,
   gutter: noop,
   tip: noop,

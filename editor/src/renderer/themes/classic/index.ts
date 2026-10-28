@@ -281,6 +281,10 @@ const theme: Theme = {
       );
     },
 
+    // There is no cursor in the classic panel.
+    cursorBar(el) {
+      el.hidden = true;
+    },
     // There is no classic panel cap
     paneHead(el) {
       el.hidden = true;

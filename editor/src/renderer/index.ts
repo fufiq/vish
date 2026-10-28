@@ -107,6 +107,16 @@ const host: Host = {
   goto(text) {
     if (active) send({ type: 'c_goto', view: active.data.view, text });
   },
+  press(key, mods = 0) {
+    (active?.host ?? app).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        ctrlKey: (mods & 2) !== 0,
+        shiftKey: (mods & 1) !== 0,
+      }),
+    );
+  },
   key(key, mods = 0) {
     if (active) send({ type: 'c_key', view: active.data.view, key, mods });
   },
@@ -193,9 +203,9 @@ let cardTimer: ReturnType<typeof setTimeout> | undefined;
 const cardRoles = ['fn', 'prelude', 'native', 'fiber'];
 function cursorCard(v: ViewElement | undefined, node: NodeId | null): void {
   clearTimeout(cardTimer);
-  const el = node === null ? undefined : v?.byId.get(node);
-  if (!v || node === null || !cardRoles.includes(el?.dataset.role ?? ''))
-    return;
+  v?.hideBar();
+  if (!v || node === null) return;
+  // not entity with a card - panel at the cursor (frame "Edit"): the same query, lines "panel"
   cardTimer = setTimeout(() => {
     hoverAt = undefined;
     send({ type: 'c_hover', view: v.data.view, node });
@@ -213,6 +223,22 @@ function activate(v: ViewElement | undefined): void {
 // of the cursor of the active panel. Checked - the marks came to the last edit; errors - error marks.
 const checks = new Map<number, { revision: number; errors: number }>();
 let conflicts = 0; // unresolved conflicts of the last merger
+let focus = ''; // type of expression at the cursor - from the panel at the cursor
+// function under the cursor: the name of its announcement (the first word of the syntax)
+function fnAt(v: ViewElement | undefined): {
+  fn: string;
+  fnNode: number | null;
+} {
+  const node = v?.cursor?.node;
+  const el =
+    node == null ? null : (v?.byId.get(node)?.closest('vish-fn') ?? null);
+  const text = el?.shadowRoot?.querySelector('.syntax')?.textContent ?? '';
+  const id = el?.getAttribute('data-id');
+  return {
+    fn: /^\s*([A-Za-z_]\w*)/.exec(text)?.[1] ?? '',
+    fnNode: id == null ? null : Number(id),
+  };
+}
 function paintHeader(): void {
   if (!header) return;
   const main = mainView();
@@ -230,6 +256,9 @@ function paintHeader(): void {
       col: at.col,
       running: runState.state === 'running',
       conflicts,
+      ...fnAt(active),
+      draft: active?.lines().some((l) => l.draft) ?? false,
+      focus,
     },
     host,
   );
@@ -385,10 +414,26 @@ function receive(m: ServerMsg): void {
       return;
     case 's_hover': {
       const v = views.get(m.view);
-      // cursor (no hoverAt) - only entity card
+      // cursor (hoverAt not) - card entity with a role, otherwise the panel at the cursor; according to the
+      // pointer - without panel lines
       const card = m.lines.some((l) => l.kind === 'имя');
+      const bar = m.lines.filter((l) => l.kind.startsWith('панель'));
+      const el = m.node === null ? undefined : v?.byId.get(m.node);
+      if (
+        v &&
+        !hoverAt &&
+        !(card && cardRoles.includes(el?.dataset.role ?? ''))
+      ) {
+        v.showBar(bar.at(0)?.target ?? null, (b) => {
+          panels.cursorBar(b, bar, host);
+        });
+        focus = bar.at(0)?.text.split(' : ').at(-1) ?? '';
+        paintHeader();
+        return;
+      }
+      const rest = { ...m, lines: m.lines.filter((l) => !bar.includes(l)) };
       if (v && (hoverAt || card))
-        v.showHover(m, hoverAt?.x ?? 0, hoverAt?.y ?? 0, (node) => {
+        v.showHover(rest, hoverAt?.x ?? 0, hoverAt?.y ?? 0, (node) => {
           v.hideHover();
           send({ type: 'c_open', view: v.data.view, node });
         });
@@ -720,15 +765,31 @@ function showTwin(from: HTMLElement, id: string | null): void {
   twin = other.querySelector(`[data-id="${id}"]`) ?? undefined;
   twin?.setAttribute('twin', '');
 }
+// All mentions of entity under the pointer: the same entity number (from VM) in the same function is the same
+// attribute, the node itself is the same-here.
+let same: Element[] = [];
+function showSame(node: Element | null): void {
+  for (const el of same) el.removeAttribute('same');
+  same = [];
+  const entity = node?.getAttribute('data-entity');
+  const fn = node?.closest('vish-fn');
+  if (!node || !entity || !fn) return;
+  same = [...fn.querySelectorAll(`[data-entity="${entity}"]`)].filter(
+    (el) => el.closest('vish-fn') === fn,
+  );
+  for (const el of same) el.setAttribute('same', el === node ? 'here' : '');
+}
 for (const pane of [app, side]) {
   pane.addEventListener('mousemove', (e) => {
     showTwin(pane, ViewElement.nodeOf(e)?.getAttribute('data-id') ?? null);
+    showSame(ViewElement.nodeOf(e) ?? null);
   });
   pane.addEventListener('keydown', (e) => {
     const v = [...views.values()].find((x) => x.host === pane);
     if (!v || (e.ctrlKey && e.shiftKey && e.key === 'I')) return;
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
     v.hideHover();
+    v.hideBar();
     if (e.isComposing || e.key === 'Process') return; // IME: Text by compositionen d d
     if (e.key === 'F2') {
       e.preventDefault();

@@ -201,15 +201,98 @@ function errorCard(
   return card;
 }
 
+// entity under the index (frame "Hiding"): dark frame, inside - name, type, stage (run-time / compile-time),
+// cells by instance, announcement by reference; under the card - the result. The lines are from VM.
+function entityCard(lines: readonly HintLine[], open: Open): HTMLElement {
+  const get = (k: string) => lines.find((l) => l.kind === k);
+  const insts = lines.filter((l) => l.kind.startsWith('экземпляр '));
+  const stages = new Set(insts.map((l) => l.kind.slice('экземпляр '.length)));
+  const frame = make('div', 'entity');
+  const inner = make('div', 'inner');
+  const head = make('div', 'head');
+  head.append(
+    make('b', 'name', get('сущность')?.text ?? ''),
+    make('span', 'type', (get('тип')?.text ?? '').split(' = ')[0] ?? ''),
+    make('span', 'fill'),
+  );
+  if (stages.size > 0)
+    head.append(make('span', 'stage', [...stages].join(' · ')));
+  inner.append(head);
+  if (insts.length > 0) {
+    const grid = make('div', 'cells');
+    for (const l of insts) {
+      const i = l.text.indexOf(' = ');
+      const cell = make('div', 'cell');
+      cell.append(
+        make('div', 'key', i < 0 ? l.text : l.text.slice(0, i)),
+        make('div', 'val', i < 0 ? '' : l.text.slice(i + 3)),
+      );
+      grid.append(cell);
+    }
+    inner.append(grid);
+  }
+  const decl = get('объявление');
+  if (decl)
+    inner.append(
+      link(make('div', 'decl', `${decl.text} ↗`), decl.target, open),
+    );
+  // Other (value in layer, errors) - lines
+  const shown = new Set(['сущность', 'тип', 'объявление', 'итог']);
+  const rest = lines.filter(
+    (l) => !shown.has(l.kind) && !l.kind.startsWith('экземпляр '),
+  );
+  if (rest.length > 0) {
+    const more = make('div', 'more');
+    renderLines(more, rest, open);
+    inner.append(more);
+  }
+  frame.append(inner);
+  const sum = get('итог');
+  if (sum) frame.append(make('p', 'sum', sum.text));
+  return frame;
+}
+
+// Tip set (frame "Addition"): the dark plaque call signature, the current parameter [from, to] is highlighted;
+// the shape of the design is the same. Lines are from VM (s_hint).
+function signatures(lines: readonly HintLine[]): HTMLElement {
+  const box = make('div', 'sigs');
+  for (const l of lines) {
+    const tag = make('div', 'sigtag');
+    // eslint-disable-next-line @typescript-eslint/no-misused-spread
+    const cps = [...l.text];
+    if (l.to > l.from)
+      tag.append(
+        cps.slice(0, l.from).join(''),
+        make('span', 'now', cps.slice(l.from, l.to).join('')),
+        cps.slice(l.to).join(''),
+      );
+    else tag.textContent = l.text;
+    box.append(tag);
+  }
+  return box;
+}
+
 export function tip(
   el: HTMLElement,
   lines: readonly HintLine[],
   open: Open,
   host: Host,
 ): void {
+  if (
+    lines.length > 0 &&
+    lines.every((l) => l.kind === 'сигнатура' || l.kind === 'форма') &&
+    el.classList.contains('vish-hint')
+  ) {
+    el.replaceChildren(signatures(lines));
+    return;
+  }
   const name = lines.find((l) => l.kind === 'имя');
   if (!name && lines.some((l) => l.kind === 'ошибка')) {
     el.replaceChildren(errorCard(lines, open, host));
+    return;
+  }
+  if (!name && lines.some((l) => l.kind === 'сущность')) {
+    el.replaceChildren(entityCard(lines, open));
     return;
   }
   if (!name) {

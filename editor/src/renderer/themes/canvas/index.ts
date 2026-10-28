@@ -82,6 +82,52 @@ const theme: Theme = {
         ),
       );
     },
+    // Panel at the cursor (frame "Edit"): expression with type, step and instance from VM; overload (F12), node
+    // in the inspector (F2), still - transition by signature (Ctrl+P)
+    cursorBar(el, lines, host) {
+      const main = lines.find((l) => l.kind === 'панель');
+      el.hidden = !main;
+      if (!main) return;
+      const span = (className: string, text = '') => {
+        const s = document.createElement('span');
+        s.className = className;
+        s.textContent = text;
+        return s;
+      };
+      const button = (text: string, f: () => void, className = '') => {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.className = className;
+        b.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          f();
+        });
+        return b;
+      };
+      const what = span('what', main.text);
+      what.prepend(span('dot'));
+      const stage = lines.find((l) => l.kind === 'панель этап');
+      el.replaceChildren(
+        span('arrow'),
+        what,
+        span('sep'),
+        ...(stage ? [span('stage', stage.text)] : []),
+        button(
+          'Перегрузки +',
+          () => {
+            host.key('F12');
+          },
+          'strong',
+        ),
+        button('Узел', () => {
+          host.press('F2');
+        }),
+        span('sep'),
+        button('⋯', () => {
+          host.press('p', 2);
+        }),
+      );
+    },
     // panel cap (frame "projection"): the same program next to it - which is projection, edit - its records
     paneHead(el, p) {
       el.hidden = !p.twin;
