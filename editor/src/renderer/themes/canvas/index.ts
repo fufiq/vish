@@ -13,6 +13,7 @@ import { tip } from './card';
 import { complete } from './complete';
 import { palette } from './palette';
 import { expansion, inspect } from './inspector';
+import { runHead, stops, traceBar } from './run';
 import css from './styles.css?inline';
 
 const backdrop =
@@ -30,6 +31,9 @@ const theme: Theme = {
     palette,
     inspect,
     expansion,
+    runHead,
+    traceBar,
+    stops,
     // number - only the lines with the code; empty and comments - without a number, counting (frame "Laptop")
     gutter(el, lines) {
       el.replaceChildren(
@@ -39,6 +43,7 @@ const theme: Theme = {
           d.toggleAttribute('draft', l.draft); // draft
           if (l.path > 0) d.dataset.path = l.path === 2 ? 'place' : 'step'; // line
           if (l.layer !== '') d.dataset.layer = l.layer; // Instruction overload: General or Own
+          d.toggleAttribute('running', l.running); // here is the launch.
           return d;
         }),
       );
@@ -64,6 +69,7 @@ const theme: Theme = {
           ? 'ok'
           : 'error';
       check.prepend(span('dot'));
+      if (h.running) check.append(' · ', span('running', '▶ идёт')); // "Run" shot.
       el.replaceChildren(
         span('brand', 'VISH'),
         span('file', h.file),

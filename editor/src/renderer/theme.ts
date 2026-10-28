@@ -10,6 +10,7 @@ import type {
   ClientMsg,
   Complete,
   Inspect,
+  TraceStep,
   Conflict,
   HintLine,
   Layers,
@@ -26,6 +27,15 @@ export interface Host {
   open(node: NodeId): void;
   reconnect(): void;
   goto(text: string): void;
+  key(key: string, mods?: number): void; // key to active presentation (track steps)
+  run(): void; // F5 - Launch with arguments and stdin panel
+  stop(): void; // Shift+F5
+}
+
+// Start state for cap panel and window: idle - not run
+export interface RunState {
+  state: 'idle' | 'running' | 'done' | 'error' | 'stopped';
+  lines: number; // lineage
 }
 
 // Brush status: state from VM; action - button (“goto signature”, “reconnect”).
@@ -49,6 +59,7 @@ export interface HeaderView {
   file: string;
   errors: number;
   checked: boolean;
+  running: boolean; // is launching (frame “Run”: “ → is coming”)
   line: number;
   col: number;
 }
@@ -59,6 +70,7 @@ export interface GutterLine {
   draft: boolean; // Open draft line (tag draft from VM)
   path: number; // Error path step line: 0 - no, 1 - step, 2 - place of error
   layer: string; // Instruction overload: 'common' - as in general logic, 'own' - own, '' - no
+  running: boolean; // here is the launch.
 }
 
 // What an inspector tree line can do: a rule reference, a node cursor, node backlight in the code.
@@ -79,6 +91,10 @@ export interface Panels {
   merge: (el: HTMLElement, cs: readonly Conflict[], host: Host) => void;
   header: (el: HTMLElement, h: HeaderView, host: Host) => void;
   gutter: (el: HTMLElement, lines: readonly GutterLine[]) => void;
+  // Start panel header: status, buttons (frame "Run")
+  runHead: (el: HTMLElement, s: RunState, host: Host) => void;
+  // track control lane (frame "Trassa"); null - no track
+  traceBar: (el: HTMLElement, t: TraceStep | null, host: Host) => void;
   // guidance and dial, entity card (line "name", "signature", "documentation", "chip ...", "scheme ..." -
   // from VM); open - go to node inspector: tree (focus and path to it are highlighted) and full focus
   // disclosure (in the panel)
@@ -165,6 +181,8 @@ export function resolve(
     'palette',
     'inspect',
     'expansion',
+    'runHead',
+    'traceBar',
   ];
   const missing = need.filter((k) => !(k in r.panels));
   if (r.shell === '' || missing.length > 0)

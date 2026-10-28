@@ -17,6 +17,8 @@ const panels: Panels = {
   palette: noop,
   inspect: noop,
   expansion: noop,
+  runHead: noop,
+  traceBar: noop,
 };
 
 describe('темы', () => {

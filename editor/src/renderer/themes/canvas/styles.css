@@ -1408,3 +1408,409 @@ vish-float[mismatch]::part(badge) {
   font: 13px/24px var(--canvas-code);
   z-index: 3;
 }
+
+/* Запуск (кадр «Запуск»): панель внизу карточки, шапка с состоянием и кнопками; исполняемая строка —
+   зелёной полосой с ▶ у номера; в шапке окна — «▶ идёт» */
+#run {
+  position: fixed;
+  z-index: 8;
+  left: clamp(32px, calc(6.7vw + 16px), 112px);
+  right: clamp(32px, calc(6.7vw + 16px), 112px);
+  bottom: 52px;
+  height: min(330px, 45vh);
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  grid-template-rows: 54px 1fr;
+  border: 1px solid #ebe9e3;
+  border-radius: 18px;
+  background: rgb(255 255 255 / 0.97);
+  box-shadow:
+    0 -2px 2px rgb(20 20 10 / 0.02),
+    0 18px 40px rgb(20 20 10 / 0.1);
+  overflow: hidden;
+  font: 13px var(--canvas-ui);
+}
+#run[hidden] {
+  display: none;
+}
+#run-head {
+  grid-column: 1 / 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid #efede8;
+}
+#run-head .title {
+  font-size: 14px;
+  color: #1c1c1a;
+}
+#run-head .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: #57544d;
+  background: #f1f0ec;
+}
+#run-head .pill::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #a3a19a;
+}
+#run-head .pill[data-state='running'] {
+  color: #15803d;
+  background: #dcfce7;
+}
+#run-head .pill[data-state='running']::before {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgb(34 197 94 / 0.25);
+}
+#run-head .pill[data-state='done']::before {
+  background: #22c55e;
+}
+#run-head .pill[data-state='error'] {
+  color: #b91c1c;
+  background: #fde4e4;
+}
+#run-head .pill[data-state='error']::before {
+  background: #ef4444;
+}
+#run-head .sub {
+  font-size: 12.5px;
+  color: #8b8880;
+}
+#run-head .fill {
+  flex: 1;
+}
+#run-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px 0 12px;
+  border: none;
+  border-radius: 10px;
+  font: 13px var(--canvas-ui);
+  cursor: pointer;
+  background: #fff;
+  color: #27251f;
+  box-shadow: inset 0 0 0 1px #e3e0d8;
+}
+#run-head button.stop {
+  background: #dc2626;
+  color: #fff;
+  box-shadow: 0 1px 2px rgb(185 28 28 / 0.3);
+}
+#run-head button.stop:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+#run-head kbd {
+  padding: 1px 6px;
+  border-radius: 6px;
+  font: 10.5px var(--canvas-code);
+  color: inherit;
+  box-shadow:
+    0 1px 0 #e2e0da,
+    inset 0 0 0 1px #ebe9e3;
+}
+#run-head button.stop kbd {
+  background: rgb(255 255 255 / 0.22);
+  box-shadow: none;
+}
+#run .run-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-right: 1px solid #efede8;
+}
+#run .run-inputs::after {
+  content: 'Правки кода уходят в живой процесс на паузе. Сменилась раскладка struct — процесс встанет и попросит migrate(T old).';
+  margin-top: auto;
+  font-size: 12px;
+  line-height: 18px;
+  color: #8b8880;
+}
+#run-stdin,
+#run-args {
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px #e3e0d8;
+  background: #fff;
+  font: 14px var(--canvas-code);
+  color: #1c1c1a;
+  resize: none;
+}
+#run-output {
+  margin: 0;
+  padding: 10px 16px;
+  overflow: auto;
+  background: #f3f2ee;
+  font: 15px var(--canvas-code);
+}
+#run-output .out-row {
+  display: flex;
+  gap: 14px;
+  line-height: 26px;
+}
+#run-output .out-at {
+  width: 70px;
+  flex: none;
+  font-size: 12px;
+  color: #a3a19a;
+}
+.vish-gutter [running] {
+  color: #15803d;
+}
+.vish-gutter [running]::after {
+  content: '▶';
+  position: absolute;
+  z-index: -1;
+  left: 0;
+  top: 0;
+  width: 1100px;
+  height: 100%;
+  padding-left: 10px;
+  box-sizing: border-box;
+  font-size: 11px;
+  text-align: left;
+  color: #22c55e;
+  background: linear-gradient(
+    90deg,
+    rgb(34 197 94 / 0.13),
+    rgb(34 197 94 / 0) 70%
+  );
+  box-shadow: inset 3px 0 0 #22c55e;
+}
+.vish-gutter [running] {
+  position: relative;
+}
+#header .running {
+  color: #15803d;
+}
+/* чёлка — не для трассы и запуска: у них полоса и панель */
+#status[kind='trace'],
+#status[kind='run'] {
+  display: none;
+}
+
+/* Трасса (кадр «Трасса»): подписи шагов в коде, список остановок справа, полоса управления внизу */
+.vish-node::part(step-label) {
+  display: inline-flex;
+  margin-left: 14px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font: 12px/22px var(--canvas-ui);
+  vertical-align: 2px;
+  color: #8b8880;
+  background: #f1f0ec;
+  white-space: nowrap;
+}
+.vish-node::part(step-now) {
+  color: #92400e;
+  background: #fef3c7;
+}
+.vish-node[current] {
+  background: linear-gradient(
+    90deg,
+    rgb(245 158 11 / 0.18),
+    rgb(245 158 11 / 0) 70%
+  );
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+.vish-node[near] {
+  background: linear-gradient(
+    90deg,
+    rgb(120 113 108 / 0.1),
+    rgb(120 113 108 / 0) 60%
+  );
+}
+#stops {
+  font: 13px/1.45 var(--canvas-ui);
+  background: rgb(255 255 255 / 0.55);
+  border-left: 1px solid var(--canvas-line);
+}
+#stops .shead {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 10px 14px 0;
+}
+#stops .shead .title {
+  font-size: 14px;
+  color: #1c1c1a;
+}
+#stops .shead .sub,
+#stops .hint {
+  font-size: 11.5px;
+  color: #8b8880;
+}
+#stops .hint {
+  padding: 2px 14px 8px;
+  border-bottom: 1px solid #f0eee9;
+}
+#stops .stop {
+  margin: 4px 8px 0 calc(8px + var(--depth) * 16px);
+  padding: 6px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+#stops .stop[current] {
+  background: #fffbeb;
+  box-shadow: inset 0 0 0 1px #fcd34d;
+}
+#stops .stop .top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #8b8880;
+}
+#stops .stop .n {
+  min-width: 18px;
+  font: 11.5px var(--canvas-code);
+}
+#stops .stop .icon.fn {
+  width: 12px;
+  height: 12px;
+  color: var(--vish-fn);
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M8 4c-2 0-3 1-3 3v2c0 1-1 3-2 3 1 0 2 2 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1 1 3 2 3-1 0-2 2-2 3v2c0 2-1 3-3 3'/%3E%3C/svg%3E");
+}
+#stops .stop .fn {
+  font: 12.5px var(--canvas-code);
+  color: var(--vish-fn);
+}
+#stops .stop .tag {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #57544d;
+  background: #f1f0ec;
+}
+#stops .stop[current] .tag {
+  color: #92400e;
+  background: #fef3c7;
+}
+#stops .stop .body {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  font: 12.5px var(--canvas-code);
+  color: #27251f;
+}
+#stops .stop .text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#stops .stop .value {
+  flex: none;
+  color: #b45309;
+}
+#stops .summary {
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8b8880;
+}
+#trace-bar {
+  position: fixed;
+  z-index: 9;
+  left: 50%;
+  bottom: 18px;
+  translate: -50% 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: calc(100vw - 32px);
+  height: 44px;
+  padding: 0 8px 0 16px;
+  border-radius: 14px;
+  background: #18181b;
+  color: #e4e4e7;
+  font: 13px var(--canvas-ui);
+  box-shadow: 0 12px 30px rgb(10 10 20 / 0.25);
+}
+#trace-bar[hidden] {
+  display: none;
+}
+#trace-bar .path {
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--canvas-code);
+}
+#trace-bar .sep {
+  color: #71717a;
+}
+#trace-bar .k {
+  margin-right: 6px;
+  color: #a1a1aa;
+}
+#trace-bar b {
+  font-weight: 500;
+  font-family: var(--canvas-code);
+}
+#trace-bar .out b {
+  color: #fcd34d;
+}
+#trace-bar .keys {
+  display: inline-flex;
+  gap: 4px;
+}
+#trace-bar button {
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: #2a2a2e;
+  color: #e4e4e7;
+  font: 12px var(--canvas-ui);
+  cursor: pointer;
+}
+#trace-bar button:hover {
+  background: #3f3f46;
+}
+/* при открытом запуске состояние — в его шапке, чёлка не нужна */
+body:has(#run:not([hidden])) #status {
+  display: none;
+}
+#run-head .icon {
+  width: 14px;
+  height: 14px;
+}
+#run-head .icon.term {
+  color: #57544d;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Crect x='3' y='4' width='18' height='16' rx='3'/%3E%3Cpath d='M7 9l3 3-3 3M12 15h5'/%3E%3C/svg%3E");
+}
+#run-head .icon.again {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5'/%3E%3C/svg%3E");
+}
+#run-head .icon.stop {
+  width: 10px;
+  height: 10px;
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='18' height='18' rx='3'/%3E%3C/svg%3E");
+}
+#stops .stop {
+  display: block;
+}
+#trace-bar > *,
+#trace-bar button {
+  white-space: nowrap;
+}
+/* в трассе вывод — в её полосе; панель запуска не нужна */
+body:has(#trace-bar:not([hidden])) #run {
+  display: none;
+}
+#stops .summary {
+  margin-bottom: 52px; /* над полосой трассы */
+}

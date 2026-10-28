@@ -281,6 +281,13 @@ const theme: Theme = {
       );
     },
 
+    // in classic: there is no start cap (stdin, arguments, conclusion), the track is in the bangs
+    runHead() {
+      return;
+    },
+    traceBar(el) {
+      el.hidden = true;
+    },
     // In the classic hat and line numbers are not (there is no #header markup; the numbers are hidden by style)
     header() {
       return;

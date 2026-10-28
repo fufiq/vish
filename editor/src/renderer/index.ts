@@ -22,6 +22,7 @@ import {
   resolve,
   type Host,
   type OutRow,
+  type RunState,
   type StatusView,
   type Theme,
 } from './theme';
@@ -106,7 +107,24 @@ const host: Host = {
   goto(text) {
     if (active) send({ type: 'c_goto', view: active.data.view, text });
   },
+  key(key, mods = 0) {
+    if (active) send({ type: 'c_key', view: active.data.view, key, mods });
+  },
+  run() {
+    run();
+  },
+  stop() {
+    stop();
+  },
 };
+// Start (frame "Run"): state for panel cap and window
+let runState: RunState = { state: 'idle', lines: 0 };
+const runHead = document.getElementById('run-head');
+const traceBar = document.getElementById('trace-bar');
+function paintRun(): void {
+  if (runHead) panels.runHead(runHead, runState, host);
+  paintHeader();
+}
 
 // Inspector AST (F2 - wood panel, Ctrl+Shift+A - frame node in the text): the element tree
 // under the cursor, places node and by whom they are disassembled - from VM.
@@ -208,6 +226,7 @@ function paintHeader(): void {
       checked: c !== undefined && c.revision >= 0,
       line: at.line,
       col: at.col,
+      running: runState.state === 'running',
     },
     host,
   );
@@ -314,6 +333,7 @@ function receive(m: ServerMsg): void {
     case 's_trace':
       debugging = m.active;
       stopsPanel.hidden = !m.active;
+      if (traceBar) panels.traceBar(traceBar, m.active ? m : null, host);
       if (!m.active) return;
       runPanel.hidden = false;
       runOutput.textContent = m.output + (m.error === '' ? '' : `\n${m.error}`);
@@ -421,6 +441,19 @@ function showOutput(m: Output): void {
   runOutput.toggleAttribute('error', !m.ok);
   panels.output(runOutput, outRows, host);
   mainView()?.showRunning(m.now);
+  paintGutter(mainView()); // Executable line - strip by number
+  runState = {
+    state:
+      m.state === 'running'
+        ? 'running'
+        : m.state === 'stopped'
+          ? 'stopped'
+          : m.ok
+            ? 'done'
+            : 'error',
+    lines: outRows.length,
+  };
+  paintRun();
 }
 
 // Status bang: the state from VM (error, track, launch; "" - to hide) holds, the event ("done", VM message)
@@ -484,6 +517,8 @@ function trace(): void {
 
 function run(): void {
   runPanel.hidden = false;
+  runState = { state: 'running', lines: 0 };
+  paintRun();
   runOutput.textContent = '…';
   runOutput.dataset.text = '';
   send({ type: 'c_run', stdin_text: runStdin.value, args: runArgs.value });

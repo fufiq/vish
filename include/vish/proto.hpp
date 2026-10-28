@@ -390,10 +390,15 @@ struct s_stop {
   std::string fn;
   std::string text;
   node_id node;
+  std::string value; // the value of the instruction (“= 9.0”) or printed by it (“output 0.0”);
 };
+// prev, next - adjacent steps of the same depth (ыF10, F10), number + 1 (0 - no); summary - the result of the path
 struct s_stops {
   uint32_t current;
   std::vector<s_stop> stops;
+  uint32_t prev;
+  uint32_t next;
+  std::string summary;
 };
 // Other clients in the view: cursor (node, piece, offset; node is not in the layout - the closest
 // ancestor), where it rules the draft (draft - names, draft_node - element). Unimportant data - a separate

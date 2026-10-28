@@ -307,7 +307,11 @@ export interface Stops {
     fn: string;
     text: string;
     node: NodeId | null;
+    value: string; // What gave the instruction: "= 9.0", "output 0.0", "" - nothing
   }[];
+  prev: number; // Neighboring steps of the same depth (ыF10, F10): number + 1, 0 - no
+  next: number;
+  summary: string; // The end of the way: steps, stops, error
 }
 // Other clients in the view: cursor (node, piece, offset), where it is that rules the draft -
 // unimportant data separate message.

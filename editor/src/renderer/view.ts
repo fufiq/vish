@@ -480,7 +480,13 @@ export class ViewElement {
 
   // Lines of text for numbers: whether there is code in a line - not spaces and not a comment (Span tags
   // from VM; text sheet - always code).
-  lines(): { code: boolean; draft: boolean; path: number; layer: string }[] {
+  lines(): {
+    code: boolean;
+    draft: boolean;
+    path: number;
+    layer: string;
+    running: boolean;
+  }[] {
     const comments = new Map<NodeId, [number, number][]>();
     for (const m of this.#decor?.marks ?? [])
       if (m.kind === 'span' && m.text.startsWith('comment')) {
@@ -504,7 +510,10 @@ export class ViewElement {
         .filter((m) => m.kind === 'draft')
         .map((m) => m.node),
     );
-    const out = [{ code: false, draft: false, path: 0, layer: '' }];
+    const running = this.#running;
+    const out = [
+      { code: false, draft: false, path: 0, layer: '', running: false },
+    ];
     let inDraft = 0;
     const walk = (id: NodeId): void => {
       const n = this.nodes.get(id);
@@ -513,6 +522,7 @@ export class ViewElement {
       const step = steps.get(id) ?? 0;
       const here = out[out.length - 1];
       if (step > here.path) here.path = step;
+      if (running && this.byId.get(id) === running) here.running = true;
       const layer = layers.get(id);
       if (layer && here.layer === '') here.layer = layer;
       const leaf = n.pieces.every((p) => typeof p === 'string');
@@ -527,7 +537,13 @@ export class ViewElement {
           const line = out[out.length - 1];
           if (inDraft > 0) line.draft = true;
           if (ch === '\n')
-            out.push({ code: false, draft: false, path: 0, layer: '' });
+            out.push({
+              code: false,
+              draft: false,
+              path: 0,
+              layer: '',
+              running: false,
+            });
           else if (
             ch.trim() !== '' &&
             (leaf || !cs.some(([a, b]) => own >= a && own < b))
@@ -590,6 +606,8 @@ export class ViewElement {
       if (m.kind === 'dead') e.dead = true;
       if (m.kind === 'current') e.current = true;
       if (m.kind === 'prev' || m.kind === 'next') e.near = m.kind;
+      if (m.kind === 'current' || m.kind === 'prev' || m.kind === 'next')
+        e.stepLabel = m.text;
       if (m.kind === 'path') e.path = m.text;
       if (m.kind === 'overloads') e.overloads = m.text;
       if (m.kind === 'chosen') e.chosen = m.text;

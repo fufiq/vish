@@ -77,7 +77,13 @@ describe('живая VM', () => {
       'action',
       'label',
     ]);
-    expect(fields('s_stops')).toEqual(['current', 'stops']);
+    expect(fields('s_stops')).toEqual([
+      'current',
+      'stops',
+      'prev',
+      'next',
+      'summary',
+    ]);
     expect(fields('c_trace_step')).toEqual(['step']);
     expect(fields('s_node')).toEqual(['id', 'kind', 'pieces', 'note']);
     expect(fields('s_update')).toEqual(['view', 'revision', 'node', 'nodes']);

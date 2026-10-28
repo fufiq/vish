@@ -395,15 +395,15 @@ send_trace(i64 peer, bool active, i64 step, i64 total, n, stack, str text, str e
   return value(int64_t(0));
 };
 // stops to the customer: current step and stop window around it
-send_stops(i64 peer, i64 current, stops) => native "cpp" {
+send_stops(i64 peer, i64 current, stops, i64 prev, i64 next, str summary) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
-  proto::s_stops out{uint32_t((a[1]).as<int64_t>()), {}};
+  proto::s_stops out{uint32_t((a[1]).as<int64_t>()), {}, uint32_t((a[3]).as<int64_t>() + 1), uint32_t((a[4]).as<int64_t>() + 1), std::string((a[5]).as<str_v>().view())};
   auto const & xs = (a[2]).as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
     value x = xs.get(k);
-    out.stops.push_back({uint32_t(s.field(x, "step", where).as<int64_t>()), uint32_t(s.field(x, "depth", where).as<int64_t>()), std::string(s.field(x, "fn", where).as<str_v>().view()), std::string(s.field(x, "text", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "node", where), where)});
+    out.stops.push_back({uint32_t(s.field(x, "step", where).as<int64_t>()), uint32_t(s.field(x, "depth", where).as<int64_t>()), std::string(s.field(x, "fn", where).as<str_v>().view()), std::string(s.field(x, "text", where).as<str_v>().view()), s.node_or_none(vm, s.field(x, "node", where), where), std::string(s.field(x, "value", where).as<str_v>().view())});
   }
   s.send_to((a[0]).as<int64_t>(), out);
   return value(int64_t(0));
@@ -1012,11 +1012,12 @@ calm_status(i64 peer) {
   where_at = short + (if(line_no > 0) " · строка " + text(line_no) else ""); // No hint: name of variable module (O4)
   send_status_with(peer, "error", errors_word(k), where_at, if(given(at)) "open " + text(code_id(at)) else "", if(given(at)) "К ошибке" else "")
 }
-errors_word(i64 k) {
+errors_word(i64 k) => text(k) + plural(k, " ошибка", " ошибки", " ошибок");
+// Decline in number: 1 step, 2 steps, 5 steps
+plural(i64 k, str one, str few, str many) {
   m = k % 10;
   h = k % 100;
-  w = if((m == 1) && (h != 11)) "ошибка" else if(((m >= 2) && (m <= 4)) && ((h < 12) || (h > 14))) "ошибки" else "ошибок";
-  (text(k) + " ") + w
+  if((m == 1) && (h != 11)) one else if(((m >= 2) && (m <= 4)) && ((h < 12) || (h > 14))) few else many
 }
 // Presentation of the peer client module (-1 - no)
 module_view_of(i64 peer) {
@@ -4660,10 +4661,10 @@ step_to(i64 pos) {
     } else k -= 1;
   }
   show_trace(true, pos, total, node, stack, trace_output(pos), trace_error());
-  send_stops(now_peer(), pos, stop_window(pos));
   // Neighboring steps of the same depth - where ыF10 and F10 lead
   prev = next_stmt(if(pos > 0) pos - 1 else 0, true, depth);
   next = next_stmt(pos + 1, false, depth);
+  send_stops(now_peer(), pos, stop_window(pos), if(prev < pos) prev else -1, if(next > pos) next else -1, trace_summary());
   // values of subexpressions of the current instruction (same depth) - icons
   from = pos;
   while((from > 0) && !(is_stmt(from - 1) && (trace_depth(from - 1) == depth))) from -= 1;
@@ -4685,9 +4686,11 @@ step_to(i64 pos) {
   for(w : peer_views()) {
     found = array{};
     for(j : range(nodes.size)) if((layout_of(w, nodes[j]) >= 0) && !quiet_value(nodes[j])) found.push(mark{nodes[j], "value", values[j], 0, 0});
-    if(layout_of(w, node) >= 0) found.push(mark{node, "current", "", 0, 0});
-    if((prev < pos) && (is_stmt(prev) && (layout_of(w, trace_node(prev)) >= 0))) found.push(mark{trace_node(prev), "prev", "", 0, 0});
-    if((next > pos) && (is_stmt(next) && (layout_of(w, trace_node(next)) >= 0))) found.push(mark{trace_node(next), "next", "", 0, 0});
+    // Signatures of steps in the code (frame “Traffic”): “Step N” and what the instruction gave
+    role_marks(found, w); // color roles and markup of text - and on the track
+    if(layout_of(w, node) >= 0) found.push(mark{node, "current", ("шаг " + text(pos + 1)) + " · сейчас", 0, 0});
+    if((prev < pos) && (is_stmt(prev) && (layout_of(w, trace_node(prev)) >= 0))) found.push(mark{trace_node(prev), "prev", step_label(prev), 0, 0});
+    if((next > pos) && (is_stmt(next) && (layout_of(w, trace_node(next)) >= 0))) found.push(mark{trace_node(next), "next", step_label(next), 0, 0});
     show_marks(w, found);
   }
   true
@@ -4697,11 +4700,39 @@ step_to(i64 pos) {
 // Depth of call: Where did you come from? *My: * Up to 12 instructions before and after, viewing no
 // more than 4,000 entries each way.
 //
-struct stop { i64 step; i64 depth; str fn; str text; code node; }
+struct stop { i64 step; i64 depth; str fn; str text; code node; str value; }
 stop_of(i64 k) {
   n = trace_node(k);
   f = enclosing_fn(n);
-  stop{k, trace_depth(k), if(given(f)) code_name(f) else "?", clip(print_node(n), 48), n}
+  stop{k, trace_depth(k), if(given(f)) code_name(f) else "?", clip(print_node(n), 48), n, step_value(k)}
+}
+// What the step k (frame "Trace") gave: the value ("= 9.0") or the one printed by it - the step is the
+// instruction after execution, its output - from the previous instruction of the same depth ("output
+// 0.0"); "" - nothing. My rule.
+step_value(i64 k) {
+  v = trace_value(k);
+  if((v != "") && (v != "()")) return "= " + v;
+  prev = if(k > 0) next_stmt(k - 1, true, trace_depth(k)) else 0;
+  before = if((prev < k) && (k > 0)) trace_output(prev) else "";
+  after = trace_output(k);
+  if(after.size > before.size) {
+    printed = trim(text_from(after, before.size));
+    if(printed != "") return "вывод " + clip(first_line(printed), 24);
+  }
+  ""
+}
+step_label(i64 k) {
+  v = step_value(k);
+  ("шаг " + text(k + 1)) + (if(v == "") "" else " · " + v)
+}
+// The result of the track path (frame "Trace"): steps, including stop-instructions, error
+trace_summary() {
+  total = trace_size();
+  stops = 0;
+  if(total <= 20000) for(k : range(total)) if(is_stmt(k)) stops += 1;
+  e = trace_error();
+  head = ((text(total) + plural(total, " шаг", " шага", " шагов")) + " исполнения") + (if(total <= 20000) (", из них " + text(stops)) + " — остановки инструкций" else "");
+  (head + ". ") + (if(e == "") "Ошибок на пути нет." else "Ошибка: " + first_line(e))
 }
 stop_window(i64 pos) {
   total = trace_size();
