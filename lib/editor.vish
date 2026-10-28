@@ -1301,31 +1301,12 @@ send_completion(i64 v) {
     f = if((it.kind == "функция") && ((k < 12) || (k == k0))) first_decl(it.name, at) else code();
     doc = if((k == k0) && given(f)) doc_line(f, it.name, rtypes, at) else "";
     if((k == k0) && given(f)) src = if(in_prelude(f)) "prelude" else if(module_note(f) != "") module_note(f) else "программа";
-    // name in the area - its type (frame "Addition": "s : f64")
-    local = (k < 12) && ((it.kind == "переменная") || (it.kind == "параметр"));
-    extra.push(item_extra{if(given(f)) result_type(f) else if(local) join_types(name_types(at, it.name)) else "", doc, m[0], m[1]});
+    extra.push(item_extra{if(given(f)) result_type(f) else "", doc, m[0], m[1]});
   }
-  // Basement: after the point - the recipient and from where; otherwise - the place of recruitment
-  here = if(views[v].items.size > 0) place_context(at) else "";
-  context = if(dot) (((recv + " ") + rtypes) + (if(src == "") "" else " · " + src)) else if(here != "") (here + (if(src == "") "" else " · " + src)) else src;
+  context = if(dot) (((recv + " ") + rtypes) + (if(src == "") "" else " · " + src)) else src;
   send_completion_list(views[v].peer, views[v].id, n, p, o, views[v].selected, views[v].items, preview, extra, context);
 }
 struct item_extra { str type; str doc; i64 from; i64 to; }
-// place of set: function and the nearest construction block around
-place_context(at) {
-  if(!given(at)) return "";
-  f = enclosing_fn(at);
-  if(!given(f)) return "";
-  ast.function{fname, _, _, _, _, _, _, _, _} = f;
-  blk = "";
-  x = at;
-  while(given(x) && ((blk == "") && (code_id(x) != code_id(f)))) {
-    up = code_parent(x);
-    if(given(up) && ((code_kind(x) == ast.block) && (code_kind(up) == ast.call))) blk = "блок " + name_of(callee_of(up));
-    x = up;
-  }
-  ("контекст: " + fname) + (if(blk == "") "" else " → " + blk)
-}
 // match typed with the name: prefix, substring; otherwise empty (subsequence)
 match_range(str name, str word) {
   if(word == "") return array{0, 0};
@@ -3307,9 +3288,9 @@ hover_at(i64 v, n) {
 bar_lines(lines, n) {
   up = code_parent(n);
   x = if(given(up) && (((code_kind(up) == ast.operation) || (code_kind(up) == ast.call)) && has_types(up))) up else n;
-  if(!has_types(x) || (code_kind(x) == ast.block)) return false; // The whole block is not an expression in the cursor
-  ts = join_types(node_types(x));
-  if((ts == "") || (ts == "unit")) return false; // instruction without value - no panel
+  if(code_kind(x) == ast.block) return false; // The whole block is not an expression in the cursor
+  ts = if(has_types(x)) join_types(node_types(x)) else "тип неизвестен";
+  if(ts == "unit") return false; // instruction without value - no panel
   lines.push(line{"панель", (clip(print_node(x), 40) + " : ") + ts, x, 0, 0});
   f = enclosing_fn(x);
   if(given(f)) {
@@ -3323,11 +3304,9 @@ bar_lines(lines, n) {
   }
   true
 }
-// entity under the index (frame "Hiding"): name, declaration by reference ("mean(xs) - line 9"), type and value
-// in each instance function, the result is whether one type and when the value is known. ;
+// entity under the pointer - card, as in the frame: name and announcement
+// link. *My: * Composition and lines.
 //
-// 
-// . *My: * Composition and lines.
 entity_lines(lines, i64 v, n, k) {
   decl = n;
   name = "";
@@ -3350,27 +3329,6 @@ entity_lines(lines, i64 v, n, k) {
   what = if(code_kind(decl) == ast.parameter) "Параметр" else "Переменная";
   at = node_place(v, decl);
   lines.push(line{"объявление", ((what + (if(given(f)) " " + head_text(f) else "")) + (if(at >= 0) " — строка " + text(line_at(v, at) + 1) else "")), decl, 0, 0});
-  if(!given(f)) return true;
-  first = "";
-  same = true;
-  lits = 0;
-  count = 0;
-  for(l : fn_layers(f)) {
-    array{key, stage} = l;
-    ts = join_types(layer_types_of(f, key, n));
-    if(ts != "") {
-      lit = layer_literal_of(f, key, n);
-      lines.push(line{"экземпляр " + stage, (key + " = ") + (if(lit != "") (ts + " = ") + lit else ts), code(), 0, 0});
-      if(first == "") first = ts else if(ts != first) same = false;
-      if(lit != "") lits += 1;
-      count += 1;
-    }
-  }
-  if(count > 0) {
-    kinds = if(same) (if(count == 1) "Тип в единственном экземпляре" else "Один тип во всех экземплярах") else "Тип зависит от экземпляра";
-    when = if(lits == 0) "значение известно только при исполнении" else if(lits == count) "значение известно при компиляции" else "значение известно при компиляции не во всех экземплярах";
-    lines.push(line{"итог", (kinds + ": ") + when, code(), 0, 0});
-  }
   true
 }
 // -- entity card (item 4 design, frame "cursor on stream") ------------------------------- User solutions
@@ -4162,7 +4120,15 @@ step_role(str name, at) {
 // "Unknown range(str) function" is a signature missing (" is not such an error)
 missing_signature(str title) {
   i = find_text(title, "неизвестная функция ");
-  if(i < 0) "" else first_line(text_from(title, i + "неизвестная функция ".size))
+  if(i >= 0) return first_line(text_from(title, i + "неизвестная функция ".size));
+  // +(i64, str) (PCM by operator - "add")
+  o = find_text(title, "оператор ");
+  d = find_text(title, " не определён для ");
+  if((o < 0) || (d < o)) return "";
+  op = slice_text(title, o + "оператор ".size, d);
+  ts = first_line(text_from(title, d + " не определён для ".size));
+  a = find_text(ts, " и ");
+  (op + "(") + ((if(a < 0) ts else (slice_text(ts, 0, a) + ", ") + text_from(ts, a + " и ".size)) + ")")
 }
 first_line(str s) {
   i = find_text(s, "\n");
@@ -4705,6 +4671,12 @@ overload_text(str sig) {
       ast.parameter{pn, _, _, _, _, _, _} = p;
       names.push(pn);
     }
+  }
+  // operator ("+(i64, str)") - as in prelude : operator (i64 a) + (str b) { }
+  if((name != "") && (!word_start(name[0]) && (types.size == 2))) {
+    left = ("operator (" + before(types[0], '<')) + " a) ";
+    right = ("(" + before(types[1], '<')) + " b) {\n\n}\n";
+    return (left + name) + (" " + right);
   }
   s = name + "(";
   for(k : range(types.size)) s = (((s + (if(k > 0) ", " else "")) + before(types[k], '<')) + " ") + (if(k < names.size) names[k] else text_byte('a' + k));

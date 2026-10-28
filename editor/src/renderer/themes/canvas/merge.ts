@@ -24,19 +24,47 @@ const press = (el: HTMLElement, f: () => void) => {
   });
 };
 
+// Colors of the text of the option, as in the frame: comment, line, number, call name, name, signs. The text
+// of the variant is not node representation (VM does not mark them), therefore - by the type of words. Mine. *
+const tokens =
+  /(\/\/[^\n]*)|("(?:[^"\\]|\\.)*")|(\b\d+(?:\.\d+)?\b)|([A-Za-z_]\w*)(?=\s*\()|([A-Za-z_]\w*)|([^\sA-Za-z_\d"]+)/g;
+const kinds = ['comment', 'string', 'number', 'fn', 'name', 'punct'];
+
 // text of the variant: [from, to) code points - modified
 function marked(text: string, from: number, to: number): HTMLElement {
   const pre = make('pre', 'code');
-  // VM eslint-disable-next-line @typescript-eslint/no-misused-spread
-  //
+  // the view of each code point, then the segments of one kind and one side of the
+  // difference code points - as VM eslint-disable-next-line
+  // @typescript-eslint/no-misused-spread
   const cps = [...text];
-  if (to <= from) pre.textContent = text;
-  else
-    pre.append(
-      cps.slice(0, from).join(''),
-      make('span', 'diff', cps.slice(from, to).join('')),
-      cps.slice(to).join(''),
-    );
+  const kind: string[] = cps.map(() => '');
+  let cp = 0;
+  let unit = 0;
+  for (const m of text.matchAll(tokens)) {
+    while (unit < m.index) unit += (cps[cp++] ?? ' ').length;
+    const k =
+      kinds[m.slice(1).findIndex((g: string | undefined) => g !== undefined)] ??
+      '';
+    // eslint-disable-next-line @typescript-eslint/no-misused-spread
+    const n = [...m[0]].length;
+    for (let i = 0; i < n; ++i) kind[cp + i] = k;
+  }
+  let at = 0;
+  while (at < cps.length) {
+    const inDiff = at >= from && at < to;
+    let end = at;
+    while (
+      end < cps.length &&
+      kind[end] === kind[at] &&
+      end >= from === at >= from &&
+      end < to === at < to
+    )
+      ++end;
+    const span = make('span', kind[at] ?? '', cps.slice(at, end).join(''));
+    if (inDiff) span.classList.add('diff');
+    pre.append(span);
+    at = end;
+  }
   return pre;
 }
 

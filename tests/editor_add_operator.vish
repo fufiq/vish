@@ -1,0 +1,6 @@
+// error: оператор + не определён для i64 и str
+// Program for 352_editor_add_operator.wire scenario: The operator does not have overload.
+main() {
+  x = 1;
+  print(x + "a");
+}

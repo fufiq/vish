@@ -105,11 +105,17 @@ export function inspect(
       row.append(rule);
     }
     row.append(make('span', 'fill'), make('span', 'types', n.types));
-    row.addEventListener('mouseenter', () => {
+    row.addEventListener('mouseenter', (e) => {
       act.mark(n.id);
+      act.hover(n.id, e.clientX, e.clientY);
     });
-    row.addEventListener('mouseleave', () => {
+    row.addEventListener('mouseleave', (e) => {
       act.mark(null);
+      act.hover(null, e.clientX, e.clientY);
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      act.menu(n.id, e.clientX, e.clientY);
     });
     press(row, () => {
       act.place(n.id);

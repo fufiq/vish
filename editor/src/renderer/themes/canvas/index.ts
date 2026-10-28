@@ -109,18 +109,29 @@ const theme: Theme = {
       const what = span('what', main.text);
       what.prepend(span('dot'));
       const stage = lines.find((l) => l.kind === 'панель этап');
+      const add = lines.find((l) => l.kind === 'добавить');
+      if (add) what.classList.add('error');
       el.replaceChildren(
         span('arrow'),
         what,
         span('sep'),
         ...(stage ? [span('stage', stage.text)] : []),
-        button(
-          'Перегрузки +',
-          () => {
-            host.key('F12');
-          },
-          'strong',
-        ),
+        // No overload - "Add Signature" (palette transition from "Add"), otherwise - overload
+        add
+          ? button(
+              `Добавить ${add.text}`,
+              () => {
+                host.goto(add.text);
+              },
+              'strong add',
+            )
+          : button(
+              'Перегрузки +',
+              () => {
+                host.key('F12');
+              },
+              'strong',
+            ),
         button('Узел', () => {
           host.press('F2');
         }),
@@ -155,6 +166,8 @@ const theme: Theme = {
           d.textContent = l.code ? String(i + 1) : '\u00a0'; // empty div would collapse
           d.toggleAttribute('draft', l.draft); // draft
           d.toggleAttribute('conflict', l.conflict); // fusion
+          if (l.step === '') d.removeAttribute('step');
+          else d.setAttribute('step', l.step); // step of the track - the whole line (frame "Trace")
           if (l.path > 0) d.dataset.path = l.path === 2 ? 'place' : 'step'; // line
           if (l.layer !== '') d.dataset.layer = l.layer; // Instruction overload: General or Own
           d.toggleAttribute('running', l.running); // here is the launch.

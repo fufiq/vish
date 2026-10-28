@@ -1619,18 +1619,33 @@ vish-float[mismatch]::part(badge) {
   color: #92400e;
   background: #fef3c7;
 }
-.vish-node[current] {
+.vish-gutter [step] {
+  position: relative;
+}
+.vish-gutter [step]::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  left: 0;
+  top: 0;
+  width: 1100px;
+  height: 100%;
+}
+.vish-gutter [step='current'] {
+  color: #b45309;
+}
+.vish-gutter [step='current']::after {
   background: linear-gradient(
     90deg,
-    rgb(245 158 11 / 0.18),
+    rgb(245 158 11 / 0.16),
     rgb(245 158 11 / 0) 70%
   );
   box-shadow: inset 3px 0 0 #f59e0b;
 }
-.vish-node[near] {
+.vish-gutter [step='near']::after {
   background: linear-gradient(
     90deg,
-    rgb(120 113 108 / 0.1),
+    rgb(120 113 108 / 0.08),
     rgb(120 113 108 / 0) 60%
   );
 }
@@ -2290,130 +2305,7 @@ body:has(#trace-bar:not([hidden])) #run {
   width: auto !important;
 }
 
-/* Наведение (кадр «Наведение»): все упоминания сущности — подложкой, наведённое — темнее; карточка —
-   тёмная рамка, внутри белая: имя, тип, этап, ячейки по экземплярам, объявление; под ней — итог */
-.vish-node[same] {
-  border-radius: 3px;
-  background: #dbeafe;
-}
-.vish-node[same='here'] {
-  background: #bfdbfe;
-}
-.vish-tip:has(> .entity) {
-  padding: 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
-}
-.entity {
-  width: 330px;
-  box-sizing: border-box;
-  padding: 10px 10px 0;
-  border-radius: 22px;
-  background: #121418;
-  box-shadow: 0 24px 50px rgb(10 12 20 / 0.3);
-  font: 13px var(--canvas-ui);
-}
-.entity .inner {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  border-radius: 15px;
-  background: #fff;
-  color: #18181b;
-}
-.entity .head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.entity .head .name {
-  font: 600 17px var(--canvas-code);
-}
-.entity .head .type {
-  font: 15px var(--canvas-code);
-  color: #2563eb;
-}
-.entity .head .fill {
-  flex: 1;
-}
-.entity .head .stage {
-  padding: 3px 8px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  background: #dbeafe;
-  color: #1e40af;
-}
-.entity .cells {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-.entity .cell {
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: #f4f4f5;
-  font-size: 12.5px;
-  color: #52525b;
-  min-width: 0;
-}
-.entity .cell .key {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: #a1a1aa;
-}
-.entity .cell .val {
-  font-family: var(--canvas-code);
-}
-.entity .decl {
-  font-size: 13px;
-  color: #2563eb;
-  cursor: pointer;
-}
-.entity .sum {
-  margin: 0;
-  padding: 12px 10px 14px;
-  text-align: center;
-  font-size: 13.5px;
-  line-height: 19px;
-  color: #e4e4e7;
-}
-/* дополнение (кадр «Дополнение»): тип у имени и итог функции — приглушённо после имени */
-.vish-complete li.item .result {
-  color: #71717a;
-  white-space: nowrap;
-}
-/* подсказка набора (кадр «Дополнение»): сигнатура тёмной плашкой над местом, текущий параметр — светлее */
-.vish-hint:has(> .sigs) {
-  padding: 0;
-  border: none;
-  background: transparent;
-  box-shadow: none;
-}
-.vish-hint .sigs {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.vish-hint .sigtag {
-  padding: 6px 11px;
-  border-radius: 10px;
-  background: #18181b;
-  color: #f4f4f5;
-  font: 12.5px var(--canvas-code);
-  white-space: pre;
-  box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
-}
-.vish-hint .sigtag .now {
-  padding: 1px 5px;
-  border-radius: 5px;
-  background: #3f3f46;
-}
-
-/* Панель у курсора (кадр «Правка»): тёмная, под строкой узла, со стрелкой вверх */
+/* Панель «Правки» (кадр «1 · Правка»): по правому щелчку, тёмная, под строкой узла, со стрелкой */
 .vish-bar {
   position: absolute;
   z-index: 6;
@@ -2734,4 +2626,91 @@ body:has(#trace-bar:not([hidden])) #run {
   background: #ede9fe;
   color: #6d28d9;
   font: 12px var(--canvas-ui);
+}
+.vish-bar .what.error .dot {
+  background: #ef4444;
+}
+.vish-bar button.add {
+  background: #0f766e;
+  color: #fff;
+}
+.vish-bar button.add:hover {
+  background: #115e59;
+}
+/* карточка и панель «Правки» у строки инспектора — поверх всего */
+.vish-float {
+  z-index: 30;
+}
+.vish-tip.vish-float:not([card]) {
+  max-width: 520px;
+}
+/* шаг трассы — строкой у номеров (выше), не подложкой узла */
+.vish-node[current],
+.vish-node[near] {
+  background: none;
+  outline: none;
+  box-shadow: none;
+}
+
+/* Проекция рядом (кадр «Ноутбук · проекция»): текст по умолчанию — приглушён, проекция — поднятой
+   карточкой с синей рамкой; внизу — легенда */
+#panes:has(#side .vish-pane-head:not([hidden]))
+  #app
+  > :not(.vish-tip, .vish-bar) {
+  opacity: 0.8;
+}
+#panes:has(#side .vish-pane-head:not([hidden])) #side-wrap {
+  position: relative;
+  margin: 14px 14px 46px 0;
+  border: 1.5px solid #c7d2fe;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow:
+    0 1px 2px rgb(20 20 10 / 0.04),
+    0 18px 40px rgb(20 20 10 / 0.09);
+  overflow: visible;
+}
+#panes:has(#side .vish-pane-head:not([hidden])) #side {
+  background: transparent;
+}
+#panes:has(#side .vish-pane-head:not([hidden]))::after {
+  content: 'одинаковый цвет — один и тот же узел дерева · курсор стоит на том же узле в обоих текстах';
+  position: absolute;
+  left: 24px;
+  bottom: 14px;
+  font: 12.5px var(--canvas-ui);
+  color: #8b8880;
+}
+/* карточка «элемент правит другой клиент» — у курсора (место ставит окно) */
+#status[kind='locked'] {
+  translate: none;
+  transform: none;
+}
+/* текст вариантов слияния — цветами кадра */
+#merge .side pre .fn {
+  color: #1e3a8a;
+}
+#merge .side pre .name {
+  color: #7c2d12;
+}
+#merge .side pre .number {
+  color: #c2410c;
+}
+#merge .side pre .string {
+  color: #0f766e;
+}
+#merge .side pre .comment {
+  color: #77746c;
+}
+#merge .side pre .punct {
+  color: #a3a19a;
+}
+#merge .side[data-side='mine'] pre .diff {
+  color: #1d4ed8;
+}
+#merge .side[data-side='theirs'] pre .diff {
+  color: #0f766e;
+}
+#layers:empty {
+  display: none;
 }

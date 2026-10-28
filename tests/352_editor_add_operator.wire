@@ -1,0 +1,11 @@
+// PKM for operator without overload (author's decision 2026-10-28): in the "Edit" panel - "Add +(i64,
+// str)", as an error card; added - operator, as in prelude.
+// program: editor_add_operator.vish
+open_view module
+hover 1 @+
+// expect: kind="панель" text="x + \"a\" : тип неизвестен"
+// expect: kind="добавить" text="+(i64, str)"
+goto 1 +(i64,\sstr)
+// expect: name="добавить +(i64, str)"
+key 1 Enter
+// expect: operator (i64 a) + (str b) {

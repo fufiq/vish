@@ -183,7 +183,12 @@ export class ViewElement {
     if (!r) return;
     paint(this.bar);
     const origin = this.host.getBoundingClientRect();
-    this.bar.style.left = `${String(r.left - origin.left + this.host.scrollLeft)}px`;
+    // not wider than the panel: at the right edge - to the left
+    const left = Math.min(
+      r.left - origin.left + this.host.scrollLeft,
+      this.host.scrollLeft + this.host.clientWidth - this.bar.offsetWidth - 8,
+    );
+    this.bar.style.left = `${String(Math.max(8, left))}px`;
     this.bar.style.top = `${String(r.bottom - origin.top + this.host.scrollTop + 10)}px`;
   }
   hideBar(): void {
@@ -372,7 +377,13 @@ export class ViewElement {
   #twinCursor: Element | undefined;
   showTwinCursor(id: NodeId | null): void {
     this.#twinCursor?.removeAttribute('twin-cursor');
-    this.#twinCursor = id === null ? undefined : this.byId.get(id);
+    // the entire module or function is not framed (a line item would circle each line)
+    const el = id === null ? undefined : this.byId.get(id);
+    const kind = el?.dataset.kind ?? '';
+    this.#twinCursor =
+      el && el !== this.root && kind !== 'n_fn' && kind !== 'n_block'
+        ? el
+        : undefined;
     this.#twinCursor?.setAttribute('twin-cursor', '');
   }
 
@@ -606,6 +617,7 @@ export class ViewElement {
     path: number;
     layer: string;
     running: boolean;
+    step: string;
   }[] {
     const comments = new Map<NodeId, [number, number][]>();
     for (const m of this.#decor?.marks ?? [])
@@ -636,6 +648,11 @@ export class ViewElement {
         .map((m) => m.node),
     );
     let inConflict = 0;
+    // the line where the current (current) or neighboring (prev/next) node begins
+    const traced = new Map<NodeId, string>();
+    for (const m of this.#decor?.marks ?? [])
+      if (m.kind === 'current' || m.kind === 'prev' || m.kind === 'next')
+        traced.set(m.node, m.kind === 'current' ? 'current' : 'near');
     const running = this.#running;
     const out = [
       {
@@ -645,6 +662,7 @@ export class ViewElement {
         path: 0,
         layer: '',
         running: false,
+        step: '',
       },
     ];
     let inDraft = 0;
@@ -657,6 +675,8 @@ export class ViewElement {
       const here = out[out.length - 1];
       if (step > here.path) here.path = step;
       if (running && this.byId.get(id) === running) here.running = true;
+      const t = traced.get(id);
+      if (t && here.step !== 'current') here.step = t;
       const layer = layers.get(id);
       if (layer && here.layer === '') here.layer = layer;
       const leaf = n.pieces.every((p) => typeof p === 'string');
@@ -679,6 +699,7 @@ export class ViewElement {
               path: 0,
               layer: '',
               running: false,
+              step: '',
             });
           else if (
             ch.trim() !== '' &&

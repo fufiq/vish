@@ -62,10 +62,6 @@ export interface HeaderView {
   checked: boolean;
   running: boolean; // is launching (frame “Run”: “ → is coming”)
   conflicts: number; // Unresolved merger conflicts (frame "Merge")
-  fn: string; // function under the cursor ('' - outside the function)
-  fnNode: number | null; // its node (the "Layers" tab opens it in the second panel)
-  draft: boolean; // playback
-  focus: string; // expression type at the cursor (panel at the cursor), '' - unknown
   line: number;
   col: number;
 }
@@ -82,6 +78,7 @@ export interface GutterLine {
   code: boolean;
   draft: boolean; // Open draft line (tag draft from VM)
   conflict: boolean; // a line of element with a fusion conflict (tag conflict)
+  step: string; // track step on the line: 'current', 'near' or 'neighbor'
   path: number; // Error path step line: 0 - no, 1 - step, 2 - place of error
   layer: string; // Instruction overload: 'common' - as in general logic, 'own' - own, '' - no
   running: boolean; // here is the launch.
@@ -92,6 +89,9 @@ export interface InspectActions {
   open(node: NodeId): void;
   place(node: NodeId): void;
   mark(node: NodeId | null): void;
+  // a tree line - like a node in the code: hovering - card, right click - panel "Edit"
+  hover(node: NodeId | null, x: number, y: number): void;
+  menu(node: NodeId, x: number, y: number): void;
 }
 
 // Panels - draw in their element markup (id from shell) all over again according to the sent.
@@ -105,7 +105,7 @@ export interface Panels {
   merge: (el: HTMLElement, m: MergeResult, host: Host) => void;
   // Viewbar cap when the same tree is open in another (frame "projection")
   paneHead: (el: HTMLElement, p: PaneHead) => void;
-  // floating panel at the cursor (frame "Edit"): lines "panel" from VM; empty - hide
+  // black panel "Edit" (frame "1 · Edit") - by right click: lines "panel" from VM
   cursorBar: (el: HTMLElement, lines: readonly HintLine[], host: Host) => void;
   // taken by merging itself - rows under the module code (frame "Merge")
   mergeNotes: (el: HTMLElement, m: MergeResult) => void;

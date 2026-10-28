@@ -43,30 +43,13 @@ export function complete(el: HTMLElement, m: Complete): void {
         cps.slice(it.to).join(''),
       );
     else name.textContent = it.name;
-    const fn = it.kind === 'функция';
-    const local = it.kind === 'переменная' || it.kind === 'параметр';
-    const sig = make('span', 'sig', fn ? it.detail : '');
-    // type: the name in the area - "s : f64", the function - "→ f64" after the parameters (frame "Addition")
-    const result =
-      it.result === '' || it.result === 'unit'
-        ? ''
-        : local
-          ? ` : ${it.result}`
-          : fn
-            ? ` → ${it.result}`
-            : '';
-    li.append(
-      icon,
-      name,
-      sig,
-      make('span', 'result', result),
-      make('span', 'fill'),
-    );
-    // on the right - the view of the item (the selected - по); other - explanation VM
-    if (selected) li.append(make('kbd', '', '↵'));
-    else if (!fn && !local && it.detail !== '')
+    const sig = make('span', 'sig', it.kind === 'функция' ? it.detail : '');
+    li.append(icon, name, sig, make('span', 'fill'));
+    if (it.kind !== 'функция' && it.detail !== '')
       li.append(make('span', 'type', it.detail));
-    else li.append(make('span', 'type', it.kind));
+    else if (it.result !== '' && it.result !== 'unit')
+      li.append(make('span', 'type', it.result));
+    if (selected) li.append(make('kbd', '', '↵'));
     rows.push(li);
     if (selected && it.doc !== '') rows.push(make('li', 'doc', it.doc));
   }

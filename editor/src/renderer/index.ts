@@ -13,6 +13,7 @@ import {
   type NodeId,
   type ServerMsg,
   type Output,
+  type Hover,
 } from '../protocol/messages';
 import type { VmBridge } from '../preload/index';
 import { ViewElement } from './view';
@@ -178,9 +179,98 @@ const inspector = new Inspector(
       if (at) send({ type: 'c_pointer', view: v.data.view, ...at, offset: 0 });
       activate(v);
     },
+    // Inspector tree lines - as node in code (author's decision 2026-10-28)
+    hover(v, node, x, y) {
+      clearTimeout(floatTimer);
+      if (!floatBar.hidden) return; // Open the panel "Edit" - no card is needed
+      if (node === null) {
+        floatHideSoon();
+        return;
+      }
+      floatTimer = setTimeout(() => {
+        clearTimeout(floatHide);
+        floatFor = { view: v.data.view, node, x, y, menu: false };
+        send({ type: 'c_hover', view: v.data.view, node });
+      }, 400);
+    },
+    menu(v, node, x, y) {
+      clearTimeout(floatTimer);
+      floatTip.hidden = true;
+      floatFor = { view: v.data.view, node, x, y, menu: true };
+      send({ type: 'c_hover', view: v.data.view, node });
+    },
   },
   panels,
 );
+// Floating card and panel "Adjustments" outside the code (at the inspector's line): the same VM response to
+// guidance, the place is at the pointer; you can reach the card with a pointer.
+const floatTip = document.createElement('div');
+floatTip.className = 'vish-tip vish-float';
+floatTip.hidden = true;
+const floatBar = document.createElement('div');
+floatBar.className = 'vish-bar vish-float';
+floatBar.hidden = true;
+document.body.append(floatTip, floatBar);
+let floatFor:
+  | { view: number; node: NodeId; x: number; y: number; menu: boolean }
+  | undefined;
+let floatTimer: ReturnType<typeof setTimeout> | undefined;
+let floatHide: ReturnType<typeof setTimeout> | undefined;
+function floatHideSoon(): void {
+  clearTimeout(floatHide);
+  floatHide = setTimeout(() => {
+    floatTip.hidden = true;
+  }, 450);
+}
+floatTip.addEventListener('mouseenter', () => {
+  clearTimeout(floatHide);
+});
+floatTip.addEventListener('mouseleave', floatHideSoon);
+document.addEventListener('mousedown', (e) => {
+  if (!e.composedPath().includes(floatBar)) floatBar.hidden = true;
+});
+function showFloat(m: Hover): boolean {
+  const f = floatFor;
+  if (f?.node !== m.node || f.view !== m.view) return false;
+  floatFor = undefined;
+  const bar = m.lines.filter((l) => l.kind.startsWith('панель'));
+  // At the pointer, but within the window: does not fit right - left, below - above the pointer
+  const place = (el: HTMLElement) => {
+    el.style.position = 'fixed';
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const x = Math.max(8, Math.min(f.x + 12, innerWidth - w - 8));
+    const y =
+      f.y + 16 + h > innerHeight - 8 ? Math.max(8, f.y - h - 8) : f.y + 16;
+    el.style.left = `${String(x)}px`;
+    el.style.top = `${String(y)}px`;
+  };
+  if (f.menu) {
+    floatTip.hidden = true;
+    const add = m.lines.filter((l) => l.kind === 'добавить');
+    panels.cursorBar(floatBar, [...bar, ...add], host);
+    place(floatBar);
+    return true;
+  }
+  const rest = m.lines.filter((l) => !bar.includes(l));
+  floatTip.hidden = rest.length === 0;
+  if (floatTip.hidden) return true;
+  floatTip.toggleAttribute(
+    'card',
+    rest.some((l) => ['имя', 'сущность', 'ошибка'].includes(l.kind)),
+  );
+  panels.tip(
+    floatTip,
+    rest,
+    (node) => {
+      floatTip.hidden = true;
+      send({ type: 'c_open', view: m.view, node });
+    },
+    host,
+  );
+  place(floatTip);
+  return true;
+}
 const cursorNode = new Map<number, NodeId>();
 let inspectTimer: ReturnType<typeof setTimeout> | undefined;
 function structure(): boolean {
@@ -203,9 +293,9 @@ let cardTimer: ReturnType<typeof setTimeout> | undefined;
 const cardRoles = ['fn', 'prelude', 'native', 'fiber'];
 function cursorCard(v: ViewElement | undefined, node: NodeId | null): void {
   clearTimeout(cardTimer);
-  v?.hideBar();
-  if (!v || node === null) return;
-  // not entity with a card - panel at the cursor (frame "Edit"): the same query, lines "panel"
+  const el = node === null ? undefined : v?.byId.get(node);
+  if (!v || node === null || !cardRoles.includes(el?.dataset.role ?? ''))
+    return;
   cardTimer = setTimeout(() => {
     hoverAt = undefined;
     send({ type: 'c_hover', view: v.data.view, node });
@@ -223,21 +313,16 @@ function activate(v: ViewElement | undefined): void {
 // of the cursor of the active panel. Checked - the marks came to the last edit; errors - error marks.
 const checks = new Map<number, { revision: number; errors: number }>();
 let conflicts = 0; // unresolved conflicts of the last merger
-let focus = ''; // type of expression at the cursor - from the panel at the cursor
+// right-click node: VM's answer to it is the "Edit" panel (frame "1 · Edit"), not a hint
+let barFor: NodeId | null = null;
+let typedAt = 0; // the last set from the keyboard (set hint - only when dialing)
 // function under the cursor: the name of its announcement (the first word of the syntax)
-function fnAt(v: ViewElement | undefined): {
-  fn: string;
-  fnNode: number | null;
-} {
+function fnAt(v: ViewElement | undefined): string {
   const node = v?.cursor?.node;
   const el =
     node == null ? null : (v?.byId.get(node)?.closest('vish-fn') ?? null);
   const text = el?.shadowRoot?.querySelector('.syntax')?.textContent ?? '';
-  const id = el?.getAttribute('data-id');
-  return {
-    fn: /^\s*([A-Za-z_]\w*)/.exec(text)?.[1] ?? '',
-    fnNode: id == null ? null : Number(id),
-  };
+  return /^\s*([A-Za-z_]\w*)/.exec(text)?.[1] ?? '';
 }
 function paintHeader(): void {
   if (!header) return;
@@ -256,9 +341,6 @@ function paintHeader(): void {
       col: at.col,
       running: runState.state === 'running',
       conflicts,
-      ...fnAt(active),
-      draft: active?.lines().some((l) => l.draft) ?? false,
-      focus,
     },
     host,
   );
@@ -414,22 +496,19 @@ function receive(m: ServerMsg): void {
       views.get(m.view)?.showSelection(m);
       return;
     case 's_hover': {
+      if (showFloat(m)) return;
       const v = views.get(m.view);
-      // cursor (hoverAt not) - card entity with a role, otherwise the panel at the cursor; according to the
-      // pointer - without panel lines
+      // right click (barFor) - the panel “Edit”; on the cursor (hoverAt no) - only the entity card; the panel
+      // lines - only her
       const card = m.lines.some((l) => l.kind === 'имя');
       const bar = m.lines.filter((l) => l.kind.startsWith('панель'));
-      const el = m.node === null ? undefined : v?.byId.get(m.node);
-      if (
-        v &&
-        !hoverAt &&
-        !(card && cardRoles.includes(el?.dataset.role ?? ''))
-      ) {
-        v.showBar(bar.at(0)?.target ?? null, (b) => {
-          panels.cursorBar(b, bar, host);
+      if (v && barFor !== null && m.node === barFor) {
+        barFor = null;
+        // No overload - in the bar and add (same line as the error card)
+        const add = m.lines.filter((l) => l.kind === 'добавить');
+        v.showBar(bar.at(0)?.target ?? m.node, (b) => {
+          panels.cursorBar(b, [...bar, ...add], host);
         });
-        focus = bar.at(0)?.text.split(' : ').at(-1) ?? '';
-        paintHeader();
         return;
       }
       const rest = { ...m, lines: m.lines.filter((l) => !bar.includes(l)) };
@@ -442,7 +521,9 @@ function receive(m: ServerMsg): void {
     }
     case 's_hint': {
       const v = views.get(m.view);
-      v?.showHint(m, (node) => {
+      // typing hint - only while dialing, not all the time while the cursor is in brackets of the call
+      const typing = Date.now() - typedAt < 1500;
+      v?.showHint(typing ? m : { ...m, lines: [] }, (node) => {
         send({ type: 'c_open', view: v.data.view, node });
       });
       return;
@@ -471,7 +552,7 @@ let aiBusy = false;
 const aiContext = byId('ai-context');
 let aiContextOff = false;
 function aiPlace(): string {
-  const { fn } = fnAt(active);
+  const fn = fnAt(active);
   const at = active?.cursor ? active.position(active.cursor) : undefined;
   if (fn === '' && !at) return '';
   return [fn, at ? `строка ${String(at.line)}` : '']
@@ -554,6 +635,16 @@ let steady: StatusView = { kind: '', text: '', hint: '' };
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
 function paintStatus(s: StatusView): void {
   panels.status(statusLine, s, host);
+  // key in someone else's draft (frame "Two clients") - a card at the cursor, not a bang on top
+  const caret = active?.caret;
+  if (s.kind === 'locked' && caret && !caret.hidden) {
+    const r = caret.getBoundingClientRect();
+    statusLine.style.left = `${String(r.left + 24)}px`;
+    statusLine.style.top = `${String(r.bottom + 10)}px`;
+  } else {
+    statusLine.style.left = '';
+    statusLine.style.top = '';
+  }
 }
 function flashStatus(kind: string, text: string, hint = ''): void {
   clearTimeout(flashTimer);
@@ -564,7 +655,7 @@ function flashStatus(kind: string, text: string, hint = ''): void {
   }, 3000);
 }
 function showStatus(s: StatusView): void {
-  if (s.kind === 'done') {
+  if (s.kind === 'done' || s.kind === 'locked') {
     steady = { kind: '', text: '', hint: '' };
     flashStatus(s.kind, s.text, s.hint);
     return;
@@ -783,6 +874,7 @@ gotoInput.addEventListener('keydown', (e) => {
 let hoverAt: { x: number; y: number } | undefined;
 let hoverTimer: ReturnType<typeof setTimeout> | undefined;
 let hoverNode = -1;
+let hideTimer: ReturnType<typeof setTimeout> | undefined;
 // Keys - VM (except for developer tools and Ctrl+P - signature strings). Two projections are next: the
 // node under the pointer - and in another panel (the same node of the tree, id common).
 let twin: Element | undefined;
@@ -794,24 +886,24 @@ function showTwin(from: HTMLElement, id: string | null): void {
   twin = other.querySelector(`[data-id="${id}"]`) ?? undefined;
   twin?.setAttribute('twin', '');
 }
-// All mentions of entity under the pointer: the same entity number (from VM) in the same function is the same
-// attribute, the node itself is the same-here.
-let same: Element[] = [];
-function showSame(node: Element | null): void {
-  for (const el of same) el.removeAttribute('same');
-  same = [];
-  const entity = node?.getAttribute('data-entity');
-  const fn = node?.closest('vish-fn');
-  if (!node || !entity || !fn) return;
-  same = [...fn.querySelectorAll(`[data-entity="${entity}"]`)].filter(
-    (el) => el.closest('vish-fn') === fn,
-  );
-  for (const el of same) el.setAttribute('same', el === node ? 'here' : '');
-}
 for (const pane of [app, side]) {
   pane.addEventListener('mousemove', (e) => {
     showTwin(pane, ViewElement.nodeOf(e)?.getAttribute('data-id') ?? null);
-    showSame(ViewElement.nodeOf(e) ?? null);
+  });
+  // The right click on node is the black panel "Edit" (frame "1 · Edit"; the author's decision
+  // 2026-10-28 - only on PCM, below it there will be a menu): expression with type, step, actions.
+  pane.addEventListener('contextmenu', (e) => {
+    const v = [...views.values()].find((x) => x.host === pane);
+    const node = ViewElement.nodeOf(e)?.nodeId ?? null;
+    if (!v || node === null) return;
+    e.preventDefault();
+    v.hideHover();
+    barFor = node;
+    send({ type: 'c_hover', view: v.data.view, node });
+  });
+  pane.addEventListener('mousedown', (e) => {
+    if (e.button !== 2)
+      for (const v of views.values()) if (v.host === pane) v.hideBar();
   });
   pane.addEventListener('keydown', (e) => {
     const v = [...views.values()].find((x) => x.host === pane);
@@ -819,6 +911,8 @@ for (const pane of [app, side]) {
     if (['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) return;
     v.hideHover();
     v.hideBar();
+    if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete')
+      typedAt = Date.now();
     if (e.isComposing || e.key === 'Process') return; // IME: Text by compositionen d d
     if (e.key === 'F2') {
       e.preventDefault();
@@ -952,17 +1046,27 @@ for (const pane of [app, side]) {
     if (!v || dragging) return;
     if (e.composedPath().includes(v.tip)) {
       clearTimeout(hoverTimer);
+      clearTimeout(hideTimer); // The pointer reached the tip - holds
       return;
     }
     const n = ViewElement.nodeOf(e);
     v.pointPath(n);
-    if (n?.nodeId !== hoverNode) v.hideHover();
+    // left with node - the hint does not immediately fade: it can be reached by a pointer through neighboring node
+    if (n?.nodeId !== hoverNode && !v.tip.hidden) {
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        hoverNode = -1;
+        v.hideHover();
+      }, 450);
+    }
     clearTimeout(hoverTimer);
     if (!n) {
       hoverNode = -1;
       return;
     }
+    if (n.nodeId === hoverNode && !v.tip.hidden) return; // The same clue is already open.
     hoverTimer = setTimeout(() => {
+      clearTimeout(hideTimer);
       hoverNode = n.nodeId;
       hoverAt = { x: e.clientX, y: e.clientY };
       send({ type: 'c_hover', view: v.data.view, node: n.nodeId });
@@ -996,7 +1100,10 @@ for (const pane of [app, side]) {
   pane.addEventListener('mouseleave', () => {
     inspector.showLabel('', 0, 0);
     clearTimeout(hoverTimer);
-    hoverNode = -1;
-    for (const v of views.values()) if (v.host === pane) v.hideHover();
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      hoverNode = -1;
+      for (const v of views.values()) if (v.host === pane) v.hideHover();
+    }, 450);
   });
 }

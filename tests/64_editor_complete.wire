@@ -17,8 +17,6 @@ key 1 r
 // expect: name="print" kind="функция" detail="(x) — VM"
 // expect: name="port" kind="функция" detail="(n)"
 // expect: name="parse_int"
-// Basement - place of set (frame "Addition")
-// expect: context="контекст: main"
 // arrows with an open list - the choice in VM, the cursor does not move
 key 1 ArrowDown
 // expect: selected=1

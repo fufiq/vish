@@ -44,6 +44,8 @@ export class Inspector {
     readonly actions: {
       open(view: ViewElement, node: NodeId): void; // citation
       place(view: ViewElement, node: NodeId): void; // node
+      hover(view: ViewElement, node: NodeId | null, x: number, y: number): void; // node card
+      menu(view: ViewElement, node: NodeId, x: number, y: number): void; // Editing panel
     },
     readonly paint: Pick<Panels, 'inspect' | 'expansion'>,
   ) {
@@ -91,6 +93,12 @@ export class Inspector {
       },
       mark: (node) => {
         this.#mark(node);
+      },
+      hover: (node, x, y) => {
+        this.actions.hover(view, node, x, y);
+      },
+      menu: (node, x, y) => {
+        this.actions.menu(view, node, x, y);
       },
     };
   }
