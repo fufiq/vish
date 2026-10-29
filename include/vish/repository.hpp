@@ -45,11 +45,13 @@ struct repository_branch {
 
 struct repository_state {
   std::string path;
-  std::string branch = "main";
+  std::string branch;
   std::vector<repository_module> modules;
   std::vector<repository_snapshot> snapshots;
-  std::vector<repository_branch> branches{{"main", 0}};
+  std::vector<repository_branch> branches;
   uint32_t next_id = 1;
+  uint64_t generation = 0; // changes to the directory, pictures and branches in addition to the edits AST
+  mutable uint64_t disk_checksum = 0; // last read/written version of the file
 };
 
 struct repository_file {
@@ -58,63 +60,45 @@ struct repository_file {
   std::vector<journal_entry> journal;
 };
 
-// The reserved names belong to host and are not included in the user manifest.
-bool repository_builtin(std::string_view name) {
-  return name == "prelude" || name == "tools" || name == "versions" || name == "tests" || name == "cli" || name == "editor";
-}
-
 repository_state repository_create(ast_db const & db, node_id root, std::string const & path) {
-  if(std::filesystem::exists(path)) throw diagnostic(cat(path, ": файл уже существует"), {});
+  if(os::file_exists(path)) throw diagnostic(cat(path, ": файл уже существует"), {});
   if(!root || root.value >= db.size() || !db.is<n_module>(root)) throw diagnostic("репозиторий: неверный корень", {});
   repository_state state;
   state.path = path;
-  for(uint32_t i = 0; i < db.size(); ++i) {
-    node_id n(i);
-    if(!db.is<n_module>(n) || db[n].parent) continue;
-    auto key = db.as<n_module>(n).name;
-    std::string name = key ? std::string(db.strings.text(key)) : std::string();
-    if(n == root && name.empty()) name = "main";
-    else if(name.empty()) continue;
-    if(repository_builtin(name)) {
-      if(n == root) throw diagnostic("репозиторий: корень — встроенный модуль", {});
-      continue;
-    }
-    for(auto const & m: state.modules)
-      if(m.name == name) throw diagnostic(cat("репозиторий: повтор имени ", name), {});
-    state.modules.push_back({n, std::move(name)});
-  }
   return state;
 }
 
 // The container contains journal once. The image is the prefix boundary of this journal,
 // so the recovery does not lose future node numbers and the history of other branches.
-constexpr std::string_view repository_magic = "VISHREPO01";
+constexpr std::string_view repository_magic = "VISHREPO04";
 constexpr uint64_t repository_limit = 512ull * 1024 * 1024;
 
 // Check links before the playback operation: regular replay trusts its journal. The checksum detects
 // damage to bytes, this check is damage to the structure.
 void repository_replay(ast_db & db, std::vector<journal_entry> const & entries) {
-  auto bad = [] { throw diagnostic("репозиторий: повреждён журнал", {}); };
-  std::vector<uint32_t> entered, finished;
+  uint64_t step = 0;
+  std::string_view reason = "ссылка";
+  auto bad = [&] { throw diagnostic(cat("репозиторий: повреждён журнал (операция ", step, ", ", reason, ")"), {}); };
+  std::vector<uint32_t> entered;
   uint32_t visit = 0;
   auto tree = [&](node_id root) {
+    reason = "дерево";
     entered.resize(db.size());
-    finished.resize(db.size());
     ++visit;
-    std::vector<std::pair<node_id, bool>> stack{{root, false}};
+    std::vector<std::pair<node_id, uint32_t>> stack{{root, 0}};
     while(!stack.empty()) {
-      auto [n, leave] = stack.back();
+      auto [n, depth] = stack.back();
       stack.pop_back();
       if(!n || n.value >= db.size()) bad();
-      if(leave) { finished[n.value] = visit; continue; }
+      if(depth > 2048) bad();
       if(entered[n.value] == visit) bad(); // cycle
       entered[n.value] = visit;
-      stack.push_back({n, true});
-      db.for_each_child(n, [&](node_id c) { stack.push_back({c, false}); });
+      db.for_each_child(n, [&](node_id c) { stack.push_back({c, depth + 1}); });
       if(stack.size() > 1000000) bad();
     }
   };
   auto kind_ok = [&](node_kind const & kind, uint32_t count) {
+    reason = "поля узла";
     auto field = [&](auto const & self, auto const & v) -> void {
       using T = std::remove_cvref_t<decltype(v)>;
       if constexpr(std::is_same_v<T, node_id>) { if(v && v.value >= count) bad(); }
@@ -125,13 +109,20 @@ void repository_replay(ast_db & db, std::vector<journal_entry> const & entries) 
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(k)>>()) field(field, k.[:m:]);
       if constexpr(std::is_same_v<std::remove_cvref_t<decltype(k)>, n_ref>)
         if(k.target >= count) bad();
+      if constexpr(std::is_same_v<std::remove_cvref_t<decltype(k)>, n_extend>)
+        if(k.target && k.target >= count) bad();
     }, kind);
   };
   auto place_ok = [&](span w) {
+    reason = "позиция узла";
     if(w.source >= db.sources.size()) { if(!db.sources.empty() || w.source) bad(); }
-    else if(w.begin > w.end || w.end > db.source(w.source).size()) bad();
+    // Virtual closing brackets/synthetic node incomplete input can have a position
+    // behind the end of the import. Replay doesn't name her.
+    if(w.begin > w.end) bad();
   };
   for(auto const & e: entries) {
+    ++step;
+    reason = "ссылка";
     std::visit([&](auto const & op) {
       using T = std::remove_cvref_t<decltype(op)>;
       if constexpr(std::is_same_v<T, j_intern>) {
@@ -158,6 +149,19 @@ void repository_replay(ast_db & db, std::vector<journal_entry> const & entries) 
       }
     }, e.op);
     db.replay({e});
+    if(auto link = std::get_if<j_link>(&e.op)) {
+      reason = "обратные связи";
+      auto parent = [&](node_id n) {
+        if(!n) return node_id{};
+        if(n.value >= db.size()) bad();
+        return db[n].parent;
+      };
+      node_id slow(link->root), fast = slow;
+      do {
+        slow = parent(slow); fast = parent(parent(fast));
+        if(slow && slow == fast) bad();
+      } while(slow && fast);
+    }
   }
 }
 
@@ -165,32 +169,19 @@ void repository_validate(repository_file const & f, ast_db const & db) {
   auto bad = [] { throw diagnostic("репозиторий: повреждён каталог или история", {}); };
   if(f.root.value >= db.size() || !db.is<n_module>(f.root)) bad();
   auto modules = [&](auto const & xs) {
-    bool main = false;
-    std::set<uint32_t> ids;
-    std::set<std::string> names;
-    for(auto const & m: xs) {
-      if(m.node.value >= db.size() || !db.is<n_module>(m.node) || m.name.empty() || repository_builtin(m.name) || !ids.insert(m.node.value).second || !names.insert(m.name).second) bad();
-      main = main || m.node == f.root;
-    }
-    if(!main) bad();
+    for(auto const & m: xs)
+      if(m.node.value >= db.size() || !db.is<n_module>(m.node)) bad();
   };
   modules(f.state.modules);
-  std::set<uint32_t> ids{0};
-  uint64_t previous_end = 0;
+  std::vector<uint64_t> module_birth(db.size(), ~uint64_t{0});
+  for(std::size_t k = 0; k < f.journal.size(); ++k)
+    if(auto added = std::get_if<j_add>(&f.journal[k].op); added && std::holds_alternative<n_module>(added->kind) && added->id < db.size()) module_birth[added->id] = k + 1;
   for(auto const & s: f.state.snapshots) {
-    if(!s.id || s.id >= f.state.next_id || !s.end || s.end > f.journal.size() || s.end < previous_end || s.name.empty()) bad();
-    for(auto p: s.parents) if(!p || !ids.contains(p)) bad();
-    if(!ids.insert(s.id).second) bad();
-    previous_end = s.end;
+    if(!s.end || s.end > f.journal.size()) bad();
     modules(s.modules);
+    for(auto const & m: s.modules) if(module_birth[m.node.value] > s.end) bad();
   }
-  bool active = false;
-  std::set<std::string> names;
-  for(auto const & b: f.state.branches) {
-    if(b.name.empty() || !names.insert(b.name).second || !ids.contains(b.head)) bad();
-    active = active || b.name == f.state.branch;
-  }
-  if(!active) bad();
+
 }
 
 void repository_save(repository_state const & state, ast_db const & db, node_id root) {
@@ -206,7 +197,13 @@ void repository_save(repository_state const & state, ast_db const & db, node_id 
   out.put(uint64_t(body.bytes.size()));
   out.put(repository_hash(body.bytes));
   out.raw(body.bytes.data(), body.bytes.size());
+  os::file_lock lock(state.path + ".lock");
+  if(state.disk_checksum) {
+    if(repository_hash(os::mapped_file(state.path).text()) != state.disk_checksum)
+      throw diagnostic("файл репозитория изменился — сохранение отклонено", {});
+  } else if(os::file_exists(state.path)) throw diagnostic("файл репозитория уже существует", {});
   os::write_file_atomic(state.path, out.bytes);
+  state.disk_checksum = repository_hash(out.bytes);
 }
 
 repository_file repository_load(std::string const & path) {
@@ -223,6 +220,7 @@ repository_file repository_load(std::string const & path) {
   auto f = r.get<repository_file>();
   if(!r.at_end()) throw diagnostic("лишние данные репозитория", {});
   f.state.path = path;
+  f.state.disk_checksum = repository_hash(bytes);
   ast_db checked;
   repository_replay(checked, f.journal);
   repository_validate(f, checked);

@@ -1,0 +1,6 @@
+// Repository: Facts from VM and team ban without fresh revision.
+// program: editor_text.vish
+open_view module
+repository 1 info - - 0
+repository 2 snapshot old - 0
+// expect: ревизия изменилась

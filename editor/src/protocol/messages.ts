@@ -182,6 +182,17 @@ export interface AgentResult {
   ok: boolean;
   text: string;
 }
+// Repository (semantic, .vishrepo): everything counts VM. info - without revision, the rest of the actions
+// require a fresh revision from s_repository; request 0 from the answer - not to the client's request.
+// action: info, init, module, open, snapshot, diff, restore, fork, checkout, merge, save.
+export interface RepositoryAsk {
+  type: 'c_repository';
+  request: number;
+  action: string;
+  key: string;
+  text: string;
+  revision: number;
+}
 export type ClientMsg =
   | Hello
   | OpenView
@@ -210,7 +221,8 @@ export type ClientMsg =
   | DecideAsk
   | ContextAsk
   | CheckAsk
-  | WorkspaceAsk;
+  | WorkspaceAsk
+  | RepositoryAsk;
 
 export interface ServerHello {
   type: 's_hello';
@@ -499,7 +511,8 @@ export type ServerMsg =
   | Peers
   | Items
   | Proposals
-  | AgentResult;
+  | AgentResult
+  | RepositoryResult;
 // Elements of the module: key (signature), text, internal
 export interface Items {
   type: 's_items';
@@ -523,6 +536,32 @@ export interface Proposal {
 export interface Proposals {
   type: 's_proposals';
   proposals: Proposal[];
+}
+
+// kind: module (node, name), snapshot (id, parent, head — второй родитель, name), branch (name, head),
+// current (name - branch, detail - path).
+export interface RepositoryEntry {
+  type: 'repository_entry';
+  kind: string;
+  id: number;
+  parent: number;
+  node: NodeId | null;
+  name: string;
+  detail: string;
+  head: number;
+}
+export interface RepositoryResult {
+  type: 's_repository';
+  request: number;
+  ok: boolean;
+  revision: number;
+  path: string;
+  branch: string;
+  head: number;
+  dirty: boolean;
+  message: string;
+  diff: string;
+  entries: RepositoryEntry[];
 }
 
 export const Mods = { shift: 1, ctrl: 2, alt: 4, meta: 8 } as const;

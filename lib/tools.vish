@@ -12,10 +12,103 @@ module tools;
 
 // The repository container is host primitives. The program and the limited AI sample
 // don't get that capability; the history decisions are in versions.
-repository_raw(i64 s, str op, str key, str text, i64 number, i64 other) => native "cpp" {
+repository_storage(i64 s, str op, str key, str text, i64 number, i64 other) => native "cpp" {
   for(auto & v: a) if(!v.known()) return erase(value(array_v::of({value(false), value(std::string()), value(int64_t(0)), value(array_v::of({}))})));
   return repository_primitive(vm, a[0].as<int64_t>(), std::string(a[1].as<str_v>().view()), std::string(a[2].as<str_v>().view()), std::string(a[3].as<str_v>().view()), a[4].as<int64_t>(), a[5].as<int64_t>());
 };
+// Only copy host data and base operations; repository rules are versions.
+repository_catalog(i64 s, modules) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & host = repository_session(vm, a[0].as<int64_t>());
+  std::vector<repository_module> out;
+  auto const & xs = a[1].as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    auto item = xs.get(k); auto const & row = item.as<array_v>();
+    out.push_back({node_id(uint32_t(row.get(0).as<int64_t>())), std::string(row.get(1).as<str_v>().view())});
+  }
+  host.repository->modules = std::move(out);
+  ++host.repository->generation;
+  return value(int64_t(0));
+};
+repository_checkpoint(i64 s, i64 id, str name, i64 parent, i64 second) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & host = repository_session(vm, a[0].as<int64_t>());
+  host.db.rollback(0);
+  std::vector<uint32_t> parents;
+  for(auto k: {3, 4}) if(a[k].as<int64_t>()) parents.push_back(uint32_t(a[k].as<int64_t>()));
+  auto & r = *host.repository;
+  auto id = uint32_t(a[1].as<int64_t>());
+  r.snapshots.push_back({id, std::move(parents), std::string(a[2].as<str_v>().view()), r.modules, host.db.journal().size()});
+  r.next_id = id + 1;
+  ++r.generation;
+  return value(int64_t(id));
+};
+version_modules(i64 v) => native "cpp" {
+  if(!a[0].known()) return erase(value(array_v::of({})));
+  std::vector<value> out;
+  if(auto * x = tools_host->at(a[0].as<int64_t>())) for(uint32_t k = 0; k < x->db->size(); ++k) {
+    node_id m(k);
+    if(x->db->is<n_module>(m) && !(*x->db)[m].parent) {
+      auto name = x->db->as<n_module>(m).name;
+      out.push_back(value(array_v::of({value(int64_t(k)), value(std::string(name ? x->db->strings.text(name) : std::string_view()))})));
+    }
+  }
+  return value(array_v::of(std::move(out)));
+};
+version_root(i64 v) => native "cpp" {
+  if(!a[0].known()) return erase(value(int64_t(-1)));
+  auto * x = tools_host->at(a[0].as<int64_t>());
+  return value(x ? int64_t(x->root.value) : int64_t(-1));
+};
+version_module_name(i64 v, i64 n) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(std::string()));
+  auto * x = tools_host->at(a[0].as<int64_t>());
+  node_id n(uint32_t(a[1].as<int64_t>()));
+  if(!x || n.value >= x->db->size() || !x->db->is<n_module>(n)) throw diagnostic("не модуль базы", {});
+  auto name = x->db->as<n_module>(n).name;
+  return value(std::string(name ? x->db->strings.text(name) : std::string_view()));
+};
+repository_tree(i64 s, i64 v, roots, selected) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & host = repository_session(vm, a[0].as<int64_t>());
+  auto * target = tools_host->at(a[1].as<int64_t>());
+  if(!target) throw diagnostic("нет версии базы", {});
+  std::vector<node_id> roots, selected;
+  for(auto [at, out]: {std::pair{2, &roots}, std::pair{3, &selected}}) {
+    auto const & xs = a[at].as<array_v>();
+    for(uint32_t k = 0; k < xs.size(); ++k) out->push_back(node_id(uint32_t(xs.get(k).as<int64_t>())));
+  }
+  restore_nodes(host.db, *target->db, roots, selected);
+  return value(int64_t(0));
+};
+repository_clear(i64 s, i64 n) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(int64_t(0)));
+  auto & host = repository_session(vm, a[0].as<int64_t>());
+  node_id n(uint32_t(a[1].as<int64_t>()));
+  if(n.value >= host.db.size() || !host.db.is<n_module>(n)) throw diagnostic("не модуль базы", {});
+  host.db.replace(n, n_module{});
+  return value(int64_t(0));
+};
+repository_attach(i64 s, i64 module, i64 node, i64 at, i64 blank, bool inner) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & host = repository_session(vm, a[0].as<int64_t>());
+  node_id m(uint32_t(a[1].as<int64_t>())), n(uint32_t(a[2].as<int64_t>()));
+  if(m.value >= host.db.size() || !host.db.is<n_module>(m) || n.value >= host.db.size()) throw diagnostic("неверный узел базы", {});
+  auto mod = host.db.as<n_module>(m);
+  auto old = std::ranges::find(mod.items, n);
+  if(old != mod.items.end()) {
+    auto at = std::size_t(old - mod.items.begin()); mod.items.erase(old);
+    if(at < mod.blank.size()) mod.blank.erase(mod.blank.begin() + at);
+  }
+  auto at = a[3].as<int64_t>();
+  if(at < 0 || uint64_t(at) > mod.items.size()) throw diagnostic("неверное место элемента", {});
+  mod.blank.resize(mod.items.size() + 1);
+  mod.items.insert(mod.items.begin() + at, n); mod.blank.insert(mod.blank.begin() + at, uint32_t(a[4].as<int64_t>()));
+  std::erase(mod.inner, n.value); if(a[5].as<bool>()) mod.inner.push_back(n.value);
+  host.db.replace(m, std::move(mod)); host.db.link_parents(m);
+  return value(int64_t(0));
+};
+
 // The exact structure of the written subtree: comparison, not hash with collisions.
 version_structure(i64 v, i64 n) => native "cpp" {
   if(!a[0].known() || !a[1].known()) return erase(value(std::string()));
@@ -388,7 +481,11 @@ vm_save(i64 s, str path) => native "cpp" {
   auto & x = tools_host->session((a[0]).as<int64_t>());
   std::string path((a[1]).as<str_v>().view());
   try {
-    save_db(x.db, x.root, path);
+    if(path.ends_with(".vishrepo")) {
+      if(!x.repository || x.repository->path != path) throw diagnostic("для нового репозитория используйте vish repo init", {});
+      auto r = repository_primitive(vm, a[0].as<int64_t>(), "save", "", "", 0, 0).as<array_v>();
+      if(!r.get(0).as<bool>()) throw diagnostic(std::string(r.get(1).as<str_v>().view()), {});
+    } else save_db(x.db, x.root, path);
   } catch(diagnostic const & d) {
     return value(render(d, x.name, x.db));
   }

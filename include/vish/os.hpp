@@ -21,12 +21,36 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 namespace vish::os {
+
+bool file_exists(std::string const & path) {
+  struct stat info;
+  if(::stat(path.c_str(), &info) == 0) return true;
+  if(errno == ENOENT || errno == ENOTDIR) return false;
+  throw diagnostic(cat("не могу проверить файл ", path), {});
+}
+
+// A separate inode lock survives an atomic rename data file. Verification of the
+// expected version and recording are performed under one lock.
+struct file_lock {
+  int fd = -1;
+  explicit file_lock(std::string const & path) {
+    fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if(fd < 0) throw diagnostic(cat("не могу открыть блокировку ", path), {});
+    int rc;
+    do rc = ::flock(fd, LOCK_EX); while(rc < 0 && errno == EINTR);
+    if(rc < 0) { ::close(fd); fd = -1; throw diagnostic(cat("не могу заблокировать ", path), {}); }
+  }
+  file_lock(file_lock const &) = delete;
+  file_lock & operator=(file_lock const &) = delete;
+  ~file_lock() { if(fd >= 0) ::close(fd); }
+};
 
 // Display a read-only file; text is string_view on file pages.
 struct mapped_file {

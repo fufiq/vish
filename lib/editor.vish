@@ -840,21 +840,30 @@ save_program(str path) => native "cpp" {
 };
 // Program session - the number for the Tools module session commands (apply_command ...)
 program_session() => native "cpp" { return value(tools_host->session_of(editor_host->session)); };
-send_repository(i64 request, bool ok, str message, str diff, str path, str branch, i64 head, bool dirty, rows) => native "cpp" {
+send_repository(i64 request, bool ok, str message, str diff, str path, str branch, i64 head, bool dirty, rows, i64 revision) => native "cpp" {
   for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
   auto & h = *editor_host;
   proto::s_repository out;
   out.request = uint32_t(a[0].as<int64_t>()); out.ok = a[1].as<bool>();
-  out.revision = h.session.db.edits + 1;
+  out.revision = uint64_t(a[9].as<int64_t>());
   out.message = a[2].as<str_v>().view(); out.diff = a[3].as<str_v>().view();
   out.path = a[4].as<str_v>().view(); out.branch = a[5].as<str_v>().view();
   out.head = uint64_t(a[6].as<int64_t>()); out.dirty = a[7].as<bool>();
   auto const & xs = a[8].as<array_v>();
   for(uint32_t k = 0; k < xs.size(); ++k) {
-    auto const & row = xs.get(k).as<array_v>();
+    auto item = xs.get(k);
+    auto const & row = item.as<array_v>();
     out.entries.push_back({std::string(row.get(0).as<str_v>().view()), uint64_t(row.get(1).as<int64_t>()), uint64_t(row.get(2).as<int64_t>()), node_id(uint32_t(row.get(3).as<int64_t>())), std::string(row.get(4).as<str_v>().view()), std::string(row.get(5).as<str_v>().view()), uint64_t(row.get(6).as<int64_t>())});
   }
-  if(h.now_peer) h.send(*h.now_peer, out);
+  if(out.request == 0) { for(auto & p: h.peers) if(p.open) h.send(p, out); }
+  else if(h.now_peer) h.send(*h.now_peer, out);
+  return value(int64_t(0));
+};
+repository_save_failed(str reason) => native "cpp" {
+  if(!a[0].known()) return erase(value(int64_t(0)));
+  std::string message = cat("автосохранение: ", a[0].as<str_v>().view());
+  put(stderr, message + "\n");
+  for(auto & p: editor_host->peers) if(p.open) editor_host->send(p, proto::s_error{message});
   return value(int64_t(0));
 };
 // Merge conflicts (and taken by itself) - to the client: conflicts - conflict tools module
@@ -1851,7 +1860,8 @@ idle() {
   }
   if(repo_branch(program_session()) != "") {
     r = repository_raw(program_session(), "save", "", "", 0, 0);
-    if(!r[0]) report("автосохранение: " + r[1]);
+    if(!r[0]) repository_save_failed(r[1]);
+    else repository_reply(0, true, "", "");
   }
   0
 }
@@ -5049,12 +5059,40 @@ on_save() {
 repository_reply(i64 request, bool ok, str message, str diff) {
   s = program_session();
   info = repo_op(s, "state", "", "", 0, 0);
-  send_repository(request, ok, message, diff, info[1], repo_branch(s), info[2], repo_dirty(s) || any_draft_open(), info[3])
+  dirty = repo_dirty(s) || any_draft_open();
+  revision = repository_revision();
+  send_repository(request, ok, message, diff, info[1], repo_branch(s), info[2], dirty, info[3], revision)
+}
+repository_seen = "";
+repository_serial = 1;
+repository_part(str part) => (text(part.size) + ":") + part;
+// The token belongs to a live VM. Ownership revisions of elaboration do not make
+// review obsolete; changes to comments/ layouts/links and history do.
+repository_revision() {
+  s = program_session();
+  repo_normalize(s);
+  info = repo_direct(s, "state", "", "", 0, 0);
+  repo_direct(s, "live", "", "", 0, 0);
+  stamp = repository_part(info[1]) + (text(info[3].size) + ";");
+  for(row : info[3]) for(part : array{row[0], text(row[1]), text(row[2]), text(row[3]), row[4], row[5], text(row[6])}) stamp = stamp + repository_part(part);
+  mods = array{};
+  for(row : info[3]) if(row[0] == "module") mods.push(repo_mod{row[3], row[4]});
+  stamp = stamp + (text(mods.size) + ";");
+  for(m : mods) {
+    structure = version_structure(0, m.node);
+    stamp = stamp + repository_part(structure);
+  }
+  if(repository_seen != stamp) { repository_seen = stamp; repository_serial += 1; }
+  repository_serial
 }
 on_repository(i64 request, str action, str key, str body, i64 wanted) {
+  try { repository_dispatch(request, action, key, body, wanted); }
+  catch(e) { send_repository(request, false, text(e), "", "", "", 0, true, array{}, repository_serial); }
+}
+repository_dispatch(i64 request, str action, str key, str body, i64 wanted) {
   if(action != "info") {
     finalize_everyone();
-    if(wanted != program_revision()) return repository_reply(request, false, "ревизия изменилась — обновите состояние репозитория", "");
+    if(wanted != repository_revision()) return repository_reply(request, false, "ревизия изменилась — обновите состояние репозитория", "");
   }
   if(action == "open") {
     s = program_session();
@@ -5075,6 +5113,12 @@ on_repository(i64 request, str action, str key, str body, i64 wanted) {
     modules = repo_modules(program_session(), 0);
     for(w : range(views.size)) if(given(views[w].root)) {
       if((views[w].kind == "module") && (repo_mod_of(modules, code_id(views[w].root)).node < 0)) views[w].root = program();
+      if((views[w].kind == "fn") && !in_prelude(views[w].root)) {
+        home = code_module(views[w].root);
+        if(!given(home) || (repo_mod_of(modules, code_id(home)).node < 0)) {
+          views[w].root = program(); views[w].kind = "module";
+        }
+      }
       views[w].done = array{}; views[w].undone = array{};
     }
     refresh_all();

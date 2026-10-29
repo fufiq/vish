@@ -59,6 +59,34 @@ describe('живая VM', () => {
       'input',
       'expected',
     ]);
+    expect(fields('c_repository')).toEqual([
+      'request',
+      'action',
+      'key',
+      'text',
+      'revision',
+    ]);
+    expect(fields('repository_entry')).toEqual([
+      'kind',
+      'id',
+      'parent',
+      'node',
+      'name',
+      'detail',
+      'head',
+    ]);
+    expect(fields('s_repository')).toEqual([
+      'request',
+      'ok',
+      'revision',
+      'path',
+      'branch',
+      'head',
+      'dirty',
+      'message',
+      'diff',
+      'entries',
+    ]);
     expect(fields('s_agent')).toEqual([
       'request',
       'revision',

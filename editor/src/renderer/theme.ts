@@ -31,6 +31,7 @@ export interface Host {
   press(key: string, mods?: number): void; // key to the window as from the keyboard (F2 - inspector, Ctrl+P)
   run(): void; // F5 - Launch with arguments and stdin panel
   stop(): void; // Shift+F5
+  repository(): void; // Show/hide the Repository panel (Ctrl+Shift+G)
 }
 
 // Start state for cap panel and window: idle - not run
@@ -62,6 +63,7 @@ export interface HeaderView {
   checked: boolean;
   running: boolean; // is launching (frame “Run”: “ → is coming”)
   conflicts: number; // Unresolved merger conflicts (frame "Merge")
+  repository: boolean; // Repository panel is open
   line: number;
   col: number;
 }

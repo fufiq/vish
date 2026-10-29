@@ -237,7 +237,169 @@ merge_command(args) => if(args.size >= 2) merge_files(args[0], args[1], if(args.
 
 // Local repository (§9.4). Container mechanics - host; history, choice of common base,
 // and merger solutions are here. This is our development of the original ideas of key
-// => ast and stable semantic links.
+// => ast and stable semantic links. Names, directory, photo numbers/parents and state
+// application are on Vish.
+repo_builtin(str name) => has_text(array{"prelude", "tools", "versions", "tests", "cli", "editor"}, name);
+repo_ident_start(i64 c) => ((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || ((c == '_') || (c >= 128)));
+repo_name_ok(str name) {
+  if((name.size == 0) || ((name.size > 256) || repo_builtin(name))) return false;
+  first = true;
+  for(k : range(name.size)) {
+    c = name[k];
+    if(c == '.') { if(first) return false; first = true; }
+    else { if(!repo_ident_start(c) && (first || !((c >= '0') && (c <= '9')))) return false; first = false; }
+  }
+  !first
+}
+repo_direct(i64 s, str op, str key, str body, i64 n, i64 other) {
+  r = repository_storage(s, op, key, body, n, other);
+  if(!r[0]) throw r[1];
+  r
+}
+repo_catalog_data(mods) {
+  rows = array{};
+  for(m : mods) rows.push(array{m.node, m.name});
+  rows
+}
+repo_native_modules(i64 s, i64 snapshot) {
+  r = array{};
+  for(x : repo_direct(s, "modules", "", "", snapshot, 0)[3]) r.push(repo_mod{x[3], x[4]});
+  r
+}
+repo_check_catalog(mods, i64 root) {
+  ids = array{}; names = array{};
+  for(m : mods) {
+    if(!repo_name_ok(m.name) || (has_number(ids, m.node) || has_text(names, m.name))) throw "повреждён каталог модулей";
+    ids.push(m.node); names.push(m.name);
+  }
+  if(!has_number(ids, root)) throw "в каталоге нет корневого модуля";
+  true
+}
+repo_normalize(i64 s) {
+  info = repo_direct(s, "state", "", "", 0, 0);
+  if(info[1] == "") return 0;
+  repo_direct(s, "live", "", "", 0, 0);
+  root = version_root(0);
+  mods = repo_native_modules(s, 0);
+  changed = false;
+  for(k : range(mods.size)) {
+    name = version_module_name(0, mods[k].node);
+    if((name == "") && (mods[k].node == root)) name = "main";
+    if(mods[k].name != name) { mods[k].name = name; changed = true; }
+  }
+  repo_check_catalog(mods, root);
+  if(changed) repository_catalog(s, repo_catalog_data(mods));
+  0
+}
+repo_restore_state(i64 s, i64 snapshot) {
+  old = repo_native_modules(s, 0);
+  target = repo_native_modules(s, snapshot);
+  v = repo_direct(s, "version", "", "", snapshot, 0)[2];
+  roots = array{};
+  for(m : target) roots.push(m.node);
+  repository_tree(s, v, roots, array{});
+  version_close(v);
+  for(m : old) if(repo_mod_of(target, m.node).node < 0) repository_clear(s, m.node);
+  repository_catalog(s, repo_catalog_data(target));
+  0
+}
+repo_take_module(i64 s, i64 snapshot, i64 node, str choice) {
+  live = repo_native_modules(s, 0);
+  target = repo_mod_of(repo_native_modules(s, snapshot), node);
+  next = array{};
+  removed = array{};
+  for(m : live) if(m.node != node) {
+    if((target.node >= 0) && (m.name == target.name)) {
+      if((choice != "theirs") || (m.node == version_root(0))) throw "конфликт имён модулей";
+      removed.push(m.node);
+    } else next.push(m);
+  }
+  if(target.node < 0) {
+    if(node == version_root(0)) throw "нельзя удалить корневой модуль";
+    repository_clear(s, node);
+  } else {
+    v = repo_direct(s, "version", "", "", snapshot, 0)[2];
+    repository_tree(s, v, array{node}, array{});
+    version_close(v);
+    next.push(target);
+  }
+  for(id : removed) repository_clear(s, id);
+  repository_catalog(s, repo_catalog_data(next));
+  0
+}
+repo_take_item(i64 s, i64 snapshot, i64 module, i64 node) {
+  if(repo_mod_of(repo_native_modules(s, 0), module).node < 0) throw "нет модуля слияния";
+  v = repo_direct(s, "version", "", "", snapshot, 0)[2];
+  target = repo_items(v, module);
+  chosen = find_item(target, text(node));
+  if(!chosen.present) version_remove(0, module, node);
+  else {
+    live = repo_items(0, module);
+    at = 0; before = true;
+    for(m : target) {
+      if(m.node == node) before = false;
+      if(before) {
+        index = 0;
+        for(x : live) if(x.node != node) { if(x.node == m.node) at = index + 1; index += 1; }
+      }
+    }
+    repository_tree(s, v, array{module}, array{node});
+    repository_attach(s, module, node, at, chosen.blank, chosen.inner);
+  }
+  version_close(v);
+  0
+}
+repository_raw(i64 s, str op, str key, str body, i64 n, i64 other) {
+  try {
+    if(op == "init") {
+      if(!ends_with(key, ".vishrepo")) throw "путь должен оканчиваться на .vishrepo";
+      if(repo_direct(s, "state", "", "", 0, 0)[1] != "") throw "репозиторий уже открыт";
+      repo_direct(s, "live", "", "", 0, 0);
+      root = version_root(0);
+      mods = array{};
+      for(x : version_modules(0)) if((x[1] != "") || (x[0] == root)) {
+        name = if(x[1] == "") "main" else x[1];
+        if(!repo_builtin(name)) mods.push(repo_mod{x[0], name});
+      }
+      repo_check_catalog(mods, root);
+      repo_direct(s, "init", key, "", 0, 0);
+      repository_catalog(s, repo_catalog_data(mods));
+      repo_direct(s, "branch", "main", "", 0, 1);
+    } else if(op == "capture") {
+      if((key.size == 0) || (key.size > 512)) throw "нужно имя снимка до 512 байт";
+      info = repo_direct(s, "state", "", "", 0, 0);
+      next = 0; ids = array{0};
+      for(x : info[3]) {
+        if(x[0] == "current") next = x[1];
+        if(x[0] == "snapshot") ids.push(x[1]);
+      }
+      if((next <= 0) || (next > 4096)) throw "не больше 4096 снимков";
+      if(!has_number(ids, n) || !has_number(ids, other)) throw "нет родителя снимка";
+      repo_normalize(s);
+      id = repository_checkpoint(s, next, key, n, other);
+      return array{true, info[1], id, array{}};
+    } else if(op == "branch") {
+      if((key.size == 0) || (key.size > 128)) throw "нужно имя ветки до 128 байт";
+      found = n == 0;
+      for(x : repo_direct(s, "state", "", "", 0, 0)[3]) if((x[0] == "snapshot") && (x[1] == n)) found = true;
+      if(!found) throw "нет снимка ветки";
+    } else if(op == "module") {
+      if(!repo_name_ok(key)) throw "недопустимое имя модуля";
+      mods = repo_native_modules(s, 0);
+      for(m : mods) if(m.name == key) throw "модуль уже есть";
+      result = repo_direct(s, "module", key, ("module " + key) + (";\n" + body), 0, 0);
+      mods.push(repo_mod{result[2], key});
+      repository_catalog(s, repo_catalog_data(mods));
+      return result;
+    } else if(op == "restore") repo_restore_state(s, n);
+    else if(op == "take-module") repo_take_module(s, n, other, body);
+    else if(op == "take-item") repo_take_item(s, n, number_of(key), other);
+    if((op == "init") || ((op == "restore") || ((op == "take-module") || (op == "take-item")))) return array{true, "", 0, array{}};
+    if((op == "state") || (op == "save")) repo_normalize(s);
+    repo_direct(s, op, key, body, n, other)
+  } catch(e) { array{false, text(e), 0, array{}} }
+}
+
 repo_op(i64 s, str op, str key, str body, i64 n, i64 other) {
   r = repository_raw(s, op, key, body, n, other);
   if(!r[0]) throw r[1];
@@ -385,8 +547,13 @@ repo_merge(i64 s, i64 theirs, str choice) {
     a = repo_mod_of(am, m.node);
     t = repo_mod_of(tm, m.node);
     if(!repo_mod_same(av, a, tv, t) && !repo_mod_same(tv, t, bv, b)) {
-      if(repo_mod_same(av, a, bv, b)) picks.push(repo_pick{"take-module", m.node, m.node, false, m.name});
+      if(repo_mod_same(av, a, bv, b)) {
+        clash = false;
+        if(t.node >= 0) for(q : am) if((q.node != t.node) && (q.name == t.name)) clash = true;
+        picks.push(repo_pick{"take-module", m.node, m.node, clash, m.name + (if(clash) " (имя модуля)" else "")});
+      }
       else if((a.node < 0) || ((t.node < 0) || ((b.node < 0) || ((a.name != b.name) || (t.name != b.name))))) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name});
+      else if(version_module_meta(av, a.node) != version_module_meta(tv, t.node)) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name + " (выбор целого модуля)"});
       else {
         ai = repo_items(av, a.node);
         bi = repo_items(bv, b.node);
@@ -399,8 +566,6 @@ repo_merge(i64 s, i64 theirs, str choice) {
           z = find_item(ti, id);
           if(!repo_same(av, x, tv, z) && !repo_same(tv, z, bv, y)) picks.push(repo_pick{"take-item", m.node, number_of(id), !repo_same(av, x, bv, y), ((m.name + "::") + (if(x.present) x.key else z.key))});
         }
-        // The modified header/module layout requires an explicit selection of the entire module.
-        if(version_module_meta(av, a.node) != version_module_meta(tv, t.node)) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name + " (метаданные)"});
       }
     }
   }
@@ -408,7 +573,7 @@ repo_merge(i64 s, i64 theirs, str choice) {
   version_close(av); version_close(bv); version_close(tv);
   if((conflicts != "") && ((choice != "ours") && (choice != "theirs"))) return array{false, "нужен выбор конфликтов: ours / theirs", conflicts};
   try {
-    for(p : picks) if(!p.conflict || (choice == "theirs")) repo_op(s, p.kind, text(p.mod), "", theirs, p.node);
+    for(p : picks) if(!p.conflict || (choice == "theirs")) repo_op(s, p.kind, text(p.mod), choice, theirs, p.node);
   } catch(e) {
     repo_op(s, "restore", "", "", mine, 0);
     throw e;
@@ -418,6 +583,7 @@ repo_merge(i64 s, i64 theirs, str choice) {
 }
 repository_command(i64 s, str action, str key, str body) {
   try {
+    repo_verify(s);
     if(action == "info") return array{true, "", ""};
     if(action == "init") {
       repo_op(s, "init", key, "", 0, 0);
@@ -445,6 +611,39 @@ repository_command(i64 s, str action, str key, str body) {
     repo_op(s, "save", "", "", 0, 0);
     array{true, "сохранено", ""}
   } catch(e) { array{false, text(e), ""} }
+}
+// Verification of the repository model is written in the language; the binary downloader
+// only checks the suitability of journal for safe playback and the node boundary.
+repo_verify(i64 s) {
+  info = repo_direct(s, "state", "", "", 0, 0);
+  if(info[1] == "") return true;
+  repo_direct(s, "live", "", "", 0, 0);
+  root = version_root(0);
+  repo_check_catalog(repo_native_modules(s, 0), root);
+  ids = array{0}; names = array{};
+  last = 0; end = 0; next = 0; active = "";
+  for(x : info[3]) {
+    if(x[0] == "current") { next = x[1]; active = x[4]; }
+    if(x[0] == "snapshot") {
+      if((x[1] != (last + 1)) || ((x[1] > 4096) || ((x[4].size == 0) || (x[4].size > 512)))) throw "повреждена история снимков";
+      if(!has_number(ids, x[2]) || !has_number(ids, x[6])) throw "повреждены родители снимка";
+      pos = parse_int(x[5]);
+      if(!pos.ok || ((pos.value == 0) || (pos.value < end))) throw "повреждена граница снимка";
+      end = pos.value; last = x[1]; ids.push(last);
+      repo_check_catalog(repo_native_modules(s, last), root);
+    }
+  }
+  if(next != (last + 1)) throw "повреждён счётчик снимков";
+  for(x : info[3]) if(x[0] == "branch") {
+    if((x[4].size == 0) || ((x[4].size > 128) || (has_text(names, x[4]) || !has_number(ids, x[6])))) throw "повреждён список веток";
+    names.push(x[4]);
+  }
+  if(!has_text(names, active)) throw "повреждена текущая ветка";
+  true
+}
+repository_verify_cli(args) {
+  try { repo_verify(number_of(args[0])); 0 }
+  catch(e) { fail(text(e)) }
 }
 repository_cli(args) {
   s = number_of(args[0]);

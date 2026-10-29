@@ -176,7 +176,7 @@ const theme: Theme = {
         }),
       );
     },
-    header(el, h) {
+    header(el, h, host) {
       const span = (className: string, text = '') => {
         const s = document.createElement('span');
         s.className = className;
@@ -206,10 +206,25 @@ const theme: Theme = {
         );
       }
       if (h.running) check.append(' · ', span('running', '▶ идёт')); // "Run" shot.
+      // Repository button: Clicking does not take away the focus of the code
+      const repo = document.createElement('button');
+      repo.type = 'button';
+      repo.className = 'repo-button';
+      repo.textContent = 'Репозиторий';
+      repo.title = 'Репозиторий (Ctrl+Shift+G)';
+      repo.setAttribute('aria-controls', 'repo');
+      repo.setAttribute('aria-expanded', String(h.repository));
+      repo.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+      });
+      repo.addEventListener('click', () => {
+        host.repository();
+      });
       el.replaceChildren(
         span('brand', 'VISH'),
         span('file', h.file),
         span('fill'),
+        repo,
         check,
         span('at', `${String(h.line)}:${String(h.col)}`),
       );

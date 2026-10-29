@@ -43,10 +43,20 @@ prog_parsed(i64 p) => native "cpp" {
   if(!(a[0]).known()) return erase(value(false));
   return value(cli_now->at((a[0]).as<int64_t>()).errors.empty());
 };
+prog_is_repository(i64 p) => native "cpp" {
+  if(!a[0].known()) return erase(value(false));
+  return value(bool(cli_now->at(a[0].as<int64_t>()).repository));
+};
 prog_save(i64 p, str path) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
   auto & x = cli_now->at((a[0]).as<int64_t>());
-  save_db(*x.db, x.root, std::string((a[1]).as<str_v>().view()));
+  std::string path(a[1].as<str_v>().view());
+  if(path.ends_with(".vishrepo")) {
+    auto & s = cli_now->session(a[0].as<int64_t>());
+    if(!s.repository || s.repository->path != path) throw diagnostic("для нового репозитория используйте vish repo init", {});
+    auto r = repository_primitive(vm, tools_host->session_of(s), "save", "", "", 0, 0).as<array_v>();
+    if(!r.get(0).as<bool>()) throw diagnostic(std::string(r.get(1).as<str_v>().view()), {});
+  } else save_db(*x.db, x.root, path);
   return value(int64_t(0));
 };
 prog_fmt(i64 p, str key) => native "cpp" {
@@ -162,6 +172,7 @@ cli(args) {
   if(cmd == "repo") {
     if(args.size < 3) return usage();
     action = args[1];
+    if((action != "new") && (action != "init") && !ends_with(args[2], ".vishrepo")) return fail("ожидается путь .vishrepo");
     p = if(action == "new") prog_empty() else prog_open(args[2]);
     key = if(args.size > 3) args[3] else "";
     body = if(args.size > 4) args[4] else "";
@@ -227,6 +238,9 @@ cli(args) {
   if(at >= args.size) return usage();
   if((cmd == "serve") && !ends_with(args[at], ".vishdb") && !ends_with(args[at], ".tzdb") && !ends_with(args[at], ".vishrepo")) load_editor_module();
   p = prog_open(args[at]);
+  if(prog_is_repository(p)) {
+    if(run_module("versions", "repository_verify_cli", array{text(prog_session(p))}) != 0) return 1;
+  }
   at += 1;
   write_err(prog_errors(p));
   parsed = prog_parsed(p);

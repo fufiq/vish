@@ -29,8 +29,8 @@ void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> co
   if(a.size() > b.size() || target.size() > live.size() || target.strings.size() > live.strings.size() || target.sources.size() > live.sources.size()) reject();
   for(std::size_t i = 0; i < a.size(); ++i) {
     writer x, y;
-    x.put(a[i]);
-    y.put(b[i]);
+    x.put(a[i].op); // replay recounts service audits; kinship is set by operations
+    y.put(b[i].op);
     if(x.bytes != y.bytes) reject();
   }
   struct saved { node_id id; node_kind kind; span where; node_note note; };

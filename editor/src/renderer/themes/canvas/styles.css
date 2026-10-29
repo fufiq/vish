@@ -2745,3 +2745,200 @@ body:has(#trace-bar:not([hidden])) #run {
   font-size: 10.5px;
   font-weight: 600;
 }
+
+/* Кнопка «Репозиторий» в шапке и панель слева (Ctrl+Shift+G; кадра нет — по образцу панели «ИИ») */
+#header .repo-button {
+  margin-right: 18px;
+  padding: 5px 11px;
+  border: 1px solid #e3e1da;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.6);
+  font: 12.5px var(--canvas-ui);
+  color: #3f3e3a;
+  cursor: pointer;
+}
+#header .repo-button[aria-expanded='true'] {
+  background: #ede9fe;
+  border-color: #d9d2fb;
+  color: #5b21b6;
+}
+#header .repo-button:focus-visible,
+#repo button:focus-visible,
+#repo .diff:focus-visible {
+  outline: 2px solid #a99ff2;
+  outline-offset: 1px;
+}
+#repo {
+  position: fixed;
+  z-index: 9;
+  top: 16px;
+  bottom: 16px;
+  left: 20px;
+  width: min(380px, 36vw);
+  box-sizing: border-box;
+  padding: 0;
+  border: 1px solid #ebe9e3;
+  border-radius: 18px;
+  background: rgb(255 255 255 / 0.97);
+  box-shadow:
+    0 1px 2px rgb(20 20 10 / 0.04),
+    0 18px 40px rgb(20 20 10 / 0.1);
+  overflow: hidden;
+  font: 13px/1.5 var(--canvas-ui);
+  color: #27251f;
+}
+#repo[hidden] {
+  display: none;
+}
+#repo .head {
+  padding: 14px 16px;
+  border-bottom: 1px solid #efede8;
+  font-size: 12.5px;
+  color: #8b8880;
+}
+#repo .head .title {
+  padding: 2px 8px;
+  border-radius: 7px;
+  background: #e0f2e9;
+  color: #166534;
+  font-weight: 600;
+}
+#repo .head .chip {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #f1f0ec;
+  color: #57544d;
+  font-family: var(--canvas-code);
+  font-size: 11.5px;
+}
+#repo .head .chip[dirty] {
+  background: #fef3c7;
+  color: #92400e;
+}
+#repo .close {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  color: #8b8880;
+  cursor: pointer;
+}
+#repo .close:hover {
+  background: #f1f0ec;
+}
+#repo .body {
+  padding: 12px 16px 16px;
+}
+#repo h3 {
+  color: #8b8880;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+#repo input,
+#repo select,
+#repo textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 10px;
+  background: #f6f5f2;
+  box-shadow: inset 0 0 0 1px #e7e5df;
+  font: 13px var(--canvas-ui);
+  color: #1c1c1a;
+}
+#repo input:focus,
+#repo select:focus,
+#repo textarea:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px #a99ff2;
+}
+#repo button:not(.close) {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 9px;
+  background: #18181b;
+  color: #fff;
+  font: 12.5px var(--canvas-ui);
+  cursor: pointer;
+}
+#repo button.module,
+#repo .snap button,
+#repo .review > button:not(.danger) {
+  background: #f1f0ec;
+  color: #27251f;
+}
+#repo button.module {
+  width: 100%;
+  padding: 6px 10px;
+  font-family: var(--canvas-code);
+}
+#repo button.danger {
+  background: #b91c1c;
+}
+#repo button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+#repo .msg {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f1f0ec;
+}
+#repo .msg[error] {
+  background: #fde4e4;
+  color: #b91c1c;
+}
+#repo .snap {
+  padding: 4px 0;
+  border-bottom: 1px solid #f1f0ec;
+}
+#repo .snap .id,
+#repo .snap .from {
+  font: 11.5px var(--canvas-code);
+}
+#repo .snap .tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #ede9fe;
+  color: #5b21b6;
+  font-size: 11px;
+}
+#repo .review,
+#repo .clash {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid #ebe9e3;
+  border-radius: 12px;
+}
+#repo .review[hidden],
+#repo .clash[hidden] {
+  display: none;
+}
+#repo .rhead {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#repo .diff {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #faf9f6;
+  box-shadow: inset 0 0 0 1px #efede8;
+  font: 12px/1.5 var(--canvas-code);
+  color: #1c1c1a;
+}
+#repo .warn {
+  color: #92400e;
+  font-size: 12px;
+}
+#repo .stale {
+  font-size: 12px;
+}

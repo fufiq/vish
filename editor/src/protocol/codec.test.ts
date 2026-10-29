@@ -56,6 +56,60 @@ describe('кодек по схеме', () => {
     ]);
   });
 
+  it('ответ репозитория: узел «нет», 64-битные номера и вложенные записи', () => {
+    const msg = {
+      type: 's_repository',
+      request: 3,
+      ok: true,
+      revision: 12,
+      path: '/tmp/a.vishrepo',
+      branch: 'main',
+      head: 2,
+      dirty: false,
+      message: 'ок',
+      diff: '',
+      entries: [
+        {
+          type: 'repository_entry',
+          kind: 'module',
+          id: 0,
+          parent: 0,
+          node: 7,
+          name: 'geo',
+          detail: '',
+          head: 0,
+        },
+        {
+          type: 'repository_entry',
+          kind: 'branch',
+          id: 0,
+          parent: 0,
+          node: null,
+          name: 'main',
+          detail: '',
+          head: 2,
+        },
+      ],
+    };
+    const bytes = frame(schema, schema.server, msg);
+    expect(decode(schema, schema.server, bytes.subarray(4))).toEqual(msg);
+    const ask = {
+      type: 'c_repository',
+      request: 1,
+      action: 'restore',
+      key: '2',
+      text: '',
+      revision: 12,
+    };
+    expect(
+      decode(
+        schema,
+        schema.client,
+        frame(schema, schema.client, ask).subarray(4),
+      ),
+    ).toEqual(ask);
+  });
+
   it('лишние байты и обрыв — ошибки', () => {
     const f = frame(schema, schema.server, { type: 's_error', text: 'x' });
     const body = f.subarray(4);

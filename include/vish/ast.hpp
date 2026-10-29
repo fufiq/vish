@@ -594,12 +594,26 @@ struct ast_db {
         }
     // Filmed children no longer belong to this node; playback replace does the same,
     // so backlinks match once downloaded.
+    std::size_t child_count = 0;
+    auto count = [&](node_id) { ++child_count; };
+    std::visit([&](auto const & next) { for_each_child_of(next, count); }, k);
+    std::vector<uint32_t> kept;
+    if(child_count > 8) {
+      kept.reserve(child_count);
+      auto keep = [&](node_id x) { kept.push_back(x.value); };
+      std::visit([&](auto const & next) { for_each_child_of(next, keep); }, k);
+      std::ranges::sort(kept); // A large module does not require a quadratic search for children.
+    }
     std::visit([&](auto const & old) {
       auto detach = [&](node_id child) {
+        if(nodes[child].parent != n) return;
         bool retained = false;
-        auto find = [&](node_id x) { retained = retained || x == child; };
-        std::visit([&](auto const & next) { for_each_child_of(next, find); }, k);
-        if(!retained && nodes[child].parent == n) nodes[child].parent = {};
+        if(child_count > 8) retained = std::ranges::binary_search(kept, child.value);
+        else {
+          auto find = [&](node_id x) { retained = retained || x == child; };
+          std::visit([&](auto const & next) { for_each_child_of(next, find); }, k);
+        }
+        if(!retained) nodes[child].parent = {};
       };
       for_each_child_of(old, detach);
     }, nodes[n].kind);

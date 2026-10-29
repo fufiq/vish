@@ -134,6 +134,7 @@ struct editor_server {
   // Editor's solution: name function in language; view - representation of the client (protocol number; -1
   // - first) whose projection can override the solution
   void decide(peer * p, int64_t view, std::string_view name, std::vector<value> args) {
+    uint64_t before = session.db.edits;
     {
       ++deciding;
       struct depth {
@@ -143,6 +144,7 @@ struct editor_server {
       decide_now(p, view, name, std::move(args));
     }
     if(!deciding) {
+      if(session.repository && name != "on_idle" && session.db.edits != before) schedule_check();
       flush_run_notes();
       flush_gone();
       flush_peers();
@@ -159,7 +161,9 @@ struct editor_server {
     while(m && !session.db.is<n_module>(m)) m = session.db[m].parent;
     try {
       not_an_edit quiet{*this};
-      lang_of(m).analyze_instance(f, std::move(args));
+      auto & language = lang_of(m);
+      tool_authority permitted{versions, language};
+      language.analyze_instance(f, std::move(args));
     } catch(diagnostic const & d) { // solution error in the client language, with a place in editor.vish
       if(p) send(*p, proto::s_error{cat("редактор: ", render(d, "editor.vish", session.db))});
       else put(stderr, cat("редактор: ", render(d, "editor.vish", session.db), "\n"));
@@ -177,7 +181,9 @@ struct editor_server {
   value ask(std::string_view name, std::vector<value> args) {
     host_hold hold{this, now_peer};
     not_an_edit quiet{*this};
-    return lang_of(editor_module).analyze_instance(fn_in(editor_module, name, false), std::move(args));
+    auto & language = lang_of(editor_module);
+    tool_authority permitted{versions, language};
+    return language.analyze_instance(fn_in(editor_module, name, false), std::move(args));
   }
   // The editor code in the program language does not rule, but parsing and execution give rise to derivatives
   // of node (base revision is growing): no editing - program verification is not repeated (retakes instance

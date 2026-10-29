@@ -3,10 +3,10 @@
 // Сообщения идут через настоящий сокет и
 // io_uring; текст представления сверяется с проекцией (vish fmt) автоматически.
 // program: editor_text.vish
-hello 7
-// expect: hello version=7 program="editor_text.vish"
 hello 8
-// expect: error text="версия протокола 8 не поддерживается (VM: 7)"
+// expect: hello version=8 program="editor_text.vish"
+hello 9
+// expect: error text="версия протокола 9 не поддерживается (VM: 8)"
 open_view grid
 // expect: неизвестный вид представления: grid
 open_view module

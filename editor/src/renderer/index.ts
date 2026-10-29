@@ -18,6 +18,7 @@ import {
 import type { VmBridge } from '../preload/index';
 import { ViewElement } from './view';
 import { Inspector } from './inspector';
+import { RepositoryModel, RepositoryPanel } from './repository';
 import { defineNodes } from './nodes/index';
 import {
   resolve,
@@ -75,6 +76,7 @@ const gotoBody = document.getElementById('goto-body') ?? gotoForm; // palette bo
 let paletteItems = 0; // in the palette - items on the transition list (Enter and arrows - VM)
 const mergePanel = byId('merge');
 const proposalsPanel = byId('proposals');
+const repoEl = byId('repo');
 const aiPanel = byId('ai');
 const aiLog = aiPanel.querySelector<HTMLElement>('.log') ?? aiPanel;
 const aiForm = byId('ai-form') as HTMLFormElement;
@@ -128,7 +130,32 @@ const host: Host = {
   stop() {
     stop();
   },
+  repository() {
+    toggleRepository();
+  },
 };
+// Repository: the model sends requests, the view draws the sent; answers and communication breaks here.
+const repo = new RepositoryModel(send, () => {
+  repoPanel.render();
+  if (repo.alert) {
+    repo.alert = false;
+    if (repoEl.hidden) toggleRepository(true);
+  }
+});
+const repoPanel = new RepositoryPanel(repoEl, repo, {
+  close() {
+    toggleRepository(false);
+  },
+});
+function toggleRepository(open = repoEl.hidden): void {
+  repoEl.hidden = !open;
+  if (open) {
+    repo.refresh(); // We don’t send it out, we ask you when you open it.
+    repoPanel.render();
+    repoPanel.focus();
+  } else activate(active);
+  paintHeader();
+}
 // Start (frame "Run"): state for panel cap and window
 let runState: RunState = { state: 'idle', lines: 0 };
 const runHead = document.getElementById('run-head');
@@ -367,6 +394,7 @@ function paintHeader(): void {
       col: at.col,
       running: runState.state === 'running',
       conflicts,
+      repository: !repoEl.hidden,
     },
     host,
   );
@@ -390,6 +418,10 @@ function receive(m: ServerMsg): void {
     case 's_hello':
       showStatus({ kind: '', text: '', hint: '' });
       send({ type: 'c_open_view', kind: 'module' });
+      repo.connect();
+      return;
+    case 's_repository':
+      repo.receive(m);
       return;
     case 's_view': {
       // second view of the module (Ctrl+Shift+J) - in the second panel: the same program in another projection
@@ -641,10 +673,9 @@ aiForm.addEventListener('submit', (e) => {
   if (place === '' || !active) window.vm.aiAsk(text);
   else {
     const request = ++aiRequest;
-    const timer = setTimeout(
-      () => { clearAiContext('VM не ответила на запрос контекста'); },
-      20000,
-    );
+    const timer = setTimeout(() => {
+      clearAiContext('VM не ответила на запрос контекста');
+    }, 20000);
     aiPending = { request, text, timer };
     send({
       type: 'c_context',
@@ -755,6 +786,7 @@ window.vm.onData((bytes) => {
   });
 });
 window.vm.onStatus((text, lost, hint) => {
+  if (lost) repo.disconnect();
   // communication with VM - to s_hello; disconnected - “Connect” button
   showStatus(
     lost
@@ -1083,12 +1115,18 @@ for (const pane of [app, side]) {
       if (!aiPanel.hidden) aiInput.focus();
       return;
     }
+    if (e.ctrlKey && e.shiftKey && (e.key === 'G' || e.key === 'П')) {
+      e.preventDefault();
+      toggleRepository();
+      return;
+    }
     if (e.ctrlKey && e.key === 'j') {
       openGoto('projection');
       return;
     }
     if (e.ctrlKey && e.key === 's') {
-      send({ type: 'c_save' });
+      if (repo.enabled) repo.save();
+      else send({ type: 'c_save' });
       return;
     }
     // Escape in the second panel without an open list - close the panel

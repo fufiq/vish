@@ -326,3 +326,63 @@ describe('точный контекст ИИ', () => {
     expect(element('#ai .log').textContent).toContain('VM не ответила');
   });
 });
+
+describe('панель «Репозиторий»', () => {
+  const info = (request: number, revision: number): ServerMsg => ({
+    type: 's_repository',
+    request,
+    ok: true,
+    revision,
+    path: '/p.vishrepo',
+    branch: 'main',
+    head: 0,
+    dirty: false,
+    message: '',
+    diff: '',
+    entries: [],
+  });
+  const repoAsks = () => sent.filter((m) => m.type === 'c_repository');
+  beforeEach(() => {
+    emit({
+      type: 's_hello',
+      version: schema.version,
+      program: 'p',
+      revision: 1,
+    });
+    // Responding to info connections; waiting for a past test may have left unclosed n
+    const asked = repoAsks().at(-1);
+    if (asked?.type === 'c_repository') emit(info(asked.request, 3));
+    sent.length = 0;
+  });
+
+  it('Ctrl+Shift+G открывает панель с запросом info, Escape закрывает без утечки в код', () => {
+    const repo = element('#repo');
+    repo.hidden = true;
+    const e = new KeyboardEvent('keydown', {
+      key: 'G',
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    element('#side').dispatchEvent(e);
+    expect(repo.hidden).toBe(false);
+    const asked = repoAsks().at(-1);
+    expect(asked).toMatchObject({ action: 'info', revision: 0 });
+    if (asked?.type === 'c_repository') emit(info(asked.request, 3));
+    const before = sent.length;
+    key(repo, 'a');
+    key(repo, 'Escape');
+    expect(repo.hidden).toBe(true);
+    expect(sent.slice(before).some((m) => m.type === 'c_key')).toBe(false);
+  });
+
+  it('Ctrl+S при открытом репозитории: info, затем save с присланной ревизией', () => {
+    key(element('#side'), 's', true);
+    const infoAsk = repoAsks().at(0);
+    if (infoAsk?.type !== 'c_repository') throw new Error('нет info');
+    expect(infoAsk.action).toBe('info');
+    emit(info(infoAsk.request, 4));
+    expect(repoAsks().at(-1)).toMatchObject({ action: 'save', revision: 4 });
+  });
+});
