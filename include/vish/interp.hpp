@@ -4787,7 +4787,7 @@ struct interpreter {
   flow eval_member(node_id n, member_view const & m, scope * env, uint32_t frame) {
     if(flow r; read_path(n, env, frame, r)) return r;
     value r;
-    if(value const * o = peek(m.object, env); o && o->is<array_v>()) r = member(*o, m.name, db[n].where);
+    if(value const * o = peek(m.object, env); o && (o->is<array_v>() || o->is<str_v>())) r = member(*o, m.name, db[n].where); // without a copy: s.size in a cycle is not a square
     else {
       VISH_TRY(obj, eval(m.object, env, frame));
       if(!vm_root->service_types.empty())
@@ -4867,6 +4867,10 @@ struct interpreter {
         return ok(std::move(e));
       }
       return index_rt(n, i, *arr, idx, env);
+    }
+    if(value const * s = peek(i.object, env); s && s->is<str_v>()) { // s[k] byte by cell, without a copy of a string
+      VISH_TRY(idx, eval(i.index, env, frame));
+      return index_rt(n, i, *s, idx, env);
     }
     VISH_TRY(obj, eval(i.object, env, frame));
     VISH_TRY(idx, eval(i.index, env, frame));

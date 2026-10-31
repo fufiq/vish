@@ -941,23 +941,26 @@ record_parts(str t) => native "cpp" {
   for(auto const & [name, tn]: type_registry::record_parts((a[0]).as<str_v>().view())) xs.push_back(value(array_v::of({value(std::string(name)), value(std::string(tn))})));
   return value(array_v::of(std::move(xs)));
 };
-// strings - bytes (§4.0 ): subsequence and ASCII register - base primitives (search, slice - tool module) w -
+// strings - bytes (§4.0): subsequence and ASCII register - in the language above s[k] and text_range (tools) w -
 // subsequence s (bytes in order, not in a row)
-subsequence(str s, str w) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
-  auto x = (a[0]).as<str_v>().view(), y = (a[1]).as<str_v>().view();
-  std::size_t k = 0;
-  for(char c: x)
-    if(k < y.size() && c == y[k]) ++k;
-  return value(k == y.size());
-};
-lower(str s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  std::string r((a[0]).as<str_v>().view());
-  for(char & c: r)
-    if(c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
-  return value(std::move(r));
-};
+subsequence(str s, str w) {
+  k = 0;
+  for(i : range(s.size)) if((k < w.size) && (s[i] == w[k])) k += 1;
+  k == w.size
+}
+// A - Z → a - z; other bytes as is
+lower(str s) {
+  parts = array{};
+  start = 0;
+  for(k : range(s.size)) if((s[k] >= 65) && (s[k] <= 90)) {
+    parts.push(text_range(s, start, k));
+    parts.push(text_byte(s[k] + 32));
+    start = k + 1;
+  }
+  if(start == 0) return s;
+  parts.push(text_range(s, start, s.size));
+  join_texts(parts)
+}
 
 // --- Views: Find, Open, Close ---
 empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0, 0, -1};

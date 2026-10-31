@@ -152,125 +152,186 @@ write_err(str s) => native "cpp" {
   return value(int64_t(0));
 };
 
-// --- primitives: strings - bytes (§4.0); search, slice, strings and words, order - base - place of part
-// in line; -1 - no
-find_text(str s, str part) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto at = (a[0]).as<str_v>().view().find((a[1]).as<str_v>().view());
-  return value(at == std::string_view::npos ? int64_t(-1) : int64_t(at));
-};
-// bytes [from, to]
-slice_text(str s, i64 from, i64 to) => native "cpp" {
+// --- strings - bytes (§4.0); search, slice, strings and words, order - in language ---
+// 
+// String - owning bytes without slice; bypass - by indices (s[k], s.size), The only primitive is
+// a copy of the range of bytes: assembling bytes by byte through `+` would copy the entire string
+// every time (square), the pieces are assembled into an array and glued in pairs (join_texts) -
+// without quadratic copying. text_range is my choice of minimum. bytes [from, to] as a new
+// string; boundaries on the calling line: 0 <= from <= to <= s.size
+//
+text_range(str s, i64 from, i64 to) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
   auto v = (a[0]).as<str_v>().view();
-  std::size_t f = std::size_t(std::clamp<int64_t>((a[1]).as<int64_t>(), 0, int64_t(v.size()))), t = std::size_t(std::clamp<int64_t>((a[2]).as<int64_t>(), int64_t(f), int64_t(v.size())));
-  return value(std::string(v.substr(f, t - f)));
+  return value(std::string(v.substr(std::size_t((a[1]).as<int64_t>()), std::size_t((a[2]).as<int64_t>() - (a[1]).as<int64_t>()))));
 };
-// bytetail
-text_from(str s, i64 k) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(std::string()));
-  auto v = (a[0]).as<str_v>().view();
-  std::size_t k = std::size_t(std::max<int64_t>(0, (a[1]).as<int64_t>()));
-  return value(std::string(k < v.size() ? v.substr(k) : std::string_view()));
-};
-// Lines of text (without line translations) and line words (through spaces)
-lines_of(str s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  std::vector<value> xs;
-  for(auto l: lines_of((a[0]).as<str_v>().view())) xs.push_back(value(std::string(l)));
-  return value(array_v::of(std::move(xs)));
-};
-words_of(str s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  std::vector<value> xs;
-  for(auto w: words_of((a[0]).as<str_v>().view())) xs.push_back(value(std::string(w)));
-  return value(array_v::of(std::move(xs)));
-};
-// row order: numbers by ascending keys (byte comparison, stable)
-sorted_indices(keys) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  auto const & ks = (a[0]).as<array_v>();
-  std::vector<uint32_t> order(ks.size());
-  for(uint32_t k = 0; k < ks.size(); ++k) order[k] = k;
-  std::ranges::stable_sort(order, [&](uint32_t x, uint32_t y) { return ks.get(x).as<str_v>().view() < ks.get(y).as<str_v>().view(); });
-  std::vector<value> xs;
-  for(uint32_t k: order) xs.push_back(value(int64_t(k)));
-  return value(array_v::of(std::move(xs)));
-};
-
-// place in an ordered array: the first, not less than x (binary search - primitive base); rows - bytes
-//
-lower_bound(xs, str x) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto const & xs = (a[0]).as<array_v>();
-  auto x = (a[1]).as<str_v>().view();
-  uint32_t lo = 0, hi = xs.size();
-  while(lo < hi) {
-    uint32_t mid = (lo + hi) / 2;
-    if(xs.get(mid).as<str_v>().view() < x) lo = mid + 1;
-    else hi = mid;
+// the place of a part in a row from (from <=s.size); -1 - no
+find_from(str s, str part, i64 from) {
+  m = part.size;
+  if(m == 0) return from;
+  c = part[0];
+  end = s.size - m;
+  k = from;
+  while(k <= end) {
+    if(s[k] == c) {
+      j = 1;
+      while((j < m) && (s[k + j] == part[j])) j += 1;
+      if(j == m) return k;
+    }
+    k += 1;
   }
-  return value(int64_t(lo));
+  -1
+}
+// place of part in a row; -1 - no
+find_text(str s, str part) => find_from(s, part, 0);
+// [from, to] bytes; boundaries outside the row are compressed to them
+slice_text(str s, i64 from, i64 to) {
+  f = if(from < 0) 0 else if(from > s.size) s.size else from;
+  t = if(to < f) f else if(to > s.size) s.size else to;
+  text_range(s, f, t)
+}
+// bytetail
+text_from(str s, i64 k) => if(k <= 0) s else if(k >= s.size) "" else text_range(s, k, s.size);
+// Lines of text (without line translations) and line words (through spaces and tabs)
+lines_of(str s) {
+  r = array{};
+  start = 0;
+  while(start < s.size) {
+    k = start;
+    while((k < s.size) && (s[k] != 10)) k += 1;
+    r.push(text_range(s, start, k));
+    start = k + 1;
+  }
+  r
+}
+words_of(str s) {
+  r = array{};
+  k = 0;
+  while(k < s.size) {
+    while((k < s.size) && ((s[k] == 32) || (s[k] == 9))) k += 1;
+    start = k;
+    while((k < s.size) && ((s[k] != 32) && (s[k] != 9))) k += 1;
+    if(k > start) r.push(text_range(s, start, k));
+  }
+  r
+}
+// order of bytes: a before b (without a sign like memcmp), numbers by value. Byte comparison is the second
+// primitive next to text_range: sorting and binary search call it thousands of times, the byte cycle of the
+// interpreter on each comparison is editor regression by 40% (*my*, measuring 2026-10-31); order and
+// algorithms are in language.
+key_less(str a, str b) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known()) return erase(value(false));
+  return value((a[0]).as<str_v>().view() < (a[1]).as<str_v>().view());
 };
-lower_bound(xs, i64 x) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known()) return erase(value(int64_t(0)));
-  auto const & xs = (a[0]).as<array_v>();
-  int64_t x = (a[1]).as<int64_t>();
-  uint32_t lo = 0, hi = xs.size();
-  if(xs.kind() == array_v::layout::ints) {
-    int64_t const * d = xs.ints();
-    while(lo < hi) {
-      uint32_t mid = (lo + hi) / 2;
-      if(d[mid] < x) lo = mid + 1;
-      else hi = mid;
+key_less(i64 a, i64 b) => a < b;
+// numbers by ascending keys (lines - bytes, numbers), stable: merging from bottom to top
+sorted_order(keys) {
+  n = keys.size;
+  cur = array{};
+  for(k : range(n)) cur.push(k);
+  w = 1;
+  while(w < n) {
+    nxt = array{};
+    lo = 0;
+    while(lo < n) {
+      mid = if(lo + w < n) lo + w else n;
+      hi = if(lo + (2 * w) < n) lo + (2 * w) else n;
+      i = lo;
+      j = mid;
+      while((i < mid) && (j < hi)) {
+        if(key_less(keys[cur[j]], keys[cur[i]])) {
+          nxt.push(cur[j]);
+          j += 1;
+        } else {
+          nxt.push(cur[i]);
+          i += 1;
+        }
+      }
+      while(i < mid) {
+        nxt.push(cur[i]);
+        i += 1;
+      }
+      while(j < hi) {
+        nxt.push(cur[j]);
+        j += 1;
+      }
+      lo = hi;
     }
-  } else
-    while(lo < hi) {
-      uint32_t mid = (lo + hi) / 2;
-      if(xs.get(mid).as<int64_t>() < x) lo = mid + 1;
-      else hi = mid;
-    }
-  return value(int64_t(lo));
-};
+    cur = nxt;
+    w = w * 2;
+  }
+  cur
+}
+sorted_indices(keys) => sorted_order(keys);
+sorted_numbers(xs) => sorted_order(xs);
 
-// the line "as in the conclusion": in quotation marks, "\\\n \\t - shielded
-in_quotes(str s) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  return value(in_quotes((a[0]).as<str_v>().view()));
-};
-// chunks in a row - one line
-join_texts(xs) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(std::string()));
-  auto const & ps = (a[0]).as<array_v>();
-  std::size_t n = 0;
-  for(uint32_t k = 0; k < ps.size(); ++k) n += ps.r().items[k].as<str_v>().view().size();
-  std::string out;
-  out.reserve(n);
-  for(uint32_t k = 0; k < ps.size(); ++k) out += ps.r().items[k].as<str_v>().view();
-  return value(std::move(out));
-};
-// replace all inputs from to
-replace_all(str s, str from, str to) => native "cpp" {
-  for(auto & x: a)
-    if(!x.known()) return erase(value(std::string()));
-  std::string t((a[0]).as<str_v>().view());
-  auto f = (a[1]).as<str_v>().view();
-  auto r = (a[2]).as<str_v>().view();
-  if(f.empty()) return value(std::move(t));
-  for(std::size_t k = 0; (k = t.find(f, k)) != std::string::npos; k += r.size()) t.replace(k, f.size(), r);
-  return value(std::move(t));
-};
-// order of numbers: ascending numbers
-sorted_numbers(xs) => native "cpp" {
-  if(!(a[0]).known()) return erase(value(array_v::of({})));
-  auto const & ks = (a[0]).as<array_v>();
-  std::vector<uint32_t> order(ks.size());
-  for(uint32_t k = 0; k < ks.size(); ++k) order[k] = k;
-  std::ranges::stable_sort(order, [&](uint32_t x, uint32_t y) { return ks.get(x).as<int64_t>() < ks.get(y).as<int64_t>(); });
-  std::vector<value> out;
-  for(uint32_t k: order) out.push_back(value(int64_t(k)));
-  return value(array_v::of(std::move(out)));
-};
+// place in an ordered array: the first, not less than x (binary search); rows - bytes
+lower_bound(xs, str x) {
+  lo = 0;
+  hi = xs.size;
+  while(lo < hi) {
+    mid = (lo + hi) / 2;
+    if(key_less(xs[mid], x)) lo = mid + 1 else hi = mid;
+  }
+  lo
+}
+lower_bound(xs, i64 x) {
+  lo = 0;
+  hi = xs.size;
+  while(lo < hi) {
+    mid = (lo + hi) / 2;
+    if(xs[mid] < x) lo = mid + 1 else hi = mid;
+  }
+  lo
+}
+
+// chunks in a row - one line: pairwise merger, each byte is copied log2(число кусков) times
+join_texts(xs) {
+  cur = xs;
+  if(cur.size == 0) return "";
+  while(cur.size > 1) {
+    nxt = array{};
+    k = 0;
+    while(k < cur.size) {
+      nxt.push(if(k + 1 < cur.size) cur[k] + cur[k + 1] else cur[k]);
+      k += 2;
+    }
+    cur = nxt;
+  }
+  cur[0]
+}
+// the line "as in conclusion": in quotation marks, "\\n \t - shielded
+in_quotes(str s) {
+  parts = array{"\""};
+  start = 0;
+  for(k : range(s.size)) {
+    c = s[k];
+    if((c == 34) || ((c == 92) || ((c == 10) || (c == 9)))) {
+      parts.push(text_range(s, start, k));
+      parts.push(if(c == 10) "\\n" else if(c == 9) "\\t" else if(c == 34) "\\\"" else "\\\\");
+      start = k + 1;
+    }
+  }
+  parts.push(text_range(s, start, s.size));
+  parts.push("\"");
+  join_texts(parts)
+}
+// Replace all inputs from to (no overlays, left to right)
+replace_all(str s, str from, str to) {
+  if(from.size == 0) return s;
+  at = find_from(s, from, 0);
+  if(at < 0) return s;
+  parts = array{};
+  start = 0;
+  while(at >= 0) {
+    parts.push(text_range(s, start, at));
+    parts.push(to);
+    start = at + from.size;
+    at = find_from(s, from, start);
+  }
+  parts.push(text_range(s, start, s.size));
+  join_texts(parts)
+}
 
 // --- Primitives: OS for commands (VM) ------------------------------------------------- text of the
 // file (as is)
