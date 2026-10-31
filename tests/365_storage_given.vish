@@ -1,0 +1,38 @@
+// Storage to the process is given by the program (plan S1, like threads in step 12.4): The
+// background process itself does not open the storage (io_error), the transmitted one reads and
+// writes; the name-path is not accepted in the program with the right.
+// grant: storage
+// machine
+// out: путь: io_error
+// out: сам открыть: нет хранилища
+// out: дали: 41
+// out: после процесса: 42
+side(given, to) {
+  try {
+    storage("общее");
+    write(to, "сам открыть: открыл");
+  } catch(io_error e) {
+    write(to, "сам открыть: нет хранилища");
+  }
+  write(to, "дали: " + text(read_i64(given, 0)));
+  write_i64(given, 0, 42);
+  commit(given);
+  write(to, "готово");
+}
+main() {
+  try {
+    storage("a/b");
+  } catch(io_error e) {
+    print("путь: io_error");
+  }
+  s = storage("общее");
+  grow(s, 8);
+  write_i64(s, 0, 41);
+  to = stream();
+  p = process(side, s, to);
+  print(read(to));
+  print(read(to));
+  read(to);
+  wait(p);
+  print("после процесса: " + text(read_i64(s, 0)));
+}

@@ -1,0 +1,18 @@
+// The repository is given and taken by the author on the go (Plan S1):
+// 
+// Proc Grant Storage Opens; Proc Revoke Storage Closed, Appeal io_error.
+//
+// program: storage_grants.vish
+proc start
+// expect: процесс запущен
+proc step 300
+// expect: жду хранилище
+proc grant storage
+// expect: дано: storage
+proc step 4000
+// expect: записано 7
+proc revoke storage
+// expect: забрано: storage
+proc run
+// expect: хранилище забрали
+// expect: завершён

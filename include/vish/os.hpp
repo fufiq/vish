@@ -138,6 +138,94 @@ void write_file_atomic(std::string const & path, std::string_view bytes) {
   if(::close(dfd) < 0) throw diagnostic(cat("не могу закрыть каталог ", dir), {});
 }
 
+// --- state storage (VM service, plan C1) ---
+//
+// 
+// 
+// 
+// 
+// 
+// ; The program sees the name (key in the VM environment) and the offset, paths, and descriptors of
+// host are not. *My:* Linux implementation is a file in the VM repository directory, displayed
+// entirely in its address range (64 GB): pages after the end of the file become available after
+// ftruncate, the data does not move; fixation is msync+fsync; the file holds one execution (flock).
+//
+struct storage_area {
+  static constexpr uint64_t range = uint64_t(1) << 36; // Storage Addresses: The Growth Limit
+  int fd = -1;
+  std::byte * at = nullptr;
+  uint64_t size = 0;
+
+  storage_area() = default;
+  storage_area(storage_area const &) = delete;
+  storage_area & operator=(storage_area const &) = delete;
+  ~storage_area() { close(); }
+
+  bool alive() const { return fd >= 0; }
+  // The name is the key, not the path: without the '/', the NUL and the leading point
+  static bool good_name(std::string_view name) {
+    if(name.empty() || name.size() > 200 || name[0] == '.') return false;
+    for(char c: name)
+      if(c == '/' || c == '\0') return false;
+    return true;
+  }
+  // 'openly'; otherwise the cause
+  std::string open(std::string const & dir, std::string_view name) {
+    if(!good_name(name)) return "имя хранилища — ключ без '/' и ведущей точки";
+    if(::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return cat("каталог хранилищ VM недоступен: ", std::strerror(errno));
+    std::string path = cat(dir, "/", name);
+    bool fresh = !file_exists(path);
+    int f = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if(f < 0) return std::strerror(errno);
+    if(::flock(f, LOCK_EX | LOCK_NB) != 0) {
+      ::close(f);
+      return "хранилище занято другим исполнением";
+    }
+    struct stat st{};
+    void * m = ::fstat(f, &st) == 0 ? ::mmap(nullptr, range, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NORESERVE, f, 0) : MAP_FAILED;
+    if(m == MAP_FAILED) {
+      ::close(f);
+      return cat("не отобразить: ", std::strerror(errno));
+    }
+    if(fresh) { // the name of the new storage - on the disk before the first fixation
+      int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      if(dfd >= 0) {
+        ::fsync(dfd);
+        ::close(dfd);
+      }
+    }
+    fd = f;
+    at = static_cast<std::byte *>(m);
+    size = uint64_t(st.st_size);
+    return "";
+  }
+  // +n zero bytes at the end: range pages behind the previous end become available
+  std::string grow(uint64_t n) {
+    if(n > range - size) return "больше 64 ГиБ";
+    int rc;
+    do rc = ::ftruncate(fd, off_t(size + n)); while(rc < 0 && errno == EINTR);
+    if(rc < 0) return std::strerror(errno);
+    size += n;
+    return "";
+  }
+  // Fix: Pages and sizes on disk
+  std::string commit() {
+    if(size && ::msync(at, size, MS_SYNC) != 0) return std::strerror(errno);
+    int rc;
+    do rc = ::fsync(fd); while(rc < 0 && errno == EINTR);
+    return rc < 0 ? std::string(std::strerror(errno)) : std::string();
+  }
+  // Close without fixing: addresses and file - system
+  void close() {
+    if(fd < 0) return;
+    ::munmap(at, range);
+    ::close(fd);
+    fd = -1;
+    at = nullptr;
+    size = 0;
+  }
+};
+
 // Descriptor lines (stdin host): your buffer, read in chunks.
 struct line_reader {
   int fd = 0;

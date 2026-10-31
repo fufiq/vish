@@ -1,0 +1,18 @@
+// Хранилище без права (план Ш1): 
+// Без vish run --grant
+// storage (здесь — без grant:) хранилищ нет: storage(имя) — io_error, как open без fs; имя — ключ
+// окружения VM, путь им не выразить.
+// machine
+// out: storage дано: false
+// out: нет хранилища
+// error: хранилища программе не даны
+main() {
+  print("storage дано:", granted("storage"));
+  try {
+    storage("заметки");
+    print("открыл");
+  } catch(io_error e) {
+    print("нет хранилища");
+  }
+  storage("../../etc/passwd");
+}

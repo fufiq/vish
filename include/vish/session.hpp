@@ -4,12 +4,12 @@
 // the next check recalculates only instance, depending on the changed, the next run goes to
 // the new version.
 //
-// Session commands (`vish vm`, scripts .session, `vish apply`) - in rows; their parsing, decisions and
-// texts - in check, report, stdin <line>, run [arguments], jit, residual [arguments], fmt, edit <function>
-// (body - up to a line from one point), <function>, save <path.vishdb>, stats, applytrip, proc start
-// [arg...] | step N | run | where | calle | grante | Here is the command base: parsing, execution, base
-// editing, live machine process; data (numbers, program texts and errors) - language. What to replace with
-// editing, struct and migrate in a live process, which editing function to apply - decides the language.
+// Session commands (`vish vm`, scripts .session, `vish apply`) - in rows; their parsing, decisions and texts - in
+// check, report, stdin <line>, run [arguments], jit, residual [arguments], fmt, edit <function> (body - up to a
+// line from a single point), <function>, save <path.vishdb>, stats,trip, proc start [arg...] | step N | run |
+// where | calle | the expression | fridges apply | Here is the command base: parsing, execution, base editing,
+// live machine process; data (numbers, program texts and errors) - language. What to replace with editing, struct
+// and migrate in a live process, which editing function to apply - decides the language.
 //
 //
 //

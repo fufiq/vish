@@ -6817,6 +6817,95 @@ struct interpreter {
     fail(cat("неизвестная операция ", n), where);
   }
 
+  // Status storage (VM service, plan S1; os::storage_area):
+//  
+// The program is named and misaligned, not the way: the storage catalog keeps VM (*my*:
+  // next to the program - <program>.storage, the runner - its temporary catalog.
+  std::string storage_dir() const {
+    std::string const & p = root->prog_path;
+    return state_dir.empty() ? p + ".storage" : cat(state_dir, "/", p.substr(p.find_last_of('/') + 1), ".storage");
+  }
+  value storage_value(value id) { return value(agg_v{types.named("storage"), {{sym("id"), std::move(id)}}}); }
+  // storage *: in parsing only types and possible exceptions
+  value storage_op(std::string_view n, std::vector<value> & a, span where) {
+    lane_guard g(vm_lock); // Storage table - at the root of VM, common to bands
+    if(checking()) {
+      rt_effect();
+      rt_check("io_error", where);
+      if(n == "storage_open") return storage_value(erase(value(int64_t(0))));
+      if(n == "storage_size" || n == "storage_grow" || n == "storage_read_i64") return erase(value(int64_t(1)));
+      if(n == "storage_read") return erase(value(std::string("x")));
+      return value();
+    }
+    return storage_call(vm_root->storages, granted("storage"), background, n, a, where);
+  }
+  // execution - shared with the process machine (it has its own table and its own rights)
+  value storage_call(std::deque<os::storage_area> & table, bool given, bool proc, std::string_view n, std::vector<value> const & a, span where) {
+    auto bad_args = [&](std::string_view sig) { fail(cat(n.substr(8), sig), where); };
+    if(n == "storage_open") {
+      if(a.size() != 1 || !a[0].is<str_v>()) bad_args("(имя)");
+      std::string name = a[0].as<str_v>().str();
+      // Not given - as there is no file at fs
+      if(!given) fail_rt("io_error", cat(name, ": нет хранилища — хранилища ", proc ? "процессу не даны (ресурс даёт программа: передаёт хранилище)" : "программе не даны (даёт пользователь: vish run --grant storage)"), where);
+      os::storage_area & s = table.emplace_back();
+      if(std::string why = s.open(storage_dir(), name); !why.empty()) fail_rt("io_error", cat("хранилище ", name, ": ", why), where);
+      return storage_value(value(int64_t(table.size() - 1)));
+    }
+    value const * h = a.empty() ? nullptr : shape_of(a[0]);
+    if(!h || !h->is<agg_v>() || types.name(h->as<agg_v>().type) != "storage" || h->as<agg_v>().fields.empty() || !h->as<agg_v>().fields[0].second.is<int64_t>()) fail("ожидалось хранилище", where);
+    int64_t id = h->as<agg_v>().fields[0].second.as<int64_t>();
+    if(n == "storage_close") {
+      if(id >= 0 && uint64_t(id) < table.size()) table[std::size_t(id)].close();
+      return value();
+    }
+    // Closed, withdrawn (proc revoke storage) or came from another VM:
+//  
+    if(id < 0 || uint64_t(id) >= table.size() || !table[std::size_t(id)].alive()) fail_rt("io_error", "хранилище закрыто", where);
+    os::storage_area & s = table[std::size_t(id)];
+    auto num = [&](std::size_t i) {
+      if(a.size() <= i || !a[i].is<int64_t>()) bad_args("(хранилище, смещение, …)");
+      return a[i].as<int64_t>();
+    };
+    // [at, at + len] - inside the vault
+    auto span_of = [&](int64_t at, int64_t len) {
+      if(at < 0 || len < 0 || uint64_t(at) > s.size || uint64_t(len) > s.size - uint64_t(at))
+        fail_rt("out_of_bounds", cat("байты [", at, ", ", at + len, ") вне хранилища размера ", s.size), where);
+      return s.at + at;
+    };
+    if(n == "storage_size") return value(int64_t(s.size));
+    if(n == "storage_grow") {
+      int64_t k = num(1), old = int64_t(s.size);
+      if(k < 0) fail_rt("out_of_bounds", cat("рост на ", k, " байт"), where);
+      if(std::string why = s.grow(uint64_t(k)); !why.empty()) fail_rt("io_error", cat("хранилище: ", why), where);
+      return value(old); // displacement
+    }
+    if(n == "storage_read") {
+      int64_t at = num(1), len = num(2);
+      return value(std::string(reinterpret_cast<char const *>(span_of(at, len)), std::size_t(len)));
+    }
+    if(n == "storage_write") {
+      if(a.size() != 3 || !a[2].is<str_v>()) bad_args("(хранилище, смещение, байты)");
+      std::string_view b = a[2].as<str_v>().view();
+      std::memcpy(span_of(num(1), int64_t(b.size())), b.data(), b.size());
+      return value();
+    }
+    if(n == "storage_read_i64") {
+      int64_t x;
+      std::memcpy(&x, span_of(num(1), 8), 8);
+      return value(x);
+    }
+    if(n == "storage_write_i64") {
+      int64_t x = num(2);
+      std::memcpy(span_of(num(1), 8), &x, 8);
+      return value();
+    }
+    if(n == "storage_commit") {
+      if(std::string why = s.commit(); !why.empty()) fail_rt("io_error", cat("хранилище: ", why), where);
+      return value();
+    }
+    fail(cat("неизвестная операция ", n), where);
+  }
+
   // Flow host: Closing cancels orders; file adds queue.
   void close_host(std::size_t sid) { // The queue of the file has already been completed (stream_do)
     stream_rec & s = vm_root->streams[sid];
@@ -9436,6 +9525,7 @@ struct interpreter {
     }
     if(n.starts_with("stream_")) return stream_op(n, a, where);
     if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
+    if(n.starts_with("storage_")) return storage_op(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
     if(n == "index" && a.size() == 2) { // a[i] kernel (operator(a)[i] prelude): array element, byte string
       if(!a[0].known() || !a[1].known()) return element_type(a[0], where);
@@ -9669,6 +9759,7 @@ struct interpreter {
   uint32_t handoff_run = 0; // direct
   std::vector<fiber_rec *> joiners;
   std::deque<stream_rec> streams;
+  std::deque<os::storage_area> storages; // state storage (S1) by number; closed with VM
   std::optional<os::uring> ring; // io_uring host (as required)
   uint32_t io_pending = 0; // nucleus
   std::deque<interpreter> procs;

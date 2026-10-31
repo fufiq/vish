@@ -319,6 +319,9 @@ struct process_machine {
     std::deque<host_peer> peers;
   };
   std::deque<host_rec> host; // by flow number (order addresses are stable)
+  // state storage (S1, as in the interpreter): not part of the process - the dump is not included,
+  // after resume the descriptor is unknown (closed); proc revoke storage - closes everything
+  std::deque<os::storage_area> storages;
   // What the author gave (as in the interpreter, VISH_GRANT at launch): not part of the process - in the new VM
   // gives it to the user; proc grant/revoke - on the go: took - streams of this kind are closed by the external side
   std::set<std::string, std::less<>> grants = interpreter::granted_by_user();
@@ -329,6 +332,10 @@ struct process_machine {
       return;
     }
     grants.erase(std::string(kind));
+    if(kind == "storage") {
+      for(auto & s: storages) s.close();
+      return;
+    }
     uint8_t want = kind == "net" ? 3 : 0;
     for(uint64_t sid = 0; sid < st.streams.size(); ++sid) {
       m_stream & s = st.streams[sid];
@@ -3027,6 +3034,11 @@ struct process_machine {
       return finish(std::move(out));
     }
     if(helper.str(name).starts_with("net_") || helper.str(name).starts_with("file_")) return finish(host_op(helper.str(name), a, db[n].where));
+    if(helper.str(name).starts_with("storage_")) { // execution - at the assistant, table and rights - the machine
+      std::vector<value> va;
+      for(auto const & x: a) va.push_back(to_value(x));
+      return finish(from_value(helper.storage_call(storages, machine_granted("storage"), bool(fib().proc), helper.str(name), va, db[n].where), db[n].where));
+    }
     if(helper.str(name) == "process" && !helper.functions.contains(name)) return finish(start_proc(call_args(n), a, db[n].where));
     if((helper.str(name) == "process_wait" || helper.str(name) == "process_error") && t.a == 1) { // waiting for the end of the process
       m_proc & m = proc_of(a[0], db[n].where);

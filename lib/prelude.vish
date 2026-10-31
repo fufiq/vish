@@ -814,6 +814,25 @@ drop(stream n, i64 peer) => net_drop(n, peer);
 open(str path) => file_open(path);
 create(str path) => file_create(path);
 
+// Storage status (service VM, plan C1):
+// 
+// 
+//;
+// 
+// . *My:* storage(имя) is a named region of bytes (name is a key in the VM environment, not a
+// path); addressing by offsets; grow(s, n) - n zero bytes at the end, the result is a displacement
+// of a new place; commit - fix (on the disk); without the right storage (vish run - storagegrant)
+// - io_error, like fs; proc revoke storage - closes, then - io_error.
+storage(str name) => storage_open(name);
+size(storage s) => storage_size(s);
+grow(storage s, i64 n) => storage_grow(s, n);
+read(storage s, i64 at, i64 n) => storage_read(s, at, n);
+write(storage s, i64 at, str bytes) => storage_write(s, at, bytes);
+read_i64(storage s, i64 at) => storage_read_i64(s, at);
+write_i64(storage s, i64 at, i64 x) => storage_write_i64(s, at, x);
+commit(storage s) => storage_commit(s);
+close(storage s) => storage_close(s);
+
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
 // error - his message.

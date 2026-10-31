@@ -1,0 +1,50 @@
+// Storage status (service VM, plan C1):
+// 
+// storage(имя) is the name, not the path; grow is the place at the end; record, commit, reopen sees the data;
+// second run (out2:) sees the data. Outside the size is out_of_bounds, closed is io_error.
+//
+// grant: storage
+// machine
+// out: дано: true
+// out: запуск 1, размер 16
+// out: слово 7, байты abcdefgh
+// out: снова: 16 байт, запуск 1, abcdefgh
+// out: вне: out_of_bounds
+// out: рост: место с 16, размер 4112, хвост 0
+// out: закрыто: io_error
+// out2: дано: true
+// out2: запуск 2, размер 4112
+// out2: слово 7, байты abcdefgh
+// out2: снова: 4112 байт, запуск 2, abcdefgh
+// out2: вне: out_of_bounds
+// out2: рост: место с 4112, размер 8208, хвост 0
+// out2: закрыто: io_error
+main() {
+  print("дано:", granted("storage"));
+  s = storage("счётчик");
+  if(size(s) == 0) grow(s, 16);
+  runs = read_i64(s, 0) + 1;
+  write_i64(s, 0, runs);
+  write(s, 8, "abcdefgh");
+  commit(s);
+  print("запуск " + text(runs) + ", размер " + text(size(s)));
+  print("слово " + text((read_i64(s, 0) * 7) / runs) + ", байты " + read(s, 8, 8));
+  close(s);
+  t = storage("счётчик");
+  print("снова: " + text(size(t)) + " байт, запуск " + text(read_i64(t, 0)) + ", " + read(t, 8, 8));
+  try {
+    read(t, size(t) - 4, 8);
+  } catch(out_of_bounds e) {
+    print("вне: out_of_bounds");
+  }
+  at = grow(t, 4096);
+  write_i64(t, size(t) - 8, 5);
+  commit(t);
+  print("рост: место с " + text(at) + ", размер " + text(size(t)) + ", хвост " + text(read_i64(t, at)));
+  close(t);
+  try {
+    size(t);
+  } catch(io_error e) {
+    print("закрыто: io_error");
+  }
+}

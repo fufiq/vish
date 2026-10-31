@@ -1168,7 +1168,12 @@ struct test_result { str why; i64 checked; i64 skipped; array notes; }
 // One test: projection (-projection k) - program reversibility only; script; program.
 test_one(str path, bool a64, str projection) {
   if(projection != "") return test_result{test_projection(path, projection), 0, 0, array{}};
-  if(ends_with(path, ".session") || ends_with(path, ".wire")) return test_result{run_scenario(path), 0, 0, array{}};
+  if(ends_with(path, ".session") || ends_with(path, ".wire")) { // state and storage in the temporary catalog
+    state_fresh();
+    why = run_scenario(path);
+    state_clear();
+    return test_result{why, 0, 0, array{}};
+  }
   test_vish(path, a64)
 }
 // The result of the child's test (fork) to the parent - lines: "checked unverified notes", notes, reasons.

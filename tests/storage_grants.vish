@@ -1,0 +1,33 @@
+// out: жду хранилище
+// out: не дали
+// machine
+// Программа сессии 366 (хранилище даёт и забирает автор на ходу); сама по себе — без права.
+wait_storage() {
+  for(i : range(20000)) {
+    if(granted("storage")) return true;
+    yield();
+  }
+  false
+}
+main() {
+  print("жду хранилище");
+  if(!wait_storage()) {
+    print("не дали");
+    return;
+  }
+  s = storage("журнал");
+  at = grow(s, 8);
+  write_i64(s, at, 7);
+  commit(s);
+  print("записано", read_i64(s, at));
+  loop {
+    if(!granted("storage")) break;
+    yield();
+  }
+  try {
+    read_i64(s, at);
+    print("читаю после отзыва");
+  } catch(io_error e) {
+    print("хранилище забрали");
+  }
+}
