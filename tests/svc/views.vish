@@ -1,0 +1,12 @@
+[[service]] module svc.views;
+// Service for test 367: the service variable is the live state of VM, not the value of parsing. parsing
+// instance sees its initial value (empty array {}), the type of element is “?”.
+
+struct view { bool on; array items; }
+views = array{};
+completing(i64 v) => views[v].on && (views[v].items.size > 0);
+add_view() => views.push(view{false, array{}});
+turn_on(i64 v) {
+  views[v].on = true;
+  views[v].items.push(1);
+}

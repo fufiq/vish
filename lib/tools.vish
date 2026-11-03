@@ -192,13 +192,31 @@ slice_text(str s, i64 from, i64 to) {
 }
 // bytetail
 text_from(str s, i64 k) => if(k <= 0) s else if(k >= s.size) "" else text_range(s, k, s.size);
+// Byte cycles are separate functions over s[k] and s.size: they are compiled by JIT (line - cell
+// address, §10.3), and the assembly of pieces (text_range, join_texts) is conducted by the interpreter
+// (*my*). place of byte b with from; s.size - no
+byte_from(str s, i64 b, i64 from) {
+  k = from;
+  while((k < s.size) && (s[k] != b)) k += 1;
+  k
+}
+// the end of spaces and tabs with from; the end of the word (before the space or tab) with from
+blank_end(str s, i64 from) {
+  k = from;
+  while((k < s.size) && ((s[k] == 32) || (s[k] == 9))) k += 1;
+  k
+}
+word_end(str s, i64 from) {
+  k = from;
+  while((k < s.size) && ((s[k] != 32) && (s[k] != 9))) k += 1;
+  k
+}
 // Lines of text (without line translations) and line words (through spaces and tabs)
 lines_of(str s) {
   r = array{};
   start = 0;
   while(start < s.size) {
-    k = start;
-    while((k < s.size) && (s[k] != 10)) k += 1;
+    k = byte_from(s, 10, start);
     r.push(text_range(s, start, k));
     start = k + 1;
   }
@@ -208,9 +226,8 @@ words_of(str s) {
   r = array{};
   k = 0;
   while(k < s.size) {
-    while((k < s.size) && ((s[k] == 32) || (s[k] == 9))) k += 1;
-    start = k;
-    while((k < s.size) && ((s[k] != 32) && (s[k] != 9))) k += 1;
+    start = blank_end(s, k);
+    k = word_end(s, start);
     if(k > start) r.push(text_range(s, start, k));
   }
   r
@@ -224,40 +241,47 @@ key_less(str a, str b) => native "cpp" {
   return value((a[0]).as<str_v>().view() < (a[1]).as<str_v>().view());
 };
 key_less(i64 a, i64 b) => a < b;
-// numbers by ascending keys (lines - bytes, numbers), stable: merging from bottom to top
+// numbers by ascending keys (lines - bytes, numbers), stable: merging from the bottom up; the passage writes to
+// an array of the same size in place o (without pushing on the element - calling the function for each number)
 sorted_order(keys) {
   n = keys.size;
   cur = array{};
   for(k : range(n)) cur.push(k);
+  nxt = cur;
   w = 1;
   while(w < n) {
-    nxt = array{};
     lo = 0;
     while(lo < n) {
       mid = if(lo + w < n) lo + w else n;
       hi = if(lo + (2 * w) < n) lo + (2 * w) else n;
       i = lo;
       j = mid;
+      o = lo;
       while((i < mid) && (j < hi)) {
         if(key_less(keys[cur[j]], keys[cur[i]])) {
-          nxt.push(cur[j]);
+          nxt[o] = cur[j];
           j += 1;
         } else {
-          nxt.push(cur[i]);
+          nxt[o] = cur[i];
           i += 1;
         }
+        o += 1;
       }
       while(i < mid) {
-        nxt.push(cur[i]);
+        nxt[o] = cur[i];
         i += 1;
+        o += 1;
       }
       while(j < hi) {
-        nxt.push(cur[j]);
+        nxt[o] = cur[j];
         j += 1;
+        o += 1;
       }
       lo = hi;
     }
+    was = cur;
     cur = nxt;
+    nxt = was;
     w = w * 2;
   }
   cur
@@ -285,37 +309,47 @@ lower_bound(xs, i64 x) {
   lo
 }
 
-// chunks in a row - one line: pairwise merger, each byte is copied log2(число кусков) times
+// chunks in a row - one line: pairwise fusion, each byte is copied log2(число кусков) times; a pair of k,
+// k + 1 is written in place k / 2 of the same copy (the first m is the current row; no push on the piece)
 join_texts(xs) {
   if(xs.size == 0) return "";
   if(xs.size == 1) return xs[0];
   if(xs.size == 2) return xs[0] + xs[1];
   cur = xs;
-  while(cur.size > 1) {
-    nxt = array{};
+  m = cur.size;
+  while(m > 1) {
     k = 0;
-    while(k < cur.size) {
-      nxt.push(if(k + 1 < cur.size) cur[k] + cur[k + 1] else cur[k]);
+    while(k + 1 < m) {
+      cur[k / 2] = cur[k] + cur[k + 1];
       k += 2;
     }
-    cur = nxt;
+    if(k < m) cur[k / 2] = cur[k];
+    m = (m + 1) / 2;
   }
   cur[0]
 }
+// the place of the first byte with from, which is screened in the output ("\\n \t); -1 - no
+escape_from(str s, i64 from) {
+  k = from;
+  while(k < s.size) {
+    c = s[k];
+    if((c == 34) || ((c == 92) || ((c == 10) || (c == 9)))) return k;
+    k += 1;
+  }
+  -1
+}
 // the line "as in conclusion": in quotation marks, "\\n \t - shielded
 in_quotes(str s) {
-  plain = true; // Usually there is nothing to hide - one glue
-  for(k : range(s.size)) if((s[k] == 34) || ((s[k] == 92) || ((s[k] == 10) || (s[k] == 9)))) plain = false;
-  if(plain) return ("\"" + s) + "\"";
+  k = escape_from(s, 0);
+  if(k < 0) return ("\"" + s) + "\""; // Usually there is nothing to hide - one glue
   parts = array{"\""};
   start = 0;
-  for(k : range(s.size)) {
+  while(k >= 0) {
     c = s[k];
-    if((c == 34) || ((c == 92) || ((c == 10) || (c == 9)))) {
-      parts.push(text_range(s, start, k));
-      parts.push(if(c == 10) "\\n" else if(c == 9) "\\t" else if(c == 34) "\\\"" else "\\\\");
-      start = k + 1;
-    }
+    parts.push(text_range(s, start, k));
+    parts.push(if(c == 10) "\\n" else if(c == 9) "\\t" else if(c == 34) "\\\"" else "\\\\");
+    start = k + 1;
+    k = escape_from(s, start);
   }
   parts.push(text_range(s, start, s.size));
   parts.push("\"");

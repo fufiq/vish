@@ -3287,6 +3287,9 @@ jit_compile(cg, f, types, type result) {
       is_outline = g_outline;
     }
     if((g.size == 0) || (rec || is_outline)) vm_or_bad(e, fmt"вызов {name}: нет встраиваемой перегрузки");
+    // Primitive native "cpp" (text_range, text_byte...) - VM code, not the body in the language: the call
+    // counts VM in place, the function around it is machine code (*mine*)
+    else if(code_kind(body) == ast.native) vm_or_bad(e, fmt"вызов {name}: примитив native");
     // call without run-time - inputs parsing curled - the body in this place is not disassembled
     // (no types): the value of VM considers the entire VM as an interpreter when executed
     else if(is_handle(ty(e)) && jit_known(e, ctx)) vm_or_bad(e, fmt"вызов {name}: свёрнут разбором");
@@ -3850,6 +3853,9 @@ jit_compile(cg, f, types, type result) {
     else if(fusing && !in_b) bad(fmt"генератор: {why}");
     else if(tries.size > 0) bad(fmt"{why} (внутри try)");
     else if((t == jc_range) || is_stream(t)) bad(why);
+    // parsing does not know the value (the element of empty array {} variable service, the path that in parsing
+    // only throws): it is not the value of VM, the cell address as bool/number would be a lie (*mine*)
+    else if(fmt"{t}" == "?") bad(fmt"{why}: тип узла неизвестен разбору");
     else if(jit_diverts(e)) bad(fmt"{why}: через узел VM — выход return(caller) — интерпретатор");
     else vm_eval(e, t);
   };

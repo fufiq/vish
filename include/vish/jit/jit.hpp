@@ -100,7 +100,7 @@ jit_service_result jit_vm_service(uint64_t op, uint64_t id, uint64_t bits, uint6
 }
 
 // clang-format off
-enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, handle, ct, other }; // range - range(n) : in the slot only n; stream is its number
+enum class jt : uint8_t { unit, i64_, f64_, bool_, arr_i64, arr_f64, range_, stream_i64, stream_f64, stream_bool, handle, ct, str_, other }; // range - range(n) : in the slot only n; stream - its number; str - string: cell address as handle
 // clang-format on
 
 // instance tag names are prelude tag names (§5.8, O15): JIT has representations only.
@@ -119,6 +119,7 @@ std::string jt_name(jt t) {
     case jt::stream_bool: return cat("stream<", b, ">");
     case jt::handle: return "значение VM";
     case jt::ct: return "кт";
+    case jt::str_: return std::string(type_registry::tag(type_registry::m_bytes));
     default: return "?";
   }
 }
@@ -145,6 +146,9 @@ jt jt_of(value const & v, interpreter const * in = nullptr) {
   if(x->is<int64_t>()) return jt::i64_;
   if(x->is<double>()) return jt::f64_;
   if(x->is<bool>()) return jt::bool_;
+  // string is its instance type (not a sample of the VM value): the type is known without the sample,
+  // the AArch64 check transfers its bytes to guest memory
+  if(x->is<str_v>()) return jt::str_;
   if(x->is<array_v>()) { // Array type - its layout: mixed array not array<i64 >>
     auto const & a = x->as<array_v>();
     if(a.kind() == array_v::layout::ints) return jt::arr_i64;
@@ -166,6 +170,7 @@ value jt_shape(jt t) {
     case jt::bool_: return erase(value(true));
     case jt::arr_i64: return erase(value(array_v::of({value(int64_t(1))})));
     case jt::arr_f64: return erase(value(array_v::of({value(double(1))})));
+    case jt::str_: return erase(value(std::string()));
     default: return value();
   }
 }
@@ -292,6 +297,7 @@ struct jit_machine {
     try {
       std::string quiet; // Compiler elaboration is not program execution: Ct { print … } module is not output
       interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.detached = detached;
       comp.capture_output(&quiet);
       comp.jit_analysis = an_for_lang;
       comp.jit_trace = &out.queries;
@@ -346,12 +352,38 @@ struct jit_machine {
   std::deque<jit_fn> fns; // instance arena (addresses stable)
   std::map<std::string, uint32_t> cache; // key instance → number in fns
   std::map<std::string, std::vector<uint32_t>> rt_index; // runtime - part → instance with code
+  // Hot Counter (§10.3, item 1): the function is compiled after hot calls by the interpreter - compilation
+  // (compiler in language) is more expensive than a rare call; 0 - immediately (run-jit, session, tests).
+  // plain - only scalars, strings and dense arrays: the instance key with a VM value is a sample of the
+  // entire value (describe, erase) on each call (*my*: editor and tuling code)
+  uint32_t hot = 0;
+  bool plain = false;
+  bool detached = false; // compiles editor/tooling code: its parsing program is not touched (interpreter::detached)
+  std::unordered_map<uint32_t, uint32_t> fn_heat; // function of interpreter calls
 };
 
 // JIT host (x86-64): its code is executed by an interpreter.
 struct jit_engine : jit_machine<x64::assembler> {
   using jit_machine::jit_machine;
 };
+
+// JIT of editor and tuling code (interpreters of editor and cli):
+// 
+// Explicitly included: VISH_TOOLS_JIT = threshold - the function is compiled after so many calls by the
+// interpreter, parameters - scalars, strings, dense arrays (plain); parsing compilation program does not
+// touch (detached) and does not execute native with known inputs (the editor has this state host). *My:* is
+// turned off by default - the compiler in the language under the interpreter costs 40-180 ms per function (in
+// a short session, test scripts, more expensive than winning), and the first compilation writes journal in
+// the general database derivatives of node of its elaboration (the editor has a user base and its repository;
+// test 250 counts records).
+void tools_jit(jit_engine & jit, interpreter & vm) {
+  char const * h = std::getenv("VISH_TOOLS_JIT");
+  if(!h) return;
+  jit.hot = uint32_t(std::strtoul(h, nullptr, 10));
+  jit.plain = true;
+  jit.detached = true;
+  vm.use_jit(&jit);
+}
 
 // Finished code in instance: host are executable pages.
 void finish(jit_fn & out, x64::assembler & a) {
@@ -372,6 +404,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   try {
     std::string quiet; // prefilter - not the execution of the program (ct-output module - not the output)
     interpreter pre(db, mod, {"jit"}, mode::run);
+    pre.detached = detached;
     pre.capture_output(&quiet);
     if(node_id pc = lang_fn("jit_precheck")) {
       value r = pre.analyze_instance(pc, {pre.code_value(fn)});
@@ -421,8 +454,10 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   // created) - the second pass starts with the types of the first, like the parsing program
   std::map<std::pair<uint64_t, uint64_t>, value> seeded;
   interpreter an(db, mod, {"jit"}, mode::check);
+  an.detached = an.inert_natives = detached;
   if(streams) {
     interpreter first(db, mod, {"jit"}, mode::check);
+    first.detached = first.inert_natives = detached;
     first.set_fuel(200000);
     auto shapes = shapes_for(first);
     std::size_t from = first.vm_root->streams.size();
@@ -439,6 +474,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
   try {
     value r = an.analyze_instance(fn, shapes);
     out.result = jt_of(r);
+    if(out.result == jt::str_) out.result = jt::other; // Result string - VM value in call memory
     if(out.result == jt::other && handle_like(r, an.types)) { // VM is the address of the cell (flow - number, not cell)
       out.result = jt::handle;
       out.result_shape = r.is<split_v>() ? r.as<split_v>().alts[0] : r;
@@ -466,6 +502,7 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
       if(&other == &out || !other.ok || !other.by_lang || !still_valid(other)) continue;
       std::string quiet;
       interpreter comp(db, mod, {"jit"}, mode::run);
+      comp.detached = detached;
       comp.capture_output(&quiet);
       comp.jit_analysis = &an;
       bool same = false;
@@ -708,6 +745,12 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   // 
   if(db[f].parent == mod && db.strings.text(db.as<n_fn>(f).name) == "main") return std::nullopt;
   if(db.is<n_block>(db[f].parent)) return std::nullopt; // Local function - closure: built into the enclosing code
+  // counter (§10.3, p. 1) - by function, up to the key instance: a cold call is worth one search
+  if(jit->hot)
+    if(uint32_t & n = jit->fn_heat[f.value]; n < jit->hot) {
+      ++n;
+      return std::nullopt;
+    }
   // expr/own/out and variable scalars - semantics of inline/feedback while interpreter;
   // variable array possible: machine code receives an array of caller
   for(auto const & v: vals)
@@ -737,6 +780,8 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
   for(uint32_t i = 0; i < vals.size(); ++i) {
     value const & v = vals[i];
     jt t = jt_of(v, this);
+    if(t == jt::str_ && v.is<rt_v>()) t = jt::other;
+    if(t == jt::other && jit->plain) return std::nullopt;
     if(t == jt::other && ct_param(v)) {
       t = jt::ct;
       extra[i] = v;
@@ -783,7 +828,7 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
     else if(v.is<double>()) std::memcpy(&raw[i], &v.as<double>(), 8);
     else if(is_stream(param_types[i])) raw[i] = stream_id(v, {});
     else if(param_types[i] == jt::ct) raw[i] = 0; // nontransmittable
-    else if(param_types[i] == jt::handle) { // VM - the address of the cell (caller, its field or copies)
+    else if(param_types[i] == jt::handle || param_types[i] == jt::str_) { // VM - the address of the cell (caller, its field or copies); string - the loan of the cell, as in the array
       value * cell = place_of(i);
       // converted to a type parameter ({x: …} → struct) - a copy, not a cell of the calling
       cells[i] = cell && !cell->is<thunk_v>() && !cell->is<ref_v>() && types.of(*cell) == types.of(vals[i]) ? cell : &vals[i];
@@ -819,6 +864,9 @@ std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<val
           else if(e.is<double>()) a.items.push_back(std::bit_cast<uint64_t>(e.as<double>()));
           else ok = false;
         }
+      } else if(param_types[i] == jt::str_) { // string - its bytes: in the guest memory its cell
+        a.text = true;
+        a.bytes = reinterpret_cast<value const *>(raw[i])->as<str_v>().str();
       } else a.bits = raw[i];
       sargs.push_back(std::move(a));
     }

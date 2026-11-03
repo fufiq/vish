@@ -3419,6 +3419,12 @@ struct interpreter {
       if(c && c->is<array_v>()) a.push_back(value(array_v::borrow(c->as<array_v>()))); // Loan - Loan: native does not keep it
       else a.push_back(c ? *c : value());
     }
+    // parsing for JIT editor and tuning code: their native reads and changes the state of host (clients,
+    // program validation, repository) - with known inputs, parsing would execute it when compiled and curtail
+    // the response to a constant; with an unknown input, the native does not work (knownness is its
+    // verification). This function is the interpreter (*my*)
+    if(inert_natives && checking() && !elaborating && std::ranges::all_of(a, [](value const & x) { return x.known(); }))
+      fail("native с известными входами — состояние хоста, у VM при исполнении", db[n].where);
     value r = e->fn(*this, a, db[n].where);
     if(r.is<array_v>() && r.as<array_v>().borrowed) r.as<array_v>().own(); // The loan doesn't survive the challenge
     if(checking() && !r.known()) // “Not proven” at the level of staticity, not the type of exception
@@ -5286,6 +5292,7 @@ struct interpreter {
   // the program does not touch (the code of the editor in the language, his assistants):
   // elaboration - nested, mutations of the ct program and its "active result" - as were
   bool detached = false;
+  bool inert_natives = false; // parsing for JIT Editor/Tooling Code: native with known inputs
   int helper_depth = 0; // Rule interpreter level (0 is not an assistant)
   node_id chain_fn;
   std::deque<interpreter> chain_langs;
@@ -9258,15 +9265,8 @@ struct interpreter {
       std::string t = literal_place(code_node(a[0], where));
       return value(aggregate_struct(t) ? t : std::string());
     }
-    if(n == "jit_str_layout" && a.empty()) { // the string in the value cell: data (bytes) and length (32 bits)
-      static std::array<int64_t, 2> const off = [] {
-        value v{str_v{}};
-        auto const * b = reinterpret_cast<char const *>(&v);
-        auto const & x = v.as<str_v>();
-        return std::array<int64_t, 2>{int64_t(reinterpret_cast<char const *>(&x.w.data) - b), int64_t(reinterpret_cast<char const *>(&x.len) - b)};
-      }();
-      return value(array_v::of({value(off[0]), value(off[1])}));
-    }
+    if(n == "jit_str_layout" && a.empty()) // the string in the value cell: data (bytes) and length (32 bits)
+      return value(array_v::of({value(int64_t(str_layout().data)), value(int64_t(str_layout().len))}));
     if(n == "jit_layout" && a.empty()) return value(array_v::of({value(int64_t(array_layout().data)), value(int64_t(array_layout().size)), value(int64_t(array_layout().cap)), value(int64_t(array_layout().items_n))}));
     // the value of node if parsing knows it and the computation is clean (convolution "top"); empty - no
     if(n == "jit_const" && a.size() == 2 && a[1].is<int64_t>()) {

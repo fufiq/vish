@@ -604,6 +604,20 @@ array_offsets const & array_layout() {
   }();
   return o;
 }
+// The string in the cell values: displacements of bytes (pointer to words) and lengths (32 bits) - the
+// machine code reads them from memory, as in an array
+struct str_offsets {
+  uint64_t data, len;
+};
+str_offsets const & str_layout() {
+  static str_offsets o = [] {
+    value v{str_v{}};
+    auto const * b = reinterpret_cast<char const *>(&v);
+    auto const & x = v.as<str_v>();
+    return str_offsets{uint64_t(reinterpret_cast<char const *>(&x.w.data) - b), uint64_t(reinterpret_cast<char const *>(&x.len) - b)};
+  }();
+  return o;
+}
 // The aggregate in the value cell: displacement of data fields, field pitch, scalar in the field (§12.2)
 struct agg_offsets {
   uint64_t data, stride, scalar;

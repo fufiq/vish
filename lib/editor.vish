@@ -948,16 +948,27 @@ subsequence(str s, str w) {
   for(i : range(s.size)) if((k < w.size) && (s[i] == w[k])) k += 1;
   k == w.size
 }
+// the place of the first capital ASCII with from; -1 - no (bypass cycle - a separate function: it is compiled by JIT)
+upper_from(str s, i64 from) {
+  k = from;
+  while(k < s.size) {
+    if((s[k] >= 65) && (s[k] <= 90)) return k;
+    k += 1;
+  }
+  -1
+}
 // A - Z → a - z; other bytes as is
 lower(str s) {
+  k = upper_from(s, 0);
+  if(k < 0) return s;
   parts = array{};
   start = 0;
-  for(k : range(s.size)) if((s[k] >= 65) && (s[k] <= 90)) {
+  while(k >= 0) {
     parts.push(text_range(s, start, k));
     parts.push(text_byte(s[k] + 32));
     start = k + 1;
+    k = upper_from(s, start);
   }
-  if(start == 0) return s;
   parts.push(text_range(s, start, s.size));
   join_texts(parts)
 }

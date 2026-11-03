@@ -117,6 +117,7 @@ struct editor_server {
     recheck();
     lang_vms.push_back({m, session.db.revision, std::make_unique<interpreter>(session.db, m, std::vector<std::string>{}, mode::run)});
     lang_vms.back().vm->detached = m == editor_module; // Editor code does not touch the program
+    if(m == editor_module) tools_jit(editor_jit, *lang_vms.back().vm);
     return *lang_vms.back().vm;
   }
   // the customer whose message is being served - at the time of the decision
@@ -1486,6 +1487,9 @@ struct editor_server {
   vm_session & session;
   tools_context versions{session.db, session.root}; // Tools module version: 0 - session base
   node_id editor_module; // Editor's decisions - in language (lib/editor.vish)
+  // Machine code for hot editor functions (search in lines, autocomplete) - tools_jit: one engine per editor
+  // module interpreter, it lives the entire server; program and projection - interpreter
+  jit_engine editor_jit{session.db, editor_module};
   struct lang_vm {
     node_id module;
     uint64_t revision;

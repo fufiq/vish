@@ -38,11 +38,13 @@ struct a64_check {
     std::vector<std::vector<uint64_t>> arrays;
   };
 
-  // Argument: scalar (bits) or array (bits of elements).
+  // Argument: scalar (bits), array (bits of elements) or string (bytes).
   struct arg {
     uint64_t bits = 0;
     bool array = false;
     std::vector<uint64_t> items;
+    bool text = false;
+    std::string bytes;
     int same_as = -1; // the same array as the same_as argument (alias: f(w, w))
   };
 
@@ -58,6 +60,11 @@ struct a64_check {
       r.why = "AArch64 не скомпилировал";
       return r;
     }
+    for(auto const & a: args)
+      if(a.text && !code->by_lang) { // a line cell reads only the compiler code in the language
+        r.why = "строка — не компилятор языка";
+        return r;
+      }
     std::string path = cat("/tmp/vish-a64-", getpid(), ".elf");
     std::vector<uint8_t> elf = build(*code, args);
     if(FILE * out = fopen(path.c_str(), "wb")) {
@@ -133,6 +140,17 @@ struct a64_check {
     }
     std::vector<uint64_t> d_headers;
     for(auto const & a: args) {
+      if(a.text) { // cell line: words before displacements of bytes and length, behind it - bytes with words
+        d_headers.push_back(data_word(0));
+        for(uint64_t k = 1; k <= std::max(str_layout().data, str_layout().len) / 8; ++k) data_word(0);
+        d_arrays.push_back(data.size());
+        for(std::size_t k = 0; k < a.bytes.size(); k += 8) {
+          uint64_t w = 0;
+          std::memcpy(&w, a.bytes.data() + k, std::min<std::size_t>(8, a.bytes.size() - k));
+          data_word(w);
+        }
+        continue;
+      }
       if(!a.array || a.same_as >= 0) {
         d_headers.push_back(a.array ? d_headers[std::size_t(a.same_as)] : 0);
         d_arrays.push_back(a.array ? d_arrays[std::size_t(a.same_as)] : 0);
@@ -215,6 +233,12 @@ struct a64_check {
     if(lang) put(d_lang_fault + 32, base + code_at + service_at);
     if(lang) put(d_lang_fault + 48, base + data_addr + d_gen);
     for(std::size_t i = 0; i < args.size(); ++i) {
+      if(args[i].text) { // cell address; it contains the address of bytes and length (32 bits, senior zeros)
+        put(d_args[i], base + data_addr + d_headers[i]);
+        put(d_headers[i] + str_layout().data, base + data_addr + d_arrays[i]);
+        for(int k = 0; k < 4; ++k) data[d_headers[i] + str_layout().len + k] = uint8_t(args[i].bytes.size() >> (8 * k));
+        continue;
+      }
       if(!args[i].array) {
         put(d_args[i], args[i].bits);
         continue;

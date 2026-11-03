@@ -232,6 +232,8 @@ int run_cli(int argc, char ** argv) {
     std::vector<value> args;
     for(int i = 1; i < argc; ++i) args.push_back(value(std::string(argv[i])));
     interpreter vm(db, ctx.module, {}, mode::run);
+    jit_engine jit(db, ctx.module); // hot tuling functions (test runner, text) - tools_jit
+    tools_jit(jit, vm);
     tool_authority permitted{ctx, vm};
     // The program does not touch the tuning code (like the editor code, server.hpp): its elaboration is nested, does
     // not roll back ct program mutations and does not declare the result to be valid. Otherwise, the prelude

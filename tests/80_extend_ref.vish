@@ -3,7 +3,7 @@
 // machine
 // fmt-stable
 // store-roundtrip
-// jit-stats: jit  sum3(значение VM, f64, значение VM)
+// jit-stats: jit  sum3(значение VM, f64, str)
 // Extension of a specific function by reference to its node (M5, §5.4):
 // 
 // 

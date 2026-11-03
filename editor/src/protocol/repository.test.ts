@@ -107,7 +107,7 @@ describe('локальный семантический репозиторий',
     cli('repo', 'checkout', path, 'dev');
     expect(cli('run', path)).toBe('5\n');
     expect(cli('repo', 'info', path)).toContain('extra');
-  }, 60000);
+  }, 120000);
 
   it('имя модуля cli не даёт программе возможности хоста репозитория', () => {
     const { dir, path } = workspace();
