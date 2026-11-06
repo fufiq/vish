@@ -945,13 +945,19 @@ record_parts(str t) => native "cpp" {
 // subsequence s (bytes in order, not in a row)
 subsequence(str s, str w) {
   k = 0;
-  for(i : range(s.size)) if((k < w.size) && (s[i] == w[k])) k += 1;
+  i = 0;
+  loop {
+    if((k == w.size) || (i == s.size)) break;
+    if(s[i] == w[k]) k += 1;
+    i += 1;
+  }
   k == w.size
 }
 // the place of the first capital ASCII with from; -1 - no (bypass cycle - a separate function: it is compiled by JIT)
 upper_from(str s, i64 from) {
   k = from;
-  while(k < s.size) {
+  loop {
+    if(k >= s.size) break;
     if((s[k] >= 65) && (s[k] <= 90)) return k;
     k += 1;
   }

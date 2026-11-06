@@ -1,0 +1,44 @@
+// program: 
+// quiet
+open_view module
+pointer 1 @read_floats 0 0
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape
+key 1 \s 2
+key 1 Escape

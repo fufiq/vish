@@ -1,0 +1,22 @@
+// Text cycles and stable order in the language: boundaries, repetitions, empty inputs. The
+// already sorted input should keep the order of equals and the original array.
+// out: [] [0] [0, 1, 2] [1, 3, 0, 2]
+// out: [2, 1, 0] [0, 1, 2] [3, 2, 1]
+// out: 0 0 2 -1 -1
+// out: [a, , b] [a, b]
+// out: abc abcde
+// out: Xba aaaa
+// out: bc abc
+use tools;
+main() {
+  print(sorted_indices(array{}), sorted_indices(array{"x"}),
+    sorted_indices(array{"a", "a", "b"}), sorted_indices(array{"b", "a", "b", "a"}));
+  xs = array{3, 2, 1};
+  print(sorted_numbers(xs), sorted_numbers(array{1, 1, 2}), xs);
+  print(find_text("", ""), find_text("ababa", "aba"), find_from("ababa", "aba", 1),
+    find_text("ab", "abc"), find_text("ab", "z"));
+  print(lines_of("a\n\nb\n"), words_of(" \ta\t b  "));
+  print(join_texts(array{"a", "b", "c"}), join_texts(array{"a", "b", "c", "d", "e"}));
+  print(replace_all("ababa", "aba", "X"), replace_all("aaaa", "", "X"));
+  print(slice_text("abc", 1, 99), text_from("abc", -1));
+}

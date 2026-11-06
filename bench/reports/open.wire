@@ -1,0 +1,4 @@
+// program: 
+// quiet
+open_view module
+pointer 1 @read_floats 0 0

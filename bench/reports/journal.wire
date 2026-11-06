@@ -1,0 +1,85 @@
+// program: 
+open_view module
+journal
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV
+pointer 1 @привет 0 7
+key 1 x
+key 1 Escape
+idle
+journal
+// expect: PROBE_JOURNAL
+hello 8
+// expect: PROBE_REV

@@ -172,10 +172,10 @@ find_from(str s, str part, i64 from) {
   c = part[0];
   end = s.size - m;
   k = from;
-  while(k <= end) {
+  loop { if(!(k <= end)) break;
     if(s[k] == c) {
       j = 1;
-      while((j < m) && (s[k + j] == part[j])) j += 1;
+      loop { if(!((j < m) && (s[k + j] == part[j]))) break; j += 1; }
       if(j == m) return k;
     }
     k += 1;
@@ -197,25 +197,25 @@ text_from(str s, i64 k) => if(k <= 0) s else if(k >= s.size) "" else text_range(
 // (*my*). place of byte b with from; s.size - no
 byte_from(str s, i64 b, i64 from) {
   k = from;
-  while((k < s.size) && (s[k] != b)) k += 1;
+  loop { if(!((k < s.size) && (s[k] != b))) break; k += 1; }
   k
 }
 // the end of spaces and tabs with from; the end of the word (before the space or tab) with from
 blank_end(str s, i64 from) {
   k = from;
-  while((k < s.size) && ((s[k] == 32) || (s[k] == 9))) k += 1;
+  loop { if(!((k < s.size) && ((s[k] == 32) || (s[k] == 9)))) break; k += 1; }
   k
 }
 word_end(str s, i64 from) {
   k = from;
-  while((k < s.size) && ((s[k] != 32) && (s[k] != 9))) k += 1;
+  loop { if(!((k < s.size) && ((s[k] != 32) && (s[k] != 9)))) break; k += 1; }
   k
 }
 // Lines of text (without line translations) and line words (through spaces and tabs)
 lines_of(str s) {
   r = array{};
   start = 0;
-  while(start < s.size) {
+  loop { if(!(start < s.size)) break;
     k = byte_from(s, 10, start);
     r.push(text_range(s, start, k));
     start = k + 1;
@@ -225,7 +225,7 @@ lines_of(str s) {
 words_of(str s) {
   r = array{};
   k = 0;
-  while(k < s.size) {
+  loop { if(!(k < s.size)) break;
     start = blank_end(s, k);
     k = word_end(s, start);
     if(k > start) r.push(text_range(s, start, k));
@@ -246,18 +246,26 @@ key_less(i64 a, i64 b) => a < b;
 sorted_order(keys) {
   n = keys.size;
   cur = array{};
-  for(k : range(n)) cur.push(k);
+  k = 0;
+  ordered = true;
+  loop {
+    if(k >= n) break;
+    cur.push(k);
+    if((k > 0) && ordered) if(key_less(keys[k], keys[k - 1])) ordered = false;
+    k += 1;
+  }
+  if(ordered) return cur;
   nxt = cur;
   w = 1;
-  while(w < n) {
+  loop { if(!(w < n)) break;
     lo = 0;
-    while(lo < n) {
+    loop { if(!(lo < n)) break;
       mid = if(lo + w < n) lo + w else n;
       hi = if(lo + (2 * w) < n) lo + (2 * w) else n;
       i = lo;
       j = mid;
       o = lo;
-      while((i < mid) && (j < hi)) {
+      loop { if(!((i < mid) && (j < hi))) break;
         if(key_less(keys[cur[j]], keys[cur[i]])) {
           nxt[o] = cur[j];
           j += 1;
@@ -267,12 +275,12 @@ sorted_order(keys) {
         }
         o += 1;
       }
-      while(i < mid) {
+      loop { if(!(i < mid)) break;
         nxt[o] = cur[i];
         i += 1;
         o += 1;
       }
-      while(j < hi) {
+      loop { if(!(j < hi)) break;
         nxt[o] = cur[j];
         j += 1;
         o += 1;
@@ -293,7 +301,7 @@ sorted_numbers(xs) => sorted_order(xs);
 lower_bound(xs, str x) {
   lo = 0;
   hi = xs.size;
-  while(lo < hi) {
+  loop { if(!(lo < hi)) break;
     mid = (lo + hi) / 2;
     if(key_less(xs[mid], x)) lo = mid + 1 else hi = mid;
   }
@@ -302,7 +310,7 @@ lower_bound(xs, str x) {
 lower_bound(xs, i64 x) {
   lo = 0;
   hi = xs.size;
-  while(lo < hi) {
+  loop { if(!(lo < hi)) break;
     mid = (lo + hi) / 2;
     if(xs[mid] < x) lo = mid + 1 else hi = mid;
   }
@@ -317,9 +325,9 @@ join_texts(xs) {
   if(xs.size == 2) return xs[0] + xs[1];
   cur = xs;
   m = cur.size;
-  while(m > 1) {
+  loop { if(!(m > 1)) break;
     k = 0;
-    while(k + 1 < m) {
+    loop { if(!(k + 1 < m)) break;
       cur[k / 2] = cur[k] + cur[k + 1];
       k += 2;
     }
@@ -331,7 +339,7 @@ join_texts(xs) {
 // the place of the first byte with from, which is screened in the output ("\\n \t); -1 - no
 escape_from(str s, i64 from) {
   k = from;
-  while(k < s.size) {
+  loop { if(!(k < s.size)) break;
     c = s[k];
     if((c == 34) || ((c == 92) || ((c == 10) || (c == 9)))) return k;
     k += 1;
@@ -344,7 +352,7 @@ in_quotes(str s) {
   if(k < 0) return ("\"" + s) + "\""; // Usually there is nothing to hide - one glue
   parts = array{"\""};
   start = 0;
-  while(k >= 0) {
+  loop { if(!(k >= 0)) break;
     c = s[k];
     parts.push(text_range(s, start, k));
     parts.push(if(c == 10) "\\n" else if(c == 9) "\\t" else if(c == 34) "\\\"" else "\\\\");
@@ -362,7 +370,7 @@ replace_all(str s, str from, str to) {
   if(at < 0) return s;
   parts = array{};
   start = 0;
-  while(at >= 0) {
+  loop { if(!(at >= 0)) break;
     parts.push(text_range(s, start, at));
     parts.push(to);
     start = at + from.size;

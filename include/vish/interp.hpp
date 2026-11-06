@@ -292,6 +292,7 @@ struct interpreter {
     sym_intercept = sym("intercept");
     sym_alloc_in = sym("alloc_in");
     sym_append = sym("append");
+    sym_push = sym("push");
     sym_pin_storage = sym("pin_storage");
     sym_set_ct_state = sym("set_ct_state");
     sym_spawn = sym("fiber_start");
@@ -2935,8 +2936,10 @@ struct interpreter {
   // implicit): below the parameter without type (§5.8).
   //
   enum class fit { no, exact, representable, maybe, subsumes };
-  fit type_fit(value const & v, std::string_view want, bool strict, value & out) {
-    out = v;
+  fit type_fit(value const & v, std::string_view want, bool strict, value & out, bool conversion_only = false) {
+    // The choice of overload for exact matching uses the original argument, not the out. Do
+    // not copy strings/arrays for the sake of a type check result.
+    if(!conversion_only) out = v;
     if(want != "shared" && want != "auto" && is_shared(v)) { // Shared - type of stored, value - itself shared (transparent)
       value got;
       fit r = type_fit(slot_of(v).v, want, strict, got);
@@ -2945,6 +2948,7 @@ struct interpreter {
     std::string got_desc = types.describe(v);
     std::string_view got(types.name(types.of(v)));
     if(want == "auto" || got_desc == want || got == want) return fit::exact; // sameness
+    if(conversion_only) out = v;
     // Type ratio in language (fit_rule prelude, M6 step 6), facts in VM
     value const * x = shape_of(v);
     bool want_node = node_kind_named(want) || want == lang_context();
@@ -7586,6 +7590,10 @@ struct interpreter {
           if(!set.empty()) return call_value(value(fn_v{m.name, {}, home, set}), c.args, env, frame, where, n.value);
         }
       }
+      if(m.name == sym_push && !checking() && !jit && c.args.size() == 1 && db.is<n_ident>(m.object) && push_is_append()) { // xs.push(x) append(xs, x) when executed
+        node_list const args2{m.object, c.args[0]};
+        return append(args2, env, frame, n);
+      }
       node_list args{m.object};
       args.insert(args.end(), c.args.begin(), c.args.end());
       return call_named(m.name, args, env, frame, where, n.value);
@@ -7629,11 +7637,30 @@ struct interpreter {
           a[1] = *arr;
           return ok(builtin_lifted(name, a, 0, where));
         }
+      // push(xs, x) prelude - wrapper over append(xs, x): when performing the same append without a wrapper frame
+      // (*mine*: narrow fast path VM; parsing and overload user go the usual way)
+      if(name == sym_push && !checking() && !jit && c.args.size() == 2 && db.is<n_ident>(c.args[0]) && push_is_append())
+        return append(c.args, env, frame, n);
       return call_named(name, c.args, env, frame, where, n.value);
     }
     VISH_TRY(fv, eval(c.callee, env, frame));
     return call_value(fv, c.args, env, frame, where, n.value);
   }
+
+  // The only push is a prelude wrapper of the form `push(mut xs, x) => append(xs, x)`.
+  bool push_is_append() {
+    auto it = functions.find(sym_push);
+    if(it == functions.end() || it->second.size() != 1) return false;
+    if(push_fn_checked == it->second[0].value) return push_fn_ok;
+    push_fn_checked = it->second[0].value;
+    auto const & fn = db.as<n_fn>(it->second[0]);
+    push_fn_ok = fn.params.size() == 2 && db.is<n_call>(fn.body) && db.is<n_ident>(db.as<n_call>(fn.body).callee) && db.as<n_ident>(db.as<n_call>(fn.body).callee).name == sym_append &&
+                 db.as<n_call>(fn.body).args.size() == 2 && db.is<n_ident>(db.as<n_call>(fn.body).args[0]) && db.as<n_ident>(db.as<n_call>(fn.body).args[0]).name == db.as<n_param>(fn.params[0]).name &&
+                 db.is<n_ident>(db.as<n_call>(fn.body).args[1]) && db.as<n_ident>(db.as<n_call>(fn.body).args[1]).name == db.as<n_param>(fn.params[1]).name;
+    return push_fn_ok;
+  }
+  uint32_t push_fn_checked = ~0u;
+  bool push_fn_ok = false;
 
   flow call_value(value const & fv, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
     if(!fv.is<fn_v>()) fail(cat("значение типа ", types.describe(fv), " нельзя вызвать"), where);
@@ -7931,6 +7958,13 @@ struct interpreter {
   std::unordered_map<std::string, overload_choice> overload_choices;
   node_id overload_fn;
   overload_choice const & choose_overload(std::vector<std::vector<int64_t> const *> const & feats, std::vector<bool> const & maybes, span where) {
+    // The only candidate has already been tested: signs do not affect the choice. Do not
+    // build a string cache key on each call; parsing uncertainty persists.
+    if(feats.size() == 1) {
+      static overload_choice const certain{{0}, 0, false, 0};
+      static overload_choice const possible{{0}, 1, false, 0};
+      return checking() && maybes[0] ? possible : certain;
+    }
     std::string key = checking() ? "c" : "r";
     for(std::size_t k = 0; k < feats.size(); ++k) {
       key += maybes[k] ? '?' : '|';
@@ -8000,7 +8034,7 @@ struct interpreter {
           if(p.type && db.is<n_ident>(p.type))
             for(uint32_t j = i; j < vals.size() && why.empty(); ++j) {
               value got;
-              fit r = type_fit(vals[j], str(db.as<n_ident>(p.type).name), p.strict, got);
+              fit r = type_fit(vals[j], str(db.as<n_ident>(p.type).name), p.strict, got, true);
               if(r == fit::no) why = cat("аргумент ", j + 1, " не ", str(db.as<n_ident>(p.type).name));
               else if(r != fit::exact) conv.push_back({j, got});
               maybe = maybe || r == fit::maybe;
@@ -8022,7 +8056,7 @@ struct interpreter {
         } else if(p.type && db.is<n_ident>(p.type)) {
           auto want = str(db.as<n_ident>(p.type).name);
           value got;
-          fit r = type_fit(vals[i], want, p.strict, got);
+          fit r = type_fit(vals[i], want, p.strict, got, true);
           if(r == fit::no) {
             why = cat("параметр ", str(p.name), " ожидает ", p.strict ? "ровно " : "", want, ", передано ", checking() || !vals[i].known() ? types.describe(vals[i]) : cat(types.describe(vals[i]), " ", show_v(vals[i])));
             if(std::string rw; !p.strict && is_record(vals[i]) && structs.contains(sym(want)) && record_fit(vals[i], want, got, &rw) == fit::no) why += cat(" (", rw, ")");
@@ -8307,7 +8341,7 @@ struct interpreter {
     // of the type of result, the body is disassembled again until the type ceases to
     // change.
 //).
-    std::string active_key = cat(key, "@", f.value); // overload: Another with the same argument is not recursion
+    std::string active_key = checking() ? cat(key, "@", f.value) : std::string(); // overload: Another with the same argument is not recursion
     // The same function with the same types is nested deep with different known values (condition from run-time - `k ==
     // part.size`, values in parsing instance are erased): values are generalized to types - recursion converges at a
     // fixed point; in the sample - immediately (*my*: threshold 16; both the key and the values of the arguments are
@@ -8338,7 +8372,7 @@ struct interpreter {
     }
 
     // Reactive cache: instance with unchanged dependencies is not rediscovered
-    std::string memo_key = active_key + "#" + path;
+    std::string memo_key = checking() ? active_key + "#" + path : std::string();
     bool memoize = checking() && cache && approx.empty() && !parent && memoizable(f, vals); // localist
     if(memoize) {
       if(auto it = cache->entries.find(memo_key); it != cache->entries.end() && valid(it->second)) {
@@ -9731,7 +9765,7 @@ struct interpreter {
   std::set<value const *> state_cells;
   std::deque<address_space> regions; // region() memory levels (at VM root); released with last holder
   bool regions_alive = false;
-  symbol sym_intercept, sym_is_index, sym_append, sym_pin_storage, sym_spawn, sym_yield, sym_process, sym_pressure; // kernel forms analyzed prior to the calculation of arguments
+  symbol sym_push, sym_intercept, sym_is_index, sym_append, sym_pin_storage, sym_spawn, sym_yield, sym_process, sym_pressure; // kernel forms analyzed prior to the calculation of arguments
   symbol sym_set_ct_state; // ct-state of place (disassembled in place as append)
   // Symbol on the text without internment (journal lines of the base does not change): while the
   // line is not, there is no name with it; it is searched again only when the lines become more.

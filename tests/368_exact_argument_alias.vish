@@ -1,0 +1,19 @@
+// The exact match of the type of argument does not require a copy to select
+// overload. The parameters remain alias, the converted value is a separate place.
+// out: changed changed
+// out: [9, 2] [9, 2]
+// out: 7.0 3
+// out: 2
+change(str s, other) { s = "changed"; print(s, other); }
+change_array(array xs, other) { xs[0] = 9; print(xs, other); }
+convert(f64 x) { x = 7.0; x }
+only(i64 x) { require(x > 0); x }
+main() {
+  s = "before";
+  change(s, s);
+  xs = array{1, 2};
+  change_array(xs, xs);
+  n = 3;
+  print(convert(n), n);
+  print(only(2));
+}

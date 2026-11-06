@@ -669,8 +669,11 @@ value erase(value const & x) {
     auto const & src = x.as<array_v>();
     array_v a;
     if(is_tuple(src))
-      for(uint32_t i = 0; i < src.size(); ++i) a.push(erase(src.get(i)));
-    else if(!src.empty()) a.push(erase(src.get(0)));
+      for(uint32_t i = 0; i < src.size(); ++i) a.push(erase(src.r().items[i]));
+    else if(!src.empty()) {
+      if(src.kind() == array_v::layout::generic) a.push(erase(src.r().items[0]));
+      else a.push(erase(src.get(0)));
+    }
     shape = value(std::move(a));
   } else if(x.is<agg_v>()) {
     agg_v g{x.as<agg_v>().type, {}};
@@ -703,11 +706,15 @@ bool same_shape(value const & a, value const & b) {
     if(tp) {
       if(p.size() != q.size()) return false;
       for(uint32_t i = 0; i < p.size(); ++i)
-        if(!same_shape(p.get(i), q.get(i))) return false;
+        if(!same_shape(p.r().items[i], q.r().items[i])) return false;
       return true;
     }
     if(p.empty() || q.empty()) return p.empty() == q.empty();
-    return same_shape(p.get(0), q.get(0));
+    // The general layout already stores cells: comparing types does not copy their data.
+    value pv, qv;
+    value const & pe = p.kind() == array_v::layout::generic ? p.r().items[0] : (pv = p.get(0));
+    value const & qe = q.kind() == array_v::layout::generic ? q.r().items[0] : (qv = q.get(0));
+    return same_shape(pe, qe);
   }
   if(x->is<agg_v>()) {
     auto const & p = x->as<agg_v>();
