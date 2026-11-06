@@ -47,7 +47,7 @@ struct printer {
   };
 
   explicit printer(ast_db const & db, filter keep = {}, substitution subst = {})
-      : db(db), keep(std::move(keep)), subst(std::move(subst)) {}
+      : db(db), keep(std::move(keep)), subst(std::move(subst)) { db.use_pool(); }
 
   std::string print(node_id n) {
     out.clear();
@@ -196,7 +196,7 @@ struct printer {
     }
   }
 
-  void attrs(node_list const & as) {
+  void attrs(node_span as) {
     if(as.empty()) return;
     out += "[[";
     for(uint32_t i = 0; i < as.size(); ++i) {
@@ -222,7 +222,7 @@ struct printer {
           out += form_open(piece) ? "(" : ", ";
           item(f.params[k]);
           if(piece == ",)") out += ')';
-        } else params({f.params[k]});
+        } else params(std::span<node_id const>(&f.params[k], 1));
       }, [](std::size_t) { return false; }, true);
       out += " => ";
       item(f.body);
@@ -240,7 +240,7 @@ struct printer {
         auto sym = name.substr(role.size());
         out += f.scoped ? "using operator " : "operator ";
         if(role == "prefix") out += sym;
-        params({f.params[0]});
+        params(std::span<node_id const>(&f.params[0], 1));
         if(role == "postfix") out += sym;
         if(sym == "[]") { // (a)[i]
           out += '[';
@@ -248,7 +248,7 @@ struct printer {
           out += ']';
         } else if(role == "infix") {
           out += cat(" ", sym, " ");
-          params({f.params[1]});
+          params(std::span<node_id const>(&f.params[1], 1));
         }
         if(f.expr_body) {
           out += " => ";
@@ -540,7 +540,7 @@ struct printer {
         if(same) {
           if constexpr(std::is_same_v<field_t, node_id>)
             same = x.[:m:] ? y.[:m:] && match_template(y.[:m:], f, r, x.[:m:], places) : !y.[:m:];
-          else if constexpr(std::is_same_v<field_t, node_list>) {
+          else if constexpr(std::is_same_v<field_t, list<node_id>>) {
             int list = x.[:m:].size() == 1 ? template_place(db, f, x.[:m:][0]) : -1;
             if(list >= 0 && r.part[list] == part_params) { // #params - the whole list: parameters without clauses
               places[list] = {n, field};
@@ -602,7 +602,7 @@ struct printer {
         using field_t = [:std::meta::type_of(m):];
         if(field++ == p.field) {
           if constexpr(std::is_same_v<field_t, symbol>) out += form_paren(piece) ? cat("(", str(x.[:m:]), ")") : std::string(str(x.[:m:]));
-          else if constexpr(std::is_same_v<field_t, node_list>) {
+          else if constexpr(std::is_same_v<field_t, list<node_id>>) {
             if(piece == "{") return struct_fields(x.[:m:]); // fields: { T x; T y; }
             out += '(';
             for(std::size_t i = 0; i < x.[:m:].size(); ++i) {
@@ -745,7 +745,7 @@ struct printer {
   std::unordered_map<uint32_t, int> found; // Node → its record (-1 - no)
   node_list using_now; // Modules whose records are taken (use cycle)
 
-  void params(node_list const & ps) {
+  void params(node_span ps) {
     out += '(';
     for(uint32_t i = 0; i < ps.size(); ++i) {
       if(i) out += ", ";
@@ -1014,7 +1014,7 @@ struct printer {
     struct_fields(st.items);
   }
   // { [ct] T поле [= значение]; … } - Struct fields (and part-block write fields, §4.5)
-  void struct_fields(node_list const & items) {
+  void struct_fields(node_span items) {
     out += '{';
     for(node_id f: items) {
       auto const & v = db.as<n_var>(f);
@@ -1268,7 +1268,7 @@ struct printer {
   }
 
   // (Arguments and parameters of the block) body
-  void clause(node_id body, node_list const & args, bool bare_ok = true) {
+  void clause(node_id body, node_span args, bool bare_ok = true) {
     n_lambda const * lam = db.is<n_lambda>(body) && db.as<n_lambda>(body).block ? &db.as<n_lambda>(body) : nullptr;
     // Print immediately in order, without intermediate lines: the layout of
     // projection by node (editor) requires the text to go out linearly
@@ -1365,7 +1365,7 @@ struct printer {
   std::vector<uint32_t> chunk_at, content_at;
   uint32_t items_end = 0, draft_begin = 0, draft_end = 0;
 
-  void verbatim_group_text(node_list const & items) {
+  void verbatim_group_text(node_span items) {
     std::string_view src = db.source(draft->source);
     uint32_t pos = 0;
     for(uint32_t k = draft->at; k < draft->at + draft->count && k < items.size(); ++k) {

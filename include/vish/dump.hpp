@@ -53,7 +53,7 @@ struct dumper {
           out += cat(std::meta::identifier_of(m), ":\n");
           visit(k.[:m:], depth + 1);
         }
-      } else if constexpr(std::is_same_v<field_t, node_list>) {
+      } else if constexpr(std::is_same_v<field_t, list<node_id>>) {
         for(node_id c: k.[:m:]) visit(c, depth);
       }
     }

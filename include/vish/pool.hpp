@@ -24,6 +24,7 @@
 #include <compare>
 #include <cstring>
 #include <initializer_list>
+#include <iterator>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -124,6 +125,9 @@ struct list {
   T & back() const pre(!empty()) { return data()[size() - 1]; }
   operator std::span<T const>() const { return {data(), size()}; }
   std::vector<T> vec() const { return std::vector<T>(begin(), end()); }
+  operator std::vector<T>() const { return vec(); } // Copy: for temporary lists (parsing, rounds)
+  std::reverse_iterator<T *> rbegin() const { return std::reverse_iterator<T *>(end()); }
+  std::reverse_iterator<T *> rend() const { return std::reverse_iterator<T *>(begin()); }
   // Deep copy is your list; the usual assignment of a descriptor divides the list
   list clone() const { return list(begin(), end()); }
   // return a piece of pool (descriptor no longer used); without it, the piece lives to the end of the base

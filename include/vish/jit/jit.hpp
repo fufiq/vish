@@ -737,7 +737,7 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
 }
 
 // Call instance by machine code from the interpreter (run mode).
-std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value> & vals, node_list const & args,
+std::optional<interpreter::flow> interpreter::try_jit(node_id f, std::vector<value> & vals, node_span args,
     scope * env, std::string const & key) {
   // The main program is executed once - no way for JIT (author's decision
   // 2026-10-01):

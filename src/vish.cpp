@@ -51,7 +51,7 @@ int native(int argc, char ** argv) {
     for(uint32_t i = 0; i < db.size(); ++i) {
       if(!db.is<vish::n_native>(vish::node_id(i))) continue;
       vish::node_id fn = vish::native_owner(db, vish::node_id(i));
-      std::string code = db.as<vish::n_native>(vish::node_id(i)).code;
+      std::string code = db.as<vish::n_native>(vish::node_id(i)).code.str();
       auto const & ps = db.as<vish::n_fn>(fn).params;
       for(std::size_t j = 0; j < ps.size(); ++j) { // #x - parameter x
         std::string name = cat("#", db.strings.text(db.as<vish::n_param>(ps[j]).name));

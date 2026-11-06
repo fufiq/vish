@@ -969,7 +969,7 @@ struct process_machine {
   // root of the current process name domain: process args on top of general globals
   uint32_t proc_globals() { return fib().globals != m_none ? fib().globals : st.globals; }
   // process(f, аргументы…): process input fiber is f; arguments are data only
-  mval start_proc(node_list const & args, std::vector<mval> & a, span where) {
+  mval start_proc(node_span args, std::vector<mval> & a, span where) {
     if(args.empty() || !db.is<n_ident>(args[0])) throw diagnostic("process(функция, аргументы…)", where);
     auto it = helper.functions.find(db.as<n_ident>(args[0]).name);
     if(it == helper.functions.end()) throw diagnostic(cat("process: нет функции ", helper.str(db.as<n_ident>(args[0]).name)), where);
@@ -2139,7 +2139,7 @@ struct process_machine {
 
   // The expression without the state of the process is to help: free names are
   // transferred from the scope (as for the chain tree and require).
-  scope * helper_probe(node_list const & exprs, uint32_t scope_id) {
+  scope * helper_probe(node_span exprs, uint32_t scope_id) {
     scope * probe = helper.new_scope(helper.globals);
     std::vector<symbol> names;
     for(node_id e: exprs) helper.free_names(e, names);
@@ -2154,7 +2154,7 @@ struct process_machine {
   }
   // nullopt - the calculation failed (VM error or exception): for the circulation of the sample - "not unpacked"
   std::optional<mval> helper_eval(node_id e, uint32_t scope_id, std::optional<mval> subject, span where) {
-    scope * probe = helper_probe({e}, scope_id);
+    scope * probe = helper_probe(std::span<node_id const>(&e, 1), scope_id);
     struct drop {
       interpreter & h;
       scope * s;
@@ -2254,7 +2254,7 @@ struct process_machine {
     mval v = deref(v0);
     if(helper.node_kind_named(kind) || (v.is<m_agg>() && helper.types.name(v.as<m_agg>().type) == "code")) {
       // sample above the code (ast.if {c, …} = node) - unpacks the assistant, names - here
-      scope * probe = helper_probe({pat}, into);
+      scope * probe = helper_probe(std::span<node_id const>(&pat, 1), into);
       scope * got = helper.new_scope(probe);
       struct drop {
         interpreter & h;
@@ -2351,7 +2351,13 @@ struct process_machine {
       place p = find_lexical(top().scope, db.as<n_param>(pn).name);
       a.push_back(p.scope == m_none ? value() : to_value(deref(st.scopes[p.scope].vars[p.slot].v)));
     }
-    finish(from_value(e->fn(helper, a, db[n].where), db[n].where));
+    value nr;
+    {
+      pool_scope keep(current_pool);
+      nr = e->fn(helper, a, db[n].where);
+    }
+    db.use_pool();
+    finish(from_value(nr, db[n].where));
   }
 
   // Raw block (§4.4): node parsing - in the assistant (ct code without a process state), the
@@ -2809,7 +2815,7 @@ struct process_machine {
   }
 
   // Arguments for congestion fns: t.extra - overload by the name of the first, t.a - number of arguments.
-  void eval_call_args(node_id n, std::vector<node_id> const & fns, node_list const & args, bool op) {
+  void eval_call_args(node_id n, std::vector<node_id> const & fns, node_span args, bool op) {
     m_task & t = top();
     (void)op;
     t.extra = fns.front();
@@ -2866,12 +2872,12 @@ struct process_machine {
   }
 
   node_list call_args(node_id n) {
-    if(db.is<n_op>(n)) return db.as<n_op>(n).args;
-    if(db.is<n_node>(n)) return db.as<n_node>(n).items; // Type of program: fields - arguments eval
+    if(db.is<n_op>(n)) return db.as<n_op>(n).args.vec();
+    if(db.is<n_node>(n)) return db.as<n_node>(n).items.vec(); // Type of program: fields - arguments eval
     auto const & c = db.as<n_call>(n);
     if(db.is<n_ident>(c.callee) && !helper.implicit_fns.empty()) // Implicit parameters (O9) - like the interpreter
-      if(auto it = helper.functions.find(db.as<n_ident>(c.callee).name); it != helper.functions.end()) return helper.with_implicit(it->second, c.args, n.value);
-    if(db.is_member(c.callee) && !entity_members(n, top().scope).empty()) return c.args; // entity .f(…) without an object
+      if(auto it = helper.functions.find(db.as<n_ident>(c.callee).name); it != helper.functions.end()) { node_span w = helper.with_implicit(it->second, c.args, n.value); return node_list(w.begin(), w.end()); }
+    if(db.is_member(c.callee) && !entity_members(n, top().scope).empty()) return c.args.vec(); // entity .f(…) without an object
     if(db.is_member(c.callee)) {
       node_list args{db.member_of(c.callee).object};
       args.insert(args.end(), c.args.begin(), c.args.end());
@@ -2982,7 +2988,7 @@ struct process_machine {
   }
 
   // Built-in VM function: arguments are computed, then operation.
-  void builtin_call(node_id n, symbol name, node_list const & args) {
+  void builtin_call(node_id n, symbol name, node_span args) {
     m_task & t = top();
     t.extra = node_id{};
     t.a = uint32_t(args.size());
@@ -3074,7 +3080,7 @@ struct process_machine {
 
   // Construction block: body(x) - parameters in the new area on top of the block environment,
   // the body - in the frame of the one who wrote the construction (semantic inlining).
-  void call_block(node_id n, m_thunk th, node_list const & args) {
+  void call_block(node_id n, m_thunk th, node_span args) {
     m_task & t = top();
     auto const & l = db.as<n_lambda>(th.expr);
     if(l.params.size() != args.size()) throw diagnostic(cat("блок ждёт ", l.params.size(), " аргументов, передано ", args.size()), db[n].where);
@@ -3139,7 +3145,7 @@ struct process_machine {
     return th;
   }
 
-  void begin_intercept(node_id n, node_list const & args) {
+  void begin_intercept(node_id n, node_span args) {
     m_task & t = top();
     if(args.size() != 2) throw diagnostic("intercept(тело, блоки)", db[n].where);
     m_thunk body = thunk_named(args[0], t.scope), hs = thunk_named(args[1], t.scope);
@@ -3194,7 +3200,7 @@ struct process_machine {
 
   // on_pressure { … } → pressure_handler(тело): process pressure handler (like an
   // interpreter); runs it pressure() - external command or PSI host
-  void begin_pressure(node_id n, node_list const & args) {
+  void begin_pressure(node_id n, node_span args) {
     if(args.size() != 1) throw diagnostic("on_pressure { … }", db[n].where);
     m_thunk th = thunk_named(args[0], top().scope);
     uint32_t env = ruled_scope(th);
@@ -3233,7 +3239,7 @@ struct process_machine {
 
   // spawn { … } prelude → fiber_start(тело): the new fiber at the end of the queue;
   // the body is closed (its area lives beyond the call).
-  void begin_spawn(node_id n, node_list const & args) {
+  void begin_spawn(node_id n, node_span args) {
     if(args.size() != 1) throw diagnostic("spawn(тело)", db[n].where);
     m_thunk th = thunk_named(args[0], top().scope);
     uint32_t env = ruled_scope(th); // Rule layer lives with fiber
@@ -3795,7 +3801,7 @@ struct process_machine {
 
   // Call phases with numbers: 1 - 2 - overload, 3 - built-in, 4 - 5 - construction block. Call
   // of closure: your frame (return - from the lambda), the area above the environment.
-  void call_closure(node_id n, m_fn fv, node_list const & args) {
+  void call_closure(node_id n, m_fn fv, node_span args) {
     m_task & t = top();
     auto const & l = db.as<n_lambda>(fv.lambda);
     if(l.params.size() != args.size()) throw diagnostic(cat("лямбда ждёт ", l.params.size(), " аргументов, передано ", args.size()), db[n].where);

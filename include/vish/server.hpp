@@ -534,7 +534,7 @@ struct editor_server {
 // 
 // The rest of the module is not printed: its pieces are the same, places
   // They're moving. Pieces of the root are glued together like a printer (the text between children is one piece).
-  value print_splice(interpreter & vm, value const & lay, node_id root, int64_t at, node_list const & old, int64_t count, int64_t source, span where) {
+  value print_splice(interpreter & vm, value const & lay, node_id root, int64_t at, node_span old, int64_t count, int64_t source, span where) {
     auto const & db = session.db;
     auto ints = [&](std::string_view f) -> array_v const & { return field(lay, f, where).as<array_v>(); };
     auto const & nodes = ints("nodes");
@@ -861,7 +861,7 @@ struct editor_server {
     for(uint32_t n: session.db.as<n_module>(session.root).inner) out.push_back(node_id(n));
     return out;
   }
-  value codes(interpreter & vm, node_list const & xs) {
+  value codes(interpreter & vm, node_span xs) {
     std::vector<value> out;
     for(node_id x: xs) out.push_back(vm.code_value(x));
     return value(array_v::of(std::move(out)));
@@ -870,7 +870,7 @@ struct editor_server {
   // Draft (author's decision 2026-10-12): the text of the module elements that rule is exactly as typed;
   // parsing is entirely according to the rules of place, elements of the same kind retain id (graft). The
   // result is draft elements, import of text, empty lines and comments of the end, disassembled.
-  value draft_parse(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_list const & old, node_id next, uint32_t at, node_id projection) {
+  value draft_parse(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection) {
     auto & db = session.db;
     ++edits;
     parser pr(db, text, cat("<черновик #", edits, ">"));
@@ -963,7 +963,7 @@ struct editor_server {
       template for(constexpr auto m: fields_of<T>()) {
         using field_t = [:std::meta::type_of(m):];
         if constexpr(std::is_same_v<field_t, node_id>) x.[:m:] = graft(y.[:m:], x.[:m:]);
-        else if constexpr(std::is_same_v<field_t, node_list>) {
+        else if constexpr(std::is_same_v<field_t, list<node_id>>) {
           auto & xs = x.[:m:];
           auto const & ys = y.[:m:];
           std::size_t a = 0, b = 0;
@@ -1211,7 +1211,7 @@ struct editor_server {
       reparsed.push_back(x);
       if(fresh->size() == 1) continue;
       // disintegrated: the rest - in context after (the value of the block - as it was)
-      node_list items = db.context_items(c);
+      node_list items(db.context_items(c).begin(), db.context_items(c).end());
       items.insert(items.begin() + std::ptrdiff_t(k) + 1, fresh->begin() + 1, fresh->end());
       if(module_level) {
         n_module m = db.as<n_module>(c);

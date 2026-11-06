@@ -25,7 +25,8 @@ namespace vish {
 
 struct node_tag;
 using node_id = id<node_tag>;
-using node_list = std::vector<node_id>;
+using node_list = std::vector<node_id>; // time lists (parsing, bypasses); node has list<node_id> in the pool
+using node_span = std::span<node_id const>; // Read the list: both vector and list node
 
 // Parameter mode (§6.2 steak)
 // clang-format off
@@ -49,26 +50,26 @@ struct n_context {};
 // The performance doesn't see her.
 struct n_module : n_context {
   symbol name;
-  node_list items;
+  list<node_id> items;
   list<uint32_t> blank;
   // internal elements (node numbers from items):
 // - in base and execution, but not in
-  // presentation of the editor module; access - transition. The layout is like blank; the
-  // numbers, not node_list, are not children (they are not seen twice by rounds in the fields).
+  // presentation of the editor module; access - transition. The layout is like blank; numbers,
+  // not list< node_id> are not children (they are not seen twice by roundabouts in the fields).
   list<uint32_t> inner;
   // [[extension(проверка)]] module k; - control of extensions entity module (§9.1):
   // 
   // 
-  node_list attrs;
+  list<node_id> attrs;
 };
 struct n_fn {
   symbol name;
-  node_list params;
+  list<node_id> params;
   node_id result_type;
   node_id body;
   bool outline = false;
   bool expr_body = false;
-  node_list attrs; // [[…]] - values calculated during compilation (§7.4)
+  list<node_id> attrs; // [[…]] - values calculated during compilation (§7.4)
   bool scoped = false; // Using Operator - Redefinition in Context (§8.2)
   // syntax: запись формы — слова и символы, "(" — параметр в скобках, "{" —
   // parameter-block (in order of parameters); the first word is the name entity (§4.4 )
@@ -94,10 +95,10 @@ struct n_var {
   bool ct = false; // Compilation field state: struct file { ct bool open = true; }
   bool ref = false; // auto&e = v[i] - reference to place (§12.1)
   bool strict = false; // explicit T x = e - type exactly T (§5.8)
-  node_list attrs; // [[state]] x = e is the state of the program (§12.2)
+  list<node_id> attrs; // [[state]] x = e is the state of the program (§12.2)
 };
 struct n_block : n_context {
-  node_list items;
+  list<node_id> items;
   bool has_value = false;
   list<uint32_t> blank; // n_module
 }; // has_value: Last expression without `;`
@@ -117,7 +118,7 @@ struct n_str {
 };
 struct n_call {
   node_id callee;
-  node_list args;
+  list<node_id> args;
   list<symbol> words; // The Word of Clause in Every Argument (Empty - Everything in Your Head)
   bool tail = false; // The final argument is the tail unit / instruction
   uint32_t form = 0; // Syntax ad entry: ad node + 1
@@ -132,13 +133,13 @@ struct n_call {
 };
 struct n_op {
   symbol op;
-  node_list args;
+  list<node_id> args;
   bool postfix = false; // one argument: a++ (otherwise prefix -a)
 }; // operator = operator entity call (§4.4)
 // A chain of infix operators, which has several trees parsing: the tree is
 // selected by brute force at instantiation - by type (§4.4).
 struct n_chain {
-  node_list atoms;
+  list<node_id> atoms;
   list<symbol> ops; // ops[k] - between atoms[k] and atoms[k+1]
 };
 struct n_if {
@@ -170,8 +171,8 @@ struct n_throw {
 // Fields (n_var), functions (n_fn), and attributes added to the Name.
 struct n_extend {
   symbol name;
-  node_list items;
-  node_list attrs;
+  list<node_id> items;
+  list<node_id> attrs;
   // Extension of a specific function by reference to its node (number, not child):
   // 
 // 
@@ -188,7 +189,7 @@ struct n_extend {
 // Code as value (§7.4): quote { объявления } and insert #x.
 //
 struct n_quote : n_context { // context: declared in the workpiece does not change parsing from the outside (author's decision 2026-10-02)
-  node_list items;
+  list<node_id> items;
 };
 struct n_splice {
   symbol name;
@@ -197,13 +198,13 @@ struct n_ct {
   node_id body;
 }; // ct e / ct { }
 struct n_lambda {
-  node_list params;
+  list<node_id> params;
   node_id body;
   bool block = false; // construction block: for(auto x : xs) {…} - semantics inline, not closing
 };
 struct n_construct {
   node_id type;
-  node_list items;
+  list<node_id> items;
   // {x: 1.0, y: 2.0} is an anonymous structural literal: type no, names[k] is the name of items[k].
   // 
 //  
@@ -222,7 +223,7 @@ struct n_hole {
 //
 struct n_pat {
   node_id type;
-  node_list items;
+  list<node_id> items;
 };
 // sample = value: instruction (failure - exclusion of unpack_failed) or predicate in the
 // expression - require(…), if(…), && (success - truth, names - with success):
@@ -282,7 +283,7 @@ struct n_ref {
 // The text is how it is written (the print does not change it).
 struct n_raw {
   node_text open; // bracket: {[[]
-  node_list items; // atoms (n_ident, n_int, n_float, n_str, n_sym, n_hole) and subblocks of n_raw
+  list<node_id> items; // atoms (n_ident, n_int, n_float, n_str, n_sym, n_hole) and subblocks of n_raw
   node_text text; // Block text with brackets - as written
   uint32_t rule = 0; // announcement of the structure, the body of which is disassembled by the block (+1); for sub-blocks - 0
   bool glued = false; // close to the previous one: f(x) vs. f(x)
@@ -302,7 +303,7 @@ struct n_sym {
 // are not shifted).
 struct n_node {
   node_text kind; // ast.twice
-  node_list items;
+  list<node_id> items;
 };
 
 using node_kind = std::variant<n_module, n_fn, n_param, n_var, n_block, n_ident, n_int, n_float, n_str,
@@ -315,6 +316,8 @@ struct node {
   span where;
   node_id parent;
 };
+// Sh5.0: node - only numbers and descriptors of the pool, without pointers and ownership (memcpy, display in file)
+static_assert(std::is_trivially_copyable_v<node>);
 
 // journal of base operations (§3.1):
 // 
@@ -590,17 +593,17 @@ struct ast_db {
   // Repeated catch(A a) {…} catch(B b) {…} Call Clause - One Argument-Cortege of Array {…}
   // Blocks
 // Pak is a motorcade, all the elements of which are blocks: elements, otherwise empty.
-  node_list const * clause_pack(node_id n) const {
-    if(!is<n_construct>(n)) return nullptr;
+  std::optional<node_span> clause_pack(node_id n) const {
+    if(!is<n_construct>(n)) return std::nullopt;
     auto const & c = as<n_construct>(n);
-    if(c.items.empty() || !is<n_ident>(c.type) || strings.text(as<n_ident>(c.type).name) != "array") return nullptr;
+    if(c.items.empty() || !is<n_ident>(c.type) || strings.text(as<n_ident>(c.type).name) != "array") return std::nullopt;
     for(node_id x: c.items)
-      if(!is<n_block>(x) && !(is<n_lambda>(x) && as<n_lambda>(x).block)) return nullptr;
-    return &c.items;
+      if(!is<n_block>(x) && !(is<n_lambda>(x) && as<n_lambda>(x).block)) return std::nullopt;
+    return node_span(c.items);
   }
   // Processor blocks: the pack - its elements, otherwise - one
   node_list handlers_of(node_id n) const {
-    if(auto p = clause_pack(n)) return *p;
+    if(auto p = clause_pack(n)) return node_list(p->begin(), p->end());
     return {n};
   }
 
@@ -813,7 +816,7 @@ struct ast_db {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
         using field_t = [:std::meta::type_of(m):];
         if constexpr(std::is_same_v<field_t, node_id>) same = same && same_tree(x.[:m:], y.[:m:]);
-        else if constexpr(std::is_same_v<field_t, node_list>) {
+        else if constexpr(std::is_same_v<field_t, list<node_id>>) {
           same = same && x.[:m:].size() == y.[:m:].size();
           for(std::size_t i = 0; same && i < x.[:m:].size(); ++i) same = same_tree(x.[:m:][i], y.[:m:][i]);
         } else same = same && x.[:m:] == y.[:m:];
@@ -1258,7 +1261,7 @@ struct ast_db {
     return n && std::visit([](auto const & k) { return std::is_base_of_v<n_context, std::remove_cvref_t<decltype(k)>>; }, nodes[n].kind);
   }
   // contextual elements
-  node_list const & context_items(node_id n) const { return is<n_block>(n) ? as<n_block>(n).items : is<n_quote>(n) ? as<n_quote>(n).items : as<n_module>(n).items; }
+  node_span context_items(node_id n) const { return is<n_block>(n) ? as<n_block>(n).items : is<n_quote>(n) ? as<n_quote>(n).items : as<n_module>(n).items; }
 
   // All daughter node_id node: One realization for all species through reflection.
   void for_each_child(node_id n, auto && f) const {
@@ -1292,7 +1295,7 @@ struct ast_db {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
         using field_t = [:std::meta::type_of(m):];
         if constexpr(std::is_same_v<field_t, node_id>) x.[:m:] = clone(x.[:m:], subst, holder);
-        else if constexpr(std::is_same_v<field_t, node_list>)
+        else if constexpr(std::is_same_v<field_t, list<node_id>>)
           for(node_id & c: x.[:m:]) c = clone(c, subst, holder);
       }
     },
@@ -1306,7 +1309,7 @@ struct ast_db {
       using field_t = [:std::meta::type_of(m):];
       if constexpr(std::is_same_v<field_t, node_id>) {
         if(k.[:m:]) f(k.[:m:]);
-      } else if constexpr(std::is_same_v<field_t, node_list>) {
+      } else if constexpr(std::is_same_v<field_t, list<node_id>>) {
         for(node_id c: k.[:m:])
           if(c) f(c);
       }
@@ -1661,7 +1664,7 @@ std::optional<record_info> record_of(ast_db const & db, node_id fn) {
               ++uses[k];
               r.part[k] = part_name;
             }
-          } else if constexpr(std::is_same_v<field_t, node_list>) {
+          } else if constexpr(std::is_same_v<field_t, list<node_id>>) {
             for(node_id c: x.[:m:]) // The list of parameters is the only one in its list.
               if(int k = template_place(db, f, c); k >= 0 && db.is<n_param>(c) && form_list(pieces[k]) && x.[:m:].size() != 1) ok = false;
             if(db.is<n_extend>(t) && x.[:m:].size() == 1 && db.is<n_splice>(x.[:m:][0])) // struct #name { #fields } - part-block fields
@@ -1688,13 +1691,13 @@ std::optional<record_info> record_of(ast_db const & db, node_id fn) {
       r.program = kind;
       n = int(pk->size());
     }
-    items = db.as<n_construct>(f.body).items;
+    items = db.as<n_construct>(f.body).items.vec();
     if(n < 0 || items.size() > uint32_t(n)) return std::nullopt;
     r.places = uint32_t(n);
   } else if(db.is<n_call>(f.body)) {
     auto const & c = db.as<n_call>(f.body);
     if(!db.is<n_ident>(c.callee) || db.as<n_ident>(c.callee).name != f.name || !c.words.empty() || c.tagged || c.form) return std::nullopt;
-    items = c.args;
+    items = c.args.vec();
     r.places = uint32_t(items.size());
   } else return std::nullopt;
   r.slot.assign(f.params.size(), ~uint32_t{0});
@@ -1716,7 +1719,7 @@ std::optional<record_info> record_of(ast_db const & db, node_id fn) {
 template<typename F>
 consteval char const * node_field_type() {
   if constexpr(std::is_same_v<F, node_id>) return "code";
-  else if constexpr(std::is_same_v<F, node_list> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>> || std::is_same_v<F, list<symbol>> || std::is_same_v<F, list<uint32_t>>) return "array";
+  else if constexpr(std::is_same_v<F, list<node_id>> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>> || std::is_same_v<F, list<symbol>> || std::is_same_v<F, list<uint32_t>>) return "array";
   // Numbers and text - machine representations (§5.8, O15): tag names - prelude
   else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string> || std::is_same_v<F, node_text>) return "__bytes";
   else if constexpr(std::is_same_v<F, bool>) return "__bool";

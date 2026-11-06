@@ -26,6 +26,7 @@ struct parser {
   // The parser reads a copy of the text stored by the database when importing: tokens and
   // holes refer to it, not to the caller string (which may be temporary).
   parser(ast_db & db, std::string_view text, std::string label = {}) : db(db) {
+    db.use_pool(); // node lists are built in this database pool
     load_prelude(db); // before import: node of this text from this import
     source = db.record_import(std::string(text), std::move(label));
     src = db.source(source);
@@ -42,6 +43,7 @@ struct parser {
   // standard parsing (§4.4, "parsing code"): the positions node - in the same text, without new
   // imports (the import of new node is specified by the calling: ast_db::pinned_source).
   parser(ast_db & db, uint32_t from, span range) : db(db) {
+    db.use_pool();
     source = from;
     src = db.source(source);
     lexer lx(src.substr(range.begin, range.end - range.begin));
@@ -118,14 +120,14 @@ struct parser {
   void attach_root(node_id n) {
     if(comments.empty() || !n) return;
     attach(n);
-    if(!db.is_context(n)) assign({}, {n}, 0, uint32_t(src.size()));
+    if(!db.is_context(n)) assign({}, std::span<node_id const>(&n, 1), 0, uint32_t(src.size()));
   }
   // Commentaries of the context of ctx (empty - the string of the set: the end - to the tail of the
   // latter) in [from, to], not yet taken by the nested: on the line of the end of the element - its
   // tail, on its lines or inside the element - the lines in front of it, after the last - before the
   // end. rest - draft editor: comments with their lines after the last element of the line of the
   // set - not the tail of the latter, but here (they - the next element).
-  void assign(node_id ctx, node_list const & items, uint32_t from, uint32_t to, std::vector<std::string> * rest = nullptr) {
+  void assign(node_id ctx, node_span items, uint32_t from, uint32_t to, std::vector<std::string> * rest = nullptr) {
     std::vector<node_note> ns(items.size() + 1);
     std::vector<uint32_t> last(items.size() + 1, ~uint32_t{0}); // end of last comment before k
     std::vector<std::vector<std::string>> inner(items.size()); // Comments on the element k
@@ -984,7 +986,7 @@ struct parser {
 
   // References & f(…) to node module functions (and prelude). Not found or
   // ambiguous - the element becomes a hole with a cause.
-  void resolve_refs(node_list const & items) {
+  void resolve_refs(node_span items) {
     for(auto const & r: std::exchange(refs, {})) {
       std::vector<node_id> found;
       auto fits = [&](node_id f) {
@@ -1758,7 +1760,7 @@ struct parser {
   // of use w, parts - as disassembled. Name-place - the disassembled parameter of the part,
   // the connection with the source (x : xs) and the clause - the workpiece; place-block - the
   // block of the part (or the block from its expression).
-  node_id instantiate(n_fn const & f, record_info const & r, node_id t, node_list const & args, span w) {
+  node_id instantiate(n_fn const & f, record_info const & r, node_id t, node_span args, span w) {
     if(int k = template_block_place(db, f, t); k >= 0) {
       node_id a = args[k];
       if(db.is<n_block>(a) || db.is<n_raw>(a)) return a;
@@ -1782,11 +1784,12 @@ struct parser {
         using field_t = [:std::meta::type_of(m):];
         if constexpr(std::is_same_v<field_t, node_id>) {
           if(x.[:m:]) x.[:m:] = instantiate(f, r, x.[:m:], args, w);
-        } else if constexpr(std::is_same_v<field_t, node_list>) {
+        } else if constexpr(std::is_same_v<field_t, list<node_id>>) {
           int list = x.[:m:].size() == 1 ? template_place(db, f, x.[:m:][0]) : -1;
           if(list >= 0 && r.part[list] == part_params) { // #params - Part parameters
             node_id a = args[list];
-            x.[:m:] = db.is<n_construct>(a) ? db.as<n_construct>(a).items : node_list{a};
+            if(db.is<n_construct>(a)) x.[:m:] = db.as<n_construct>(a).items;
+            else x.[:m:] = node_list{a};
           } else if(list >= 0 && r.part[list] == part_items) // #fields - Part fields (disassembled as struct)
             x.[:m:] = db.as<n_block>(args[list]).items;
           else

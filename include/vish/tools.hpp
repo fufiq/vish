@@ -289,7 +289,7 @@ node_id put_item(ast_db & db, node_id m, node_id mine, std::string const & text,
   auto at_of = [&](node_id n) { return std::size_t(std::ranges::find(mod.items, n) - mod.items.begin()); };
   if(mod.blank.size() < mod.items.size() + 1) mod.blank.resize(mod.items.size() + 1, 0);
   parser pr(db, text, cat("<слияние ", name, ">"));
-  pr.outer_items = mod.items; // f(…) - on the function of this module
+  pr.outer_items = mod.items.vec(); // f(…) - on the function of this module
   pr.place(m, mine); // Rules parsing of the Item Place (§4.4)
   node_id snippet = pr.parse_module();
   auto const & got = db.as<n_module>(snippet).items;
@@ -300,7 +300,7 @@ node_id put_item(ast_db & db, node_id m, node_id mine, std::string const & text,
     item = mine;
   } else {
     std::size_t k = after ? at_of(after) + 1 : mod.items.size();
-    k = std::min(k, mod.items.size());
+    k = std::min<size_t>(k, mod.items.size());
     mod.items.insert(mod.items.begin() + std::ptrdiff_t(k), item);
     mod.blank.insert(mod.blank.begin() + std::ptrdiff_t(k), 0);
   }

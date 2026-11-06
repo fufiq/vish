@@ -494,7 +494,7 @@ struct interpreter {
     node_id module;
   };
   // [[extension(g)]] among the attributes is the name of the check g
-  symbol extension_check(node_list const & attrs) {
+  symbol extension_check(node_span attrs) {
     for(node_id a: attrs) {
       if(!db.is<n_call>(a) || !db.is<n_ident>(db.as<n_call>(a).callee) || str(db.as<n_ident>(db.as<n_call>(a).callee).name) != "extension") continue;
       auto const & args = db.as<n_call>(a).args;
@@ -503,16 +503,16 @@ struct interpreter {
     }
     return {};
   }
-  node_list const * decl_attrs(node_id n) const {
-    if(db.is<n_fn>(n)) return &db.as<n_fn>(n).attrs;
-    if(db.is_struct(n)) return &db.as<n_extend>(n).attrs;
-    return nullptr;
+  std::optional<node_span> decl_attrs(node_id n) const {
+    if(db.is<n_fn>(n)) return node_span(db.as<n_fn>(n).attrs);
+    if(db.is_struct(n)) return node_span(db.as<n_extend>(n).attrs);
+    return std::nullopt;
   }
   // The module or one of its ads has [[extension(…)]]
   bool has_extension_attr(node_id m) {
     if(extension_check(db.as<n_module>(m).attrs)) return true;
     for(node_id item: db.as<n_module>(m).items)
-      if(auto * as = decl_attrs(item); as && extension_check(*as)) return true;
+      if(auto as = decl_attrs(item); as && extension_check(*as)) return true;
     return false;
   }
   // entity registration: the first is an announcement (host module), the following are extensions.
@@ -543,7 +543,7 @@ struct interpreter {
   std::vector<std::pair<symbol, node_id>> extension_checks(std::vector<ext_reg> const & regs) {
     std::vector<std::pair<symbol, node_id>> out;
     for(auto const & r: regs)
-      if(auto * as = decl_attrs(r.item))
+      if(auto as = decl_attrs(r.item))
         if(symbol g = extension_check(*as)) out.push_back({g, r.item});
     if(symbol g = extension_check(db.as<n_module>(regs.front().module).attrs)) out.push_back({g, regs.front().item});
     return out;
@@ -715,7 +715,7 @@ struct interpreter {
   }
   // Call arguments with implicit ones: there is overload, which lacks the written ones exactly for
   // its implicit ones, and there is no one that takes them as is.
-  node_list const & with_implicit(std::vector<node_id> const & fns, node_list const & args, uint32_t call) {
+  node_span with_implicit(std::vector<node_id> const & fns, node_span args, uint32_t call) {
     if(implicit_fns.empty() || !call) return args;
     node_id pick;
     for(node_id f: fns) {
@@ -726,7 +726,7 @@ struct interpreter {
     if(!pick) return args;
     auto key = std::pair{call, pick.value};
     if(auto it = implicit_args.find(key); it != implicit_args.end()) return it->second;
-    node_list full = args;
+    node_list full(args.begin(), args.end());
     auto const & ps = db.as<n_fn>(pick).params;
     for(std::size_t i = args.size(); i < ps.size(); ++i) {
       node_id x = db.derive(n_ident{db.as<n_param>(ps[i]).name}, db[node_id(call)].where, derived_nodes);
@@ -3443,7 +3443,12 @@ struct interpreter {
     // verification). This function is the interpreter (*my*)
     if(inert_natives && checking() && !elaborating && std::ranges::all_of(a, [](value const & x) { return x.known(); }))
       fail("native с известными входами — состояние хоста, у VM при исполнении", db[n].where);
-    value r = e->fn(*this, a, db[n].where);
+    value r;
+    {
+      pool_scope keep(current_pool); // native can work with another base (test run, version): after it - again this
+      r = e->fn(*this, a, db[n].where);
+    }
+    db.use_pool();
     if(r.is<array_v>() && r.as<array_v>().borrowed) r.as<array_v>().own(); // The loan doesn't survive the challenge
     else if(r.is<str_v>()) r.as<str_v>().own();
     if(checking() && !r.known()) // “Not proven” at the level of staticity, not the type of exception
@@ -3714,7 +3719,7 @@ struct interpreter {
       }
     }
     // The call (and the operator declared to be: a++ with a mut parameter) changes the place-argument
-    auto via = [&](symbol callee, node_list const & args) {
+    auto via = [&](symbol callee, node_span args) {
       if(auto it = functions.find(callee); it != functions.end())
         for(uint32_t k = 0; k < args.size(); ++k) {
           node_id a = args[k];
@@ -3848,7 +3853,7 @@ struct interpreter {
   // 
 // 
 // 
-  flow alloc_in(node_list const & args, scope * env, uint32_t frame, span where) {
+  flow alloc_in(node_span args, scope * env, uint32_t frame, span where) {
     if(args.size() != 2) fail("alloc_in(уровень, тело)", where);
     VISH_TRY(r, eval(args[0], env, frame));
     value const * sh = shape_of(r);
@@ -3864,7 +3869,7 @@ struct interpreter {
     return eval(args[1], env, frame);
   }
 
-  flow intercept(node_list const & args, scope * env, uint32_t frame, span where) {
+  flow intercept(node_span args, scope * env, uint32_t frame, span where) {
     if(args.size() != 2) fail("intercept(тело, блоки)", where);
     thunk_v hs = thunk_arg(args[1], env, where);
     node_list handlers = db.handlers_of(hs.expr);
@@ -3941,7 +3946,7 @@ struct interpreter {
 
   // Calling a construction block with arguments: body(xs[k]) in for. The block is
   // the part of the caller (semantics inline): return and break from it go further.
-  flow call_block(thunk_v const & t, node_list const & args, scope * env, uint32_t frame, span where) {
+  flow call_block(thunk_v const & t, node_span args, scope * env, uint32_t frame, span where) {
     auto const & l = db.as<n_lambda>(t.expr);
     if(l.params.size() != args.size()) fail(cat("блок ждёт ", l.params.size(), " аргументов, передано ", args.size()), where);
     ruled_hold rh{*this, t, ruled_env(t)};
@@ -4114,7 +4119,7 @@ struct interpreter {
   value field_value(auto const & f) {
     using field_t = std::remove_cvref_t<decltype(f)>;
     if constexpr(std::is_same_v<field_t, node_id>) return code_value(f);
-    else if constexpr(std::is_same_v<field_t, node_list>) {
+    else if constexpr(std::is_same_v<field_t, list<node_id>>) {
       std::vector<value> ys;
       for(node_id y: f) ys.push_back(code_value(y));
       return value(array_v::of(std::move(ys)));
@@ -4150,7 +4155,7 @@ struct interpreter {
     using field_t = std::remove_cvref_t<decltype(f)>;
     value code = code_value(node_id(1));
     if constexpr(std::is_same_v<field_t, node_id>) return erase(code);
-    else if constexpr(std::is_same_v<field_t, node_list>) return erase(value(array_v::of({code})));
+    else if constexpr(std::is_same_v<field_t, list<node_id>>) return erase(value(array_v::of({code})));
     else if constexpr(std::is_same_v<field_t, list<symbol>>) return erase(value(array_v::of({value(std::string("x"))})));
     else if constexpr(std::is_same_v<field_t, list<uint32_t>>) return erase(value(array_v::of({value(int64_t(1))})));
     else if constexpr(std::is_same_v<field_t, symbol> || std::is_same_v<field_t, std::string>) return erase(value(std::string("x")));
@@ -4263,7 +4268,7 @@ struct interpreter {
       for(uint32_t k = 0; k < v.as<array_v>().size(); ++k) each(v.as<array_v>().get(k));
     };
     if constexpr(std::is_same_v<field_t, node_id>) f = adopt(child_node(v, what, where), owner, taken);
-    else if constexpr(std::is_same_v<field_t, node_list>) {
+    else if constexpr(std::is_same_v<field_t, list<node_id>>) {
       field_t xs;
       items([&](value const & x) { xs.push_back(adopt(child_node(x, what, where), owner, taken)); });
       f = std::move(xs);
@@ -4399,7 +4404,7 @@ struct interpreter {
         using field_t = [:std::meta::type_of(m):];
         if(lang_field(std::meta::identifier_of(m)) != str(name)) {
           if constexpr(std::is_same_v<field_t, node_id>) taken.insert(x.[:m:].value);
-          else if constexpr(std::is_same_v<field_t, node_list>)
+          else if constexpr(std::is_same_v<field_t, list<node_id>>)
             for(node_id y: x.[:m:]) taken.insert(y.value);
         }
       }
@@ -5723,7 +5728,7 @@ struct interpreter {
 
   // pin_storage(xs) - pin core: array-variable data - in its range of addresses, their growth no
   // longer moves (pages.hpp); the support pointer model puts prelude.
-  flow pin_storage(node_list const & args, scope * env, node_id n) {
+  flow pin_storage(node_span args, scope * env, node_id n) {
     span where = db[n].where;
     if(args.size() != 1 || !db.is<n_ident>(args[0])) fail("pin_storage(массив)", where);
     value * cell = find(env, db.as<n_ident>(args[0]).name);
@@ -5760,7 +5765,7 @@ struct interpreter {
 
   // append(xs, x) is the growth of the array, the core push. What growth means for links, the library
   // declares: [[relocates(xs)]] at push and the pivot pointer model (the parsing hook on the language).
-  flow append(node_list const & args, scope * env, uint32_t frame, node_id n) {
+  flow append(node_span args, scope * env, uint32_t frame, node_id n) {
     span where = db[n].where;
     if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("append(массив, значение)", where);
     value * cell = find(env, db.as<n_ident>(args[0]).name);
@@ -5853,7 +5858,7 @@ struct interpreter {
   }
 
   // set_ct_state(x, s): The ct-state of the place x is the compile value.
-  flow set_ct_state(node_list const & args, scope * env, uint32_t frame, span where) {
+  flow set_ct_state(node_span args, scope * env, uint32_t frame, span where) {
     if(args.size() != 2 || !db.is<n_ident>(args[0])) fail("set_ct_state(переменная, состояние)", where);
     value * cell = find(env, db.as<n_ident>(args[0]).name);
     if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("set_ct_state: первый аргумент — переменная", where);
@@ -5949,7 +5954,7 @@ struct interpreter {
   // each call is executed with the parameters of the function associated with arguments (place -
   // alias). [[relocates(xs)]] for push is the code prelude, not the rule of the compiler. The
   // argument is split - the call goes on each alternative (dispatch_split), the hook changes it.
-  void attribute_hooks(node_id f, std::vector<value> const & vals, node_list const & args, scope * env, call_site const & site) {
+  void attribute_hooks(node_id f, std::vector<value> const & vals, node_span args, scope * env, call_site const & site) {
     if(!checking()) return;
     auto const & fn = db.as<n_fn>(f);
     for(node_id a: fn.attrs) {
@@ -6061,7 +6066,7 @@ struct interpreter {
   }
 
   // spawn(expr body) is the new fiber; the body is closed (the area lives beyond the call).
-  flow spawn(node_list const & args, scope * env, uint32_t frame, span where) {
+  flow spawn(node_span args, scope * env, uint32_t frame, span where) {
     if(args.size() != 1) fail("spawn(тело)", where);
     thunk_v t = thunk_arg(args[0], env, where);
     if(checking()) { // parsing: the body is in place; fiber launch - runtime effect
@@ -6100,7 +6105,7 @@ struct interpreter {
   };
   std::vector<pressure_rec> pressure_handlers;
   int psi_fd = -1; // at the root: memory pressure trigger host
-  flow pressure_handler(node_list const & args, scope * env, uint32_t frame, span where) {
+  flow pressure_handler(node_span args, scope * env, uint32_t frame, span where) {
     if(checking()) return spawn(args, env, frame, where);
     if(args.size() != 1) fail("on_pressure { … }", where);
     thunk_v t = thunk_arg(args[0], env, where);
@@ -6529,7 +6534,7 @@ struct interpreter {
     return true;
   }
 
-  flow start_process(node_list const & args, scope * env, uint32_t frame, span where) {
+  flow start_process(node_span args, scope * env, uint32_t frame, span where) {
     if(args.empty() || !db.is<n_ident>(args[0])) fail("process(функция, аргументы…)", where);
     symbol fname = db.as<n_ident>(args[0]).name;
     if(!functions.contains(fname)) fail(cat("process: нет функции ", str(fname)), where);
@@ -7474,7 +7479,7 @@ struct interpreter {
   bool out_marker(uint32_t h) const {
     return h && db.is<n_param>(node_id(h - 1)) && db.as<n_param>(node_id(h - 1)).mode == param_mode::out;
   }
-  void out_written(node_list const & params, scope * inner, call_site const & site) {
+  void out_written(node_span params, scope * inner, call_site const & site) {
     for(node_id pn: params) {
       auto const & p = db.as<n_param>(pn);
       if(p.mode != param_mode::out) continue;
@@ -7802,7 +7807,7 @@ struct interpreter {
   uint32_t push_fn_checked = ~0u;
   bool push_fn_ok = false;
 
-  flow call_value(value const & fv, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
+  flow call_value(value const & fv, node_span args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
     if(!fv.is<fn_v>()) fail(cat("значение типа ", types.describe(fv), " нельзя вызвать"), where);
     fn_v const & f = fv.as<fn_v>();
     if(!f.set.empty()) { // a set of overloads (local or entity member): choice as a function, area as the set environment
@@ -7810,7 +7815,7 @@ struct interpreter {
       return call_overloaded(fns, args, env, frame, {where, std::string(str(db.as<n_fn>(fns[0]).name)), node, frame}, f.env);
     }
     if(f.name) return call_named(f.name, args, env, frame, where, node);
-    node_list const & params = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).params : db.as<n_fn>(f.lambda).params;
+    node_span params = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).params : db.as<n_fn>(f.lambda).params;
     node_id body = db.is<n_lambda>(f.lambda) ? db.as<n_lambda>(f.lambda).body : db.as<n_fn>(f.lambda).body;
     if(params.size() != args.size()) fail(cat("ожидалось ", params.size(), " аргументов, передано ", args.size()), where);
     scope * inner = new_scope(f.env);
@@ -7861,7 +7866,7 @@ struct interpreter {
     return r;
   }
 
-  flow call_named(symbol name, node_list const & args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
+  flow call_named(symbol name, node_span args, scope * env, uint32_t frame, span where, uint32_t node = 0) {
     if(auto it = functions.find(name); it != functions.end()) {
       if(node && module_order.size() > 1 && !name_visible(module_of(node_id(node)), name, it->second)) {
         node_id home = module_of(it->second.front());
@@ -7911,8 +7916,8 @@ struct interpreter {
   // overload: Candidates by arity and types; require at the beginning of the body -
   // candidate restriction (§5.4); choose the most specific. base - environment of a local
   // set of congestion (otherwise a global area)
-  flow call_overloaded(std::vector<node_id> const & fns, node_list const & args_in, scope * env, uint32_t frame, call_site site, scope * base = nullptr) {
-    node_list args = args_in;
+  flow call_overloaded(std::vector<node_id> const & fns, node_span args_in, scope * env, uint32_t frame, call_site site, scope * base = nullptr) {
+    node_list args(args_in.begin(), args_in.end());
     if(std::ranges::any_of(args_in, [&](node_id a) { return db.is<n_spread>(a); })) { // ...t - in separate arguments
       std::vector<value> vals;
       args.clear();
@@ -7958,7 +7963,7 @@ struct interpreter {
         if(on) vm.arg_refs.pop_back();
       }
     } refs_hold{*this, std::ranges::any_of(args, [&](node_id a) { return db.is_member(a) || db.is_index(a); })};
-    if(refs_hold.on) arg_refs.push_back({&args, std::vector<value>(args.size()), {}});
+    if(refs_hold.on) arg_refs.push_back({args, std::vector<value>(args.size()), {}});
     for(uint32_t i = 0; i < args.size(); ++i) {
       bool expr_everywhere = true;
       for(node_id f: fns) {
@@ -8007,7 +8012,7 @@ struct interpreter {
   // length separately, the rest (tail ...xs) - one "open" call, where the tail - the array
   // run-time - lengths; the results merge like branches if. The length that no one takes
   // is runtime, the unpack_failed error.
-  flow spread_lengths(std::vector<node_id> const & fns, std::vector<value> const & vals, node_list const & args, uint32_t at,
+  flow spread_lengths(std::vector<node_id> const & fns, std::vector<value> const & vals, node_span args, uint32_t at,
       value const & elem, node_id where, scope * env, uint32_t frame, call_site const & site, scope * base) {
     std::size_t given = vals.size();
     auto with = [&](std::size_t k, std::vector<value> & out, node_list & out_args) {
@@ -8059,7 +8064,7 @@ struct interpreter {
     return out;
   }
 
-  flow dispatch_split(std::vector<node_id> const & fns, std::vector<value> & vals, uint32_t from, node_list const & args,
+  flow dispatch_split(std::vector<node_id> const & fns, std::vector<value> & vals, uint32_t from, node_span args,
       scope * env, uint32_t frame, call_site const & site, scope * base = nullptr) {
     for(uint32_t i = from; i < vals.size(); ++i) {
       if(!vals[i].is<split_v>()) continue;
@@ -8145,7 +8150,7 @@ struct interpreter {
     return overload_choices.emplace(std::move(key), std::move(out)).first->second;
   }
 
-  flow select_and_invoke(std::vector<node_id> const & fns, std::vector<value> & vals, node_list const & args,
+  flow select_and_invoke(std::vector<node_id> const & fns, std::vector<value> & vals, node_span args,
       scope * env, uint32_t frame, call_site const & site, scope * parent = nullptr, bool repacked = false, bool open = false) {
     scope * base = parent ? parent : globals; // local set: its environment
     struct candidate {
@@ -8319,7 +8324,7 @@ struct interpreter {
   // require at the beginning of the body: run-time - Candidate condition does not
   // cut off - it is checked in runtime (§5.4). The fourth condition is run-time
   // (will decide the value: runtime - overload).
-  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_list const & args, scope * env, scope * base, bool open = false) {
+  std::tuple<bool, int, std::string, bool> leading_requires(node_id f, std::vector<value> & vals, node_span args, scope * env, scope * base, bool open = false) {
     auto const & fn = db.as<n_fn>(f);
     if(!db.is<n_block>(fn.body)) return {true, 0, "", false}; // и f(x) => { require(…); … }
     if(auto const & items = db.as<n_block>(fn.body).items; items.empty() || !db.require_cond(items[0]) || db.is_assume(items[0]))
@@ -8424,7 +8429,7 @@ struct interpreter {
     return it->second.contains(call);
   }
 
-  flow invoke(node_id f, std::vector<value> & vals, node_list const & args, scope * env, call_site const & site) {
+  flow invoke(node_id f, std::vector<value> & vals, node_span args, scope * env, call_site const & site) {
     if(!checking() && site.node && tail_self(f, site.node)) { // tail challenge itself - transition: values - working call
       for(value & v: vals) // The loan of the outgoing frame cell would hang - its value; the owner's loan above - lives.
         if(v.is<array_v>() && v.as<array_v>().borrowed && in_frame(v.as<array_v>().borrowed, env, f)) v.as<array_v>().own();
@@ -8563,14 +8568,14 @@ struct interpreter {
     std::size_t journal_mark = journal.size();
     frame_floors.push_back({frame_counter, false});
     flow r;
-    node_list const no_args;
-    node_list const * argp = &args; // after the transition (tail call yourself) - parameters
+    node_span const no_args;
+    node_span const * argp = &args; // after the transition (tail call yourself) - parameters
     for(uint32_t pass = 0;; ++pass) {
       scope * inner = new_scope(parent ? parent : globals); // Local function - on top of the surroundings of its block
       inner->caller = env; // call environment (O4)
       inner->fn = f;
       scope_hold hold{*this, inner};
-      node_list const & args = *argp;
+      node_span args = *argp;
       bind_values(fn.params, vals, args, env, inner, f, open);
       if(checking()) {
         active.insert(active_key);
@@ -8686,7 +8691,7 @@ struct interpreter {
     return r;
   }
 
-  std::optional<flow> try_jit(node_id f, std::vector<value> & vals, node_list const & args, scope * env,
+  std::optional<flow> try_jit(node_id f, std::vector<value> & vals, node_span args, scope * env,
       std::string const & key);
 
   bool valid(check_cache::entry const & e) {
@@ -8707,7 +8712,7 @@ struct interpreter {
 
   // Parameters: alias per caller cell, if the argument is a place; otherwise its own cell. open
   // - tail run-time-length (parsing f(...t)): ...xs - erased array
-  void bind_values(node_list const & params, std::vector<value> & vals, node_list const & args, scope * env, scope * inner, node_id f = {}, bool open = false) {
+  void bind_values(node_span params, std::vector<value> & vals, node_span args, scope * env, scope * inner, node_id f = {}, bool open = false) {
     for(uint32_t i = 0; i < params.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
       if(p.pack && p.mode == param_mode::let && i + 1 == params.size()) { // ...xs - the remainder of arguments (cortege)
@@ -8778,20 +8783,20 @@ struct interpreter {
   // References of the ways-arguments of the call during execution: are taken together with the values of the arguments
   // (indices - once), parameter binding - according to them. Intermediate links of chains live until the end of the call.
   struct taken_refs {
-    node_list const * args;
+    node_span args; // call list: same data address and length - same call
     std::vector<value> refs; // Unit: An argument is no way
     std::deque<value> hold;
   };
   std::deque<taken_refs> arg_refs; // deque: indices computation calls add their entries in place
-  value const * taken_ref(node_list const & args, uint32_t i) const {
+  value const * taken_ref(node_span args, uint32_t i) const {
     for(auto it = arg_refs.rbegin(); it != arg_refs.rend(); ++it)
-      if(it->args == &args) return i < it->refs.size() && it->refs[i].is<ref_v>() ? &it->refs[i] : nullptr;
+      if(it->args.data() == args.data() && it->args.size() == args.size()) return i < it->refs.size() && it->refs[i].is<ref_v>() ? &it->refs[i] : nullptr;
     return nullptr;
   }
 
   // Field to a variable parameter that has not become a reference (conversion to a parameter type): a
   // copy at the input, a record in the caller field at the output (if excluded - no).
-  void write_back_fields(node_id f, node_list const & params, node_list const & args, scope * env, scope * inner, call_site const & site) {
+  void write_back_fields(node_id f, node_span params, node_span args, scope * env, scope * inner, call_site const & site) {
     for(uint32_t i = 0; i < params.size() && i < args.size(); ++i) {
       auto const & p = db.as<n_param>(params[i]);
       if(p.mode == param_mode::expr || p.mode == param_mode::own || p.pack || (p.type && db.is<n_pat>(p.type))) continue;
@@ -9000,7 +9005,7 @@ struct interpreter {
           if(db.is<n_op>(s) && db.strings.text(db.as<n_op>(s).op) == "=" && db.is<n_ident>(db.as<n_op>(s).args[0]) && db.as<n_ident>(db.as<n_op>(s).args[0]).name == name) return true;
         }
       if(db.is<n_fn>(p) || db.is<n_lambda>(p)) {
-        node_list const & ps = db.is<n_fn>(p) ? db.as<n_fn>(p).params : db.as<n_lambda>(p).params;
+        node_span ps = db.is<n_fn>(p) ? db.as<n_fn>(p).params : db.as<n_lambda>(p).params;
         for(node_id q: ps)
           if(db.as<n_param>(q).name == name) return true;
       }
@@ -9205,7 +9210,7 @@ struct interpreter {
         if(!instantiating && done_by_pass(where)) return value();
         if(instantiating) {
           node_list items;
-          if(db.is<n_quote>(q)) items = db.as<n_quote>(q).items;
+          if(db.is<n_quote>(q)) items = db.as<n_quote>(q).items.vec();
           else if(db.is<n_fn>(q) || db.is<n_extend>(q)) items = {q};
           else fail("emit: ожидался quote { объявления } или узел объявления (n_fn, n_extend)", where);
           auto m = db.as<n_module>(mod);
@@ -9468,7 +9473,7 @@ struct interpreter {
       interpreter * an = jit_analysis ? const_cast<interpreter *>(jit_analysis) : this;
       if(db.is<n_call>(c) && db.is<n_ident>(db.as<n_call>(c).callee))
         if(auto it = an->functions.find(db.as<n_ident>(db.as<n_call>(c).callee).name); it != an->functions.end()) {
-          node_list const & full = an->with_implicit(it->second, db.as<n_call>(c).args, c.value);
+          node_span full = an->with_implicit(it->second, db.as<n_call>(c).args, c.value);
           for(std::size_t i = db.as<n_call>(c).args.size(); i < full.size(); ++i) xs.push_back(code_value(full[i]));
         }
       return value(array_v::of(std::move(xs)));
@@ -9572,7 +9577,7 @@ struct interpreter {
         if(!up || !db.is_context(up)) fail("code_remove: удалить можно элемент блока или модуля", where);
         node_kind k = db[up].kind;
         std::visit([&](auto & x) {
-          if constexpr(requires { x.items; }) std::erase(x.items, c);
+          if constexpr(requires { x.items; }) x.items.erase_value(c);
         }, k);
         db.replace(up, std::move(k));
         db.link_parents(up);
