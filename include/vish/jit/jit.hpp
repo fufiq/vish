@@ -635,7 +635,7 @@ uint64_t jit_stream_call(uint64_t op, uint64_t id, uint64_t bits, uint64_t t_nod
     }
     if(op == 6 || op == 7) {
       auto & pa = reinterpret_cast<jit_call_mem *>(id)->print_args;
-      if(op == 7) pa.push_back(value(vm.db.as<n_str>(at).value));
+      if(op == 7) pa.push_back(value(vm.db.as<n_str>(at).value.str()));
       else if(t == jt::f64_) pa.push_back(value(std::bit_cast<double>(bits)));
       else if(t == jt::bool_) pa.push_back(value(bits != 0));
       else if(t == jt::i64_) pa.push_back(value(int64_t(bits)));

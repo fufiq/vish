@@ -126,8 +126,9 @@ struct tools_context {
   int64_t open(std::string const & path) {
     node_id root;
     std::vector<journal_entry> entries;
+    node_pool staging; // It lives until add_copy replays the records to a new database.
     try {
-      entries = read_journal(path, root);
+      entries = read_journal(path, root, staging);
     } catch(diagnostic const & d) {
       error = d.what();
       return -1;
@@ -145,7 +146,7 @@ struct tools_context {
     version & x = versions[slot];
     x.db = &x.own.emplace();
     x.db->replay(entries);
-    x.journal = std::move(entries);
+    x.journal = x.db->journal(); // records - in the pool of this database, not in someone else's (staging, source base)
     x.root = root;
     return int64_t(slot);
   }

@@ -598,7 +598,7 @@ std::optional<client_msg> client_from(std::string_view name, std::vector<std::st
         using F = [:std::meta::type_of(f):];
         if(at < values.size()) {
           std::string const & w = values[at++];
-          if constexpr(std::is_same_v<F, std::string>) m.[:f:] = w;
+          if constexpr(std::is_same_v<F, std::string> || std::is_same_v<F, node_text>) m.[:f:] = w;
           else {
             uint64_t x = 0;
             std::from_chars(w.data(), w.data() + w.size(), x);
@@ -634,6 +634,7 @@ struct flat_tree {
     if constexpr(std::is_same_v<T, node_id>) put("node", n, "", x ? int64_t(x.value) : -1, 0);
     else if constexpr(std::is_arithmetic_v<T>) put("num", n, cat(x), int64_t(x), 0);
     else if constexpr(std::is_same_v<T, std::string>) put("str", n, x, 0, 0);
+    else if constexpr(std::is_same_v<T, node_text>) put("str", n, x.str(), 0, 0);
     else if constexpr(is_variant<T>::value) std::visit([&](auto const & a) { value_of(n, a); }, x);
     else if constexpr(is_vector<T>::value) {
       using E = typename T::value_type;
@@ -685,7 +686,7 @@ struct schema_builder {
     else if constexpr(std::is_same_v<T, double>) out += "\"f64\"";
     else if constexpr(std::is_same_v<T, node_id>) out += "\"node\"";
     else if constexpr(is_id<T>::value) out += "\"u32\"";
-    else if constexpr(std::is_same_v<T, std::string>) out += "\"string\"";
+    else if constexpr(std::is_same_v<T, std::string> || std::is_same_v<T, node_text>) out += "\"string\"";
     else if constexpr(is_vector<T>::value) {
       out += "[\"vector\", ";
       type(out, std::type_identity<typename T::value_type>{});

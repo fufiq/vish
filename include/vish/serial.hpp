@@ -5,7 +5,9 @@
 #pragma once
 
 #include "base.hpp"
+#include "pool.hpp"
 
+#include <memory>
 #include <optional>
 #include <variant>
 
@@ -27,22 +29,34 @@ struct is_id<id<T>> : std::true_type {};
 struct writer {
   void put(auto const & x) {
     using T = std::remove_cvref_t<decltype(x)>;
-    if constexpr(std::is_arithmetic_v<T> || std::is_enum_v<T>) {
+    if constexpr(std::is_same_v<T, node_pool const *>) {
+      // The book is not written (the reader is his)
+    } else if constexpr(std::is_arithmetic_v<T> || std::is_enum_v<T>) {
       raw(&x, sizeof x);
     } else if constexpr(is_id<T>::value) {
       put(x.value);
     } else if constexpr(std::is_same_v<T, std::string>) {
       put(uint32_t(x.size()));
       raw(x.data(), x.size());
-    } else if constexpr(is_vector<T>::value) {
+    } else if constexpr(std::is_same_v<T, node_text>) { // Pool text - as a string (reads through the current database)
+      put(uint32_t(x.size()));
+      raw(x.data(), x.size());
+    } else if constexpr(is_vector<T>::value || is_pool_list<T>::value) {
       put(uint32_t(x.size()));
       for(auto const & e: x) put(e);
     } else if constexpr(is_variant<T>::value) {
       put(uint32_t(x.index()));
       std::visit([&](auto const & alt) { put(alt); }, x);
+    } else if constexpr(std::is_same_v<T, std::shared_ptr<node_pool>>) {
+      // Reading Pool Owner: Not Data
     } else {
       static_assert(std::is_aggregate_v<T>, "сериализуются агрегаты");
-      template for(constexpr auto m: fields_of<T>()) put(x.[:m:]);
+      if constexpr(requires { x.home; }) { // The lists and text are read from her pool.
+        pool_scope home(const_cast<node_pool *>(x.home ? x.home : current_pool));
+        template for(constexpr auto m: fields_of<T>()) put(x.[:m:]);
+      } else {
+        template for(constexpr auto m: fields_of<T>()) put(x.[:m:]);
+      }
     }
   }
 
@@ -56,7 +70,11 @@ struct reader {
 
   template<typename T>
   T get() {
-    if constexpr(std::is_arithmetic_v<T> || std::is_enum_v<T>) {
+    if constexpr(std::is_same_v<T, std::shared_ptr<node_pool>>) {
+      return {};
+    } else if constexpr(std::is_same_v<T, node_pool const *>) {
+      return current_pool; // lists and text are read into the current pool - it is the home of the record
+    } else if constexpr(std::is_arithmetic_v<T> || std::is_enum_v<T>) {
       T x;
       raw(&x, sizeof x);
       return x;
@@ -68,6 +86,18 @@ struct reader {
       std::string s(in.substr(pos, n));
       pos += n;
       return s;
+    } else if constexpr(std::is_same_v<T, node_text>) { // current-base
+      uint32_t n = get<uint32_t>();
+      need(n);
+      node_text s(in.substr(pos, n));
+      pos += n;
+      return s;
+    } else if constexpr(is_pool_list<T>::value) {
+      uint32_t n = get<uint32_t>();
+      T v;
+      v.reserve(std::min<std::size_t>(n, in.size() - pos));
+      for(uint32_t i = 0; i < n; ++i) v.push_back(get<typename T::value_type>());
+      return v;
     } else if constexpr(is_vector<T>::value) {
       uint32_t n = get<uint32_t>();
       T v;

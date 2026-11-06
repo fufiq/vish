@@ -2258,7 +2258,7 @@ struct interpreter {
 
   flow eval_node(node_id, n_int const & x, scope *, uint32_t) { return ok(value(x.value)); }
   flow eval_node(node_id, n_float const & x, scope *, uint32_t) { return ok(value(x.value)); }
-  flow eval_node(node_id, n_str const & x, scope *, uint32_t) { return ok(value(x.value)); }
+  flow eval_node(node_id, n_str const & x, scope *, uint32_t) { return ok(value(x.value.str())); }
 
   flow eval_node(node_id n, n_ident const & x, scope * env, uint32_t) {
     value * found = find(env, x.name);
@@ -4130,6 +4130,7 @@ struct interpreter {
     else if constexpr(std::is_same_v<field_t, bool>) return value(f);
     else if constexpr(std::is_floating_point_v<field_t>) return value(double(f));
     else if constexpr(std::is_same_v<field_t, std::string>) return value(f);
+    else if constexpr(std::is_same_v<field_t, node_text>) return value(std::string(f.view()));
     else return value(int64_t(f));
   }
   std::vector<value> node_fields(node_id c) {
@@ -4283,7 +4284,7 @@ struct interpreter {
     } else if constexpr(std::is_same_v<field_t, symbol>) {
       need(v.is<str_v>(), types.str_name());
       f = v.as<str_v>().view().empty() ? symbol{} : sym(v.as<str_v>().view());
-    } else if constexpr(std::is_same_v<field_t, std::string>) {
+    } else if constexpr(std::is_same_v<field_t, std::string> || std::is_same_v<field_t, node_text>) {
       need(v.is<str_v>(), types.str_name());
       f = std::string(v.as<str_v>().view());
     } else if constexpr(std::is_same_v<field_t, bool>) {

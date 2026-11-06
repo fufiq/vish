@@ -124,7 +124,9 @@ resume_dump(str path) => native "cpp" {
 journal_text(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
   node_id root;
-  return value(describe_journal(read_journal(std::string((a[0]).as<str_v>().view()), root)));
+  node_pool staging;
+  auto entries = read_journal(std::string((a[0]).as<str_v>().view()), root, staging);
+  return value(describe_journal(entries));
 };
 proto_schema() => native "cpp" { return value(proto::schema()); };
 

@@ -58,6 +58,7 @@ struct repository_file {
   node_id root;
   repository_state state;
   std::vector<journal_entry> journal;
+  std::shared_ptr<node_pool> pool; // Pool of read records (not data: not serialized)
 };
 
 repository_state repository_create(ast_db const & db, node_id root, std::string const & path) {
@@ -215,9 +216,12 @@ repository_file repository_load(std::string const & path) {
   auto checksum = header.get<uint64_t>();
   auto payload = header.in.substr(header.pos);
   if(length != payload.size() || checksum != repository_hash(payload)) throw diagnostic("репозиторий повреждён: длина или контрольная сумма", {});
+  auto staging = std::make_shared<node_pool>();
+  pool_scope in(staging.get());
   reader r(payload);
   if(r.get<uint64_t>() != repository_build() || r.get<std::string>() != vishdb_magic) throw diagnostic("репозиторий создан другой сборкой Vish; требуется совместимый экспорт", {});
   auto f = r.get<repository_file>();
+  f.pool = staging;
   if(!r.at_end()) throw diagnostic("лишние данные репозитория", {});
   f.state.path = path;
   f.state.disk_checksum = repository_hash(bytes);

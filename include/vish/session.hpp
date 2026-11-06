@@ -102,9 +102,13 @@ struct vm_session {
   roundtrip_facts roundtrip() {
     writer w;
     for(auto const & e: db.journal()) w.put(e);
+    node_pool staging;
     reader r(w.bytes);
     std::vector<journal_entry> entries;
-    while(!r.at_end()) entries.push_back(r.get<journal_entry>());
+    {
+      pool_scope in(&staging);
+      while(!r.at_end()) entries.push_back(r.get<journal_entry>());
+    }
     ast_db db2;
     db2.replay(entries);
     bool same = printer(db).print(root) == printer(db2).print(root);

@@ -84,7 +84,9 @@ void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> co
   for(auto root: module_roots) live.link_parents(root);
 }
 
-std::vector<journal_entry> read_journal(std::string const & path, node_id & root) {
+// staging - a pool in which the lists and text of the read records lie: it must survive their reproduction
+std::vector<journal_entry> read_journal(std::string const & path, node_id & root, node_pool & staging) {
+  pool_scope in(&staging);
   os::mapped_file file(path);
   reader r(file.text());
   // Before the renaming of the language (2026-10-22), the base began with TZDB0035 - the same format.
@@ -99,7 +101,8 @@ std::vector<journal_entry> read_journal(std::string const & path, node_id & root
 
 node_id load_db(ast_db & db, std::string const & path) {
   node_id root;
-  db.replay(read_journal(path, root));
+  node_pool staging;
+  db.replay(read_journal(path, root, staging));
   return root;
 }
 

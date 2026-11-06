@@ -8,6 +8,7 @@
 
 #include "base.hpp"
 #include "lexer.hpp"
+#include "pool.hpp"
 
 #include <algorithm>
 #include <array>
@@ -112,7 +113,7 @@ struct n_float {
   double value = 0;
 };
 struct n_str {
-  std::string value;
+  node_text value;
 };
 struct n_call {
   node_id callee;
@@ -209,8 +210,8 @@ struct n_construct {
   std::vector<symbol> names;
 }; // array{1, 2, 3}
 struct n_hole {
-  std::string text;
-  std::string reason;
+  node_text text;
+  node_text reason;
 }; // undisassembled fragment (§4.1)
 
 // Unpacking (P12):
@@ -261,7 +262,7 @@ struct n_use {
 // of VM. It is part of VM (vish native).
 struct n_native {
   symbol lang;
-  std::string code;
+  node_text code;
 };
 // The link to the ad (function, struct, ct-variable) is its node number, not its name:
 // 
@@ -280,16 +281,16 @@ struct n_ref {
 // 
 // The text is how it is written (the print does not change it).
 struct n_raw {
-  std::string open; // bracket: {[[]
+  node_text open; // bracket: {[[]
   node_list items; // atoms (n_ident, n_int, n_float, n_str, n_sym, n_hole) and subblocks of n_raw
-  std::string text; // Block text with brackets - as written
+  node_text text; // Block text with brackets - as written
   uint32_t rule = 0; // announcement of the structure, the body of which is disassembled by the block (+1); for sub-blocks - 0
   bool glued = false; // close to the previous one: f(x) vs. f(x)
 };
 // The operator symbol of the raw unit is one: “the operator is always
 // single-character” gluing (==, ->) is visible by glued.
 struct n_sym {
-  std::string text;
+  node_text text;
   bool glued = false;
 };
 
@@ -300,7 +301,7 @@ struct n_sym {
 // order of the announcement; in node_kind - the last (view numbers in journal .vishdb
 // are not shifted).
 struct n_node {
-  std::string kind; // ast.twice
+  node_text kind; // ast.twice
   node_list items;
 };
 
@@ -323,14 +324,19 @@ struct j_intern {
   uint32_t id;
   std::string text;
 };
+// home - a pool in which lists and text are kind (S5.0): the recording is self-sufficient only with it;
+// playback to another database transfers them to its pool; when writing to a disk is not written, when reading
+// - the pool in which they read.
 struct j_add {
   uint32_t id;
   node_kind kind;
   span where;
+  node_pool const * home = nullptr;
 };
 struct j_replace {
   uint32_t id;
   node_kind kind;
+  node_pool const * home = nullptr;
 };
 struct j_link {
   uint32_t root;
@@ -346,6 +352,7 @@ struct j_mutate {
   uint32_t id;
   node_kind kind;
   uint32_t source;
+  node_pool const * home = nullptr;
 };
 // Return of mutations of the source (0 - all) and all later:
 //
@@ -409,7 +416,16 @@ struct field_view {
 };
 
 struct ast_db {
+  // The listing and text pool node (S5.0): each ast_db has its own base, the current thread_local. Any reference
+  // to node exposes it; the code that holds a list of one base and touches another calls use_pool.
+  node_pool pool;
+  ast_db() { use_pool(); }
+  void use_pool() const {
+    if(current_pool != &pool) current_pool = const_cast<node_pool *>(&pool);
+  }
+
   node_id add(node_kind k, span where) {
+    use_pool();
     lane_guard g(lock); // Stripes (step 12.3b): the base grows from the background
     ++revision;
     where.source = pinned_source != ~uint32_t{0} ? pinned_source : uint32_t(sources.empty() ? 0 : sources.size() - 1);
@@ -417,7 +433,7 @@ struct ast_db {
     note_fn(id);
     node_rev.push_back(revision);
     birth.push_back(++births);
-    log({j_add{id.value, nodes[id].kind, where}});
+    log({j_add{id.value, kind_clone(nodes[id].kind), where, &pool}});
     return id;
   }
 
@@ -443,15 +459,27 @@ struct ast_db {
     return add(node_kind(std::move(k)), where);
   }
 
-  node & operator[](node_id n) { return nodes[n]; }
-  node const & operator[](node_id n) const { return nodes[n]; }
+  node & operator[](node_id n) {
+    use_pool();
+    return nodes[n];
+  }
+  node const & operator[](node_id n) const {
+    use_pool();
+    return nodes[n];
+  }
 
   template<typename kind>
   bool is(node_id n) const { return n && std::holds_alternative<kind>(nodes[n].kind); }
   template<typename kind>
-  kind & as(node_id n) { return std::get<kind>(nodes[n].kind); }
+  kind & as(node_id n) {
+    use_pool();
+    return std::get<kind>(nodes[n].kind);
+  }
   template<typename kind>
-  kind const & as(node_id n) const { return std::get<kind>(nodes[n].kind); }
+  kind const & as(node_id n) const {
+    use_pool();
+    return std::get<kind>(nodes[n].kind);
+  }
 
   // The character class for node checks at each execution step: the text of the character
   // is unchanged - the answer is remembered by number (without comparing lines).
@@ -585,6 +613,7 @@ struct ast_db {
   }
 
   void replace(node_id n, node_kind k) {
+    use_pool();
     // Quoting the source of the mutations (or node over it - deletion) rolls them back.
     if(!mutations.empty())
       for(auto const & m: mutations)
@@ -624,7 +653,7 @@ struct ast_db {
     touch(n);
     if(edited_at.size() <= n.value) edited_at.resize(n.value + 1);
     edited_at[n.value] = revision;
-    log({j_replace{n.value, nodes[n].kind}});
+    log({j_replace{n.value, kind_clone(nodes[n].kind), &pool}});
   }
   // The node stood in a new place (raw block, redisassembled on site).
   void place(node_id n, span where) {
@@ -662,6 +691,7 @@ struct ast_db {
     node_kind old;
   };
   void mutate(node_id n, node_kind k, uint32_t source) {
+    use_pool();
     ++revision;
     // new module elements - generated by ct code instance (and when playing journal)
     if(source && is<n_module>(n) && std::holds_alternative<n_module>(k))
@@ -677,7 +707,7 @@ struct ast_db {
     if(!source && reopened(n)) return; // Derivative taken again: in journal - when reconciled
     touch(n);
     changed.push_back(n.value);
-    log({j_mutate{n.value, nodes[n].kind, source}});
+    log({j_mutate{n.value, kind_clone(nodes[n].kind), source, &pool}});
   }
   // The rollback of mutations of the source (0 - all) and all after the first of them - later
   // ones could read its result (canonical order, §7.3 p.5):
@@ -824,6 +854,7 @@ struct ast_db {
     using F = std::remove_cvref_t<decltype(f)>;
     if constexpr(std::is_same_v<F, node_id> || std::is_same_v<F, symbol>) return f.value;
     else if constexpr(std::is_same_v<F, std::string>) return std::hash<std::string>{}(f);
+    else if constexpr(std::is_same_v<F, node_text>) return std::hash<std::string_view>{}(f.view());
     else if constexpr(std::is_floating_point_v<F>) return std::bit_cast<uint64_t>(f);
     else if constexpr(std::is_enum_v<F> || std::is_integral_v<F>) return uint64_t(f);
     else {
@@ -836,6 +867,52 @@ struct ast_db {
     using F = std::remove_cvref_t<decltype(a)>;
     if constexpr(std::is_floating_point_v<F>) return std::bit_cast<uint64_t>(a) == std::bit_cast<uint64_t>(b);
     else return a == b;
+  }
+  // View with its own lists and text in the current database: a journal image does not share memory with a live
+  // node (descriptor is a copy of the link: editing the node list in place should not change the recorded)
+  static node_kind kind_clone(node_kind const & k) {
+    node_kind out = k;
+    std::visit([](auto & x) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using F = [:std::meta::type_of(m):];
+        if constexpr(is_pool_list<F>::value || std::is_same_v<F, node_text>) x.[:m:] = x.[:m:].clone();
+      }
+    },
+        out);
+    return out;
+  }
+  // View from pool to pool to (play journal to another database, download from disk)
+  static node_kind kind_translate(node_kind const & k, node_pool const * from, node_pool * to) {
+    node_kind out = k;
+    std::visit([&](auto & x) {
+      template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+        using F = [:std::meta::type_of(m):];
+        if constexpr(is_pool_list<F>::value) {
+          std::vector<typename F::value_type> tmp;
+          {
+            pool_scope a(const_cast<node_pool *>(from));
+            tmp = x.[:m:].vec();
+          }
+          pool_scope b(to);
+          x.[:m:] = F(tmp);
+        } else if constexpr(std::is_same_v<F, node_text>) {
+          std::string tmp;
+          {
+            pool_scope a(const_cast<node_pool *>(from));
+            tmp = x.[:m:].str();
+          }
+          pool_scope b(to);
+          x.[:m:] = node_text(tmp);
+        }
+      }
+    },
+        out);
+    return out;
+  }
+  // Type of journal recording in the pool of this database
+  node_kind own_kind(node_kind const & k, node_pool const * home) {
+    use_pool();
+    return home && home != &pool ? kind_translate(k, home, &pool) : k;
   }
   static uint64_t kind_hash(node_kind const & k, span where) {
     uint64_t h = k.index();
@@ -893,6 +970,7 @@ struct ast_db {
   // Derivative node: former free with the same view at birth and place, otherwise new. Holder is a
   // list of node that the interpreter holds (releases release).
   node_id derive(node_kind k, span where, std::vector<uint32_t> & holder) {
+    use_pool();
     lane_guard g(lock);
     uint64_t key = kind_hash(k, where); // place - as at the source (not the last import: editing it does not change)
     auto & list = reusable[key];
@@ -961,7 +1039,7 @@ struct ast_db {
         if(!kind_same) {
           touch(n);
           changed.push_back(r.id);
-          log({j_mutate{r.id, nodes[n].kind, 0}});
+          log({j_mutate{r.id, kind_clone(nodes[n].kind), 0, &pool}});
         }
         log({j_link{r.id}});
         if(nodes[n].parent) log({j_link{nodes[n].parent.value}});
@@ -1013,7 +1091,7 @@ struct ast_db {
       out.push_back({revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
     for(auto const & r: reborn) // Taken again, not yet verified: state - as is
       if(!kind_equal(nodes[node_id(r.id)].kind, r.was) || nodes[node_id(r.id)].parent != r.parent) {
-        out.push_back({revision, j_mutate{r.id, nodes[node_id(r.id)].kind, 0}});
+        out.push_back({revision, j_mutate{r.id, nodes[node_id(r.id)].kind, 0, &pool}});
         out.push_back({revision, j_link{r.id}});
         if(nodes[node_id(r.id)].parent) out.push_back({revision, j_link{nodes[node_id(r.id)].parent.value}});
       }
@@ -1089,6 +1167,7 @@ struct ast_db {
 
   // Play journal to an empty database.
   void replay(std::vector<journal_entry> const & entries) {
+    use_pool();
     for(auto const & e: entries) {
       std::visit([&](auto const & op) {
         using T = std::remove_cvref_t<decltype(op)>;
@@ -1096,15 +1175,15 @@ struct ast_db {
           if(strings.intern(op.text).value != op.id) throw diagnostic("журнал повреждён: порядок строк", {});
         } else if constexpr(std::is_same_v<T, j_add>) {
           pinned_source = op.where.source; // as written (node parsing raw block - in its text)
-          node_id got = add(op.kind, op.where);
+          node_id got = add(own_kind(op.kind, op.home), op.where);
           pinned_source = ~uint32_t{0};
           if(got.value != op.id) throw diagnostic("журнал повреждён: порядок узлов", {});
         } else if constexpr(std::is_same_v<T, j_replace>) {
-          replace(node_id(op.id), op.kind);
+          replace(node_id(op.id), own_kind(op.kind, op.home));
         } else if constexpr(std::is_same_v<T, j_link>) {
           link_parents(node_id(op.root));
         } else if constexpr(std::is_same_v<T, j_mutate>) {
-          mutate(node_id(op.id), op.kind, op.source);
+          mutate(node_id(op.id), own_kind(op.kind, op.home), op.source);
         } else if constexpr(std::is_same_v<T, j_rollback>) {
           rollback(op.source);
         } else if constexpr(std::is_same_v<T, j_place>) {
@@ -1624,7 +1703,7 @@ consteval char const * node_field_type() {
   if constexpr(std::is_same_v<F, node_id>) return "code";
   else if constexpr(std::is_same_v<F, node_list> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>>) return "array";
   // Numbers and text - machine representations (§5.8, O15): tag names - prelude
-  else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string>) return "__bytes";
+  else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string> || std::is_same_v<F, node_text>) return "__bytes";
   else if constexpr(std::is_same_v<F, bool>) return "__bool";
   else if constexpr(std::is_floating_point_v<F>) return "__float64";
   else return "__int64";

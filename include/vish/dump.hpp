@@ -36,8 +36,8 @@ struct dumper {
         if(k.[:m:]) out += cat(" ", name);
       } else if constexpr(std::is_same_v<field_t, int64_t> || std::is_same_v<field_t, double>) {
         out += cat(" ", name, "=", k.[:m:]);
-      } else if constexpr(std::is_same_v<field_t, std::string>) {
-        out += cat(" ", name, "=", in_quotes(k.[:m:]));
+      } else if constexpr(std::is_same_v<field_t, std::string> || std::is_same_v<field_t, node_text>) {
+        out += cat(" ", name, "=", in_quotes(std::string(std::string_view(k.[:m:]))));
       } else if constexpr(std::is_enum_v<field_t>) {
         out += cat(" ", name, "=", uint32_t(k.[:m:]));
       }
