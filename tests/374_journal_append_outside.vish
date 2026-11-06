@@ -1,0 +1,9 @@
+// error: запись в журнал — только при применении функции правки
+// out: до записи
+// Write in journal from the language (W3) - as code_replace: not every run, otherwise the execution of
+// the program would change it.: editing goes through the database and journal explicit application
+// (vish apply, editor). The border is mine.
+main() {
+  print("до записи");
+  journal_append(journal_link{0, 1});
+}

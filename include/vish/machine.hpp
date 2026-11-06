@@ -2464,6 +2464,11 @@ struct process_machine {
       return push_eval(next, t.scope, t.frame);
     }
     mval o = deref(pop_val()), key = deref(pop_val());
+    if(is_code(o)) { // c.[f] - node field of code by descriptor: reads assistant (as c.cond)
+      auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
+      if(!v) throw diagnostic("у узла кода нет такого поля", db[n].where);
+      return finish(std::move(*v));
+    }
     std::string name;
     if(key.is<m_str>()) name = key.as<m_str>();
     else if(key.is<m_agg>() && !key.as<m_agg>().fields.empty() && key.as<m_agg>().fields[0].v.is<m_str>()) name = key.as<m_agg>().fields[0].v.as<m_str>();
@@ -3601,7 +3606,11 @@ struct process_machine {
       return finish(from_value(helper.record_value(std::move(fs)), db[n].where));
     }
     if(db.is<n_ident>(c.type) && t.phase == 0) helper.service_guard(helper.str(db.as<n_ident>(c.type).name), n, "создать"); // serviceman
-    if(!db.is<n_ident>(c.type) || helper.node_kind_named(helper.str(db.as<n_ident>(c.type).name))) { // ast.call {…} - node type of program: builds an assistant
+    // k {…} at k is variable-type (code_kind(c), Sh3): a value constructor builds an assistant like ast.call {…}
+    bool type_var = false;
+    if(db.is<n_ident>(c.type))
+      if(place q = find(t.scope, db.as<n_ident>(c.type).name); q.scope != m_none) type_var = deref(cell(q)).is<m_type>();
+    if(!db.is<n_ident>(c.type) || type_var || helper.node_kind_named(helper.str(db.as<n_ident>(c.type).name))) { // ast.call {…} - node type of program: builds an assistant
       auto v = helper_eval(n, t.scope, std::nullopt, db[n].where);
       if(!v) throw diagnostic("узел кода: не удалось построить", db[n].where);
       return finish(std::move(*v));

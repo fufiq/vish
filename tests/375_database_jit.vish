@@ -1,0 +1,15 @@
+// out: 3000 true
+// out: ast.call true
+// jit-compiled: journal_len
+// Base as value under JIT (W3): journal_size() is a VM call (service-node), the function is compiled rather
+// than given to the interpreter as a whole. Node-value (code_at) is not taken into machine code - the
+// function with it remains to the interpreter and gives the same result. The border is mine.
+journal_len() => journal_size();
+kind_at(i64 i) => code_kind(code_at(i));
+main() {
+  s = 0;
+  for(i : range(3000)) if(journal_len() > 0) s += 1;
+  c = code(journal_len());
+  print(s, kind_at(code_id(c)) == ast.call);
+  print(code_kind(c), kind_at(code_id(c)) == code_kind(c));
+}

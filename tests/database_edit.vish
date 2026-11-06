@@ -1,5 +1,6 @@
 // Программа для сценария 373_database_edit.session (сама по себе — обычный тест).
 // out: 3 1 false
+// out: комментарий []
 one() => 1;
 two() => 2;
 // правки после последнего импорта в журнале: сколько записей — замены узлов
@@ -20,6 +21,7 @@ edits_in_journal() {
 }
 main() {
   print(one() + two(), one(), edits_in_journal() > 0);
+  print("комментарий [" + code_comment(code(two)) + "]");
 }
 // функция правки: каждый вызов one() → узел-число, вид которого — значение (k{5}), а не имя в тексте
 swap() {
@@ -28,3 +30,10 @@ swap() {
   for(c : code_callers(d)) code_replace(c, k{5});
 }
 then_kind() => ast.int;
+// запись журнала значением обратно в базу: комментарий узла (journal_note) — целиком из полей
+annotate() {
+  d = code_declaration(code(two));
+  journal_append(journal_note{0, code_id(d), array{"// пояснение из кода"}, "", array{}});
+}
+// journal_replace несёт тело узла, которого у значения нет, — отказ с подсказкой
+bad() => journal_append(journal_replace{0, 1, ast.int});

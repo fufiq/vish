@@ -7,9 +7,10 @@
 // out: журнал true true true
 // out: запись 0 journal_import
 // out: за пределами out_of_bounds
-// Base as values (Sh3, spec §7.4): node by number (code_at), types node (code_kinds) - types,
-// constructor by value-type k {…} and k {...поля}, record journal by number (journal_entry,
-// journal_size) - value of struct prelude, type of record - type of value.
+// machine
+// База как значения (Ш3, spec §7.4): узел по номеру (code_at), виды узлов (code_kinds) — типы,
+// конструктор по значению-типу k{…} и k{...поля}, запись журнала по номеру (journal_entry,
+// journal_size) — значение struct прелюдии, тип записи — тип значения. 
 // 
 // Names and records are mine.
 g(a, b) => a + b;

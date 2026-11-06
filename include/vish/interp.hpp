@@ -9052,7 +9052,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"process_class", "()"}, {"granted", "(вид)"}, {"read_floats", "(stdin)"}, {"range", "(i64 n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_at", "(номер)"}, {"code_kinds", "()"}, {"journal_size", "()"}, {"journal_entry", "(номер)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_tail_self", "(f, вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_at", "(номер)"}, {"code_kinds", "()"}, {"journal_size", "()"}, {"journal_entry", "(номер)"}, {"journal_append", "(запись)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_tail_self", "(f, вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
@@ -9436,9 +9436,54 @@ struct interpreter {
     }
     // --- editing the program from the language (author's decision 2026-10-17):
 // through the database and journal, as
-    // editing the editor, not mutations of the ct code (these are derivatives, roll back). Only with
-    // the explicit application of the editing function (vish apply, editor), not at every run:
-    // otherwise, the execution of the program would change the program itself. My names and boundaries.
+    // editing the editor, not mutations of the ct code (these are derivatives, roll back). Only with the
+    // explicit application of the editing function (vish apply, editor), not at every run: otherwise, the
+    // execution of the program would change the program itself. My names and boundaries.
+    // journal_append(запись) is a record of journal with a value back to the base (SH3, *my*): only those
+    // that are completely set by the value fields - journal_note (commentaries node), journal_link (parents
+    // of the subtree), journal_rollback (rollback of mutations of the ct code of the source). journal_add /
+    // replace / mutate carry the body of node, which the value-record does not have (view - type), - for
+    // them code_replace and k {…}; others - service (lines, imports, place, omissions, derivatives).
+    if(n == "journal_append" && a.size() == 1) {
+      if(!editing_program) fail("journal_append: запись в журнал — только при применении функции правки (vish apply функция, редактор Ctrl+Shift+R)", where);
+      value const * r = shape_of(a[0]);
+      if(!r || !r->is<agg_v>()) fail(cat("journal_append: ожидалась запись journal_*, получено ", types.describe(a[0])), where);
+      std::string_view tn = types.name(r->as<agg_v>().type);
+      auto field = [&](char const * f) -> value const & {
+        for(auto const & [k, v]: r->as<agg_v>().fields)
+          if(str(k) == f) return v;
+        fail(cat("journal_append: у ", tn, " нет поля ", f), where);
+      };
+      auto node = [&](char const * f) {
+        value const & v = field(f);
+        if(!v.is<int64_t>() || v.as<int64_t>() < 0 || uint64_t(v.as<int64_t>()) >= db.size()) fail_rt("out_of_bounds", cat("journal_append: ", f, " — нет такого узла в базе из ", db.size(), " узлов"), where);
+        return node_id(uint32_t(v.as<int64_t>()));
+      };
+      auto strs = [&](char const * f) {
+        std::vector<std::string> out;
+        value const & v = field(f);
+        if(!v.is<array_v>()) fail(cat("journal_append: ", f, " — массив строк"), where);
+        for(uint32_t i = 0; i < v.as<array_v>().size(); ++i) {
+          value x = v.as<array_v>().get(i);
+          if(!x.is<str_v>()) fail(cat("journal_append: ", f, " — массив строк"), where);
+          out.push_back(x.as<str_v>().str());
+        }
+        return out;
+      };
+      if(tn == "journal_note") {
+        value const & tail = field("tail");
+        if(!tail.is<str_v>()) fail("journal_append: tail — строка", where);
+        db.set_note(node("id"), node_note{strs("lead"), tail.as<str_v>().str(), strs("end")});
+      } else if(tn == "journal_link") {
+        db.link_parents(node("root"));
+      } else if(tn == "journal_rollback") {
+        value const & src = field("source");
+        if(!src.is<int64_t>() || src.as<int64_t>() < 0) fail("journal_append: source — номер источника", where);
+        db.rollback(uint32_t(src.as<int64_t>()));
+      } else fail(cat("journal_append: ", tn, " нельзя записать значением (add/replace/mutate несут тело узла — code_replace, k{…}; прочие служебные)"), where);
+      ++program_edits;
+      return value(unit_v{});
+    }
     if(n == "code_replace" || n == "code_rename" || n == "code_remove" || n == "code_insert") {
       if(!editing_program) fail(cat(n, ": правка программы — только при её применении (vish apply функция, редактор Ctrl+Shift+R)"), where);
       if(n == "code_replace" && a.size() == 2) { // The node becomes different (id the same)
