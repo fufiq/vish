@@ -565,7 +565,9 @@ inline std::unique_ptr<db_area> scratch_area() {
   std::string where = cat(dir, "/vish-area-", ::getpid());
   auto a = std::make_unique<db_area>();
   std::string name = cat("a", serial.fetch_add(1));
-  if(!a->open(where, name, true, false).empty()) return nullptr; // MAP_PRIVATE: Fork test does not share pages with parent
+  // VISH_DB_SCRATCH_SHARED = 1 - General display, as in the storage (fork-child replays it private); otherwise the
+  // private immediately
+  if(!a->open(where, name, true, bool(std::getenv("VISH_DB_SCRATCH_SHARED"))).empty()) return nullptr;
   ::unlink(cat(where, "/", name).c_str());
   return a;
 }

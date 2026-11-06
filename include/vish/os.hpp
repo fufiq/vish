@@ -145,16 +145,37 @@ void write_file_atomic(std::string const & path, std::string_view bytes) {
 // 
 // 
 // 
-// ; The program sees the name (key in the VM environment) and the offset, paths, and descriptors of
-// host are not. *My:* Linux implementation is a file in the VM repository directory, displayed
-// entirely in its address range (64 GB): pages after the end of the file become available after
-// ftruncate, the data does not move; fixation is msync+fsync; the file holds one execution (flock).
+// ; The program sees the name (key in the VM environment) and the offset, paths, and descriptors of host are not.
+// *My:* Linux implementation is a file in the VM repository directory, displayed entirely in its address range (64
+// GB): pages after the end of the file become available after ftruncate, the data does not move; fixation is
+// msync+fsync; the file holds one execution (flock). General display storage (MAP_SHARED) opened in this process.
+// After fork, the descendant sees the same pages of the file, and his record would spoil the parent (clone sample,
+// run the test): the handler of the descendant replays each on top of itself as MAP_PRIVATE - the record of the
+// descendant remains with him, the file does not change. The descendant reads the pages of the file until he wrote
+// down his own: the parent’s edits after fork are visible to him before his first entry into the page (parent
+// fork-host is waiting for a descendant). VISH_NO_ATFORK = 1 without it (for verification).
 //
+struct storage_area;
+std::vector<storage_area *> & shared_areas() {
+  static std::vector<storage_area *> v;
+  return v;
+}
+void remap_private_after_fork();
+void register_shared_area(storage_area * a) {
+  static bool installed = false;
+  if(!installed) {
+    installed = true;
+    if(!std::getenv("VISH_NO_ATFORK")) ::pthread_atfork(nullptr, nullptr, remap_private_after_fork);
+  }
+  shared_areas().push_back(a);
+}
+
 struct storage_area {
   static constexpr uint64_t range = uint64_t(1) << 36; // Storage Addresses: The Growth Limit
   int fd = -1;
   std::byte * at = nullptr;
   uint64_t size = 0;
+  bool shared = true; // display general (MAP_SHARED); after fork in the descendant - private
 
   storage_area() = default;
   storage_area(storage_area const &) = delete;
@@ -171,7 +192,7 @@ struct storage_area {
   }
   // 'Open'; otherwise cause shared = false: display MAP_PRIVATE - changes do not enter the file and are not visible after fork
   //
-  std::string open(std::string const & dir, std::string_view name, bool shared = true) {
+  std::string open(std::string const & dir, std::string_view name, bool share = true) {
     if(!good_name(name)) return "имя хранилища — ключ без '/' и ведущей точки";
     if(::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return cat("каталог хранилищ VM недоступен: ", std::strerror(errno));
     std::string path = cat(dir, "/", name);
@@ -183,7 +204,7 @@ struct storage_area {
       return "хранилище занято другим исполнением";
     }
     struct stat st{};
-    void * m = ::fstat(f, &st) == 0 ? ::mmap(nullptr, range, PROT_READ | PROT_WRITE, (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_NORESERVE, f, 0) : MAP_FAILED;
+    void * m = ::fstat(f, &st) == 0 ? ::mmap(nullptr, range, PROT_READ | PROT_WRITE, (share ? MAP_SHARED : MAP_PRIVATE) | MAP_NORESERVE, f, 0) : MAP_FAILED;
     if(m == MAP_FAILED) {
       ::close(f);
       return cat("не отобразить: ", std::strerror(errno));
@@ -198,6 +219,8 @@ struct storage_area {
     fd = f;
     at = static_cast<std::byte *>(m);
     size = uint64_t(st.st_size);
+    shared = share;
+    if(share) register_shared_area(this);
     return "";
   }
   // +n zero bytes at the end: range pages behind the previous end become available
@@ -219,6 +242,7 @@ struct storage_area {
   // Close without fixing: addresses and file - system
   void close() {
     if(fd < 0) return;
+    std::erase(shared_areas(), this);
     ::munmap(at, range);
     ::close(fd);
     fd = -1;
@@ -226,6 +250,15 @@ struct storage_area {
     size = 0;
   }
 };
+
+// Fork descendant: shared storage displays become private (the record does not go to the file and to the parent)
+void remap_private_after_fork() {
+  for(storage_area * a: shared_areas()) {
+    if(a->fd < 0 || !a->shared) continue;
+    ::mmap(a->at, storage_area::range, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_NORESERVE, a->fd, 0);
+    a->shared = false;
+  }
+}
 
 // Descriptor lines (stdin host): your buffer, read in chunks.
 struct line_reader {

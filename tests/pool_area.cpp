@@ -3,6 +3,7 @@
 // compaction saves the contents. Runs check.sh. Argument is a directory for domain files.
 #include "vish/repository.hpp"
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <cassert>
 #include <cstdio>
 using namespace vish;
@@ -224,6 +225,35 @@ int main(int argc, char ** argv) {
     ast_db ref;
     ref.replay(read_journal(dir + "/компактация.vishdb", r2, staging));
     assert(dump(db) == dump(ref));
+  }
+  { // fork: the descendant changes the base in the area - the original is intact, the fixation of the parent works (MAP_SHARED → the descendant is private)
+    db_area area;
+    assert(area.open(dir, "форк").empty());
+    ast_db db(&area);
+    node_id r = build(db, 200);
+    std::string text = dump(db);
+    pid_t pid = ::fork();
+    if(pid == 0) { // descendant: rules and writes a lot (including new pool pages), he fixes
+      for(int i = 0; i < 30; ++i) {
+        n_module m = db.copy_of<n_module>(r);
+        m.items.erase(m.items.begin() + 2);
+        db.replace(r, m);
+      }
+      _exit(db.size() > 0 && dump(db) != text ? 0 : 1);
+    }
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(dump(db) == text); // original untouched
+    assert(db.commit_area().empty());
+    db_area again;
+    assert(!again.open(dir, "форк", false).empty()); // parent still holds
+  }
+  {
+    db_area area;
+    assert(area.open(dir, "форк", false).empty());
+    ast_db db(&area);
+    assert(db.size() > 0 && db.size() == db.nodes.size());
   }
   std::puts("area ok");
 }
