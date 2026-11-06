@@ -1,0 +1,34 @@
+// grant: fs,net
+// machine
+// out: нет файла: io_error
+// out: ядро мимо сервиса: 4, файла нет
+// out: файл: строка
+// out: сеть: порт слушается true
+// out: адрес: io_error connect: неверный адрес
+// Opening files and networks - service on vish over the kernel (plan X2b): the kernel (file_raw_*, net_raw_*)
+// responds to host_reply {status, num, text} and does not abandon - the rights, sockets and files remain with
+// it, a direct call past the service is safe (error host - status 4, not a drop); type of exclusion (Qio_error)
+// and texts - prelude. Status is mine.
+main() {
+  try {
+    open("/нет/такого/файла");
+    print("открыл");
+  } catch(io_error e) {
+    print("нет файла: io_error");
+  }
+  r = file_raw_open("/нет/такого/файла");
+  print("ядро мимо сервиса: " + text(r.status) + ", " + (if(r.text != "") "файла нет" else "?"));
+  f = create("out/host_service.txt");
+  write(f, "строка");
+  close(f);
+  g = open("out/host_service.txt");
+  for(x : g) print("файл: " + x);
+  n = listen(0);
+  print("сеть: порт слушается " + text(port(n) > 0));
+  close(n);
+  try {
+    connect("не адрес", 80);
+  } catch(io_error e) {
+    print("адрес: io_error " + e.message);
+  }
+}

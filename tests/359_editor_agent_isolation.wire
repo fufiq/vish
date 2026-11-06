@@ -10,7 +10,7 @@ workspace 5 1 offer 0 - нельзя
 // expect: нужен непустой пакет с успешной проверкой
 workspace 6 1 drop
 workspace 7 0 create
-workspace 8 2 edit 0 main() main()\s=>\sfile_create("/tmp/vish-agent-must-not-create");
+workspace 8 2 edit 0 main() main()\s=>\screate("/tmp/vish-agent-must-not-create");
 workspace 9 2 check
 workspace 10 2 test 0 - - \s \s -
 // expect: файловая система программе не дана

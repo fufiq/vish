@@ -6843,73 +6843,84 @@ struct interpreter {
     return value(std::move(a));
   }
 
-  // Network and file operations (net *, file *): in parsing, only types.
+  // Network and file operations (net *, file *): in parsing, only types. Opening (net_raw_listen, net_raw_connect,
+  // file_raw_open, file_raw_create) - kernel: rights, sockets, files; answers host_reply {status, num, text} (0 -
+  // yes, num - stream; 1 - not given; 4 - error host, text - reason) and does not throw: type of exclusion and texts
+  // - service on vish (Qprelude), stream by number - net_stream / file_stream.
+  //
   value io_op_call(std::string_view n, std::vector<value> & a, span where) {
     lane_guard g(vm_lock); // flow table - common for bands
     auto & ss = vm_root->streams;
+    bool raw_open = n == "net_raw_listen" || n == "net_raw_connect" || n == "file_raw_open" || n == "file_raw_create";
+    bool attach = n == "net_stream" || n == "file_stream";
     if(checking()) {
       rt_effect();
-      rt_check("io_error", where);
-      if(n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create") {
+      if(raw_open) return host_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
+      if(attach) { // stream type for parsing: network events or file strings
         ss.emplace_back();
         ss.back().typed = true;
-        ss.back().shape = n.starts_with("net_") ? erase(make_event(0, "x", "x")) : erase(value(std::string("x")));
+        ss.back().shape = n == "net_stream" ? erase(make_event(0, "x", "x")) : erase(value(std::string("x")));
         return stream_value(ss.size() - 1);
       }
       if(n == "net_port") return erase(value(int64_t(1)));
       return value();
+    }
+    if(attach) {
+      if(a.size() != 1 || !a[0].is<int64_t>() || a[0].as<int64_t>() < 0 || uint64_t(a[0].as<int64_t>()) >= ss.size()) fail(cat(n, "(номер потока)"), where);
+      return stream_value(std::size_t(a[0].as<int64_t>()));
     }
     // host resources are only given (step 12.4)
 // 
 // Not given - not dump, but "0 devices".
     // Gives a program: transmits an open stream; takes away - closes it (the process sees the end).
     // Program - what the author gave (VISH_GRANT); background process - nothing (program gives).
-    if((n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create") && !granted(n.starts_with("file_") ? "fs" : "net")) {
-      std::string_view who = background ? "процессу не дана (ресурс даёт программа: передаёт поток)" : "программе не дана (даёт пользователь: vish run --grant fs)";
-      if(n.starts_with("file_")) fail_rt("io_error", cat(a.empty() || !a[0].is<str_v>() ? std::string("?") : a[0].as<str_v>().str(), ": нет файла — файловая система ", who), where);
+    if(raw_open && !granted(n.starts_with("file_") ? "fs" : "net")) {
+      if(n.starts_with("file_")) return host_status(1);
       ss.emplace_back();
       ss.back().net = true; // Network without devices: no one to listen to, nowhere to connect
-      if(n == "net_connect") {
+      if(n == "net_raw_connect") {
         ss.back().peers.push_back({-1});
         ss.back().peers[0].open = false;
         deliver(ss.back(), make_event(0, "close", background ? "сеть процессу не дана" : "сеть программе не дана"));
       }
-      return stream_value(ss.size() - 1);
+      return host_status(1, int64_t(ss.size() - 1)); // There is a stream, but empty: the service gives it as it is
     }
-    if(n == "net_listen") {
+    if(n == "net_raw_listen") {
       if(a.size() != 1 || !a[0].is<int64_t>()) fail("listen(порт)", where);
       int fd = os::listen_tcp(int(a[0].as<int64_t>()));
-      if(fd < 0) fail_rt("io_error", cat("listen: ", std::strerror(errno)), where);
+      if(fd < 0) return host_status(4, 0, std::strerror(errno));
       ss.emplace_back();
       ss.back().listen_fd = fd;
       ss.back().net = true;
       ++root->io_pending;
       io().accept_all(fd, io_tag(op_accept, ss.size() - 1, 0));
-      return stream_value(ss.size() - 1);
+      return host_status(0, int64_t(ss.size() - 1));
     }
-    if(n == "net_connect") {
+    if(n == "net_raw_connect") {
       if(a.size() != 2 || !a[0].is<str_v>() || !a[1].is<int64_t>()) fail("connect(адрес, порт)", where);
+      sockaddr_in addr{};
+      if(!os::ipv4(a[0].as<str_v>().str(), int(a[1].as<int64_t>()), addr)) return host_status(4, 0, "неверный адрес");
+      int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+      if(fd < 0) return host_status(4, 0, std::strerror(errno));
       ss.emplace_back();
       stream_rec & s = ss.back();
       s.net = true;
-      if(!os::ipv4(a[0].as<str_v>().str(), int(a[1].as<int64_t>()), s.addr)) fail_rt("io_error", "connect: неверный адрес", where);
-      int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-      if(fd < 0) fail_rt("io_error", cat("connect: ", std::strerror(errno)), where);
+      s.addr = addr;
       s.peers.push_back({fd});
       ++root->io_pending;
       io().connect(fd, &s.addr, io_tag(op_connect, ss.size() - 1, 0));
-      return stream_value(ss.size() - 1);
+      return host_status(0, int64_t(ss.size() - 1));
     }
-    if(n == "file_open" || n == "file_create") {
-      if(a.size() != 1 || !a[0].is<str_v>()) fail(cat(n == "file_open" ? "open" : "create", "(путь)"), where);
-      int fd = n == "file_open" ? ::open(a[0].as<str_v>().str().c_str(), O_RDONLY | O_CLOEXEC)
-                                : ::open(a[0].as<str_v>().str().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-      if(fd < 0) fail_rt("io_error", cat(a[0].as<str_v>(), ": ", std::strerror(errno)), where);
+    if(n == "file_raw_open" || n == "file_raw_create") {
+      if(a.size() != 1 || !a[0].is<str_v>()) fail(cat(n == "file_raw_open" ? "open" : "create", "(путь)"), where);
+      int fd = n == "file_raw_open" ? ::open(a[0].as<str_v>().str().c_str(), O_RDONLY | O_CLOEXEC)
+                                    : ::open(a[0].as<str_v>().str().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+      if(fd < 0) return host_status(4, 0, std::strerror(errno));
       ss.emplace_back();
       ss.back().file_fd = fd;
-      ss.back().file_write = n == "file_create";
+      ss.back().file_write = n == "file_raw_create";
       ss.back().peers.push_back({});
-      return stream_value(ss.size() - 1);
+      return host_status(0, int64_t(ss.size() - 1));
     }
     std::size_t sid = stream_id(a[0], where);
     stream_rec & s = ss[sid];
@@ -6948,23 +6959,24 @@ struct interpreter {
     std::string const & p = root->prog_path;
     return state_dir.empty() ? p + ".storage" : cat(state_dir, "/", p.substr(p.find_last_of('/') + 1), ".storage");
   }
-  // storage_raw_*: In parsing, only the storage_reply response form
+  // storage_raw_*: In parsing, only the host_reply response form
   value storage_op(std::string_view n, std::vector<value> & a, span where) {
     lane_guard g(vm_lock); // Storage table - at the root of VM, common to bands
     if(checking()) {
       rt_effect();
-      return storage_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
+      return host_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
     }
     return storage_call(vm_root->storages, granted("storage"), background, n, a, where);
   }
-  // storage_reply {status, num, text}: status (0 yes, 1 not given, 2 closed, 3 out of storage, 4 host error), number (descriptor, size, former
+  // host_reply {status, num, text}: status (0 yes, 1 not given, 2 closed, 3 out of storage, 4 host error), number (descriptor, size, former
   // size, word), text (bytes, cause of host)
-  value storage_reply(value status, value num, value text) {
-    return value(agg_v{types.named("storage_reply"), {{sym("status"), std::move(status)}, {sym("num"), std::move(num)}, {sym("text"), std::move(text)}}});
+  value host_reply(value status, value num, value text) {
+    return value(agg_v{types.named("host_reply"), {{sym("status"), std::move(status)}, {sym("num"), std::move(num)}, {sym("text"), std::move(text)}}});
   }
-  value storage_status(int64_t status, int64_t num = 0, std::string text = {}) {
-    return storage_reply(value(status), value(num), value(std::move(text)));
+  value host_status(int64_t status, int64_t num = 0, std::string text = {}) {
+    return host_reply(value(status), value(num), value(std::move(text)));
   }
+  value storage_status(int64_t status, int64_t num = 0, std::string text = {}) { return host_status(status, num, std::move(text)); }
   // execution - shared with the process machine (it has its own table and its own rights)
   value storage_call(std::deque<os::storage_area> & table, bool given, bool /*proc*/, std::string_view n, std::vector<value> const & a, span where) {
     auto bad_args = [&](std::string_view sig) { fail(cat(n.substr(8), sig), where); };

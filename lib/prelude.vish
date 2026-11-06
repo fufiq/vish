@@ -803,16 +803,38 @@ for(stream s, expr body) {
 // connect - the same stream for one peer (0).
 //
 struct event { i64 peer; str kind; str data; }
-listen(i64 p) => net_listen(p);
-connect(str host, i64 p) => net_connect(host, p);
+// Opening - service on vish over the kernel (S2b): the kernel (net_raw_*, file_raw_*) responds to host_reply
+// and does not throw; here is the exception type and texts. The network is not given - not an error, but a
+// "0 Device" stream (the kernel starts it, it has a close event).
+host_who() => if(process_class() == "фоновый") "процессу не дана (ресурс даёт программа: передаёт поток)" else "программе не дана (даёт пользователь: vish run --grant fs)";
+listen(i64 p) {
+  r = net_raw_listen(p);
+  if(r.status == 4) throw io_error{"listen: " + r.text};
+  net_stream(r.num)
+}
+connect(str host, i64 p) {
+  r = net_raw_connect(host, p);
+  if(r.status == 4) throw io_error{"connect: " + r.text};
+  net_stream(r.num)
+}
 port(stream n) => net_port(n);
 send(stream n, i64 peer, str data) => net_send(n, peer, data);
 send(stream n, str data) => net_send(n, 0, data);
 drop(stream n, i64 peer) => net_drop(n, peer);
 
 // Files: open - stream of pieces (read io_uring), create - write.
-open(str path) => file_open(path);
-create(str path) => file_create(path);
+open(str path) {
+  r = file_raw_open(path);
+  if(r.status == 1) throw io_error{path + ": нет файла — файловая система " + host_who()};
+  if(r.status != 0) throw io_error{path + ": " + r.text};
+  file_stream(r.num)
+}
+create(str path) {
+  r = file_raw_create(path);
+  if(r.status == 1) throw io_error{path + ": нет файла — файловая система " + host_who()};
+  if(r.status != 0) throw io_error{path + ": " + r.text};
+  file_stream(r.num)
+}
 
 // Storage status (service VM, plan C1):
 // 
@@ -825,7 +847,7 @@ create(str path) => file_create(path);
 // - io_error, like fs; proc revoke storage - closes, then - io_error.
 //
 // Service on vish (plan Sh2b, docs/plan-vm-os.md §4 b): . . The kernel (C++, os.hpp + storage_raw_ *)
-// answers STATUS storage_reply {status, num, text}: 0 - yes, 1 - not given, 2 - closed, 3 - out of storage
+// answers STATUS host_reply {status, num, text}: 0 - yes, 1 - not given, 2 - closed, 3 - out of storage
 // (number - size), 4 - host error (text); it checks the rights, vitality and boundaries itself (service
 // cannot bypass them, memory does not depend on it). Here are APIs, exception types and texts: VM errors -
 // values of their types with a single base are caught by catch(io_error e) / catch(vm_error e). *My:*
@@ -837,7 +859,7 @@ struct vm_error { str message; }
 struct io_error : vm_error {}
 struct out_of_bounds : vm_error {}
 struct storage { i64 id; }
-struct storage_reply { i64 status; i64 num; str text; }
+struct host_reply { i64 status; i64 num; str text; }
 storage_not_given() => if(process_class() == "фоновый") "процессу не даны (ресурс даёт программа: передаёт хранилище)" else "программе не даны (даёт пользователь: vish run --grant storage)";
 // kernel response r to an operation over the range [at, at + len]: status → exclusion, otherwise r
 storage_checked(r, i64 at, i64 len) {

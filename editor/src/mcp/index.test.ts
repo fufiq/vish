@@ -146,7 +146,7 @@ describe('ИИ через настоящий MCP', () => {
       const effect = await tool('vish_propose', {
         revision: initial.revision,
         key: 'main()',
-        text: `main() => file_create("${forbiddenFile}");`,
+        text: `main() => create("${forbiddenFile}");`,
         why: 'проверка устройств',
         tests: [{ expected: '' }],
       });

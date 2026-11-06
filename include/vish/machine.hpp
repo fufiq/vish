@@ -888,48 +888,55 @@ struct process_machine {
   // net *, file * - like an interpreter (io_op_call): creating and operating a host stream
   mval host_op(std::string_view n, std::vector<mval> const & a, span where) {
     auto str_arg = [&](std::size_t i) { return std::string(a[i].as<m_str>()); };
+    // Opening - kernel, host_reply response (like interpreter: exclusion type and texts - vish service)
+    auto reply = [&](int64_t status, int64_t num = 0, std::string text = {}) { return from_value(helper.host_status(status, num, std::move(text)), where); };
+    if(n == "net_stream" || n == "file_stream") {
+      if(a.size() != 1 || !a[0].is<int64_t>() || a[0].as<int64_t>() < 0 || uint64_t(a[0].as<int64_t>()) >= st.streams.size()) throw diagnostic(cat(n, "(номер потока)"), where);
+      return stream_value(uint64_t(a[0].as<int64_t>()));
+    }
     // host resources are only given (step 12.4, like the interpreter): the background - nothing, the program
     // - what the author gave (grants; proc grant / revoke - on the go); not given - "0 devices"
-    if((n == "net_listen" || n == "net_connect" || n == "file_open" || n == "file_create") && !machine_granted(n.starts_with("file_") ? "fs" : "net")) {
-      std::string_view who = fib().proc ? "процессу не дана (ресурс даёт программа: передаёт поток)" : "программе не дана (даёт пользователь: vish run --grant fs)";
-      if(n.starts_with("file_")) rt_fail("io_error", cat(a.empty() || !a[0].is<m_str>() ? std::string("?") : str_arg(0), ": нет файла — файловая система ", who), where);
+    if((n == "net_raw_listen" || n == "net_raw_connect" || n == "file_raw_open" || n == "file_raw_create") && !machine_granted(n.starts_with("file_") ? "fs" : "net")) {
+      if(n.starts_with("file_")) return reply(1);
       st.streams.emplace_back(); // Network without devices: no one to listen to, nowhere to connect
       uint64_t sid = st.streams.size() - 1;
-      if(n == "net_connect") deliver(sid, event(0, "close", fib().proc ? "сеть процессу не дана" : "сеть программе не дана"));
-      return stream_value(sid);
+      if(n == "net_raw_connect") deliver(sid, event(0, "close", fib().proc ? "сеть процессу не дана" : "сеть программе не дана"));
+      return reply(1, int64_t(sid));
     }
-    if(n == "net_listen") {
+    if(n == "net_raw_listen") {
       if(a.size() != 1 || !a[0].is<int64_t>()) throw diagnostic("listen(порт)", where);
       int fd = os::listen_tcp(int(a[0].as<int64_t>()));
-      if(fd < 0) rt_fail("io_error", cat("listen: ", std::strerror(errno)), where);
+      if(fd < 0) return reply(4, 0, std::strerror(errno));
       uint64_t sid = host_stream(3);
       host[sid].listen_fd = fd;
       ++io_pending;
       io(where).accept_all(fd, io_tag(op_accept, sid, 0));
-      return stream_value(sid);
+      return reply(0, int64_t(sid));
     }
-    if(n == "net_connect") {
+    if(n == "net_raw_connect") {
       if(a.size() != 2 || !a[0].is<m_str>() || !a[1].is<int64_t>()) throw diagnostic("connect(адрес, порт)", where);
+      sockaddr_in addr{};
+      if(!os::ipv4(str_arg(0), int(a[1].as<int64_t>()), addr)) return reply(4, 0, "неверный адрес");
+      int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+      if(fd < 0) return reply(4, 0, std::strerror(errno));
       uint64_t sid = host_stream(3);
       host_rec & h = host[sid];
-      if(!os::ipv4(str_arg(0), int(a[1].as<int64_t>()), h.addr)) rt_fail("io_error", "connect: неверный адрес", where);
-      int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-      if(fd < 0) rt_fail("io_error", cat("connect: ", std::strerror(errno)), where);
+      h.addr = addr;
       h.peers.push_back({fd});
       ++io_pending;
       io(where).connect(fd, &h.addr, io_tag(op_connect, sid, 0));
-      return stream_value(sid);
+      return reply(0, int64_t(sid));
     }
-    if(n == "file_open" || n == "file_create") {
-      if(a.size() != 1 || !a[0].is<m_str>()) throw diagnostic(cat(n == "file_open" ? "open" : "create", "(путь)"), where);
+    if(n == "file_raw_open" || n == "file_raw_create") {
+      if(a.size() != 1 || !a[0].is<m_str>()) throw diagnostic(cat(n == "file_raw_open" ? "open" : "create", "(путь)"), where);
       std::string path = str_arg(0);
-      int fd = n == "file_open" ? ::open(path.c_str(), O_RDONLY | O_CLOEXEC) : ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-      if(fd < 0) rt_fail("io_error", cat(path, ": ", std::strerror(errno)), where);
-      uint64_t sid = host_stream(n == "file_open" ? 1 : 2);
+      int fd = n == "file_raw_open" ? ::open(path.c_str(), O_RDONLY | O_CLOEXEC) : ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+      if(fd < 0) return reply(4, 0, std::strerror(errno));
+      uint64_t sid = host_stream(n == "file_raw_open" ? 1 : 2);
       st.streams[sid].cap = 16;
       host[sid].file_fd = fd;
       host[sid].peers.push_back({});
-      return stream_value(sid);
+      return reply(0, int64_t(sid));
     }
     uint64_t sid = stream_id(a[0], where);
     host_rec * h = host_of(sid);
