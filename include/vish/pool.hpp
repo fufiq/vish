@@ -22,6 +22,7 @@
 
 #include <bit>
 #include <compare>
+#include <functional>
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
@@ -40,21 +41,38 @@ struct node_pool {
   uint32_t used = 1; // The word 0 is not given: offset 0 is an empty list
   std::vector<uint32_t> free_runs[classes];
   std::recursive_mutex lock;
+  // Area in storage (S5.1): Pool memory - its display; ready - words are available without reference to the
+  // area (it grows the file), the first change after fixing marks the area "dirty".
+  uint64_t ready = words_max;
+  bool external = false;
+  bool dirty = true; // Anonymous pool is always “dirty”: there is nothing to fix
+  std::function<void(uint64_t)> grow_to; // At least as many words are available (the area grows the file)
+  std::function<void()> mark_dirty;
 
   node_pool() {
     void * p = ::mmap(nullptr, words_max * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if(p == MAP_FAILED) throw std::bad_alloc();
     base = static_cast<uint32_t *>(p);
   }
+  // Pool in someone else's memory: at - word 0, used_words - occupied (≥ 1), ready_words - available words
+  node_pool(uint32_t * at, uint32_t used_words, uint64_t ready_words, std::function<void(uint64_t)> grow, std::function<void()> dirtied)
+      : base(at), used(used_words), ready(ready_words), external(true), dirty(false), grow_to(std::move(grow)), mark_dirty(std::move(dirtied)) {}
   node_pool(node_pool const &) = delete;
   node_pool & operator=(node_pool const &) = delete;
   ~node_pool() {
-    if(base) ::munmap(base, words_max * 4);
+    if(base && !external) ::munmap(base, words_max * 4);
   }
 
+  void touch() {
+    if(!dirty) {
+      dirty = true;
+      if(mark_dirty) mark_dirty();
+    }
+  }
   // chunk
   uint32_t take(uint32_t cls) {
     lane_guard g(lock);
+    touch();
     if(!free_runs[cls].empty()) {
       uint32_t at = free_runs[cls].back();
       free_runs[cls].pop_back();
@@ -62,22 +80,87 @@ struct node_pool {
     }
     uint64_t size = uint64_t(1) << cls;
     if(uint64_t(used) + size > words_max) throw std::bad_alloc();
+    if(uint64_t(used) + size > ready) {
+      grow_to(uint64_t(used) + size);
+      ready = std::min<uint64_t>(words_max, std::max<uint64_t>(ready, uint64_t(used) + size));
+    }
     uint32_t at = used;
     used += uint32_t(size);
     return at;
   }
   void give(uint32_t at, uint32_t cls) {
     lane_guard g(lock);
+    touch();
     free_runs[cls].push_back(at);
   }
   // How many words are used (including free pieces)
   uint32_t words() const { return used; }
 };
 
-// Current Stream Base: The list reads and grows its memory here. Expose ast_db on each call to node
-// (as, operator[], add...) and pool_scope where the base is known in advance.
 thread_local node_pool * current_pool = nullptr;
 
+// The node array is one continuous address range (S5.1): the element i lies on base + i * sizeof(T), does not
+// move, is read without a lock while the other band adds (like arena, but without a catalog of pieces: "vector
+// in mmap" - the same array can be displayed on the file, the index remains the address).
+template<typename T, typename tag>
+struct node_array {
+  using handle = id<tag>;
+  static_assert(std::is_trivially_copyable_v<T>);
+  T * base = nullptr;
+  uint64_t cap = 0; // range
+  uint64_t ready = 0; // Elements available without reference to the area
+  std::atomic<uint32_t> count{0};
+  std::recursive_mutex grow;
+  bool external = false;
+  bool dirty = true;
+  std::function<void(uint64_t)> grow_to;
+  std::function<void()> mark_dirty;
+
+  explicit node_array(uint64_t elements) : cap(elements), ready(elements) {
+    void * p = ::mmap(nullptr, cap * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if(p == MAP_FAILED) throw std::bad_alloc();
+    base = static_cast<T *>(p);
+  }
+  node_array(T * at, uint64_t elements, uint32_t have, uint64_t ready_elements, std::function<void(uint64_t)> grow_fn, std::function<void()> dirtied)
+      : base(at), cap(elements), ready(ready_elements), external(true), dirty(false), grow_to(std::move(grow_fn)), mark_dirty(std::move(dirtied)) {
+    count.store(have, std::memory_order_relaxed);
+  }
+  node_array(node_array const &) = delete;
+  ~node_array() {
+    if(base && !external) ::munmap(base, cap * sizeof(T));
+  }
+
+  handle add(T value) {
+    lane_guard g(grow);
+    uint32_t n = count.load(std::memory_order_relaxed);
+    if(n >= cap) throw diagnostic(cat("база: больше ", cap, " узлов"), {});
+    if(!dirty) {
+      dirty = true;
+      if(mark_dirty) mark_dirty();
+    }
+    if(n >= ready) {
+      grow_to(uint64_t(n) + 1);
+      ready = std::min<uint64_t>(cap, std::max<uint64_t>(ready, uint64_t(n) + 1));
+    }
+    new(base + n) T(std::move(value));
+    count.store(n + 1, std::memory_order_release);
+    return handle(n);
+  }
+  // Any reading of node exposes the base whose lists it holds: bypassing ast_db accessories, too.
+  node_pool * owner = nullptr;
+  T & operator[](handle h) pre(h.value < size()) {
+    if(current_pool != owner) current_pool = owner;
+    return base[h.value];
+  }
+  T const & operator[](handle h) const pre(h.value < size()) {
+    if(current_pool != owner) current_pool = owner;
+    return base[h.value];
+  }
+  uint32_t size() const { return count.load(std::memory_order_acquire); }
+};
+
+// Current Stream Base: The list reads and grows its memory here. Expose ast_db on each call to node
+// (as, operator[], add...) and pool_scope where the base is known in advance.
 struct pool_scope {
   node_pool * saved;
   explicit pool_scope(node_pool * p) : saved(current_pool) { current_pool = p; }

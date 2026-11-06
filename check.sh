@@ -40,8 +40,12 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     VISH_JIT_SELF=1 suite self $L/t_self.log $b test tests &
     suite projection $L/t_projection.log $b test tests --projection geo.words & # второй язык: тот же АСТ (§4.5)
     # node pool invariants (S5.0): list and text by offsets - a separate small executable file
-    ( CXX=${CXX:-g++-16}; $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/pool_list.cpp -o $L/pool_list && $L/pool_list ) > $L/t_pool.log 2>&1
+    CXX=${CXX:-g++-16}
+    ( $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/pool_list.cpp -o $L/pool_list && $L/pool_list ) > $L/t_pool.log 2>&1
     echo "pool: код $?" > $L/r_pool
+    # base area in the storage (S5.1): close / open, another version, cropping, copy for samples, compaction
+    ( rm -rf $L/area; mkdir -p $L/area; $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/pool_area.cpp -o $L/pool_area && $L/pool_area $L/area ) > $L/t_area.log 2>&1
+    echo "area: код $?" > $L/r_area
     if [ -d editor/node_modules ]; then
       $b schema > editor/src/protocol/schema.json
       (cd editor && npx tsc --noEmit && npx vitest run) > $L/t_editor.log 2>&1

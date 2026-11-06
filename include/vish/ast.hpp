@@ -8,6 +8,7 @@
 
 #include "base.hpp"
 #include "lexer.hpp"
+#include "os.hpp"
 #include "pool.hpp"
 
 #include <algorithm>
@@ -418,11 +419,180 @@ struct field_view {
   node_id key;
 };
 
+// Base area in storage (S5.1, plan S5): the node array and the list/text pool are in the storage file
+// (os::storage_area: name - key, not path; flock - one execution; display 64 GB addresses per file).
+// 
+// ; Layout (*my*): header (db_header ) | empty to nodes_at | node array (node_cap × sizeof(node) ) | empty to
+// pool_at | pool(s). Pieces are separated by file holes (sparse), only the pool grows. Everything inside is indexes
+// and offsets, not addresses: the area opens anywhere. Fixation (commit) - data on the disk, then the header with
+// the sign “closed”; the first change after it resets the feature on the disk. The opening checks magic, format
+// version, node layout print (another build with other node fields is failure), file size, feature and length:
+// understandable reason, not fall.
+//
+struct db_header {
+  char magic[8];
+  uint32_t version;
+  uint32_t header_bytes;
+  uint64_t layout; // node_kind layout print (names and sizes of fields)
+  uint32_t node_bytes;
+  uint32_t node_cap;
+  uint64_t nodes_at; // byte
+  uint64_t pool_at;
+  uint32_t pool_cap; // word
+  uint32_t node_count; // fixation
+  uint32_t pool_used;
+  uint32_t clean; // 1 - fixed and unchanged
+  uint64_t generation;
+  uint64_t checksum; // higher up
+};
+
+struct db_area {
+  static constexpr uint32_t format_version = 1;
+  static constexpr uint32_t default_node_cap = 1u << 21;
+  static constexpr uint64_t header_gap = uint64_t(1) << 16; // subtitle
+  static constexpr uint64_t step = uint64_t(1) << 20; // file grows in pieces
+
+  os::storage_area file;
+  db_header * h = nullptr;
+  bool fresh = false;
+
+  static uint64_t layout_hash() {
+    uint64_t x = 1469598103934665603ull;
+    auto mix = [&](std::string_view t) {
+      for(char c: t) x = (x ^ uint8_t(c)) * 1099511628211ull;
+      x = (x ^ 0xff) * 1099511628211ull;
+    };
+    mix(cat(sizeof(node), ":", sizeof(node_kind), ":", std::variant_size_v<node_kind>));
+    template for(constexpr auto t: std::define_static_array(std::meta::template_arguments_of(std::meta::dealias(^^node_kind)))) {
+      mix(std::meta::identifier_of(t));
+      template for(constexpr auto m: fields_of<typename[:t:]>()) {
+        mix(std::meta::identifier_of(m));
+        mix(cat(sizeof(typename[:std::meta::type_of(m):])));
+      }
+    }
+    return x;
+  }
+  static uint64_t sum(db_header const & x) {
+    uint64_t v = 1469598103934665603ull;
+    auto const * p = reinterpret_cast<unsigned char const *>(&x);
+    for(size_t i = 0; i < offsetof(db_header, checksum); ++i) v = (v ^ p[i]) * 1099511628211ull;
+    return v;
+  }
+  uint64_t nodes_off() const { return h->nodes_at; }
+  node * nodes() const { return reinterpret_cast<node *>(file.at + h->nodes_at); }
+  uint32_t * pool() const { return reinterpret_cast<uint32_t *>(file.at + h->pool_at); }
+
+  // 'open' (fresh - new, empty); otherwise the cause, the area is closed
+  std::string open(std::string const & dir, std::string_view name, bool create = true) {
+    if(std::string why = file.open(dir, name); !why.empty()) return why;
+    auto fail = [&](std::string why) {
+      file.close();
+      h = nullptr;
+      return cat("область базы ", name, ": ", why);
+    };
+    if(file.size == 0) {
+      if(!create) return fail("нет такой области");
+      uint64_t nodes_at = header_gap, pool_at = (nodes_at + uint64_t(default_node_cap) * sizeof(node) + step - 1) / step * step;
+      if(std::string why = file.grow(pool_at + step); !why.empty()) return fail(why);
+      h = reinterpret_cast<db_header *>(file.at);
+      std::memset(h, 0, sizeof *h);
+      std::memcpy(h->magic, "VISHAREA", 8);
+      h->version = format_version;
+      h->header_bytes = sizeof(db_header);
+      h->layout = layout_hash();
+      h->node_bytes = sizeof(node);
+      h->node_cap = default_node_cap;
+      h->nodes_at = nodes_at;
+      h->pool_at = pool_at;
+      h->pool_cap = uint32_t(node_pool::words_max - 1);
+      h->pool_used = 1;
+      h->clean = 1;
+      h->checksum = sum(*h);
+      fresh = true;
+      return "";
+    }
+    if(file.size < sizeof(db_header)) return fail(cat("файл короче заголовка (", file.size, " байт): область обрезана"));
+    h = reinterpret_cast<db_header *>(file.at);
+    if(std::memcmp(h->magic, "VISHAREA", 8) != 0) return fail("не область базы vish");
+    if(h->version != format_version) return fail(cat("версия формата ", h->version, ", эта сборка читает ", format_version));
+    if(h->checksum != sum(*h)) return fail("заголовок повреждён (контрольная сумма)");
+    if(h->header_bytes != sizeof(db_header) || h->node_bytes != sizeof(node) || h->layout != layout_hash())
+      return fail("создана сборкой с другим устройством узлов (раскладка не совпадает)");
+    if(h->nodes_at < sizeof(db_header) || h->nodes_at + uint64_t(h->node_cap) * sizeof(node) > h->pool_at || h->node_count > h->node_cap || h->pool_used < 1 || h->pool_used > h->pool_cap)
+      return fail("размеры в заголовке несовместимы");
+    if(!h->clean) return fail("не была зафиксирована (сорвана посреди работы): данные могут быть несогласованы");
+    if(file.size < h->pool_at + uint64_t(h->pool_used) * 4) return fail(cat("файл короче данных (", file.size, " байт, нужно ", h->pool_at + uint64_t(h->pool_used) * 4, "): область обрезана"));
+    fresh = false;
+    return "";
+  }
+  // The file covers the pool before the word
+  void grow_pool(uint64_t words) {
+    uint64_t need = h->pool_at + words * 4;
+    if(need <= file.size) return;
+    if(std::string why = file.grow((need - file.size + step - 1) / step * step); !why.empty()) throw diagnostic(cat("область базы: ", why), {});
+  }
+  uint64_t pool_ready() const { return (file.size - h->pool_at) / 4; }
+  uint64_t nodes_ready() const { return h->node_cap; } // File holes up to pool_at - displayed in their entirety
+  // First change after fixation: a sign to the disk before the data floats
+  void dirtied() {
+    if(!h->clean) return;
+    h->clean = 0;
+    h->checksum = sum(*h);
+    ::msync(file.at, 4096, MS_SYNC);
+  }
+  // Data on the disk, then a header with a feature (two steps: the header “closed” does not outpace the data)
+  std::string commit(uint32_t node_count, uint32_t pool_used) {
+    if(std::string why = file.commit(); !why.empty()) return why;
+    h->node_count = node_count;
+    h->pool_used = pool_used;
+    ++h->generation;
+    h->clean = 1;
+    h->checksum = sum(*h);
+    if(::msync(file.at, 4096, MS_SYNC) != 0) return std::strerror(errno);
+    int rc;
+    do rc = ::fsync(file.fd); while(rc < 0 && errno == EINTR);
+    return rc < 0 ? std::string(std::strerror(errno)) : std::string();
+  }
+};
+
 struct ast_db {
   // The listing and text pool node (S5.0): each ast_db has its own base, the current thread_local. Any reference
   // to node exposes it; the code that holds a list of one base and touches another calls use_pool.
+  db_area * area = nullptr; // storage area (S5.1); empty - normal memory
   node_pool pool;
-  ast_db() { use_pool(); }
+  explicit ast_db(db_area * a = nullptr) : area(a), pool(make_pool(a)), nodes(make_nodes(a)) {
+    nodes.owner = &pool;
+    use_pool();
+  }
+  static node_pool make_pool(db_area * a) {
+    if(!a) return node_pool();
+    return node_pool(a->pool(), a->h->pool_used, a->pool_ready(), [a](uint64_t w) { a->grow_pool(w); }, [a] { a->dirtied(); });
+  }
+  static node_array<node, node_tag> make_nodes(db_area * a) {
+    constexpr uint64_t anonymous_cap = uint64_t(1) << 24;
+    if(!a) return node_array<node, node_tag>(anonymous_cap);
+    return node_array<node, node_tag>(a->nodes(), a->h->node_cap, a->h->node_count, a->nodes_ready(), [a](uint64_t) {}, [a] { a->dirtied(); });
+  }
+  // The base above the open area (S5.1): node and lists are already in the area, the rest (lines, import texts, node
+  // tables) are not in it. Lines and imports are taken from journal (j_intern, j_import - reader of the old format), the
+  // tables on node are built anew; journal changes, comments, ct-code mutations - no (spec §3.1).
+  void attach_meta(std::vector<journal_entry> const & entries) {
+    use_pool();
+    for(auto const & e: entries) {
+      if(auto const * i = std::get_if<j_intern>(&e.op)) {
+        if(strings.intern(i->text).value != i->id) throw diagnostic("журнал повреждён: порядок строк", {});
+      } else if(auto const * m = std::get_if<j_import>(&e.op)) record_import(m->text, m->label);
+      else if(auto const * g = std::get_if<j_gap>(&e.op))
+        for(uint32_t k = 0; k < g->imports; ++k) record_import({}, {});
+    }
+    uint32_t n = nodes.size();
+    node_rev.assign(n, revision);
+    edited_at.assign(n, 0);
+    birth.assign(n, 0);
+    for(uint32_t k = 0; k < n; ++k) note_fn(node_id(k));
+  }
+  // Fix domain: node data and pool to disk (the rest of the database members - see spec §3.1)
+  std::string commit_area() { return area ? area->commit(nodes.size(), pool.used) : std::string("база не в области хранилища"); }
   void use_pool() const {
     if(current_pool != &pool) current_pool = const_cast<node_pool *>(&pool);
   }
@@ -1316,7 +1486,7 @@ struct ast_db {
     }
   }
 
-  arena<node, node_tag> nodes;
+  node_array<node, node_tag> nodes;
   node_id prelude; // prelude module: kernel designs written in language
   bool loading_prelude = false;
   uint64_t revision = 0;
