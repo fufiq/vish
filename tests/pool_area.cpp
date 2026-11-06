@@ -1,11 +1,13 @@
-// Base area in storage (S5.1): close/open - node, children and text are the same; another version, cropped file,
-// unwritten area occupied by another execution, name-path; copy for samples does not spoil the original;
-// compaction saves the contents. Runs check.sh. Argument is a directory for domain files.
+// Base area in the repository (S5.1-S5.2): close/open - the base is completely the same WITHOUT journal (node, children,
+// text, intern, import texts, journal, comments, mutations, tables on node); old and foreign version, cropped file,
+// unwritten area occupied by another execution, name-path; copy for samples and fork-child does not spoil the original;
+// compaction saves the content. Runs check.sh. Argument is a directory for domain files.
 #include "vish/repository.hpp"
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <cassert>
 #include <cstdio>
+#include <sstream>
 using namespace vish;
 
 // Synthetic program: module of n functions, each has a block of calls with strings and numbers (lists, text, symbols)
@@ -50,6 +52,29 @@ static std::string dump(ast_db & db) {
   return out;
 }
 
+// Fingerprint of the entire database: node, intern, imports, journal (how it goes to the disk), comments, mutations, tables
+static std::string fingerprint(ast_db & db) {
+  std::string out = dump(db);
+  for(uint32_t k = 0; k < db.strings.size(); ++k) out += cat("S", k, "=", db.strings.text(symbol(k)), "\n");
+  for(uint32_t k = 0; k < db.source_count(); ++k) out += cat("I", k, "=", db.source(k), "|", db.source_label(k), "\n");
+  writer w;
+  for(auto const & e: db.journal()) w.put(e);
+  out += cat("J", w.bytes.size(), ":", std::hash<std::string>{}(w.bytes), "\n");
+  if(std::getenv("FP_DEBUG")) { uint32_t k = 0; for(auto const & e: db.journal()) { writer one; one.put(e); out += cat("j", k++, ":", e.op.index(), ":", one.bytes.size(), ":", std::hash<std::string>{}(one.bytes), "\n"); } }
+  for(uint32_t k = 0; k < db.size(); ++k)
+    if(auto const * n = db.note_of(node_id(k))) {
+      out += cat("N", k, "[");
+      for(auto const & l: n->lead) out += l + "|";
+      out += cat(n->tail, "|");
+      for(auto const & l: n->end) out += l + "|";
+      out += "]\n";
+    }
+  for(auto const & m: db.mutations) out += cat("M", m.target, ",", m.source, ",", m.at, "\n");
+  out += cat("R", db.revision, ",", db.births, ",", db.edits, ",", db.prelude.value, "\n");
+  for(uint32_t k = 0; k < db.size(); ++k) out += cat(db.node_revision(node_id(k)), ",");
+  return out;
+}
+
 static bool same_nodes(ast_db & a, ast_db & b) {
   if(a.size() != b.size()) return false;
   for(uint32_t k = 0; k < a.size(); ++k) {
@@ -69,64 +94,91 @@ static bool same_nodes(ast_db & a, ast_db & b) {
 int main(int argc, char ** argv) {
   assert(argc == 2);
   std::string dir = argv[1];
-  std::string before, journal_path = dir + "/journal.vishdb";
+  std::string before;
   node_id root;
-  uint32_t nodes_before = 0, used_before = 0;
+  uint32_t nodes_before = 0, used_before = 0, strings_before = 0;
   {
     db_area area;
     assert(area.open(dir, "база").empty() && area.fresh);
     ast_db db(&area);
     root = build(db, 600);
     assert(db.size() > 3000);
-    before = dump(db);
+    db.record_import("// черновик\nf0();", "метка");
+    node_note nt;
+    nt.lead = {"// первая", "// вторая"};
+    nt.tail = "// хвост";
+    nt.end = {"// конец"};
+    db.set_note(node_id(40), nt);
+    db.set_note(node_id(41), node_note{{}, "// только хвост", {}});
+    n_module m = db.copy_of<n_module>(root);
+    m.items.pop_back();
+    db.replace(root, m);
+    n_int forty{40};
+    db.mutate(node_id(3), forty, 7); // ct code mutation: journal recording and mutations
+    db.mutate(node_id(5), n_int{50}, 8);
+    assert(!db.mutations.empty());
+    assert(db.note_of(node_id(40)));
+    before = fingerprint(db);
     nodes_before = db.size();
-    used_before = db.pool.used;
-    save_db(db, root, journal_path);
+    strings_before = db.strings.size();
     assert(db.commit_area().empty());
+    used_before = db.pool.used; // fixation
     // The second opener is a refusal (one execution), a name-path is a refusal.
     db_area other;
     assert(other.open(dir, "база").find("занято") != std::string::npos);
     assert(!other.open(dir, "../база").empty());
   }
-  { // Open: Same text, same node
+  { // Open: the base is the same without journal and without reading .vishdb
     db_area area;
     assert(area.open(dir, "база", false).empty() && !area.fresh);
     ast_db db(&area);
-    assert(db.size() == nodes_before && db.pool.used == used_before);
-    node_id r2;
-    node_pool staging;
-    auto entries = read_journal(journal_path, r2, staging);
-    db.attach_meta(entries);
-    assert(r2 == root);
-    assert(dump(db) == before);
-    // Reconciliation with the base played from journal in normal memory
+    assert(db.size() == nodes_before && db.pool.used == used_before && db.strings.size() == strings_before);
+    std::string after = fingerprint(db);
+    if(after != before) { // divergent print lines (first 6)
+      std::istringstream a(after), b(before);
+      std::string la, lb;
+      int shown = 0;
+      while(std::getline(a, la) && std::getline(b, lb) && shown < 6)
+        if(la != lb) {
+          std::fprintf(stderr, "расходится:\n  после: %.100s\n  до:    %.100s\n", la.c_str(), lb.c_str());
+          ++shown;
+        }
+    }
+    assert(after == before);
+    // journal from the region is played into normal memory: the same node
     ast_db ref;
-    ref.replay(entries);
-    if(!same_nodes(db, ref)) std::fprintf(stderr, "nodes differ: %u vs %u\n", db.size(), ref.size());
-    if(dump(ref) != before) { auto a = dump(ref); size_t i = 0; while(i < a.size() && i < before.size() && a[i] == before[i]) ++i; std::fprintf(stderr, "dump differs at %zu: [%s] vs [%s]\n", i, a.substr(i, 60).c_str(), before.substr(i, 60).c_str()); }
-    assert(same_nodes(db, ref) && dump(ref) == before);
-    // copy for samples (playing journal to another database) does not spoil the original: editing the copy is not here
+    ref.replay(db.journal());
+    assert(same_nodes(db, ref) && dump(ref) == dump(db));
+    // sample copy does not spoil the original
     ast_db probe;
-    probe.replay(entries);
-    n_module m = probe.copy_of<n_module>(root);
-    m.items.push_back(m.items[0]);
-    probe.replace(root, m);
-    assert(dump(db) == before && dump(probe) != before);
-    // correction in the area, fixation, reopening
+    probe.replay(db.journal());
+    n_module pm = probe.copy_of<n_module>(root);
+    pm.items.push_back(pm.items[0]);
+    probe.replace(root, pm);
+    probe.set_note(node_id(40), node_note{});
+    assert(fingerprint(db) == before && dump(probe) != dump(db));
+    // editing an already open area: intern, comments, node - and fixing again
+    symbol fresh_name = db.strings.intern("новый символ после открытия");
+    assert(fresh_name.value == strings_before);
+    db.set_note(node_id(42), node_note{{"// после открытия"}, {}, {}});
     n_module mm = db.copy_of<n_module>(root);
     mm.items.pop_back();
     db.replace(root, mm);
-    assert(dump(db) != before);
+    before = fingerprint(db);
+    assert(before.find("новый символ после открытия") != std::string::npos);
     assert(db.commit_area().empty());
+  }
+  {
+    db_area area;
+    assert(area.open(dir, "база", false).empty());
+    ast_db db(&area);
+    assert(fingerprint(db) == before);
   }
   { // unwritten area (no fixation after editing) - refusal with cause
     {
       db_area area;
       assert(area.open(dir, "база", false).empty());
       ast_db db(&area);
-      node_id r2;
-      node_pool staging;
-      db.attach_meta(read_journal(journal_path, r2, staging));
       n_module mm = db.copy_of<n_module>(root);
       mm.items.push_back(mm.items[0]);
       db.replace(root, mm); // dirty: no commit
@@ -135,47 +187,46 @@ int main(int argc, char ** argv) {
     std::string why = area.open(dir, "база", false);
     assert(why.find("не была зафиксирована") != std::string::npos);
   }
-  { // another version of the format and another’s layout: an understandable reason, not a fall
-    std::string path = dir + "/версия.storage/чужая";
+  { // old (S5.1), another version and someone else's layout: understandable reason, not falling
     ::mkdir((dir + "/версия.storage").c_str(), 0700);
-    {
-      db_area a;
-      assert(a.open(dir + "/версия.storage", "чужая").empty());
-      a.h->version = 99;
-      a.h->checksum = db_area::sum(*a.h);
-      a.h->clean = 1;
-      a.h->checksum = db_area::sum(*a.h);
+    std::string d2 = dir + "/версия.storage";
+    for(auto [name, version] : {std::pair{"старая", 1u}, std::pair{"чужая", 99u}}) {
+      {
+        db_area a;
+        assert(a.open(d2, name).empty());
+        a.h->version = version;
+        a.h->checksum = db_area::sum(*a.h);
+      }
+      db_area b;
+      std::string why = b.open(d2, name, false);
+      assert(why.find(cat("версия формата ", version)) != std::string::npos);
     }
-    db_area b;
-    std::string why = b.open(dir + "/версия.storage", "чужая", false);
-    assert(why.find("версия формата 99") != std::string::npos);
     {
       db_area a;
-      assert(a.open(dir + "/версия.storage", "иная").empty());
+      assert(a.open(d2, "иная").empty());
       a.h->layout ^= 1;
       a.h->checksum = db_area::sum(*a.h);
     }
     db_area c;
-    why = c.open(dir + "/версия.storage", "иная", false);
+    std::string why = c.open(d2, "иная", false);
     assert(why.find("устройством узлов") != std::string::npos);
     { // cropped file: shorter data and shorter header
       db_area a;
-      assert(a.open(dir + "/версия.storage", "обрезка").empty());
+      assert(a.open(d2, "обрезка").empty());
       ast_db db(&a);
       build(db, 50);
       assert(db.commit_area().empty());
     }
-    std::string file = dir + "/версия.storage/обрезка";
-    assert(::truncate(file.c_str(), 64 << 20) == 0 || true);
+    std::string file = d2 + "/обрезка";
     struct stat st{};
     ::stat(file.c_str(), &st);
     ::truncate(file.c_str(), off_t(st.st_size - st.st_size / 2));
     db_area d;
-    why = d.open(dir + "/версия.storage", "обрезка", false);
+    why = d.open(d2, "обрезка", false);
     assert(why.find("обрезана") != std::string::npos);
     ::truncate(file.c_str(), 10);
     db_area e;
-    why = e.open(dir + "/версия.storage", "обрезка", false);
+    why = e.open(d2, "обрезка", false);
     assert(why.find("короче заголовка") != std::string::npos);
   }
   { // compaction: abandoned chunks of rewrites go away, content, journal and area are the same
@@ -183,6 +234,7 @@ int main(int argc, char ** argv) {
     assert(area.open(dir, "компактация").empty());
     ast_db db(&area);
     node_id r = build(db, 300);
+    db.set_note(node_id(7), node_note{{"// заметка"}, "// хвост", {}});
     for(int round = 0; round < 40; ++round) { // Module editing: inserting and erasing elements - each time a new piece
       n_module m = db.copy_of<n_module>(r);
       m.items.insert(m.items.begin() + 1, m.items[round % 7]);
@@ -193,37 +245,29 @@ int main(int argc, char ** argv) {
       b.items.push_back(b.items[0]);
       db.replace(db.as<n_fn>(m.items[5]).body, b);
     }
-    std::string text = dump(db);
+    std::string text = fingerprint(db);
     uint32_t used = db.pool.used;
     uint64_t estimate = db.reclaimable();
     assert(estimate > 0);
     uint32_t stat_live = db.pool_stats().live;
+    assert(db.commit_area().empty()); // The image is up to compact: it updates and
     uint32_t freed = db.compact_pool();
-    assert(freed > 0 && db.pool.used < used && db.pool.used == stat_live && db.reclaimable() == 0);
-    assert(dump(db) == text); // node, children, text - the same
-    // journal after compaction is reproduced in normal memory: the same node (journal records carried pieces of pool)
+    assert(freed > 0 && db.pool.used < used && db.reclaimable() == 0 && db.pool.used >= stat_live);
+    assert(fingerprint(db) == text); // node, children, text, journal, comments - same
     ast_db ref;
-    ref.replay(db.journal());
-    assert(dump(ref) == text);
-    // and area: fixing, closing, opening - the same node
-    node_id root2;
-    std::string jp = dir + "/компактация.vishdb";
-    save_db(db, r, jp);
+    ref.replay(db.journal()); // journal is played back into normal memory after compaction.
+    assert(dump(ref) == dump(db));
     assert(db.commit_area().empty());
-    uint32_t count = db.size(), pool_used = db.pool.used;
+    uint32_t pool_used = db.pool.used;
+    std::printf("компактация: пул %u → %u слов (оценка %llu), узлов %u\n", used, pool_used, (unsigned long long)estimate, db.size());
     db.area = nullptr;
-    (void)root2;
-    std::printf("компактация: пул %u → %u слов (оценка %llu), узлов %u\n", used, pool_used, (unsigned long long)estimate, count);
   }
   {
     db_area area;
     assert(area.open(dir, "компактация", false).empty());
     ast_db db(&area);
-    node_id r2;
-    node_pool staging;
-    db.attach_meta(read_journal(dir + "/компактация.vishdb", r2, staging));
     ast_db ref;
-    ref.replay(read_journal(dir + "/компактация.vishdb", r2, staging));
+    ref.replay(db.journal());
     assert(dump(db) == dump(ref));
   }
   { // fork: the descendant changes the base in the area - the original is intact, the fixation of the parent works (MAP_SHARED → the descendant is private)

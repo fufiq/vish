@@ -116,7 +116,7 @@ void repository_replay(ast_db & db, std::vector<journal_entry> const & entries) 
   };
   auto place_ok = [&](span w) {
     reason = "позиция узла";
-    if(w.source >= db.sources.size()) { if(!db.sources.empty() || w.source) bad(); }
+    if(w.source >= db.source_count()) { if(db.source_count() || w.source) bad(); }
     // Virtual closing brackets/synthetic node incomplete input can have a position
     // behind the end of the import. Replay doesn't name her.
     if(w.begin > w.end) bad();

@@ -150,27 +150,6 @@ struct text_hash {
   size_t operator()(std::string_view s) const { return std::hash<std::string_view>{}(s); }
 };
 
-struct interner {
-  symbol intern(std::string_view s) {
-    lane_guard g(lock); // search and paste - under the lock of stripes (reading text - without it)
-    if(auto it = index.find(s); it != index.end()) return it->second;
-    symbol sym(strings.size());
-    auto h = strings.add(std::string(s));
-    index.emplace(strings[h], sym);
-    return sym;
-  }
-
-  uint32_t size() const { return strings.size(); }
-
-  std::string_view text(symbol s) const {
-    return s.valid() ? std::string_view(strings[id<string_tag>(s.value)]) : std::string_view("<none>");
-  }
-  struct string_tag;
-  arena<std::string, string_tag> strings; // Line addresses are stable: string_view from text() does not hang when growing
-  std::unordered_map<std::string, symbol, text_hash, std::equal_to<>> index;
-  std::recursive_mutex lock;
-};
-
 // Position in the text projection (for diagnostics and feedback with the editor).
 struct span {
   uint32_t begin = 0;

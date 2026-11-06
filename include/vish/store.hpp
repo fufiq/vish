@@ -26,7 +26,7 @@ void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> co
   auto reject = [] { throw diagnostic("несовместимая история базы или дерево модулей", {}); };
   auto a = target.journal();
   auto b = live.journal();
-  if(a.size() > b.size() || target.size() > live.size() || target.strings.size() > live.strings.size() || target.sources.size() > live.sources.size()) reject();
+  if(a.size() > b.size() || target.size() > live.size() || target.strings.size() > live.strings.size() || target.source_count() > live.source_count()) reject();
   for(std::size_t i = 0; i < a.size(); ++i) {
     writer x, y;
     x.put(a[i].op); // replay recounts service audits; kinship is set by operations
@@ -54,7 +54,7 @@ void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> co
     if(!n || n.value >= target.size() || n.value >= live.size() || seen[n.value]) reject();
     seen[n.value] = 1;
     auto const & node = target[n];
-    if(node.where.source >= target.sources.size() && !target.sources.empty()) reject();
+    if(node.where.source >= target.source_count() && target.source_count()) reject();
     if(auto ref = std::get_if<n_ref>(&node.kind); ref && ref->target >= target.size()) reject();
     std::visit([&](auto const & kind) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(kind)>>()) {

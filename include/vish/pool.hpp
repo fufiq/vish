@@ -26,6 +26,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
+#include <map>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -34,34 +35,34 @@ namespace vish {
 
 struct node_pool {
   static constexpr size_t words_max = size_t(1) << 30; // 4 GB addresses per base: growth limit
-  static constexpr uint32_t classes = 28; // pieces 2^0 ... 2^27 words
+  uint64_t cap = words_max; // limit of this pool, words
   static constexpr uint32_t len_bits = 27; // Length - in the lower bits, class capacity - in the higher
 
   uint32_t * base = nullptr;
   uint32_t used = 1; // The word 0 is not given: offset 0 is an empty list
-  std::vector<uint32_t> free_runs[classes];
+  std::map<uint32_t, std::vector<uint32_t>> free_runs; // size in words → free pieces (sizes: ew · 2^k)
   std::recursive_mutex lock;
   // Area in storage (S5.1): Pool memory - its display; ready - words are available without reference to the
   // area (it grows the file), the first change after fixing marks the area "dirty".
-  uint64_t ready = words_max;
+  uint64_t ready = words_max; // (Anonymous: All available)
   uint64_t garbage = 0; // words in thrown chunks (rewriting the list with a new chunk): assessment for compaction
   bool external = false;
   bool dirty = true; // Anonymous pool is always “dirty”: there is nothing to fix
   std::function<void(uint64_t)> grow_to; // At least as many words are available (the area grows the file)
   std::function<void()> mark_dirty;
 
-  node_pool() {
-    void * p = ::mmap(nullptr, words_max * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  explicit node_pool(uint64_t capacity_words = words_max) : cap(capacity_words) {
+    void * p = ::mmap(nullptr, cap * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if(p == MAP_FAILED) throw std::bad_alloc();
     base = static_cast<uint32_t *>(p);
   }
   // Pool in someone else's memory: at - word 0, used_words - occupied (≥ 1), ready_words - available words
-  node_pool(uint32_t * at, uint32_t used_words, uint64_t ready_words, std::function<void(uint64_t)> grow, std::function<void()> dirtied)
-      : base(at), used(used_words), ready(ready_words), external(true), dirty(false), grow_to(std::move(grow)), mark_dirty(std::move(dirtied)) {}
+  node_pool(uint32_t * at, uint64_t capacity_words, uint32_t used_words, uint64_t ready_words, std::function<void(uint64_t)> grow, std::function<void()> dirtied)
+      : cap(capacity_words), base(at), used(used_words), ready(ready_words), external(true), dirty(false), grow_to(std::move(grow)), mark_dirty(std::move(dirtied)) {}
   node_pool(node_pool const &) = delete;
   node_pool & operator=(node_pool const &) = delete;
   ~node_pool() {
-    if(base && !external) ::munmap(base, words_max * 4);
+    if(base && !external) ::munmap(base, cap * 4);
   }
 
   void touch() {
@@ -70,29 +71,33 @@ struct node_pool {
       if(mark_dirty) mark_dirty();
     }
   }
-  // chunk
-  uint32_t take(uint32_t cls) {
+  // a piece in words of words (list sizes - ew · 2^k, text - 2^k)
+  uint32_t take(uint64_t words) {
     lane_guard g(lock);
     touch();
-    if(!free_runs[cls].empty()) {
-      uint32_t at = free_runs[cls].back();
-      free_runs[cls].pop_back();
+    if(auto it = free_runs.find(uint32_t(words)); it != free_runs.end() && !it->second.empty()) {
+      uint32_t at = it->second.back();
+      it->second.pop_back();
       return at;
     }
-    uint64_t size = uint64_t(1) << cls;
-    if(uint64_t(used) + size > words_max) throw std::bad_alloc();
-    if(uint64_t(used) + size > ready) {
-      grow_to(uint64_t(used) + size);
-      ready = std::min<uint64_t>(words_max, std::max<uint64_t>(ready, uint64_t(used) + size));
+    if(uint64_t(used) + words > cap) throw std::bad_alloc();
+    if(uint64_t(used) + words > ready) {
+      grow_to(uint64_t(used) + words);
+      ready = std::min<uint64_t>(cap, std::max<uint64_t>(ready, uint64_t(used) + words));
     }
     uint32_t at = used;
-    used += uint32_t(size);
+    used += uint32_t(words);
     return at;
   }
-  void give(uint32_t at, uint32_t cls) {
+  void give(uint32_t at, uint64_t words) {
     lane_guard g(lock);
     touch();
-    free_runs[cls].push_back(at);
+    free_runs[uint32_t(words)].push_back(at);
+  }
+  uint64_t free_words() const {
+    uint64_t w = 0;
+    for(auto const & [size, runs]: free_runs) w += uint64_t(size) * runs.size();
+    return w;
   }
   // How many words are used (including free pieces)
   uint32_t words() const { return used; }
@@ -174,7 +179,8 @@ constexpr uint32_t pool_class_of(uint64_t words) { return words <= 1 ? 0 : uint3
 // List of 4-byte values in the pool: {смещение, длина | класс << 27}.
 template<typename T>
 struct list {
-  static_assert(sizeof(T) == 4 && std::is_trivially_copyable_v<T>, "список — 4-байтовые тривиальные значения");
+  static_assert(sizeof(T) % 4 == 0 && std::is_trivially_copyable_v<T>, "список — тривиальные значения, кратные слову");
+  static constexpr uint32_t ew = sizeof(T) / 4; // element
   using value_type = T;
   using iterator = T *;
   using const_iterator = T const *;
@@ -200,7 +206,8 @@ struct list {
   uint32_t size() const { return meta & ((uint32_t(1) << node_pool::len_bits) - 1); }
   bool empty() const { return size() == 0; }
   uint32_t cap_class() const { return meta >> node_pool::len_bits; }
-  uint64_t capacity() const { return off ? uint64_t(1) << cap_class() : 0; }
+  uint64_t capacity() const { return off ? uint64_t(1) << cap_class() : 0; } // component
+  uint64_t capacity_words() const { return capacity() * ew; }
   T * data() const { return off ? reinterpret_cast<T *>(current_pool->base + off) : nullptr; }
   T * begin() const { return data(); }
   T * end() const { return data() + size(); }
@@ -216,7 +223,7 @@ struct list {
   list clone() const { return list(begin(), end()); }
   // return a piece of pool (descriptor no longer used); without it, the piece lives to the end of the base
   void release() {
-    if(off) current_pool->give(off, cap_class());
+    if(off) current_pool->give(off, capacity_words());
     off = 0;
     meta = 0;
   }
@@ -226,10 +233,10 @@ struct list {
     if(n <= capacity()) return;
     if(n >= (uint64_t(1) << node_pool::len_bits)) throw std::bad_alloc();
     uint32_t cls = pool_class_of(n);
-    uint32_t at = current_pool->take(cls);
+    uint32_t at = current_pool->take(uint64_t(ew) << cls);
     uint32_t old_off = off, old_cls = cap_class(), len = size();
-    if(len) std::memcpy(current_pool->base + at, current_pool->base + old_off, size_t(len) * 4);
-    if(old_off) current_pool->give(old_off, old_cls);
+    if(len) std::memcpy(current_pool->base + at, current_pool->base + old_off, size_t(len) * sizeof(T));
+    if(old_off) current_pool->give(old_off, uint64_t(ew) << old_cls);
     off = at;
     meta = len | (cls << node_pool::len_bits);
   }
@@ -258,11 +265,11 @@ struct list {
   template<typename It>
   void assign(It first, It last) {
     std::vector<T> tmp(first, last); // The source may be on the same list.
-    if(off) current_pool->garbage += capacity(); // abandoned piece: it can be held by a copy of the descriptor - the compaction will release
+    if(off) current_pool->garbage += capacity_words(); // abandoned piece: it can be held by a copy of the descriptor - the compaction will release
     off = 0;
     meta = 0;
     reserve(tmp.size());
-    if(!tmp.empty()) std::memcpy(data(), tmp.data(), tmp.size() * 4);
+    if(!tmp.empty()) std::memcpy(data(), tmp.data(), tmp.size() * sizeof(T));
     set_size(uint32_t(tmp.size()));
   }
   iterator insert(const_iterator pos, T v) { return insert(pos, &v, &v + 1); }
@@ -294,7 +301,7 @@ struct list {
     assign(all.begin(), all.end());
     return n;
   }
-  friend bool operator==(list const & a, list const & b) { return a.size() == b.size() && (a.size() == 0 || std::memcmp(a.data(), b.data(), size_t(a.size()) * 4) == 0); }
+  friend bool operator==(list const & a, list const & b) { return a.size() == b.size() && (a.size() == 0 || std::memcmp(a.data(), b.data(), size_t(a.size()) * sizeof(T)) == 0); }
 };
 
 template<typename T>
@@ -341,8 +348,8 @@ struct node_text {
     if(tmp.size() >= (size_t(1) << node_pool::len_bits)) throw std::bad_alloc();
     if(tmp.size() > capacity()) {
       uint32_t cls = pool_class_of((tmp.size() + 3) / 4);
-      uint32_t at = current_pool->take(cls);
-      if(off) current_pool->give(off, cap_class());
+      uint32_t at = current_pool->take(uint64_t(1) << cls);
+      if(off) current_pool->give(off, uint64_t(1) << cap_class());
       off = at;
       meta = cls << node_pool::len_bits;
     }
@@ -351,7 +358,7 @@ struct node_text {
   }
   node_text clone() const { return node_text(view()); }
   void release() {
-    if(off) current_pool->give(off, cap_class());
+    if(off) current_pool->give(off, uint64_t(1) << cap_class());
     off = 0;
     meta = 0;
   }
@@ -361,6 +368,106 @@ struct node_text {
   friend bool operator==(node_text const & a, std::string const & b) { return a.view() == b; }
   friend std::string operator+(std::string a, node_text const & b) { return a.append(b.view()), a; }
   friend std::string operator+(node_text const & a, std::string_view b) { return std::string(a.view()) + std::string(b); }
+};
+
+// Interner: character (number) я text, text in a row pool (spool: grows, does not shrink and does not move - string_view from
+// text() does not hang, as in the former std::string arena); tables - in the main pool (list), roots - in db_roots. Hash table
+// with open addressing by displacement: search by string_view does not allocate memory (hot path sym()). Readers (text, find)
+// do not take the lock: growth is a new piece and publication of displacement, the old piece is not released.
+struct interner_roots {
+  list<node_text> strs; // symbol → text (bytes - in spool)
+  list<uint32_t> table; // symbol + 1; 0 - empty; length - degree of two (0 - no table)
+};
+
+struct interner {
+  node_pool * spool;
+  node_pool * pool;
+  interner_roots * r;
+  std::recursive_mutex lock;
+
+  interner(node_pool * strings_pool, node_pool * main_pool, interner_roots * roots) : spool(strings_pool), pool(main_pool), r(roots) {}
+  interner(interner const &) = delete;
+
+  static uint32_t hash(std::string_view s) {
+    uint32_t h = 2166136261u;
+    for(char c: s) h = (h ^ uint8_t(c)) * 16777619u;
+    return h;
+  }
+  uint32_t size() const { return r->strs.size(); }
+  node_text const & entry(uint32_t i) const { return reinterpret_cast<node_text const *>(pool->base + r->strs.off)[i]; }
+  std::string_view text(symbol s) const {
+    if(!s.valid()) return "<none>";
+    node_text const & t = entry(s.value);
+    return {reinterpret_cast<char const *>(spool->base + t.off), t.size()};
+  }
+  // symbol-number
+  symbol lookup(std::string_view s) const {
+    uint32_t slots = r->table.size();
+    if(!slots) return {};
+    uint32_t const * tab = reinterpret_cast<uint32_t const *>(pool->base + r->table.off);
+    for(uint32_t i = hash(s) & (slots - 1);; i = (i + 1) & (slots - 1)) {
+      if(!tab[i]) return {};
+      if(text(symbol(tab[i] - 1)) == s) return symbol(tab[i] - 1);
+    }
+  }
+  // Compatible with previous unordered_map: strings.index.find(ключ) / end() / contains
+  struct hit {
+    symbol second;
+    bool ok = false;
+    hit const * operator->() const { return this; }
+    friend bool operator==(hit a, hit b) { return a.ok == b.ok; }
+  };
+  struct index_view {
+    interner const * in;
+    hit find(std::string_view s) const {
+      symbol x = in->lookup(s);
+      return {x, x.valid()};
+    }
+    hit end() const { return {}; }
+    bool contains(std::string_view s) const { return in->lookup(s).valid(); }
+  };
+  index_view index{this};
+
+  symbol intern(std::string_view s) {
+    if(symbol x = lookup(s); x.valid()) return x;
+    lane_guard g(lock); // insert - under the lock of stripes (reading text - without it)
+    if(symbol x = lookup(s); x.valid()) return x;
+    pool_scope in_pool(pool);
+    uint32_t n = r->strs.size();
+    node_text t;
+    {
+      pool_scope in_strings(spool);
+      t = node_text(s);
+    }
+    if(n == r->strs.capacity()) { // a new piece, the old one is not released: the reader could take the displacement
+      uint32_t cls = pool_class_of(uint64_t(n) + 1);
+      uint32_t at = pool->take(uint64_t(list<node_text>::ew) << cls);
+      if(n) std::memcpy(pool->base + at, pool->base + r->strs.off, size_t(n) * sizeof(node_text));
+      r->strs.meta = n | (cls << node_pool::len_bits);
+      r->strs.off = at;
+    }
+    r->strs.data()[n] = t;
+    r->strs.set_size(n + 1);
+    if(uint64_t(n + 1) * 2 > r->table.size()) { // Rebuild: twice as many slots
+      uint32_t slots = std::max<uint32_t>(64, uint32_t(std::bit_ceil(uint64_t(n + 1) * 4)));
+      list<uint32_t> fresh;
+      fresh.resize(slots, 0u);
+      uint32_t * tab = fresh.data();
+      for(uint32_t k = 0; k <= n; ++k) {
+        uint32_t i = hash(text(symbol(k))) & (slots - 1);
+        while(tab[i]) i = (i + 1) & (slots - 1);
+        tab[i] = k + 1;
+      }
+      r->table = fresh;
+    } else {
+      uint32_t slots = r->table.size();
+      uint32_t * tab = r->table.data();
+      uint32_t i = hash(s) & (slots - 1);
+      while(tab[i]) i = (i + 1) & (slots - 1);
+      tab[i] = n + 1;
+    }
+    return symbol(n);
+  }
 };
 
 } // namespace vish

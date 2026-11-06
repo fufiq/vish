@@ -32,7 +32,7 @@ struct cli_program {
   std::optional<vm_session> session;
   std::optional<repository_state> repository;
 
-  std::string const & src() const { return db->source((*db)[root].where.source); }
+  std::string_view src() const { return db->source((*db)[root].where.source); }
   int report(diagnostic const & d) const {
     put(stderr, render(d, path, *db));
     return 1;
