@@ -1,0 +1,30 @@
+// out: 6
+// out: 5
+// out: 0
+// out: 1
+// out: [abcdef]
+// out: [ghijk]
+// out: [0123456789abc]
+// out: [z]
+// machine
+// Буфер вывода с порогом (Ш2а): 
+//,.
+// out_buffer(поток, порог): мелкие put копятся; не влезло — накопленное одним write; кусок от порога
+// и больше — в поток сразу, мимо буфера; порядок байтов — порядок put. Порог 10 здесь вместо 2048 —
+// чтобы видеть границы; имена и число 2048 — *моё*.
+main() {
+  s = stream(100);
+  b = out_buffer(s, 10);
+  b.put("abc");
+  b.put("def");
+  print(size(b));
+  b.put("ghijk");
+  print(size(b));
+  b.put("0123456789abc");
+  print(size(b));
+  b.put("z");
+  print(size(b));
+  b.flush();
+  close(s);
+  for(x : s) print("[" + x + "]");
+}

@@ -1763,7 +1763,7 @@ struct process_machine {
           if(p.type && db.is<n_ident>(p.type))
             for(uint32_t j = i; j < nargs && fits; ++j) {
               mval got;
-              int r = type_fit(deref(args[j]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
+              int r = type_fit(ref_of(args[j]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
               if(!r) fits = false;
               else if(r != 2) conv.push_back({j, got});
             }
@@ -1786,7 +1786,7 @@ struct process_machine {
         if(p.type && db.is<n_ident>(p.type)) {
           if(args[i].is<m_thunk>()) continue;
           mval got;
-          int r = type_fit(deref(args[i]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
+          int r = type_fit(ref_of(args[i]), helper.str(db.as<n_ident>(p.type).name), p.strict, got);
           if(!r) {
             fits = false;
             by_value += numeric_pair(deref(args[i]), helper.str(db.as<n_ident>(p.type).name)) && !p.strict;
@@ -2170,13 +2170,16 @@ struct process_machine {
   // under the common type (heir, record → struct), 1 - the value is conceivable (out - in the
   // type of parameter), 0 - no.
   int type_fit(mval const & v, std::string_view want, bool strict, mval & out) {
-    out = v;
+    // out - only at 1 and 3 (conversion): no copy of the value for the sake of coincidence and failure (S2a)
     if(is_shared_v(v) && want != "shared") { // Shared is suitable where stored (transparent)
       mval in;
       return type_fit(slot_of(v).v, want, strict, in) ? 2 : 0;
     }
     std::string have = describe(v);
     if(want == "auto" || have == want || have.substr(0, have.find('<')) == want) return 2; // identity is here
+    // the named unit of the wrong type, subtype and without implicit transformation - "no", without to_value (a
+    // copy of the unit with a line of kilobytes for each rejected overload : g.put(s) - square)
+    if(v.is<m_agg>() && !is_record(v) && !is_code(v) && !helper.types.is_a(have, want) && !helper.implicit_fn(have, want)) return 0;
     // The ratio of unequal types is the same rule as that of the interpreter (fit_rule prelude, M6)
     value got;
     auto r = helper.type_fit(to_value(v), want, strict, got);

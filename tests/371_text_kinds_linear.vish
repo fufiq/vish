@@ -1,11 +1,12 @@
-// args: 100000
-// out: 400000 d 400000
-// out: 10000000 97
-// Line types grow linearly (S2a): parameters are alias, so the large string and line view transmitted to
-// the function are not copied for every call. There was: a copy of the line for each call (checking the
-// type of rejected overloads printed it in its entirety) - square, 100,000 additions - minutes. The
-// process machine (strong in meaning in its call) is not here.
-//
+// args: 30000
+// out: 120000 d 120000
+// out: 900000 97
+// machine
+// Виды строк растут линейно (Ш2а): 
+// параметры — алиасы, поэтому
+// большая строка и вид строки, переданные в функцию, не копируются на каждый вызов. Было: копия
+// строки на каждый вызов (проверка типа отвергнутых перегрузок печатала её целиком) — квадрат,
+// 30000 дописываний — минуты. Машина процессов: проверка типа параметра не копирует агрегат ради отказа.
 fill(i64 n) {
   g = grown_text();
   for(i : range(n)) g.put("abcd");

@@ -1013,6 +1013,31 @@ take(mut text_buffer b) {
 }
 text(text_buffer b) => b.data.bytes;
 
+// Output buffer with threshold (S2a):
+// 
+// . out_buffer(поток, порог) accumulates small put; not fit (size + chunk > threshold) - accumulated goes
+// into the stream one write; a piece from the threshold and more - into the stream immediately, past the
+// buffer. flush(b) - give back the accumulated. The order of bytes in a stream is the order of put. Default
+// threshold 2048 - from the author's words, the number and names are *my*.
+struct out_buffer { grown_text data; stream sink; i64 limit; }
+out_buffer(stream sink) => out_buffer{grown_text(), sink, 2048};
+out_buffer(stream sink, i64 limit) => out_buffer{grown_text(), sink, limit};
+size(out_buffer b) => b.data.bytes.size;
+flush(mut out_buffer b) {
+  if(b.data.bytes.size > 0) {
+    write(b.sink, take_all(b));
+  }
+}
+take_all(mut out_buffer b) {
+  r = b.data.bytes;
+  b.data = grown_text();
+  r
+}
+put(mut out_buffer b, str s) {
+  if((b.data.bytes.size + s.size) > b.limit) flush(b);
+  if(s.size >= b.limit) write(b.sink, s) else b.data.bytes.push(s);
+}
+
 // Base as values (S3, spec §7.4): the journal record by number - journal_entry(i), the number of records -
 // journal_size(); the record - the value of the struct below (option type - value type, field - by type), revision
 // - revision of the base at the time of writing. Node number - code_at(i) (reverse code_id), types node -
