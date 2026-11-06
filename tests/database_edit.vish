@@ -1,0 +1,30 @@
+// Программа для сценария 373_database_edit.session (сама по себе — обычный тест).
+// out: 3 1 false
+one() => 1;
+two() => 2;
+// правки после последнего импорта в журнале: сколько записей — замены узлов
+edits_in_journal() {
+  n = journal_size();
+  k = n;
+  loop {
+    if(k == 0) break;
+    if(typeof(journal_entry(k - 1)) == journal_import) break;
+    k -= 1;
+  }
+  reps = 0;
+  while(k < n) {
+    if(typeof(journal_entry(k)) == journal_replace) reps += 1;
+    k += 1;
+  }
+  reps
+}
+main() {
+  print(one() + two(), one(), edits_in_journal() > 0);
+}
+// функция правки: каждый вызов one() → узел-число, вид которого — значение (k{5}), а не имя в тексте
+swap() {
+  d = code_declaration(code(one));
+  k = then_kind();
+  for(c : code_callers(d)) code_replace(c, k{5});
+}
+then_kind() => ast.int;

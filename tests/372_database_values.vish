@@ -1,0 +1,53 @@
+// out: 25 5
+// out: обход true true true
+// out: вид и поля ast.call callee
+// out: собран из полей g(1, 2) g(1, 2)
+// out: узел по номеру true
+// out: виды true
+// out: журнал true true true
+// out: запись 0 journal_import
+// out: за пределами out_of_bounds
+// Base as values (Sh3, spec §7.4): node by number (code_at), types node (code_kinds) - types,
+// constructor by value-type k {…} and k {...поля}, record journal by number (journal_entry,
+// journal_size) - value of struct prelude, type of record - type of value.
+// 
+// Names and records are mine.
+g(a, b) => a + b;
+inspect(expr e) {
+  c = code(e);
+  k = code_kind(c);
+  vals = array{};
+  names = array{};
+  for(fd : fields(k)) {
+    vals.push(c.[fd]);
+    names.push(fd.name);
+  }
+  print("вид и поля", k, names[0]);
+  d = k{...vals};
+  d2 = k{c.callee, c.args};
+  print("собран из полей", code_text(d), code_text(d2));
+  print("узел по номеру", code_id(code_at(code_id(c))) == code_id(c));
+}
+main() {
+  print(g(10, 15), g(2, 3));
+  walk = 0;
+  for(k : code_kinds()) if(k == ast.module) walk += 1;
+  print("обход", walk == 1, code_kinds().size > 20, code_kinds()[0] == ast.module);
+  inspect(g(1, 2));
+  print("виды", code_kinds().size == code_kinds().size);
+  n = journal_size();
+  adds = 0;
+  mono = true;
+  prev = 0;
+  firsts = 0;
+  for(i : range(n)) {
+    e = journal_entry(i);
+    if(typeof(e) == journal_add) adds += 1;
+    if(e.revision < prev) mono = false;
+    prev = e.revision;
+  }
+  print("журнал", adds > 100, mono, n > adds);
+  print("запись 0", typeof(journal_entry(0)));
+  r = try { journal_entry(n); "нашёл" } catch(out_of_bounds e) { "out_of_bounds" };
+  print("за пределами", r);
+}

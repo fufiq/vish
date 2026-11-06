@@ -4303,6 +4303,39 @@ struct interpreter {
   // ast.twice { code x; }).
   bool node_kind_named(std::string_view k) const { return is_node_kind(k) || (k.starts_with("ast.") && program_kind(db, k)); }
 
+  std::vector<journal_entry> journal_snapshot;
+  std::array<uint64_t, 4> journal_key{};
+  // journal - value of struct prelude journal *: revision and field of operation (S3)
+  value journal_value(journal_entry const & e) {
+    auto num = [](auto x) { return value(int64_t(x)); };
+    auto kind = [&](node_kind const & k) { return value(type_v{types.named(lang_kind(k.index()))}); };
+    auto strs = [](std::vector<std::string> const & xs) {
+      std::vector<value> out;
+      for(auto const & x: xs) out.push_back(value(std::string(x)));
+      return value(array_v::of(std::move(out)));
+    };
+    auto rec = [&](char const * type, std::initializer_list<std::pair<char const *, value>> fs) {
+      agg_v g{types.named(type), {}};
+      g.fields.push_back({sym("revision"), num(e.revision)});
+      for(auto const & [f, v]: fs) g.fields.push_back({sym(f), v});
+      return value(std::move(g));
+    };
+    return std::visit([&](auto const & op) -> value {
+      using T = std::remove_cvref_t<decltype(op)>;
+      if constexpr(std::is_same_v<T, j_intern>) return rec("journal_intern", {{"id", num(op.id)}, {"text", value(std::string(op.text))}});
+      else if constexpr(std::is_same_v<T, j_add>) return rec("journal_add", {{"id", num(op.id)}, {"kind", kind(op.kind)}, {"from", num(op.where.begin)}, {"to", num(op.where.end)}});
+      else if constexpr(std::is_same_v<T, j_replace>) return rec("journal_replace", {{"id", num(op.id)}, {"kind", kind(op.kind)}});
+      else if constexpr(std::is_same_v<T, j_link>) return rec("journal_link", {{"root", num(op.root)}});
+      else if constexpr(std::is_same_v<T, j_import>) return rec("journal_import", {{"text", value(std::string(op.text))}, {"label", value(std::string(op.label))}});
+      else if constexpr(std::is_same_v<T, j_mutate>) return rec("journal_mutate", {{"id", num(op.id)}, {"kind", kind(op.kind)}, {"source", num(op.source)}});
+      else if constexpr(std::is_same_v<T, j_rollback>) return rec("journal_rollback", {{"source", num(op.source)}});
+      else if constexpr(std::is_same_v<T, j_place>) return rec("journal_place", {{"id", num(op.id)}, {"from", num(op.where.begin)}, {"to", num(op.where.end)}});
+      else if constexpr(std::is_same_v<T, j_note>) return rec("journal_note", {{"id", num(op.id)}, {"lead", strs(op.note.lead)}, {"tail", value(std::string(op.note.tail))}, {"end", strs(op.note.end)}});
+      else if constexpr(std::is_same_v<T, j_gap>) return rec("journal_gap", {{"nodes", num(op.nodes)}, {"imports", num(op.imports)}});
+      else return rec("journal_derived", {{"id", num(op.id)}});
+    },
+        e.op);
+  }
   value node_literal(std::string_view kind, std::vector<value> const & items, span where) {
     for(auto const & x: items)
       if(!x.known()) return erase(code_value(node_id(1)));
@@ -4672,12 +4705,15 @@ struct interpreter {
       }
       return ok(record_value(std::move(fs)));
     }
-    if(db.is<n_ident>(c.type)) service_guard(str(db.as<n_ident>(c.type).name), n, "создать");
+    // k {…} at k is variable-type (code_kind(c), typeof(x)): type as value, constructor the same (SH3, *my*)
+    symbol tsym = db.as<n_ident>(c.type).name;
+    if(value * tv = find(env, tsym); tv && tv->is<type_v>() && tv->known()) tsym = sym(types.name(tv->as<type_v>().type));
+    if(db.is<n_ident>(c.type)) service_guard(str(tsym), n, "создать");
     std::vector<value> items;
     bool open = false; // the run-time-length array is disclosed: the result is the run-time-length array
     for(node_id item: c.items) {
       if(db.is<n_spread>(item)) { // ...a are elements of the array
-        if(str(db.as<n_ident>(c.type).name) != "array") fail("...: раскрытие — в array{…} или аргументах вызова", db[item].where);
+        if(str(tsym) != "array" && !node_kind_named(str(tsym)) && !structs.contains(tsym)) fail("...: раскрытие — в array{…}, узле, struct или аргументах вызова", db[item].where);
         VISH_TRY(t, eval(db.as<n_spread>(item).value, env, frame));
         value const * x = shape_of(t);
         if(!x || !x->is<array_v>()) fail(cat("...: раскрывается массив или кортеж, получено ", types.describe(t)), db[item].where);
@@ -4693,9 +4729,9 @@ struct interpreter {
       VISH_TAKE(x, item, x0, env, frame);
       items.push_back(std::move(x));
     }
-    auto tname = str(db.as<n_ident>(c.type).name);
+    auto tname = str(tsym);
     if(node_kind_named(tname)) return ok(node_literal(tname, items, db[n].where)); // Ast.X {…} - Live Base Node
-    if(auto it = structs.find(db.as<n_ident>(c.type).name); it != structs.end()) { // Name {a, b} - by position n
+    if(auto it = structs.find(tsym); it != structs.end()) { // Name {a, b} - by position n
       auto all = fields_of_struct(it->first);
       if(items.size() > all.size()) fail(cat(tname, ": полей ", all.size(), ", значений ", items.size()), db[n].where);
       agg_v g{types.named(tname), {}};
@@ -4714,7 +4750,7 @@ struct interpreter {
     }
     // Tag above representation: i64 {x} is the value represented in i64 (as i64 y = x): the tag is a
     // type as a value, its constructor is the same as the location of this type
-    if(tname != "array" && types.builtin(tname) && items.size() == 1 && !open) return ok(placed(std::move(items[0]), db.as<n_ident>(c.type).name, false, db[c.items[0]].where));
+    if(tname != "array" && types.builtin(tname) && items.size() == 1 && !open) return ok(placed(std::move(items[0]), tsym, false, db[c.items[0]].where));
     if(tname != "array") fail(cat("конструктор ", tname, "{} пока не поддержан"), db[n].where);
     for(auto const & x: items)
       if(!x.known() || open) { // at least one run-time element is an array of run-time; tuple is the length and types of elements in its type
@@ -9016,7 +9052,7 @@ struct interpreter {
   // they are not here. New visible built-in over here.
   static constexpr std::pair<std::string_view, std::string_view> visible_builtins[] = {
       {"print", "(x)"}, {"process_class", "()"}, {"granted", "(вид)"}, {"read_floats", "(stdin)"}, {"range", "(i64 n)"},
-      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_tail_self", "(f, вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
+      {"typeof", "(x)"}, {"fields", "(T)"}, {"attrs", "(f)"}, {"emit", "(quote)"}, {"static_level", "(f)"}, {"code", "(x)"}, {"code_kind", "(c)"}, {"code_items", "(c)"}, {"code_name", "(c)"}, {"code_text", "(c)"}, {"code_fields", "(c)"}, {"given", "(x)"}, {"op_codegen", "(цель, узел, типы)"}, {"type_of_code", "(c)"}, {"type_family", "(t)"}, {"code_id", "(c)"}, {"code_at", "(номер)"}, {"code_kinds", "()"}, {"journal_size", "()"}, {"journal_entry", "(номер)"}, {"code_parent", "(c)"}, {"code_module", "(c)"}, {"functions_named", "(имя)"}, {"kind_functions", "(узел, имя)"}, {"inline_context", "(ctx, c)"}, {"jit_type", "(c, ctx)"}, {"jit_proven", "(c)"}, {"jit_loop_keeps", "(цикл, c)"}, {"jit_ref_keeps", "(ссылка)"}, {"jit_const", "(c, ctx)"}, {"jit_known", "(c, ctx)"}, {"jit_implicit_args", "(вызов)"}, {"jit_tail_self", "(f, вызов)"}, {"jit_diverts", "(c)"}, {"jit_chain", "(c, ctx)"}, {"f64_bits", "(x)"}, {"zero", "(T)"}, {"ct_state", "(x, иначе)"}, {"set_ct_state", "(x, состояние)"}, {"call_site", "()"}, {"code_parse", "(подблок)"}, {"code_glued", "(атом)"}, {"code_comment", "(c)"}, {"code_declaration", "(имя)"}, {"code_targets", "(вызов)"}, {"code_users", "(объявление)"}, {"code_callers", "(функция)"}, {"code_calls", "(c)"}, {"code_deps", "(c)"}, {"code_instances", "(функция)"}, {"code_types", "(c)"}, {"code_values", "(c)"}, {"code_replace", "(c, новый)"}, {"code_rename", "(объявление, имя)"}, {"code_remove", "(c)"}, {"code_insert", "(блок, место, c)"},
       {"int_to_float", "(x)"}, {"f32_round", "(x)"}, {"float_to_int", "(x)"}, {"not", "(x)"}};
 
   // parsing instance compiler questions (jit_type, jit_const...) and answers - runtime - part of
@@ -9082,6 +9118,12 @@ struct interpreter {
     if(n == "granted" && a.size() == 1 && a[0].is<str_v>()) { // Whether the resource (fs, net) is available
       bool g = granted(a[0].as<str_v>().view());
       return checking() ? erase(value(g)) : value(g);
+    }
+    // --- base as a value (W3): node by number - up to the general parsing code *(code)
+    if(n == "code_at" && a.size() == 1 && a[0].is<int64_t>()) { // reverse code_id
+      int64_t i = a[0].as<int64_t>();
+      if(i < 0 || uint64_t(i) >= db.size()) fail_rt("out_of_bounds", cat("узла ", i, " нет в базе из ", db.size(), " узлов"), where);
+      return code_value(node_id(uint32_t(i)));
     }
     if(n == "process_class" && a.empty()) {
       std::string k = background ? "фоновый" : "монопольный";
@@ -9559,6 +9601,30 @@ struct interpreter {
       if(n == "code_parent") return code_value(db[c].parent); // The root is empty; the root is empty.
       if(n == "code_module") return code_value(module_of(c)); // module where the node is written (extension control, §9.1)
       if(n == "code_parse") return code_value(parse_sub(c, where)); // Subblock {…} - standard parsing seat (§4.4)
+    }
+    // --- base as values (Sh3, spec §7.4 "Base as values"): node by number, types node, journal. Type node -
+    // type (`ast.call`), not a string; journal is the value of struct prelude (`journal_add{…}`), fields by
+    // type. My:* composition and names, modeled after code_id/code_kind.
+    if(n == "code_kinds" && a.empty()) { // all node kernel types, in base order
+      std::vector<value> xs;
+      for(std::size_t k = 0; k < std::variant_size_v<node_kind>; ++k) xs.push_back(value(type_v{types.named(lang_kind(k))}));
+      return value(array_v::of(std::move(xs)));
+    }
+    if((n == "journal_size" && a.empty()) || (n == "journal_entry" && a.size() == 1)) { // journal - Base state
+      rt_effect();
+      if(checking()) return n == "journal_size" ? erase(value(int64_t(0))) : value(rt_v{});
+      // journal image one on the base state: writing by number - not bypassing the entire journal for each call
+      std::array<uint64_t, 4> key{db.oplog.size(), db.strings.size(), db.reborn.size(), db.revision};
+      if(journal_snapshot.empty() || key != journal_key) {
+        journal_snapshot = db.journal();
+        journal_key = key;
+      }
+      std::vector<journal_entry> const & entries = journal_snapshot;
+      if(n == "journal_size") return value(int64_t(entries.size()));
+      if(!a[0].is<int64_t>()) fail("journal_entry(номер)", where);
+      int64_t i = a[0].as<int64_t>();
+      if(i < 0 || uint64_t(i) >= entries.size()) fail_rt("out_of_bounds", cat("записи журнала ", i, " нет: записей ", entries.size()), where);
+      return journal_value(entries[std::size_t(i)]);
     }
     if(n == "typeof" && a.size() == 1) { // Value Approach: Type is also known for run-time
       if(a[0].is<rt_v>() && !a[0].as<rt_v>()) fail("тип неизвестен", where);

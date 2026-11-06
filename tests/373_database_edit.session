@@ -1,0 +1,13 @@
+// База как значения (Ш3): правка программы из кода (узел вида k собирается по значению-типу,
+// code_replace) пишет в журнал записи, которые видны программе: journal_entry / journal_size, тип
+// записи — тип значения (journal_replace). Правка — как правка человека (spec §7.4): 
+// Имена записей — *моё*.
+// program: database_edit.vish
+run
+// expect: 3 1 false
+apply swap
+// expect: применена swap
+fmt
+// expect: print(5 + two(), 5, edits_in_journal() > 0);
+run
+// expect: 7 5 true

@@ -1013,6 +1013,24 @@ take(mut text_buffer b) {
 }
 text(text_buffer b) => b.data.bytes;
 
+// Base as values (S3, spec §7.4): the journal record by number - journal_entry(i), the number of records -
+// journal_size(); the record - the value of the struct below (option type - value type, field - by type), revision
+// - revision of the base at the time of writing. Node number - code_at(i) (reverse code_id), types node -
+// code_kinds (types ast.*), node type k - k {поля} or ast.call {…} as before.
+// 
+// The list of records and names - *my* (by j * base).
+struct journal_intern { i64 revision; i64 id; str text; }
+struct journal_add { i64 revision; i64 id; type kind; i64 from; i64 to; }
+struct journal_replace { i64 revision; i64 id; type kind; }
+struct journal_link { i64 revision; i64 root; }
+struct journal_import { i64 revision; str text; str label; }
+struct journal_mutate { i64 revision; i64 id; type kind; i64 source; }
+struct journal_rollback { i64 revision; i64 source; }
+struct journal_place { i64 revision; i64 id; i64 from; i64 to; }
+struct journal_note { i64 revision; i64 id; array lead; str tail; array end; }
+struct journal_gap { i64 revision; i64 nodes; i64 imports; }
+struct journal_derived { i64 revision; i64 id; }
+
 // fill(n, x) is an array of n copies of x.
 fill(i64 n, x) {
   r = array{};
