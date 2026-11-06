@@ -104,7 +104,7 @@ repository_attach(i64 s, i64 module, i64 node, i64 at, i64 blank, bool inner) =>
   if(at < 0 || uint64_t(at) > mod.items.size()) throw diagnostic("неверное место элемента", {});
   mod.blank.resize(mod.items.size() + 1);
   mod.items.insert(mod.items.begin() + at, n); mod.blank.insert(mod.blank.begin() + at, uint32_t(a[4].as<int64_t>()));
-  std::erase(mod.inner, n.value); if(a[5].as<bool>()) mod.inner.push_back(n.value);
+  mod.inner.erase_value(n.value); if(a[5].as<bool>()) mod.inner.push_back(n.value);
   host.db.replace(m, std::move(mod)); host.db.link_parents(m);
   return value(int64_t(0));
 };

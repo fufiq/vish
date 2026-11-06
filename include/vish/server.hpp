@@ -983,10 +983,10 @@ struct editor_server {
 
   // The canon of the draft: empty lines of the set - layout of the module, comments after the last
   // element - the next (or end of the module), the draft keys - one edit journal.
-  void draft_close(bool module, uint32_t at, uint32_t count, node_id next, std::vector<uint32_t> const & blank, std::vector<std::string> const & rest, uint64_t since, std::vector<uint32_t> const & sources, uint32_t source) {
+  void draft_close(bool module, uint32_t at, uint32_t count, node_id next, std::span<uint32_t const> blank, std::vector<std::string> const & rest, uint64_t since, std::vector<uint32_t> const & sources, uint32_t source) {
     auto & db = session.db;
     if(module) {
-      n_module m = db.as<n_module>(session.root);
+      n_module m = db.copy_of<n_module>(session.root);
       bool has_next = next && at + count < m.items.size() && m.items[at + count] == next;
       m.blank.resize(std::max<std::size_t>(m.blank.size(), m.items.size() + 1), 0);
       for(uint32_t i = 0; i < count && i < blank.size(); ++i) m.blank[at + i] = at + i == 0 ? 0 : blank[i];
@@ -1101,7 +1101,7 @@ struct editor_server {
       }
     }
     // Empty space lines when inserted: above and below the new element
-    std::vector<uint32_t> blank = db.is<n_block>(c) ? db.as<n_block>(c).blank : db.as<n_module>(c).blank;
+    std::vector<uint32_t> blank = (db.is<n_block>(c) ? db.as<n_block>(c).blank : db.as<n_module>(c).blank).vec();
     blank.resize(items.size() + 1, 0);
     uint32_t canon = module_level ? 2 : 1;
     if(!count && !fresh->empty()) {

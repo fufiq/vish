@@ -13,6 +13,7 @@ int main() {
   assert(xs.size() == 1000 && xs[999] == 999 && xs.back() == 999 && xs.front() == 0);
   list<uint32_t> alias = xs; // copy of the descriptor - same list
   xs.erase(xs.begin() + 10);
+  assert(alias.size() == 1000 && alias[10] == 10 && alias[11] == 11); // editing the copy does not change the original
   assert(xs.size() == 999 && xs[10] == 11);
   xs.insert(xs.begin() + 10, 10u);
   assert(xs.size() == 1000 && xs[10] == 10 && xs[11] == 11);

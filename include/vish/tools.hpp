@@ -285,7 +285,7 @@ value item_signature(ast_db const & db, node_id n) {
 // replace it (node saves id), otherwise new - after the element after (-1 - at the end); layout -
 // blank, inner, comments. The result is a node of the element; not understood - empty.
 node_id put_item(ast_db & db, node_id m, node_id mine, std::string const & text, std::string const & name, node_id after, uint32_t blank, bool inner, node_note note) {
-  n_module mod = db.as<n_module>(m);
+  n_module mod = db.copy_of<n_module>(m);
   auto at_of = [&](node_id n) { return std::size_t(std::ranges::find(mod.items, n) - mod.items.begin()); };
   if(mod.blank.size() < mod.items.size() + 1) mod.blank.resize(mod.items.size() + 1, 0);
   parser pr(db, text, cat("<слияние ", name, ">"));
@@ -305,7 +305,7 @@ node_id put_item(ast_db & db, node_id m, node_id mine, std::string const & text,
     mod.blank.insert(mod.blank.begin() + std::ptrdiff_t(k), 0);
   }
   mod.blank[at_of(item)] = blank;
-  std::erase(mod.inner, item.value);
+  mod.inner.erase_value(item.value);
   if(inner) mod.inner.push_back(item.value);
   db.replace(m, mod);
   db.set_note(item, std::move(note));
@@ -315,13 +315,13 @@ node_id put_item(ast_db & db, node_id m, node_id mine, std::string const & text,
 
 // Remove element n of module m (with its layout).
 void remove_item(ast_db & db, node_id m, node_id n) {
-  n_module mod = db.as<n_module>(m);
+  n_module mod = db.copy_of<n_module>(m);
   auto it = std::ranges::find(mod.items, n);
   if(it == mod.items.end()) return;
   std::size_t k = std::size_t(it - mod.items.begin());
   mod.items.erase(it);
   if(k < mod.blank.size()) mod.blank.erase(mod.blank.begin() + std::ptrdiff_t(k));
-  std::erase(mod.inner, n.value);
+  mod.inner.erase_value(n.value);
   db.replace(m, mod);
   db.link_parents(m);
 }

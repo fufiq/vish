@@ -4118,11 +4118,11 @@ struct interpreter {
       std::vector<value> ys;
       for(node_id y: f) ys.push_back(code_value(y));
       return value(array_v::of(std::move(ys)));
-    } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
+    } else if constexpr(std::is_same_v<field_t, list<symbol>>) {
       std::vector<value> ys;
       for(symbol y: f) ys.push_back(value(std::string(y ? str(y) : ""))); // an empty name, like a field name
       return value(array_v::of(std::move(ys)));
-    } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) { // layout
+    } else if constexpr(std::is_same_v<field_t, list<uint32_t>>) { // layout
       std::vector<value> ys;
       for(uint32_t y: f) ys.push_back(value(int64_t(y)));
       return value(array_v::of(std::move(ys)));
@@ -4151,8 +4151,8 @@ struct interpreter {
     value code = code_value(node_id(1));
     if constexpr(std::is_same_v<field_t, node_id>) return erase(code);
     else if constexpr(std::is_same_v<field_t, node_list>) return erase(value(array_v::of({code})));
-    else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) return erase(value(array_v::of({value(std::string("x"))})));
-    else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) return erase(value(array_v::of({value(int64_t(1))})));
+    else if constexpr(std::is_same_v<field_t, list<symbol>>) return erase(value(array_v::of({value(std::string("x"))})));
+    else if constexpr(std::is_same_v<field_t, list<uint32_t>>) return erase(value(array_v::of({value(int64_t(1))})));
     else if constexpr(std::is_same_v<field_t, symbol> || std::is_same_v<field_t, std::string>) return erase(value(std::string("x")));
     else if constexpr(std::is_same_v<field_t, bool>) return erase(value(true));
     else if constexpr(std::is_floating_point_v<field_t>) return erase(value(1.0));
@@ -4267,14 +4267,14 @@ struct interpreter {
       field_t xs;
       items([&](value const & x) { xs.push_back(adopt(child_node(x, what, where), owner, taken)); });
       f = std::move(xs);
-    } else if constexpr(std::is_same_v<field_t, std::vector<symbol>>) {
+    } else if constexpr(std::is_same_v<field_t, list<symbol>>) {
       field_t xs;
       items([&](value const & x) {
         if(!x.is<str_v>()) fail(cat(what, ": ожидались строки, получено ", types.describe(x)), where);
         xs.push_back(x.as<str_v>().view().empty() ? symbol{} : sym(x.as<str_v>().view()));
       });
       f = std::move(xs);
-    } else if constexpr(std::is_same_v<field_t, std::vector<uint32_t>>) {
+    } else if constexpr(std::is_same_v<field_t, list<uint32_t>>) {
       field_t xs;
       items([&](value const & x) {
         if(!x.is<int64_t>()) fail(cat(what, ": ожидались числа, получено ", types.describe(x)), where);
@@ -5313,7 +5313,7 @@ struct interpreter {
           break;
         }
     if(!chain_fn) fail("нет chain_resolve в прелюдии — цепочку не разобрать", db[n].where);
-    chain_job job{&p, std::move(shapes), c.ops, {}};
+    chain_job job{&p, std::move(shapes), c.ops.vec(), {}};
     chain_jobs.push_back(&job);
     struct pop_job {
       std::vector<chain_job *> & jobs;

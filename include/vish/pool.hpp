@@ -164,34 +164,46 @@ struct list {
     for(size_t i = old; i < n; ++i) data()[i] = v;
     set_size(uint32_t(n));
   }
+  // Rewriting, pasting, and erasing are always in a new piece: a copy of the descriptor (node) divides the piece, and
+  // editing the copy should not change the original; the old piece remains (it can be held by another copy), the pool grows.
+  // The addition to the end (push_back) goes in place behind the length - other people's copies see the former elements.
   template<typename It>
   void assign(It first, It last) {
     std::vector<T> tmp(first, last); // The source may be on the same list.
-    clear();
+    off = 0;
+    meta = 0;
     reserve(tmp.size());
     if(!tmp.empty()) std::memcpy(data(), tmp.data(), tmp.size() * 4);
     set_size(uint32_t(tmp.size()));
   }
   iterator insert(const_iterator pos, T v) { return insert(pos, &v, &v + 1); }
+  iterator insert(const_iterator pos, size_t count, T v) {
+    std::vector<T> tmp(count, v);
+    return insert(pos, tmp.begin(), tmp.end());
+  }
   template<typename It>
   iterator insert(const_iterator pos, It first, It last) {
     size_t at = size_t(pos - begin());
     std::vector<T> tmp(first, last);
-    size_t n = size();
-    reserve(n + tmp.size());
-    T * d = data();
-    std::memmove(d + at + tmp.size(), d + at, (n - at) * 4);
-    if(!tmp.empty()) std::memcpy(d + at, tmp.data(), tmp.size() * 4);
-    set_size(uint32_t(n + tmp.size()));
-    return d + at;
+    std::vector<T> all = vec();
+    all.insert(all.begin() + std::ptrdiff_t(at), tmp.begin(), tmp.end());
+    assign(all.begin(), all.end());
+    return data() + at;
   }
   iterator erase(const_iterator pos) { return erase(pos, pos + 1); }
   iterator erase(const_iterator first, const_iterator last) {
-    size_t at = size_t(first - begin()), k = size_t(last - first), n = size();
-    T * d = data();
-    std::memmove(d + at, d + at + k, (n - at - k) * 4);
-    set_size(uint32_t(n - k));
-    return d + at;
+    size_t at = size_t(first - begin());
+    std::vector<T> all = vec();
+    all.erase(all.begin() + std::ptrdiff_t(at), all.begin() + std::ptrdiff_t(at + size_t(last - first)));
+    assign(all.begin(), all.end());
+    return data() + at;
+  }
+  // Remove all equals v (as std::erase); a new piece
+  size_t erase_value(T v) {
+    std::vector<T> all = vec();
+    size_t n = std::erase(all, v);
+    assign(all.begin(), all.end());
+    return n;
   }
   friend bool operator==(list const & a, list const & b) { return a.size() == b.size() && (a.size() == 0 || std::memcmp(a.data(), b.data(), size_t(a.size()) * 4) == 0); }
 };

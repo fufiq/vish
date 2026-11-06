@@ -1377,7 +1377,7 @@ struct parser {
     uint32_t n = newlines_before();
     return n > canon ? n - canon : 0;
   }
-  static void trim_blank(std::vector<uint32_t> & blank) {
+  static void trim_blank(list<uint32_t> & blank) {
     if(std::ranges::all_of(blank, [](uint32_t x) { return x == 0; })) blank.clear();
   }
 
@@ -1776,7 +1776,7 @@ struct parser {
       db.replace(a, std::move(p));
       return a;
     }
-    node_kind k = db[t].kind; // Copy: base could move
+    node_kind k = db.copy_kind(t); // copy: base can move; lists are corrected on the spot
     std::visit([&](auto & x) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
         using field_t = [:std::meta::type_of(m):];

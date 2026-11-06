@@ -288,7 +288,7 @@ struct printer {
   // block recedes itself). hole(k, часть) prints the kth place, block(k) the k place is
   // occupied by the block. In the announcement (decl) brackets - as written ("()" close,
   // "(" through the space), notes - the text [[…]].
-  void form(std::vector<symbol> const & pieces, auto && hole, auto && block, bool decl = false) {
+  void form(std::span<symbol const> pieces, auto && hole, auto && block, bool decl = false) {
     std::size_t k = 0;
     std::string_view prev;
     std::vector<std::string_view> marks;
@@ -559,7 +559,7 @@ struct printer {
               auto name = str(y.[:m:]);
               same = !name.empty() && lexer::is_ident_start(name[0]) && std::ranges::all_of(name, lexer::is_ident);
             } else same = x.[:m:] == y.[:m:];
-          } else if constexpr(!std::is_same_v<field_t, std::vector<uint32_t>>) // blank, inner - layout
+          } else if constexpr(!std::is_same_v<field_t, list<uint32_t>>) // blank, inner - layout
             same = x.[:m:] == y.[:m:];
         }
         ++field;
@@ -876,7 +876,7 @@ struct printer {
 
   // Empty lines set by a person; in the editor - with indentation (the place of the cursor
   // on an empty line - in the code column), in the text - without tail spaces.
-  void blank_lines(std::vector<uint32_t> const & blank, std::size_t k) {
+  void blank_lines(std::span<uint32_t const> blank, std::size_t k) {
     for(uint32_t n = k < blank.size() ? blank[k] : 0; n > 0; --n) {
       out += '\n';
       if(layouts) out.append(indent * 2, ' ');

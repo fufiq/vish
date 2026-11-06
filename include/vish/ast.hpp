@@ -50,12 +50,12 @@ struct n_context {};
 struct n_module : n_context {
   symbol name;
   node_list items;
-  std::vector<uint32_t> blank;
+  list<uint32_t> blank;
   // internal elements (node numbers from items):
 // - in base and execution, but not in
   // presentation of the editor module; access - transition. The layout is like blank; the
   // numbers, not node_list, are not children (they are not seen twice by rounds in the fields).
-  std::vector<uint32_t> inner;
+  list<uint32_t> inner;
   // [[extension(проверка)]] module k; - control of extensions entity module (§9.1):
   // 
   // 
@@ -72,7 +72,7 @@ struct n_fn {
   bool scoped = false; // Using Operator - Redefinition in Context (§8.2)
   // syntax: запись формы — слова и символы, "(" — параметр в скобках, "{" —
   // parameter-block (in order of parameters); the first word is the name entity (§4.4 )
-  std::vector<symbol> form;
+  list<symbol> form;
 };
 struct n_param {
   symbol name;
@@ -99,7 +99,7 @@ struct n_var {
 struct n_block : n_context {
   node_list items;
   bool has_value = false;
-  std::vector<uint32_t> blank; // n_module
+  list<uint32_t> blank; // n_module
 }; // has_value: Last expression without `;`
 struct n_ident {
   symbol name;
@@ -118,7 +118,7 @@ struct n_str {
 struct n_call {
   node_id callee;
   node_list args;
-  std::vector<symbol> words; // The Word of Clause in Every Argument (Empty - Everything in Your Head)
+  list<symbol> words; // The Word of Clause in Every Argument (Empty - Everything in Your Head)
   bool tail = false; // The final argument is the tail unit / instruction
   uint32_t form = 0; // Syntax ad entry: ad node + 1
   // Tag "text {x} text" - call tag ("text", x, "text"):
@@ -139,7 +139,7 @@ struct n_op {
 // selected by brute force at instantiation - by type (§4.4).
 struct n_chain {
   node_list atoms;
-  std::vector<symbol> ops; // ops[k] - between atoms[k] and atoms[k+1]
+  list<symbol> ops; // ops[k] - between atoms[k] and atoms[k+1]
 };
 struct n_if {
   node_id cond;
@@ -207,7 +207,7 @@ struct n_construct {
   // {x: 1.0, y: 2.0} is an anonymous structural literal: type no, names[k] is the name of items[k].
   // 
 //  
-  std::vector<symbol> names;
+  list<symbol> names;
 }; // array{1, 2, 3}
 struct n_hole {
   node_text text;
@@ -254,7 +254,7 @@ struct n_spread {
 // announcements.
 struct n_use {
   symbol key;
-  std::vector<symbol> names;
+  list<symbol> names;
 };
 // native "cpp" { … } is a function body in C++ (§3.3):
 // 
@@ -881,6 +881,21 @@ struct ast_db {
         out);
     return out;
   }
+  // Copy of node for editing elements in place: lists - their own (otherwise editing the copy changes the living node)
+  template<typename K>
+  K copy_of(node_id n) {
+    use_pool();
+    K x = std::get<K>(nodes[n].kind);
+    template for(constexpr auto m: fields_of<K>()) {
+      using F = [:std::meta::type_of(m):];
+      if constexpr(is_pool_list<F>::value || std::is_same_v<F, node_text>) x.[:m:] = x.[:m:].clone();
+    }
+    return x;
+  }
+  node_kind copy_kind(node_id n) {
+    use_pool();
+    return kind_clone(nodes[n].kind);
+  }
   // View from pool to pool to (play journal to another database, download from disk)
   static node_kind kind_translate(node_kind const & k, node_pool const * from, node_pool * to) {
     node_kind out = k;
@@ -1271,7 +1286,7 @@ struct ast_db {
   node_id clone(node_id n, auto && subst, std::vector<uint32_t> * holder = nullptr) {
     if(!n) return n;
     if(auto r = subst(n)) return *r;
-    node_kind k = nodes[n].kind; // Copy: Arena could move out
+    node_kind k = kind_clone(nodes[n].kind); // copy: arena can move; lists are corrected on the spot
     span w = nodes[n].where;
     std::visit([&](auto & x) {
       template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
@@ -1701,7 +1716,7 @@ std::optional<record_info> record_of(ast_db const & db, node_id fn) {
 template<typename F>
 consteval char const * node_field_type() {
   if constexpr(std::is_same_v<F, node_id>) return "code";
-  else if constexpr(std::is_same_v<F, node_list> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>>) return "array";
+  else if constexpr(std::is_same_v<F, node_list> || std::is_same_v<F, std::vector<symbol>> || std::is_same_v<F, std::vector<uint32_t>> || std::is_same_v<F, list<symbol>> || std::is_same_v<F, list<uint32_t>>) return "array";
   // Numbers and text - machine representations (§5.8, O15): tag names - prelude
   else if constexpr(std::is_same_v<F, symbol> || std::is_same_v<F, std::string> || std::is_same_v<F, node_text>) return "__bytes";
   else if constexpr(std::is_same_v<F, bool>) return "__bool";
