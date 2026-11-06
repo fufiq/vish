@@ -169,8 +169,9 @@ struct storage_area {
       if(c == '/' || c == '\0') return false;
     return true;
   }
-  // 'openly'; otherwise the cause
-  std::string open(std::string const & dir, std::string_view name) {
+  // 'Open'; otherwise cause shared = false: display MAP_PRIVATE - changes do not enter the file and are not visible after fork
+  //
+  std::string open(std::string const & dir, std::string_view name, bool shared = true) {
     if(!good_name(name)) return "имя хранилища — ключ без '/' и ведущей точки";
     if(::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return cat("каталог хранилищ VM недоступен: ", std::strerror(errno));
     std::string path = cat(dir, "/", name);
@@ -182,7 +183,7 @@ struct storage_area {
       return "хранилище занято другим исполнением";
     }
     struct stat st{};
-    void * m = ::fstat(f, &st) == 0 ? ::mmap(nullptr, range, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NORESERVE, f, 0) : MAP_FAILED;
+    void * m = ::fstat(f, &st) == 0 ? ::mmap(nullptr, range, PROT_READ | PROT_WRITE, (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_NORESERVE, f, 0) : MAP_FAILED;
     if(m == MAP_FAILED) {
       ::close(f);
       return cat("не отобразить: ", std::strerror(errno));

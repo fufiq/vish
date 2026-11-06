@@ -342,7 +342,10 @@ struct editor_server {
     } catch(diagnostic const & d) {
       send(p, proto::s_error{d.what()});
     }
-    if(!deciding) session.db.sweep_retired(); // Message served - no rounds
+    if(!deciding) {
+      session.db.sweep_retired(); // Message served - no rounds
+      session.db.maybe_compact(); // pool: abandoned chunks of rewriting lists (S5.1)
+    }
   }
 
   // --- Messages: each - solution in language ---

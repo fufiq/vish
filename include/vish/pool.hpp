@@ -44,6 +44,7 @@ struct node_pool {
   // Area in storage (S5.1): Pool memory - its display; ready - words are available without reference to the
   // area (it grows the file), the first change after fixing marks the area "dirty".
   uint64_t ready = words_max;
+  uint64_t garbage = 0; // words in thrown chunks (rewriting the list with a new chunk): assessment for compaction
   bool external = false;
   bool dirty = true; // Anonymous pool is always “dirty”: there is nothing to fix
   std::function<void(uint64_t)> grow_to; // At least as many words are available (the area grows the file)
@@ -257,6 +258,7 @@ struct list {
   template<typename It>
   void assign(It first, It last) {
     std::vector<T> tmp(first, last); // The source may be on the same list.
+    if(off) current_pool->garbage += capacity(); // abandoned piece: it can be held by a copy of the descriptor - the compaction will release
     off = 0;
     meta = 0;
     reserve(tmp.size());

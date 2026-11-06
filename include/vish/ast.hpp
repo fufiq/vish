@@ -18,6 +18,7 @@
 #include <optional>
 #include <unordered_map>
 #include <map>
+#include <memory>
 #include <set>
 #include <tuple>
 #include <variant>
@@ -483,8 +484,8 @@ struct db_area {
   uint32_t * pool() const { return reinterpret_cast<uint32_t *>(file.at + h->pool_at); }
 
   // 'open' (fresh - new, empty); otherwise the cause, the area is closed
-  std::string open(std::string const & dir, std::string_view name, bool create = true) {
-    if(std::string why = file.open(dir, name); !why.empty()) return why;
+  std::string open(std::string const & dir, std::string_view name, bool create = true, bool shared = true) {
+    if(std::string why = file.open(dir, name, shared); !why.empty()) return why;
     auto fail = [&](std::string why) {
       file.close();
       h = nullptr;
@@ -555,12 +556,35 @@ struct db_area {
   }
 };
 
+// Area without a name to check: file in the temporary directory, immediately unlink (lives while open). VISH_DB_SCRATCH =
+// directory is turned on - each process base lives in a region, as in a repository (the whole set of tests - verification).
+inline std::unique_ptr<db_area> scratch_area() {
+  static std::atomic<uint32_t> serial{0};
+  char const * dir = std::getenv("VISH_DB_SCRATCH");
+  if(!dir || !*dir) return nullptr;
+  std::string where = cat(dir, "/vish-area-", ::getpid());
+  auto a = std::make_unique<db_area>();
+  std::string name = cat("a", serial.fetch_add(1));
+  if(!a->open(where, name, true, false).empty()) return nullptr; // MAP_PRIVATE: Fork test does not share pages with parent
+  ::unlink(cat(where, "/", name).c_str());
+  return a;
+}
+
 struct ast_db {
   // The listing and text pool node (S5.0): each ast_db has its own base, the current thread_local. Any reference
   // to node exposes it; the code that holds a list of one base and touches another calls use_pool.
+  std::unique_ptr<db_area> own_area; // domain created by the base itself (VISH_DB_SCRATCH check)
   db_area * area = nullptr; // storage area (S5.1); empty - normal memory
+  ~ast_db() {
+    if(pool.used > 20000 && std::getenv("VISH_POOL_STATS")) { // Pool growth measurement: before and after compaction
+      auto st = pool_stats();
+      std::fprintf(stderr, "пул: занято %u слов, живых %u, к возврату по оценке %llu, узлов %u\n", st.used, st.live, (unsigned long long)reclaimable(), nodes.size());
+      uint32_t freed = compact_pool();
+      std::fprintf(stderr, "пул после компактации: занято %u слов (вернула %u)\n", pool.used, freed);
+    }
+  }
   node_pool pool;
-  explicit ast_db(db_area * a = nullptr) : area(a), pool(make_pool(a)), nodes(make_nodes(a)) {
+  explicit ast_db(db_area * a = nullptr) : own_area(a ? nullptr : scratch_area()), area(a ? a : own_area.get()), pool(make_pool(area)), nodes(make_nodes(area)) {
     nodes.owner = &pool;
     use_pool();
   }
@@ -590,6 +614,103 @@ struct ast_db {
     edited_at.assign(n, 0);
     birth.assign(n, 0);
     for(uint32_t k = 0; k < n; ++k) note_fn(node_id(k));
+  }
+  // Pool: achievable pieces, statistics, compaction (S5.1) ------------------------------------ bypass all pool descriptors
+  // that hold the base: f (shift, meta, text?). Holders: nodes, species in journal entries (j add/j replace/j mutate),
+  // mutated species, born/reborn, retired. No one else, so compaction is only allowed where there are no rounds (between
+  // server messages and session commands).
+  void for_each_handle(auto && f) {
+    auto kind = [&](node_kind & k) {
+      std::visit([&](auto & x) {
+        template for(constexpr auto m: fields_of<std::remove_cvref_t<decltype(x)>>()) {
+          using F = [:std::meta::type_of(m):];
+          if constexpr(is_pool_list<F>::value) f(x.[:m:].off, x.[:m:].meta, false);
+          else if constexpr(std::is_same_v<F, node_text>) f(x.[:m:].off, x.[:m:].meta, true);
+        }
+      },
+          k);
+    };
+    for(uint32_t i = 0, n = nodes.size(); i < n; ++i) kind(nodes[node_id(i)].kind);
+    for(auto & e: oplog) {
+      if(auto * x = std::get_if<j_add>(&e.second.op)) kind(x->kind);
+      else if(auto * y = std::get_if<j_replace>(&e.second.op)) kind(y->kind);
+      else if(auto * z = std::get_if<j_mutate>(&e.second.op)) kind(z->kind);
+    }
+    for(auto & m: mutations) kind(m.old);
+    for(auto & b: born) kind(b.second.kind);
+    for(auto & r: reborn) kind(r.was);
+    for(auto & k: retired) kind(k);
+  }
+  struct pool_stat {
+    uint32_t used, live; // The words are occupied / need to live (with a container in length)
+  };
+  pool_stat pool_stats() {
+    use_pool();
+    std::map<uint32_t, uint32_t> need; // word-shift
+    for_each_handle([&](uint32_t & off, uint32_t & meta, bool text) {
+      if(!off) return;
+      uint32_t len = meta & ((uint32_t(1) << node_pool::len_bits) - 1);
+      uint32_t w = text ? (len + 3) / 4 : len;
+      auto & n = need[off];
+      n = std::max(n, w);
+    });
+    uint64_t live = 1;
+    for(auto const & [off, w]: need)
+      if(w) live += uint64_t(1) << pool_class_of(w);
+    return {pool.used, uint32_t(std::min<uint64_t>(live, pool.used))};
+  }
+  // Move the live pieces to the beginning of the pool, the container - along the length; thrown pieces and free lists
+  // disappear. Returns freed words. It is impossible when the second lane is working and where the lists (bypasses) are kept.
+  uint32_t compact_pool() {
+    use_pool();
+    if(lanes_on.load(std::memory_order_acquire)) return 0;
+    sweep_retired();
+    lane_guard g(pool.lock);
+    struct run {
+      uint32_t need = 0;
+      uint32_t to = 0;
+    };
+    std::map<uint32_t, run> runs;
+    for_each_handle([&](uint32_t & off, uint32_t & meta, bool text) {
+      if(!off) return;
+      uint32_t len = meta & ((uint32_t(1) << node_pool::len_bits) - 1);
+      auto & r = runs[off];
+      r.need = std::max(r.need, text ? (len + 3) / 4 : len);
+    });
+    uint32_t before = pool.used, cursor = 1;
+    pool.touch();
+    for(auto & [off, r]: runs) { // The new place is not higher than the old and does not touch the not yet shifted
+      if(!r.need) continue;
+      r.to = cursor;
+      if(r.to != off) std::memmove(pool.base + r.to, pool.base + off, size_t(r.need) * 4);
+      cursor += uint32_t(1) << pool_class_of(r.need);
+    }
+    for_each_handle([&](uint32_t & off, uint32_t & meta, bool text) {
+      if(!off) return;
+      uint32_t len = meta & ((uint32_t(1) << node_pool::len_bits) - 1);
+      run const & r = runs.at(off);
+      if(!r.need) {
+        off = 0;
+        meta = 0;
+        return;
+      }
+      off = r.to;
+      meta = len | (pool_class_of(r.need) << node_pool::len_bits);
+    });
+    pool.used = cursor;
+    pool.garbage = 0;
+    for(auto & f: pool.free_runs) f.clear();
+    return before - cursor;
+  }
+  // Words that the compaction will return by evaluating: thrown by rewriting + free chunks by class
+  uint64_t reclaimable() const {
+    uint64_t w = pool.garbage;
+    for(uint32_t c = 0; c < node_pool::classes; ++c) w += uint64_t(pool.free_runs[c].size()) << c;
+    return w;
+  }
+  // Automatic: not less than 64 K words and not less than a quarter of the pool
+  void maybe_compact() {
+    if(reclaimable() >= (uint64_t(1) << 16) && reclaimable() * 4 >= pool.used && !std::getenv("VISH_NO_COMPACT")) compact_pool(); // VISH_NO_COMPACT - Measurement without compaction
   }
   // Fix domain: node data and pool to disk (the rest of the database members - see spec §3.1)
   std::string commit_area() { return area ? area->commit(nodes.size(), pool.used) : std::string("база не в области хранилища"); }

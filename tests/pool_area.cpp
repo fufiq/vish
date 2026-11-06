@@ -177,5 +177,53 @@ int main(int argc, char ** argv) {
     why = e.open(dir + "/версия.storage", "обрезка", false);
     assert(why.find("короче заголовка") != std::string::npos);
   }
+  { // compaction: abandoned chunks of rewrites go away, content, journal and area are the same
+    db_area area;
+    assert(area.open(dir, "компактация").empty());
+    ast_db db(&area);
+    node_id r = build(db, 300);
+    for(int round = 0; round < 40; ++round) { // Module editing: inserting and erasing elements - each time a new piece
+      n_module m = db.copy_of<n_module>(r);
+      m.items.insert(m.items.begin() + 1, m.items[round % 7]);
+      m.items.erase(m.items.begin() + 3);
+      m.blank.push_back(uint32_t(round));
+      db.replace(r, m);
+      n_block b = db.copy_of<n_block>(db.as<n_fn>(m.items[5]).body);
+      b.items.push_back(b.items[0]);
+      db.replace(db.as<n_fn>(m.items[5]).body, b);
+    }
+    std::string text = dump(db);
+    uint32_t used = db.pool.used;
+    uint64_t estimate = db.reclaimable();
+    assert(estimate > 0);
+    uint32_t stat_live = db.pool_stats().live;
+    uint32_t freed = db.compact_pool();
+    assert(freed > 0 && db.pool.used < used && db.pool.used == stat_live && db.reclaimable() == 0);
+    assert(dump(db) == text); // node, children, text - the same
+    // journal after compaction is reproduced in normal memory: the same node (journal records carried pieces of pool)
+    ast_db ref;
+    ref.replay(db.journal());
+    assert(dump(ref) == text);
+    // and area: fixing, closing, opening - the same node
+    node_id root2;
+    std::string jp = dir + "/компактация.vishdb";
+    save_db(db, r, jp);
+    assert(db.commit_area().empty());
+    uint32_t count = db.size(), pool_used = db.pool.used;
+    db.area = nullptr;
+    (void)root2;
+    std::printf("компактация: пул %u → %u слов (оценка %llu), узлов %u\n", used, pool_used, (unsigned long long)estimate, count);
+  }
+  {
+    db_area area;
+    assert(area.open(dir, "компактация", false).empty());
+    ast_db db(&area);
+    node_id r2;
+    node_pool staging;
+    db.attach_meta(read_journal(dir + "/компактация.vishdb", r2, staging));
+    ast_db ref;
+    ref.replay(read_journal(dir + "/компактация.vishdb", r2, staging));
+    assert(dump(db) == dump(ref));
+  }
   std::puts("area ok");
 }
