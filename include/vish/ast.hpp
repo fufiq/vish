@@ -753,27 +753,16 @@ struct ast_db {
     return add(node_kind(std::move(k)), where);
   }
 
-  node & operator[](node_id n) {
-    use_pool();
-    return nodes[n];
-  }
-  node const & operator[](node_id n) const {
-    use_pool();
-    return nodes[n];
-  }
+  // reading node (nodes[]) sets the base itself - a separate use_pool here is superfluous (hot way)
+  node & operator[](node_id n) { return nodes[n]; }
+  node const & operator[](node_id n) const { return nodes[n]; }
 
   template<typename kind>
   bool is(node_id n) const { return n && std::holds_alternative<kind>(nodes[n].kind); }
   template<typename kind>
-  kind & as(node_id n) {
-    use_pool();
-    return std::get<kind>(nodes[n].kind);
-  }
+  kind & as(node_id n) { return std::get<kind>(nodes[n].kind); }
   template<typename kind>
-  kind const & as(node_id n) const {
-    use_pool();
-    return std::get<kind>(nodes[n].kind);
-  }
+  kind const & as(node_id n) const { return std::get<kind>(nodes[n].kind); }
 
   // The character class for node checks at each execution step: the text of the character
   // is unchanged - the answer is remembered by number (without comparing lines).

@@ -150,11 +150,11 @@ struct node_array {
   // Any reading of node exposes the base whose lists it holds: bypassing ast_db accessories, too.
   node_pool * owner = nullptr;
   T & operator[](handle h) pre(h.value < size()) {
-    if(current_pool != owner) current_pool = owner;
+    if(__builtin_expect(current_pool != owner, 0)) current_pool = owner;
     return base[h.value];
   }
   T const & operator[](handle h) const pre(h.value < size()) {
-    if(current_pool != owner) current_pool = owner;
+    if(__builtin_expect(current_pool != owner, 0)) current_pool = owner;
     return base[h.value];
   }
   uint32_t size() const { return count.load(std::memory_order_acquire); }
