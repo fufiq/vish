@@ -6936,91 +6936,99 @@ struct interpreter {
     fail(cat("неизвестная операция ", n), where);
   }
 
-  // Status storage (VM service, plan S1; os::storage_area):
+  // State Storage - kernel (VM service, plan S1/Sh2b; os::storage_area):
 //  
-// The program is named and misaligned, not the way: the storage catalog keeps VM (*my*:
-  // next to the program - <program>.storage, the runner - its temporary catalog.
+// There is only that which cannot be given to the language: rights.
+  // ), the liveliness of the descriptor, the security of memory and the name-key (not the path) - and all
+  // this corresponds to Status, not the exception. API, Exclusion Types and Texts - service on vish
+  // (prelude, “Storage Service”), Storage directory holds VM (*my*: next to the program -
+  // <program>.storage, runner - its temporary directory).
+  //
   std::string storage_dir() const {
     std::string const & p = root->prog_path;
     return state_dir.empty() ? p + ".storage" : cat(state_dir, "/", p.substr(p.find_last_of('/') + 1), ".storage");
   }
-  value storage_value(value id) { return value(agg_v{types.named("storage"), {{sym("id"), std::move(id)}}}); }
-  // storage *: in parsing only types and possible exceptions
+  // storage_raw_*: In parsing, only the storage_reply response form
   value storage_op(std::string_view n, std::vector<value> & a, span where) {
     lane_guard g(vm_lock); // Storage table - at the root of VM, common to bands
     if(checking()) {
       rt_effect();
-      rt_check("io_error", where);
-      if(n == "storage_open") return storage_value(erase(value(int64_t(0))));
-      if(n == "storage_size" || n == "storage_grow" || n == "storage_read_i64") return erase(value(int64_t(1)));
-      if(n == "storage_read") return erase(value(std::string("x")));
-      return value();
+      return storage_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
     }
     return storage_call(vm_root->storages, granted("storage"), background, n, a, where);
   }
+  // storage_reply {status, num, text}: status (0 yes, 1 not given, 2 closed, 3 out of storage, 4 host error), number (descriptor, size, former
+  // size, word), text (bytes, cause of host)
+  value storage_reply(value status, value num, value text) {
+    return value(agg_v{types.named("storage_reply"), {{sym("status"), std::move(status)}, {sym("num"), std::move(num)}, {sym("text"), std::move(text)}}});
+  }
+  value storage_status(int64_t status, int64_t num = 0, std::string text = {}) {
+    return storage_reply(value(status), value(num), value(std::move(text)));
+  }
   // execution - shared with the process machine (it has its own table and its own rights)
-  value storage_call(std::deque<os::storage_area> & table, bool given, bool proc, std::string_view n, std::vector<value> const & a, span where) {
+  value storage_call(std::deque<os::storage_area> & table, bool given, bool /*proc*/, std::string_view n, std::vector<value> const & a, span where) {
     auto bad_args = [&](std::string_view sig) { fail(cat(n.substr(8), sig), where); };
-    if(n == "storage_open") {
+    if(n == "storage_raw_open") {
       if(a.size() != 1 || !a[0].is<str_v>()) bad_args("(имя)");
-      std::string name = a[0].as<str_v>().str();
-      // Not given - as there is no file at fs
-      if(!given) fail_rt("io_error", cat(name, ": нет хранилища — хранилища ", proc ? "процессу не даны (ресурс даёт программа: передаёт хранилище)" : "программе не даны (даёт пользователь: vish run --grant storage)"), where);
+      if(!given) return storage_status(1); // Not given: as there is no file in fs
       os::storage_area & s = table.emplace_back();
-      if(std::string why = s.open(storage_dir(), name); !why.empty()) fail_rt("io_error", cat("хранилище ", name, ": ", why), where);
-      return storage_value(value(int64_t(table.size() - 1)));
+      if(std::string why = s.open(storage_dir(), a[0].as<str_v>().str()); !why.empty()) {
+        table.pop_back();
+        return storage_status(4, 0, why);
+      }
+      return storage_status(0, int64_t(table.size() - 1));
     }
-    value const * h = a.empty() ? nullptr : shape_of(a[0]);
-    if(!h || !h->is<agg_v>() || types.name(h->as<agg_v>().type) != "storage" || h->as<agg_v>().fields.empty() || !h->as<agg_v>().fields[0].second.is<int64_t>()) fail("ожидалось хранилище", where);
-    int64_t id = h->as<agg_v>().fields[0].second.as<int64_t>();
-    if(n == "storage_close") {
+    auto num = [&](std::size_t i) {
+      if(a.size() <= i || !a[i].is<int64_t>()) bad_args("(дескриптор, смещение, …)");
+      return a[i].as<int64_t>();
+    };
+    int64_t id = num(0);
+    if(n == "storage_raw_close") {
       if(id >= 0 && uint64_t(id) < table.size()) table[std::size_t(id)].close();
-      return value();
+      return storage_status(0);
     }
     // Closed, withdrawn (proc revoke storage) or came from another VM:
 //  
-    if(id < 0 || uint64_t(id) >= table.size() || !table[std::size_t(id)].alive()) fail_rt("io_error", "хранилище закрыто", where);
+    if(id < 0 || uint64_t(id) >= table.size() || !table[std::size_t(id)].alive()) return storage_status(2);
     os::storage_area & s = table[std::size_t(id)];
-    auto num = [&](std::size_t i) {
-      if(a.size() <= i || !a[i].is<int64_t>()) bad_args("(хранилище, смещение, …)");
-      return a[i].as<int64_t>();
-    };
-    // [at, at + len] - inside the vault
-    auto span_of = [&](int64_t at, int64_t len) {
-      if(at < 0 || len < 0 || uint64_t(at) > s.size || uint64_t(len) > s.size - uint64_t(at))
-        fail_rt("out_of_bounds", cat("байты [", at, ", ", at + len, ") вне хранилища размера ", s.size), where);
-      return s.at + at;
-    };
-    if(n == "storage_size") return value(int64_t(s.size));
-    if(n == "storage_grow") {
-      int64_t k = num(1), old = int64_t(s.size);
-      if(k < 0) fail_rt("out_of_bounds", cat("рост на ", k, " байт"), where);
-      if(std::string why = s.grow(uint64_t(k)); !why.empty()) fail_rt("io_error", cat("хранилище: ", why), where);
-      return value(old); // displacement
+    int64_t size = int64_t(s.size);
+    // [at, at + len] - inside storage (otherwise - status 3: memory security is not service dependent)
+    auto inside = [&](int64_t at, int64_t len) { return at >= 0 && len >= 0 && uint64_t(at) <= s.size && uint64_t(len) <= s.size - uint64_t(at); };
+    if(n == "storage_raw_size") return storage_status(0, size);
+    if(n == "storage_raw_grow") {
+      int64_t k = num(1);
+      if(k < 0) return storage_status(3, size);
+      if(std::string why = s.grow(uint64_t(k)); !why.empty()) return storage_status(4, size, why);
+      return storage_status(0, size); // previous size = displacement of a new location
     }
-    if(n == "storage_read") {
+    if(n == "storage_raw_read") {
       int64_t at = num(1), len = num(2);
-      return value(std::string(reinterpret_cast<char const *>(span_of(at, len)), std::size_t(len)));
+      if(!inside(at, len)) return storage_status(3, size);
+      return storage_status(0, size, std::string(reinterpret_cast<char const *>(s.at + at), std::size_t(len)));
     }
-    if(n == "storage_write") {
-      if(a.size() != 3 || !a[2].is<str_v>()) bad_args("(хранилище, смещение, байты)");
+    if(n == "storage_raw_write") {
+      if(a.size() != 3 || !a[2].is<str_v>()) bad_args("(дескриптор, смещение, байты)");
       std::string_view b = a[2].as<str_v>().view();
-      std::memcpy(span_of(num(1), int64_t(b.size())), b.data(), b.size());
-      return value();
+      int64_t at = num(1);
+      if(!inside(at, int64_t(b.size()))) return storage_status(3, size);
+      std::memcpy(s.at + at, b.data(), b.size());
+      return storage_status(0, size);
     }
-    if(n == "storage_read_i64") {
-      int64_t x;
-      std::memcpy(&x, span_of(num(1), 8), 8);
-      return value(x);
+    if(n == "storage_raw_read_i64") {
+      int64_t at = num(1), x = 0;
+      if(!inside(at, 8)) return storage_status(3, size);
+      std::memcpy(&x, s.at + at, 8);
+      return storage_status(0, x);
     }
-    if(n == "storage_write_i64") {
-      int64_t x = num(2);
-      std::memcpy(span_of(num(1), 8), &x, 8);
-      return value();
+    if(n == "storage_raw_write_i64") {
+      int64_t at = num(1), x = num(2);
+      if(!inside(at, 8)) return storage_status(3, size);
+      std::memcpy(s.at + at, &x, 8);
+      return storage_status(0, size);
     }
-    if(n == "storage_commit") {
-      if(std::string why = s.commit(); !why.empty()) fail_rt("io_error", cat("хранилище: ", why), where);
-      return value();
+    if(n == "storage_raw_commit") {
+      if(std::string why = s.commit(); !why.empty()) return storage_status(4, size, why);
+      return storage_status(0, size);
     }
     fail(cat("неизвестная операция ", n), where);
   }
@@ -7226,7 +7234,7 @@ struct interpreter {
             std::vector<value> lent_vals; // push_back is not a {…} list: the list copies the elements, and the copy of the loan is its own
             lent_vals.push_back(lend(*base));
             lent_vals.push_back(idx);
-            if(!idx.is<split_v>() && !user_applies(f, lent_vals)) return index_rt(n, db.index_of(n), lent_vals[0], lent_vals[1], env);
+            if(!idx.is<split_v>() && (user_index_on_aggs(n) || !user_applies(f, lent_vals))) return index_rt(n, db.index_of(n), lent_vals[0], lent_vals[1], env);
             vals.push_back(*base); // overload is the usual choice of value. n
             vals.push_back(std::move(idx));
             prepared = true;

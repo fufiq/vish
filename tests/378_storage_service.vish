@@ -1,0 +1,43 @@
+// grant: storage
+// machine
+// out: vm_error: байты [20, 28) вне хранилища размера 16
+// out: out_of_bounds: рост на -1 байт
+// out: io_error: хранилище закрыто
+// out: ядро: вне 3, закрыто 2
+// out: ядро: чужое имя 4, статус открытия 0
+// out: после: 16
+// Storage service on vish (S2b plan): APIs, exception types and texts - language (prelude), kernel (C++) meets
+// the status and checks rights, vitality and boundaries. io_error and out_of_bounds are the descendants of
+// vm_error, caught both. Bypassing the service (direct kernel call) is safe: out of storage - status 3, closed
+// - 2, name-path - 4. Status composition and texts are *my*.
+//
+main() {
+  s = storage("сервис");
+  grow(s, 16 - size(s));
+  try {
+    read(s, 20, 8);
+  } catch(vm_error e) {
+    print("vm_error: " + e.message);
+  }
+  try {
+    grow(s, -1);
+  } catch(out_of_bounds e) {
+    print("out_of_bounds: " + e.message);
+  }
+  r = storage_raw_read(s.id, 0, 1099511627776);
+  c = storage_raw_open("../x");
+  o = storage_raw_open("сервис2");
+  close(s);
+  z = storage_raw_size(s.id);
+  try {
+    size(s);
+  } catch(io_error e) {
+    print("io_error: " + e.message);
+  }
+  print("ядро: вне " + text(r.status) + ", закрыто " + text(z.status));
+  print("ядро: чужое имя " + text(c.status) + ", статус открытия " + text(o.status));
+  t = storage("сервис");
+  print("после: " + text(size(t)));
+  close(t);
+  storage_raw_close(o.num);
+}

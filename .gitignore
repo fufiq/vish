@@ -1,3 +1,4 @@
 out/
 *.vish.state
 qemu_*.core
+*.vish.storage/

@@ -823,15 +823,52 @@ create(str path) => file_create(path);
 // path); addressing by offsets; grow(s, n) - n zero bytes at the end, the result is a displacement
 // of a new place; commit - fix (on the disk); without the right storage (vish run - storagegrant)
 // - io_error, like fs; proc revoke storage - closes, then - io_error.
-storage(str name) => storage_open(name);
-size(storage s) => storage_size(s);
-grow(storage s, i64 n) => storage_grow(s, n);
-read(storage s, i64 at, i64 n) => storage_read(s, at, n);
-write(storage s, i64 at, str bytes) => storage_write(s, at, bytes);
-read_i64(storage s, i64 at) => storage_read_i64(s, at);
-write_i64(storage s, i64 at, i64 x) => storage_write_i64(s, at, x);
-commit(storage s) => storage_commit(s);
-close(storage s) => storage_close(s);
+//
+// Service on vish (plan Sh2b, docs/plan-vm-os.md §4 b): . . The kernel (C++, os.hpp + storage_raw_ *)
+// answers STATUS storage_reply {status, num, text}: 0 - yes, 1 - not given, 2 - closed, 3 - out of storage
+// (number - size), 4 - host error (text); it checks the rights, vitality and boundaries itself (service
+// cannot bypass them, memory does not depend on it). Here are APIs, exception types and texts: VM errors -
+// values of their types with a single base are caught by catch(io_error e) / catch(vm_error e). *My:*
+// status partitioning and texts.
+//
+//
+//
+struct vm_error { str message; }
+struct io_error : vm_error {}
+struct out_of_bounds : vm_error {}
+struct storage { i64 id; }
+struct storage_reply { i64 status; i64 num; str text; }
+storage_not_given() => if(process_class() == "фоновый") "процессу не даны (ресурс даёт программа: передаёт хранилище)" else "программе не даны (даёт пользователь: vish run --grant storage)";
+// kernel response r to an operation over the range [at, at + len]: status → exclusion, otherwise r
+storage_checked(r, i64 at, i64 len) {
+  if(r.status == 2) throw io_error{"хранилище закрыто"};
+  if(r.status == 3) throw out_of_bounds{"байты [" + text(at) + ", " + text(at + len) + ") вне хранилища размера " + text(r.num)};
+  if(r.status == 4) throw io_error{"хранилище: " + r.text};
+  r
+}
+storage(str name) {
+  r = storage_raw_open(name);
+  if(r.status == 1) throw io_error{name + ": нет хранилища — хранилища " + storage_not_given()};
+  if(r.status != 0) throw io_error{"хранилище " + name + ": " + r.text};
+  storage{r.num}
+}
+size(storage s) => storage_checked(storage_raw_size(s.id), 0, 0).num;
+grow(storage s, i64 n) {
+  if(n < 0) throw out_of_bounds{"рост на " + text(n) + " байт"};
+  storage_checked(storage_raw_grow(s.id, n), 0, 0).num // displacement
+}
+read(storage s, i64 at, i64 n) => storage_checked(storage_raw_read(s.id, at, n), at, n).text;
+write(storage s, i64 at, str bytes) {
+  storage_checked(storage_raw_write(s.id, at, bytes), at, bytes.size);
+}
+read_i64(storage s, i64 at) => storage_checked(storage_raw_read_i64(s.id, at), at, 8).num;
+write_i64(storage s, i64 at, i64 x) {
+  storage_checked(storage_raw_write_i64(s.id, at, x), at, 8);
+}
+commit(storage s) {
+  storage_checked(storage_raw_commit(s.id), 0, 0);
+}
+close(storage s) => storage_raw_close(s.id);
 
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
