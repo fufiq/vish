@@ -1830,6 +1830,19 @@ struct interpreter {
   symbol sym(std::string_view s) { return db.strings.intern(s); }
   std::string_view str(symbol s) const { return db.strings.text(s); }
   std::string show_v(value const & x) const { return show(x, types, db.strings); }
+  // Rough value size in bytes (stops early): large is not printed entirely in the overload failure text -
+  // showing the string for each call was O(n) for each rejected overload (S2a)
+  static std::size_t weight(value const & v, std::size_t cap = 512) {
+    if(v.is<str_v>()) return v.as<str_v>().size();
+    if(v.is<array_v>()) return std::size_t(v.as<array_v>().size()) * 8;
+    std::size_t w = 8;
+    if(v.is<agg_v>())
+      for(auto const & [k, x]: v.as<agg_v>().fields) {
+        w += weight(x, cap);
+        if(w > cap) break;
+      }
+    return w;
+  }
 
   static std::string join(std::vector<std::string> const & xs) {
     std::string s;
@@ -2948,7 +2961,6 @@ struct interpreter {
     std::string got_desc = types.describe(v);
     std::string_view got(types.name(types.of(v)));
     if(want == "auto" || got_desc == want || got == want) return fit::exact; // sameness
-    if(conversion_only) out = v;
     // Type ratio in language (fit_rule prelude, M6 step 6), facts in VM
     value const * x = shape_of(v);
     bool want_node = node_kind_named(want) || want == lang_context();
@@ -2967,6 +2979,7 @@ struct interpreter {
       value r = lang_rule(fit_fn, "fit_rule", {value(std::string(got)), value(std::string(want)), value(strict), value(subtype), value(record), value(want_struct), value(empty), value(is_code), value(want_node), value(bool(conv))}, {});
       it = fit_rules.emplace(std::move(key), r.as<int64_t>()).first;
     }
+    if(conversion_only && it->second >= 2 && it->second <= 8) out = v; // "No" gives nothing: without a copy of the value (Sh2a - string and aggregate for the sake of failure)
     switch(it->second) {
       case 2: return fit::subsumes; // base
       case 3: { // {x: …} where struct is expected
@@ -3421,6 +3434,7 @@ struct interpreter {
         }
       }
       if(c && c->is<array_v>()) a.push_back(value(array_v::borrow(c->as<array_v>()))); // Loan - Loan: native does not keep it
+      else if(c && c->is<str_v>()) a.push_back(c->as<str_v>().empty() ? *c : value(str_v::lend(c->as<str_v>()))); // line - also (Sh2a)
       else a.push_back(c ? *c : value());
     }
     // parsing for JIT editor and tuning code: their native reads and changes the state of host (clients,
@@ -3431,6 +3445,7 @@ struct interpreter {
       fail("native с известными входами — состояние хоста, у VM при исполнении", db[n].where);
     value r = e->fn(*this, a, db[n].where);
     if(r.is<array_v>() && r.as<array_v>().borrowed) r.as<array_v>().own(); // The loan doesn't survive the challenge
+    else if(r.is<str_v>()) r.as<str_v>().own();
     if(checking() && !r.known()) // “Not proven” at the level of staticity, not the type of exception
       for(auto const & k: instance_keys) emit({report_event::rt_check, k, "native", {}, db[n].where, {}});
     return ok(std::move(r));
@@ -5657,11 +5672,35 @@ struct interpreter {
     span where = db[n].where;
     if(args.size() != 1 || !db.is<n_ident>(args[0])) fail("pin_storage(массив)", where);
     value * cell = find(env, db.as<n_ident>(args[0]).name);
-    if(!cell || cell->is<thunk_v>() || cell->is<ref_v>()) fail("pin: аргумент — переменная-массив", where);
+    if(!cell || cell->is<thunk_v>()) fail("pin: аргумент — переменная-массив или строка", where);
+    if(cell->is<ref_v>()) { // field or element (pin(g.bytes)) - in place as in appen d d
+      if(checking()) return ok();
+      ref_v const r = cell->as<ref_v>();
+      cell = path_place(r, 1 + r.more, where, true);
+      if(!cell) fail("pin: место за рантайм-шагом", where);
+    }
     if(checking()) return ok();
-    if(!cell->is<array_v>()) fail(cat("pin: ожидался массив, получено ", types.describe(*cell)), where);
+    if(cell->is<str_v>()) { // Growing string (W2A): the same range of addresses as the growing vector
+      cell->as<str_v>().w.pin();
+      return ok();
+    }
+    if(!cell->is<array_v>()) fail(cat("pin: ожидался массив или строка, получено ", types.describe(*cell)), where);
     cell->as<array_v>().pin();
     return ok();
+  }
+
+  // Byte string grows in place (types of strings, Sh2a): append(s, "…") - as a push array; parsing:
+  // a known string with a known end - known, otherwise run-time - line.
+  void grow_str(value & s, value const & x, span where) {
+    value const * add = shape_of(x);
+    if(!add || !add->is<str_v>()) fail(cat("append: в строку добавляется строка, получено ", types.describe(x)), where);
+    if(s.is<str_v>() && x.known()) {
+      s.as<str_v>().append(x.as<str_v>().view());
+      return;
+    }
+    uint32_t keep = s.ct;
+    s = erase(value(str_v{}));
+    s.ct = keep;
   }
 
   // append(xs, x) is the growth of the array, the core push. What growth means for links, the library
@@ -5680,13 +5719,16 @@ struct interpreter {
       else { // parsing: the value of the place, growth, writing back - the meaning is the same as the name
         value now = path_deref(r, where);
         value const * shape = shape_of(now);
-        if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(now)), where);
-        if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
-          fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(now)), where);
-        uint32_t keep = now.ct;
-        if(now.is<array_v>() && x.known()) now.as<array_v>().push(x);
-        else now = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
-        now.ct = keep;
+        if(shape && shape->is<str_v>()) grow_str(now, x, where);
+        else {
+          if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(now)), where);
+          if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
+            fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(now)), where);
+          uint32_t keep = now.ct;
+          if(now.is<array_v>() && x.known()) now.as<array_v>().push(x);
+          else now = erase(value(array_v::of({shape->as<array_v>().empty() ? x : shape->as<array_v>().get(0)})));
+          now.ct = keep;
+        }
         book.written(&root_cell(r), true);
         if(value * at = path_place(r, 1 + r.more, where, true)) *at = std::move(now);
         else root_cell(r) = erase(root_cell(r)); // place after run-time - step - variable run-time
@@ -5694,6 +5736,10 @@ struct interpreter {
       }
     }
     if(!checking()) {
+      if(cell->is<str_v>()) { // growing string (S2a)
+        grow_str(*cell, x, where);
+        return ok();
+      }
       if(!cell->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
       cell->as<array_v>().push(x); // data transfer links are not visible: they are the place (base and index)
       return ok();
@@ -5701,6 +5747,10 @@ struct interpreter {
     book.written(cell, true);
     on_alternatives(cell, [&] {
       value const * shape = shape_of(*cell);
+      if(shape && shape->is<str_v>()) {
+        grow_str(*cell, x, where);
+        return;
+      }
       if(!shape || !shape->is<array_v>()) fail(cat("append: ожидался массив, получено ", types.describe(*cell)), where);
       if(!shape->as<array_v>().empty() && !unknown(x) && types.describe(erase(shape->as<array_v>().get(0))) != types.describe(erase(x)))
         fail(cat("append: элемент типа ", types.describe(x), " в массив ", types.describe(*cell)), where);
@@ -7846,7 +7896,7 @@ struct interpreter {
           vals[i] = std::move(v);
         }
         if(r) tr.refs[i] = std::move(*r);
-      } else if(value * cell = arg_place(args[i], env); cell && (cell->is<array_v>() || cell->is<agg_v>()))
+      } else if(value * cell = arg_place(args[i], env); cell && (cell->is<array_v>() || cell->is<agg_v>() || cell->is<str_v>()))
         vals[i] = lend(*cell); // place (and field, and link) - loan, not copy
       else {
         VISH_TRY(v, eval(args[i], env, frame));
@@ -8058,7 +8108,7 @@ struct interpreter {
           value got;
           fit r = type_fit(vals[i], want, p.strict, got, true);
           if(r == fit::no) {
-            why = cat("параметр ", str(p.name), " ожидает ", p.strict ? "ровно " : "", want, ", передано ", checking() || !vals[i].known() ? types.describe(vals[i]) : cat(types.describe(vals[i]), " ", show_v(vals[i])));
+            why = cat("параметр ", str(p.name), " ожидает ", p.strict ? "ровно " : "", want, ", передано ", checking() || !vals[i].known() || weight(vals[i]) > 512 ? types.describe(vals[i]) : cat(types.describe(vals[i]), " ", show_v(vals[i])));
             if(std::string rw; !p.strict && is_record(vals[i]) && structs.contains(sym(want)) && record_fit(vals[i], want, got, &rw) == fit::no) why += cat(" (", rw, ")");
             by_value += numeric_pair(vals[i], want) && !p.strict; // type fits, doesn't fit the value
           } else {
@@ -8230,11 +8280,12 @@ struct interpreter {
   // value.
   value lend(value const & c) {
     if(c.is<array_v>()) return value(array_v::borrow(c.as<array_v>()));
+    if(c.is<str_v>()) return c.as<str_v>().empty() ? c : value(str_v::lend(c.as<str_v>())); // S2a: bytes without a copy
     if(!c.is<agg_v>() || c.as<agg_v>().rid || code_agg(c) || is_shared(c)) return c;
     agg_v a;
     a.type = c.as<agg_v>().type;
     for(auto const & [k, v]: c.as<agg_v>().fields)
-      if(v.is<array_v>() || v.is<agg_v>()) a.fields.push_back({k, lend(v)});
+      if(v.is<array_v>() || v.is<agg_v>() || v.is<str_v>()) a.fields.push_back({k, lend(v)});
       else a.fields.push_back({k, v});
     value r(std::move(a));
     r.ct = c.ct;
@@ -8243,6 +8294,7 @@ struct interpreter {
   }
   static void own_lent(value & v) {
     if(v.is<array_v>()) v.as<array_v>().own();
+    else if(v.is<str_v>()) v.as<str_v>().own();
     else if(v.is<agg_v>())
       for(auto & [k, x]: v.as<agg_v>().fields) own_lent(x);
   }
@@ -8286,7 +8338,7 @@ struct interpreter {
     if(!checking() && site.node && tail_self(f, site.node)) { // tail challenge itself - transition: values - working call
       for(value & v: vals) // The loan of the outgoing frame cell would hang - its value; the owner's loan above - lives.
         if(v.is<array_v>() && v.as<array_v>().borrowed && in_frame(v.as<array_v>().borrowed, env, f)) v.as<array_v>().own();
-        else if(v.is<agg_v>()) own_lent(v); // Loans in the fields of the unit - their own (the field place in the frame is not sought)
+        else if(v.is<agg_v>() || v.is<str_v>()) own_lent(v); // Loans in the fields of the unit - their own (the field place in the frame is not sought)
       tail_vals = std::move(vals);
       return flow{flow_kind::tail, {}, 0};
     }

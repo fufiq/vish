@@ -951,6 +951,68 @@ text_byte(i64 b) => native "cpp" {
   return value(std::string(1, char(#b.as<int64_t>())));
 };
 
+// Types of strings (Sh2a, docs/plan-vm-os.md §4 in, spec §5.9): the string is bytes, and the storage method
+// chooses the code, the type is the view.
+// 
+// 
+// (ibid.); SSO is the “most obvious case” of a fixed-size buffer; Specific types, names, and overflow
+// behaviors are mine. `str` - default view: chunks of 2^k words, growth by copying. Here:
+//
+//
+// grown_text is growing: bytes in their address range (like pin in a growing vector)
+// growth of pages in place, bytes do not move;
+// fixed_text(N) is a fixed text <N>: capacity N - ct-field type, overflow - exclusion of text_overflow.
+// not silent truncation (§3.5);
+// text_buffer - buffer + position for assembly and output: put, take (take everything, position - at 0). General:
+// put(вид, str) - add on the spot (core append), size(вид), byte_at(вид, k) - byte, text(вид) - str. Operator type[k]
+// no: overload operator[] would slow down each a[i] program (user candidate operator bypasses the fast path of the
+// kernel). pin(s) is the str in its address range (core pin_storage).
+//
+pin(str s) => pin_storage(s);
+
+struct grown_text { str bytes; }
+grown_text() {
+  g = grown_text{""};
+  pin(g.bytes);
+  g
+}
+grown_text(str s) {
+  g = grown_text();
+  g.bytes.push(s);
+  g
+}
+put(mut grown_text g, str s) { g.bytes.push(s); }
+size(grown_text g) => g.bytes.size;
+byte_at(grown_text g, i64 k) => g.bytes[k];
+text(grown_text g) => g.bytes;
+
+struct fixed_text { ct i64 cap; str bytes; }
+fixed_text(ct i64 n) => fixed_text{n, ""};
+// Will s fit into the remaining bytes?
+fits(fixed_text t, str s) => (t.bytes.size + s.size) <= t.cap;
+// text_overflow exception (does not require: it selects overload instead of throwing)
+struct text_overflow { i64 cap; i64 need; }
+put(mut fixed_text t, str s) {
+  if(!fits(t, s)) throw text_overflow{t.cap, t.bytes.size + s.size};
+  t.bytes.push(s);
+}
+size(fixed_text t) => t.bytes.size;
+byte_at(fixed_text t, i64 k) => t.bytes[k];
+text(fixed_text t) => t.bytes;
+
+struct text_buffer { grown_text data; }
+text_buffer() => text_buffer{grown_text()};
+byte_at(text_buffer b, i64 k) => b.data.bytes[k];
+put(mut text_buffer b, str s) { b.data.bytes.push(s); }
+size(text_buffer b) => b.data.bytes.size;
+// everything accumulated by one line; position to the beginning, buffer address range the same
+take(mut text_buffer b) {
+  r = b.data.bytes;
+  b.data = grown_text();
+  r
+}
+text(text_buffer b) => b.data.bytes;
+
 // fill(n, x) is an array of n copies of x.
 fill(i64 n, x) {
   r = array{};

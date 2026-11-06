@@ -1,0 +1,27 @@
+// args: 100000
+// out: 400000 d 400000
+// out: 10000000 97
+// Line types grow linearly (S2a): parameters are alias, so the large string and line view transmitted to
+// the function are not copied for every call. There was: a copy of the line for each call (checking the
+// type of rejected overloads printed it in its entirety) - square, 100,000 additions - minutes. The
+// process machine (strong in meaning in its call) is not here.
+//
+fill(i64 n) {
+  g = grown_text();
+  for(i : range(n)) g.put("abcd");
+  g
+}
+// Size and s[k] read the location of the caller.
+probe(str s) => s.size;
+last(grown_text g) => byte_at(g, size(g) - 1);
+main() {
+  n = parse_int(args[1]).value;
+  g = fill(n);
+  b = text_buffer();
+  for(i : range(n)) b.put("abcd");
+  print(size(g), text_byte(last(g)), size(b));
+  total = 0;
+  s = text(g);
+  for(i : range(n)) total += (probe(s) / 4000) + (if(last(g) == 100) 0 else 1);
+  print(total, s[0]);
+}

@@ -429,6 +429,7 @@ struct words {
   words(words && o) noexcept { steal(o); }
   words & operator=(words const & o) { // copy - at the level where it is made (and empty: growth - there)
     if(this == &o) return *this;
+    if(view()) drop(); // The loan is not written: a copy is your own
     clear();
     if(!data) home = &space();
     reserve(o.n);
@@ -443,6 +444,22 @@ struct words {
     return *this;
   }
   ~words() { release(); }
+
+  // Loan (Sh2a): The words of someone else's cell at the time of the call, without a copy - "parameters
+  // are alias" like array_v::borrow. There is no owner (home is empty): it is not released; Capacity 0
+  // - any record first copies to its (reserve), a copy of the loan - its own.
+  static words lend(words const & o) {
+    words w;
+    w.data = o.data;
+    w.n = o.n;
+    return w;
+  }
+  bool view() const { return data && !home; }
+  void drop() { // forget
+    data = nullptr;
+    n = cap = 0;
+    big = false;
+  }
 
   uint32_t size() const { return uint32_t(n); }
   bool empty() const { return n == 0; }
@@ -472,6 +489,7 @@ struct words {
     }
     uint64_t * old = data;
     uint64_t old_cap = cap;
+    bool lent = view(); // Old words - others: copy, do not release
     uint64_t grow = std::max(want, cap * 2); // petty
     if(!home) home = &space();
     if(grow <= address_space::small_max) {
@@ -487,7 +505,7 @@ struct words {
     }
     if(old) {
       if(n) std::memcpy(data, old, size_t(n) * 8);
-      home->give_small(old, address_space::class_of(uint32_t(old_cap)));
+      if(!lent) home->give_small(old, address_space::class_of(uint32_t(old_cap)));
     }
   }
 
@@ -503,6 +521,7 @@ struct words {
   }
   void release() {
     if(!data) return;
+    if(!home) return drop(); // loan
     if(big) home->give_big(data, size_t(cap) * 8);
     else home->give_small(data, address_space::class_of(uint32_t(cap)));
     data = nullptr;
@@ -521,6 +540,20 @@ struct str_v {
   str_v(std::string_view s) { append(s); }
   str_v(std::string const & s) : str_v(std::string_view(s)) {}
   str_v(char const * s) : str_v(std::string_view(s)) {}
+
+  // Loan bytes at the time of the call (Sh2a): a copy of the loan - your own; own - make your own now
+  static str_v lend(str_v const & s) {
+    str_v r;
+    r.w = words::lend(s.w);
+    r.len = s.len;
+    return r;
+  }
+  bool lent() const { return w.view(); }
+  void own() {
+    if(!lent()) return;
+    str_v c(view());
+    *this = std::move(c);
+  }
 
   std::string_view view() const { return {reinterpret_cast<char const *>(w.data), len}; }
   operator std::string_view() const { return view(); }

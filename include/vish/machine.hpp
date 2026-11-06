@@ -2990,12 +2990,18 @@ struct process_machine {
       if(i.is<int64_t>() && xs.is<m_arr>()) return finish(mval{i.as<int64_t>() >= 0 && uint64_t(i.as<int64_t>()) < xs.as<m_arr>().items.size()});
     }
     if(helper.str(name) == "pin_storage" && t.a == 1 && fib().vals[t.base].is<m_alias>()) { // pin: the machine does not have host addresses - links and so base and index
-      if(!follow(fib().vals[t.base].as<m_alias>()).is<m_arr>()) throw diagnostic("pin: не массив", db[n].where);
+      if(!follow(fib().vals[t.base].as<m_alias>()).is<m_arr>() && !follow(fib().vals[t.base].as<m_alias>()).is<m_str>()) throw diagnostic("pin: не массив и не строка", db[n].where);
       return finish(mval{m_unit{}});
     }
     if(helper.str(name) == "append" && t.a == 2 && fib().vals[t.base].is<m_alias>()) { // push: the place of the caller grows (before the name of the arguments - without a copy of the array)
       m_alias al = fib().vals[t.base].as<m_alias>();
       mval & xs = follow(al);
+      if(xs.is<m_str>()) { // growing string (types of rows, Sh2a): bytes - in place
+        mval const & add = ref_of(fib().vals[t.base + 1]);
+        if(!add.is<m_str>()) throw diagnostic("append: в строку добавляется строка", db[n].where);
+        xs.as<m_str>().append(add.as<m_str>());
+        return finish(mval{m_unit{}});
+      }
       if(!xs.is<m_arr>()) throw diagnostic("append: не массив", db[n].where);
       mval x = deref(fib().vals[t.base + 1]);
       if(st.res_on) take_from(call_args(n)[1], x, t.scope); // resource in an array - transfer or copy, as in the assignment

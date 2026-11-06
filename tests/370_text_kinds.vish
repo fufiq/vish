@@ -1,0 +1,48 @@
+// out: растущая 6 e abcdef
+// out: фиксированная 2 true false ab
+// out: переполнение: ёмкость 5, нужно 6
+// out: после отказа ab
+// out: буфер 11 hello world
+// out: после take 0
+// out: снова again
+// out: на месте xyz qq
+// out: параметр-алиас 7 3 abcdefg
+// machine
+// Виды строк (Ш2а, spec §5.9): тип выбирает код.,
+// SSO — буфер фиксированного размера,. Конкретные виды,
+// имена и исключение text_overflow — *моё*. grown_text растёт на месте (push по str — ядро),
+// fixed_text(N) — ёмкость в типе (ct), text_buffer — put/take.
+main() {
+  g = grown_text();
+  g.put("abc");
+  g.put("def");
+  print("растущая", size(g), text_byte(byte_at(g, 4)), text(g));
+
+  f = fixed_text(5);
+  f.put("ab");
+  print("фиксированная", size(f), fits(f, "cde"), fits(f, "cdef"), text(f));
+  r = try { f.put("cdef"); "влезло" } catch(text_overflow e) { "переполнение: ёмкость " + text(e.cap) + ", нужно " + text(e.need) };
+  print(r);
+  print("после отказа", text(f));
+
+  b = text_buffer();
+  b.put("hello ");
+  b.put("world");
+  print("буфер", size(b), b.take());
+  print("после take", size(b));
+  b.put("again");
+  print("снова", text(b));
+
+  s = "x";
+  s.push("yz");
+  p = "";
+  pin(p);
+  p.push("q");
+  p.push(p);
+  print("на месте", s, p);
+
+  h = grown_text("abcd");
+  tail(h, "efg");
+  print("параметр-алиас", size(h), size(grown_text("xyz")), text(h));
+}
+tail(mut grown_text g, str s) { g.put(s); }
