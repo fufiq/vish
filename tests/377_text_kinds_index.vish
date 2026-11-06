@@ -1,0 +1,36 @@
+// out: 101 101 101
+// out: 3 98 99
+// out: 20 7
+// out: 42 8
+// out: ab 6
+// out: 100000 100000
+// machine
+// вид[k] (Ш2а): оператор [] своим типам — grown_text / fixed_text / text_buffer; a[i] массива и строки
+// остаётся ядром (основа — заём по месту, не копия): 
+// Программа перегружает [] и для своего типа, и для массива
+// по ключу-строке: тот же индекс i64 над массивом — по-прежнему ядро. Последний цикл: 100000 индексов массива из
+// 100000 элементов при перегруженном [] — копия основы на каждый индекс была бы минутами (было ×17).
+struct pair2 { array xs; }
+operator (pair2 p)[i64 k] => p.xs[k] * 2;
+operator (array a)[str key] => a.size;
+main() {
+  g = grown_text("abcdef");
+  f = fixed_text(8);
+  f.put("abcdef");
+  b = text_buffer();
+  b.put("abcdef");
+  print(g[4], f[4], b[4]);
+  xs = array{98, 99, 100};
+  print(xs.size, xs[0], xs[1]);
+  p = pair2{array{10, 3}};
+  print(p[0], xs[2] - 93);
+  print(xs["n"] * 14, "abcdefgh".size);
+  s = "ab";
+  print(text_range_head(s), s[1] - 92);
+  big = array{};
+  for(i : range(100000)) big.push(i);
+  t = 0;
+  for(i : range(100000)) t += (big[i % 7] - big[i % 7]) + 1;
+  print(t, big.size);
+}
+text_range_head(str s) => s;

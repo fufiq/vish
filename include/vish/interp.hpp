@@ -4763,6 +4763,19 @@ struct interpreter {
 
   // --- field access ---
 
+  // [] overloaded with code only for their types (the first parameter is struct): the array and string of such a[i] is
+  // still the kernel. The step of the index in the path-place (arg_place) itself checks that there is an array in the cell
+  // (otherwise there is no space), so the path through such a[i] can be searched (S2a: view[k] without slowing down a[i]).
+  bool user_index_on_aggs(node_id x) {
+    if(!db.is_index(x) || db.in_prelude(x) || user_ops.empty()) return false;
+    symbol f = known(sym_index_op);
+    if(!user_ops.contains(f.value)) return false;
+    for(node_id fn: user_candidates(f)) {
+      node_id t = db.as<n_param>(db.as<n_fn>(fn).params[0]).type;
+      if(!t || !db.is<n_ident>(t) || !structs.contains(db.as<n_ident>(t).name)) return false;
+    }
+    return true;
+  }
   // a[i] - kernels: [] not overloaded with program code (as in eval_node)
   bool core_index(node_id x) {
     return db.is_index(x) && (user_ops.empty() || !user_ops.contains(known(sym_index_op).value) || db.in_prelude(x));
@@ -4780,6 +4793,11 @@ struct interpreter {
     node_id x = n;
     for(;;) {
       bool member = db.is_member(x), index = !member && core_index(x);
+      if(!member && !index && user_index_on_aggs(x)) { // [] overloaded for its types: index - kernel, only if the cell array / row
+        value * b = arg_place(db.index_of(x).object, env);
+        if(!b || !(b->is<array_v>() || b->is<str_v>())) return false;
+        index = true;
+      }
       if(!member && !index) break;
       if(depth == steps.size()) return false;
       steps[depth++] = x;
@@ -7199,7 +7217,22 @@ struct interpreter {
         if(o.postfix || lazy) return call_overloaded(functions[f], o.args, env, frame, site());
         auto scalar = [](value const & v) { return v.is<int64_t>() || v.is<double>() || v.is<bool>(); };
         std::vector<value> vals;
-        if(o.args.size() == 2 && !ui.scalar_params) { // Frequent: a + b over built-in scalars - no vector
+        bool prepared = false;
+        // a[i] over an array or row-place at overload [] its types: the basis is a loan, not a copy (the eval
+        // cells copied the array to each index - overload [] slowed down all a[i] × 5, Sh2a)
+        if(db.is_index(n) && o.args.size() == 2 && overrides.empty())
+          if(value * base = checking() ? const_cast<value *>(peek(o.args[0], env)) : arg_place(o.args[0], env); base && (base->is<array_v>() || base->is<str_v>())) {
+            VISH_TRY(idx, eval(o.args[1], env, frame));
+            std::vector<value> lent_vals; // push_back is not a {…} list: the list copies the elements, and the copy of the loan is its own
+            lent_vals.push_back(lend(*base));
+            lent_vals.push_back(idx);
+            if(!idx.is<split_v>() && !user_applies(f, lent_vals)) return index_rt(n, db.index_of(n), lent_vals[0], lent_vals[1], env);
+            vals.push_back(*base); // overload is the usual choice of value. n
+            vals.push_back(std::move(idx));
+            prepared = true;
+          }
+        if(prepared) {
+        } else if(o.args.size() == 2 && !ui.scalar_params) { // Frequent: a + b over built-in scalars - no vector
           VISH_TRY(x, eval(o.args[0], env, frame));
           VISH_TRY(y, eval(o.args[1], env, frame));
           if(scalar(x) && scalar(y) && overrides.empty() && op != "&&" && op != "||") return ok(binary(op, x, y, where));
@@ -8760,7 +8793,7 @@ struct interpreter {
     std::array<node_id, 8> steps;
     uint32_t depth = 0;
     node_id x = n;
-    while(db.is_member(x) || core_index(x)) {
+    while(db.is_member(x) || core_index(x) || user_index_on_aggs(x)) {
       if(depth == steps.size()) return nullptr;
       steps[depth++] = x;
       x = db.is_member(x) ? db.member_of(x).object : db.index_of(x).object;
