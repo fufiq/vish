@@ -1,0 +1,33 @@
+// JIT regression (found 2026-11-09 when editing `!is_index`): a range(<константа>) cycle with the sum of two calls of one function - `s
+// += rot(x, 7) + rot(x, 18)` - after the JIT began taking such cycles, returned 0 instead of the sum: calls went node VM (service), the
+// result was lost. Ranner compares the JIT with the interpreter: silently incorrect machine code is worse than the interpreter.
+// out: 37867880448 2256 2304
+rot(i64 x, i64 n) => ((x >> n) | (x << (32 - n))) & 0xffffffff;
+two_calls(w) {
+  s = 0;
+  for(t : range(48)) {
+    x = w[t];
+    s += rot(x, 7) + rot(x, 18);
+  }
+  s
+}
+twice(w) {
+  s = 0;
+  for(t : range(48)) {
+    x = w[t];
+    s += x + x;
+  }
+  s
+}
+neighbors(w) {
+  s = 0;
+  for(t : range(48)) {
+    s += w[t] + w[t + 1];
+  }
+  s
+}
+main() {
+  w = array{};
+  for(t : range(69 + args.size)) w.push(t);
+  print(two_calls(w), twice(w), neighbors(w));
+}
