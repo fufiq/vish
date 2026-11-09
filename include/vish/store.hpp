@@ -4,6 +4,8 @@
 // serialized generically through reflection (serial.hpp).
 #pragma once
 
+#include <filesystem>
+
 #include "ast.hpp"
 #include "os.hpp"
 #include "serial.hpp"
@@ -11,6 +13,45 @@
 namespace vish {
 
 constexpr std::string_view vishdb_magic = "VISHDB0035"; // 0035: Derivative nodes - in the pool when playing (j derived); 0034: skipping the node numbers and imports of dropped draft parsings (j gap); 0033: comments - layout in the database (j note); 0032: control of extensions - n module.attrs instead of sealed; 0031: the place of the node after re-examination on the spot - raw block as a unit of editing (j place); 0030: anonymous structural literature (n construct.s); 00: 00: 00: roll from the source of sym back (28 m) [[state]] variable module (n var.attrs); 0026: struct - instance struct, extension (n extend.of, without n struct); 0025: point - operators .x and .[] (without n member, n field); 0024: a[i] - pair operator [] (n op, without n index); 0023: auto - absence of type (without n pack - {blocks} (without n pack); 0021:ntrict (without 00: 00: 00: 00: n n n
+
+// File is the base area (S5.3), not journal: by signature at the beginning
+bool is_area_file(std::string const & path) {
+  std::FILE * f = std::fopen(path.c_str(), "rb");
+  if(!f) return false;
+  char m[8] = {};
+  bool ok = std::fread(m, 1, 8, f) == 8 && std::memcmp(m, "VISHAREA", 8) == 0;
+  std::fclose(f);
+  return ok;
+}
+
+// Open the file area without locking and privately (changes do not go to the file): readers and live session base.
+// Product Save (save_area) writes a new file and renames the open private file.
+std::string open_area_private(db_area & area, std::string const & path) {
+  std::filesystem::path p(path);
+  auto dir = p.parent_path().empty() ? std::filesystem::path(".") : p.parent_path();
+  return area.open(dir.string(), p.filename().string(), false, false, false);
+}
+
+// Save the product: the whole base is in the area next to it, fixation, then atomic renaming on top of the path (a
+// failure in the middle of saving leaves the old file). The root of the program lies in the roots of the region.
+void save_area(ast_db const & db, node_id root, std::string const & path) {
+  std::filesystem::path p(path);
+  auto dir = p.parent_path().empty() ? std::filesystem::path(".") : p.parent_path();
+  std::string tmp = cat(p.filename().string(), ".new", ::getpid());
+  std::filesystem::remove(dir / tmp);
+  {
+    db_area area;
+    if(std::string why = area.open(dir.string(), tmp); !why.empty()) throw diagnostic(why, {});
+    ast_db out(&area);
+    out.replay(db.journal());
+    out.use_pool();
+    out.roots->program_root = root.value + 1;
+    if(std::string why = out.commit_area(); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
+  }
+  std::error_code ec;
+  std::filesystem::rename(dir / tmp, p, ec);
+  if(ec) throw diagnostic(cat(path, ": ", ec.message()), {});
+}
 
 void save_db(ast_db const & db, node_id root, std::string const & path) {
   writer w;
@@ -86,6 +127,21 @@ void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> co
 
 // staging - a pool in which the lists and text of the read records lie: it must survive their reproduction
 std::vector<journal_entry> read_journal(std::string const & path, node_id & root, node_pool & staging) {
+  if(is_area_file(path)) { // Area: journal is the same byte path as .vishdb (records to the staging pool)
+    writer w;
+    {
+      db_area area;
+      if(std::string why = open_area_private(area, path); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
+      ast_db src(&area);
+      root = node_id(src.roots->program_root - 1);
+      for(auto const & e: src.journal()) w.put(e);
+    }
+    pool_scope in(&staging);
+    reader r(w.bytes);
+    std::vector<journal_entry> entries;
+    while(!r.at_end()) entries.push_back(r.get<journal_entry>());
+    return entries;
+  }
   pool_scope in(&staging);
   os::mapped_file file(path);
   reader r(file.text());
@@ -101,6 +157,15 @@ std::vector<journal_entry> read_journal(std::string const & path, node_id & root
 
 node_id load_db(ast_db & db, std::string const & path) {
   node_id root;
+  if(is_area_file(path)) {
+    db_area area;
+    if(std::string why = open_area_private(area, path); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
+    ast_db src(&area);
+    if(!src.roots->program_root) throw diagnostic(cat(path, ": в области нет корня программы"), {});
+    root = node_id(src.roots->program_root - 1);
+    db.replay(src.journal());
+    return root;
+  }
   node_pool staging;
   db.replay(read_journal(path, root, staging));
   return root;

@@ -520,7 +520,7 @@ struct db_roots {
   uint64_t valid;
   uint64_t revision, births, edits;
   uint32_t prelude;
-  uint32_t pad;
+  uint32_t program_root; // Program root +1 (0 is not written): saving the product puts it at save_area
   list<stored_entry> oplog;
   list<note_rec> notes;
   list<mutation_rec> mutations;
@@ -591,8 +591,8 @@ struct db_area {
   db_roots * roots() const { return reinterpret_cast<db_roots *>(file.at + h->roots_at); }
 
   // 'open' (fresh - new, empty); otherwise the cause, the area is closed
-  std::string open(std::string const & dir, std::string_view name, bool create = true, bool shared = true) {
-    if(std::string why = file.open(dir, name, shared); !why.empty()) return why;
+  std::string open(std::string const & dir, std::string_view name, bool create = true, bool shared = true, bool lock = true) {
+    if(std::string why = file.open(dir, name, shared, lock); !why.empty()) return why;
     auto fail = [&](std::string why) {
       file.close();
       h = nullptr;

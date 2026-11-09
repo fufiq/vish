@@ -56,7 +56,7 @@ prog_save(i64 p, str path) => native "cpp" {
     if(!s.repository || s.repository->path != path) throw diagnostic("для нового репозитория используйте vish repo init", {});
     auto r = repository_primitive(vm, tools_host->session_of(s), "save", "", "", 0, 0).as<array_v>();
     if(!r.get(0).as<bool>()) throw diagnostic(std::string(r.get(1).as<str_v>().view()), {});
-  } else save_db(*x.db, x.root, path);
+  } else save_area(*x.db, x.root, path);
   return value(int64_t(0));
 };
 prog_fmt(i64 p, str key) => native "cpp" {

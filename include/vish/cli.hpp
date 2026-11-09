@@ -24,6 +24,7 @@ namespace vish {
 
 // Team program: base (for .vish - the team base, for .vishdb - its own by journal), root, errors parsing.
 struct cli_program {
+  std::optional<db_area> area; // file area .vishdb (S5.3): the base lives in it, without playing journal
   std::optional<ast_db> own;
   ast_db * db = nullptr;
   node_id root;
@@ -57,6 +58,11 @@ struct cli_host {
       p.db->replay(file.journal); // repository_load has already tested the structure.
       p.root = file.root;
       p.repository = std::move(file.state);
+    } else if(is_area_file(path)) { // area (S5.3): opens privately and immediately, without journal
+      if(std::string why = open_area_private(p.area.emplace(), path); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
+      p.db = &p.own.emplace(&*p.area);
+      if(!p.db->roots->program_root) throw diagnostic(cat(path, ": в области нет корня программы"), {});
+      p.root = node_id(p.db->roots->program_root - 1);
     } else if(path.ends_with(".vishdb") || path.ends_with(".tzdb")) { // .tzdb - before renaming the language
       p.db = &p.own.emplace();
       p.root = load_db(*p.db, path);

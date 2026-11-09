@@ -190,16 +190,17 @@ struct storage_area {
       if(c == '/' || c == '\0') return false;
     return true;
   }
-  // 'Open'; otherwise cause shared = false: display MAP_PRIVATE - changes do not enter the file and are not visible after fork
+  // 'Open'; otherwise lock cause = false: no flock (readers and private copies - file they don't write) shared = false: display
+  // MAP_PRIVATE - changes do not enter the file and are not visible after fork (check databases in the area)
   //
-  std::string open(std::string const & dir, std::string_view name, bool share = true) {
+  std::string open(std::string const & dir, std::string_view name, bool share = true, bool lock = true) {
     if(!good_name(name)) return "имя хранилища — ключ без '/' и ведущей точки";
     if(::mkdir(dir.c_str(), 0700) != 0 && errno != EEXIST) return cat("каталог хранилищ VM недоступен: ", std::strerror(errno));
     std::string path = cat(dir, "/", name);
     bool fresh = !file_exists(path);
     int f = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if(f < 0) return std::strerror(errno);
-    if(::flock(f, LOCK_EX | LOCK_NB) != 0) {
+    if(lock && ::flock(f, LOCK_EX | LOCK_NB) != 0) {
       ::close(f);
       return "хранилище занято другим исполнением";
     }

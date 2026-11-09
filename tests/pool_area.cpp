@@ -299,5 +299,49 @@ int main(int argc, char ** argv) {
     ast_db db(&area);
     assert(db.size() > 0 && db.size() == db.nodes.size());
   }
+  { // S5.3: Product saving - file area .vishdb: save_area → load_db / read_journal / live open base
+    std::string file = cat(dir, "/продукт.vishdb");
+    std::remove(file.c_str());
+    ast_db db;
+    node_id root = build(db, 40);
+    db.add(n_str{"ещё"}, {});
+    save_area(db, root, file);
+    assert(is_area_file(file));
+    save_area(db, root, file); // Repeatedly over the previous (rename), no temporary files remain
+    for(auto const & e: std::filesystem::directory_iterator(dir))
+      assert(e.path().filename().string().find(".new") == std::string::npos);
+    std::string want = dump(db);
+    ast_db copy; // Reader-reproduction (cli, versions, merge)
+    node_id r2 = load_db(copy, file);
+    assert(r2 == root && dump(copy) == want);
+    node_pool staging; // journal bytes like .vishdb
+    node_id r3;
+    auto entries = read_journal(file, r3, staging);
+    assert(r3 == root);
+    {
+      writer a, b;
+      for(auto const & e: entries) a.put(e);
+      for(auto const & e: db.journal()) b.put(e);
+      assert(a.bytes == b.bytes);
+    }
+    { // live base above the file, without journal; two readers at once (without flock) and editing does not go into the file
+      db_area one, two;
+      assert(open_area_private(one, file).empty() && open_area_private(two, file).empty());
+      ast_db live(&one), other(&two);
+      assert(live.roots->program_root == root.value + 1 && dump(live) == want);
+      live.add(n_str{"правка"}, {});
+      assert(other.size() + 1 == live.size());
+    }
+    ast_db again;
+    load_db(again, file);
+    assert(dump(again) == want);
+    { // Old journal .vishdb reads like before
+      std::string old = cat(dir, "/старый.vishdb");
+      save_db(db, root, old);
+      assert(!is_area_file(old));
+      ast_db z;
+      assert(load_db(z, old) == root && dump(z) == want);
+    }
+  }
   std::puts("area ok");
 }

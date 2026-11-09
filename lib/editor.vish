@@ -829,12 +829,12 @@ show_output(str text, bool ok) => native "cpp" {
 };
 // name of the program of the session (the way is open)
 program_name() => native "cpp" { return value(editor_host->session.name); };
-// journal database - in the file .vishdb
+// base - in the file .vishdb area (S5.3): new file next to, renaming over the former
 save_program(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
   std::string path((a[0]).as<str_v>().view());
-  save_db(s.session.db, s.session.root, path);
+  save_area(s.session.db, s.session.root, path);
   if(s.now_peer) s.send(*s.now_peer, proto::s_saved{path});
   return value(int64_t(0));
 };
