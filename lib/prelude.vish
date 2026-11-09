@@ -3163,6 +3163,10 @@ jit_compile(cg, f, types, type result) {
     else if(field_slot(e).size == 2) gen_field(e, field_slot(e));
     else if(xs.size == 1) {
       t = ty(xs[0]);
+      // `!is_index(i, xs)` is a condition of the `for` cycle over range(константа): parsing knows the steps, the type of call "unit", but
+      // is_index is always bool; without this, the operator left node VM and read jc_range (simple cycles on range(48) JIT did not take). The
+      // variable bodies that depend on the step are also “unit” - such cycles are still to the interpreter (JIT debt, spec §10.4).
+      if((t == unit) && (op == "!") && is_call_of(xs[0], "is_index")) t = bool;
       g = op_codegen(cg, e, array{t});
       if((op == "-") && (t == i64)) {
         gen(xs[0]);

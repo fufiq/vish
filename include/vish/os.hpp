@@ -450,6 +450,7 @@ struct ipc_channel {
       if(h->cap - (tail - head) >= need) {
         uint32_t len = uint32_t(msg.size());
         auto put = [&](uint64_t at, void const * p, uint64_t n) {
+          if(!n) return; // data() can be a zero pointer - memcpy with it UB
           uint64_t o = at & (h->cap - 1), first = std::min<uint64_t>(n, h->cap - o);
           std::memcpy(ring + o, p, size_t(first));
           if(first < n) std::memcpy(ring, static_cast<std::byte const *>(p) + first, size_t(n - first));
@@ -476,6 +477,7 @@ struct ipc_channel {
       uint64_t head = h->head.load(std::memory_order_relaxed), tail = h->tail.load(std::memory_order_acquire);
       if(tail != head) {
         auto get = [&](uint64_t at, void * p, uint64_t n) {
+          if(!n) return;
           uint64_t o = at & (h->cap - 1), first = std::min<uint64_t>(n, h->cap - o);
           std::memcpy(p, ring + o, size_t(first));
           if(first < n) std::memcpy(static_cast<std::byte *>(p) + first, ring, size_t(n - first));

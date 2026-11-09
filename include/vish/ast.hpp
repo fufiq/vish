@@ -847,6 +847,7 @@ struct ast_db {
     drop_snapshot();
     for(auto & [off, r]: runs) { // The new place is not higher than the old and does not touch the not yet shifted
       if(!r.need) continue;
+      cursor = (cursor + 1) & ~uint32_t{1}; // even word: alignment 8 (see node_pool::take)
       r.to = cursor;
       if(r.to != off) std::memmove(pool.base + r.to, pool.base + off, size_t(r.ew ? r.need * r.ew : r.need) * 4);
       cursor += uint32_t(handle_words(r.need, r.ew));

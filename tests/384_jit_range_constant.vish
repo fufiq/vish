@@ -1,0 +1,27 @@
+// JIT and range(<константа>) cycle: the `!is_index(i, xs)` condition is bool, not the "unit" step (otherwise the operator left node VM
+// and read jc_range -). Simple cycles (sum, number of steps) are compiled into machine code; the result is the same.
+// jit-compiled: sum_const
+// jit-compiled: sum_known
+// out: 1128 1128 48
+sum_const(w) {
+  s = 0;
+  for(t : range(48)) {
+    s += w[t];
+  }
+  s
+}
+sum_known(w) {
+  s = 0;
+  n = 48;
+  for(t : range(n)) {
+    s += t;
+  }
+  s
+}
+main() {
+  w = array{};
+  for(t : range(64)) w.push(t);
+  c = 0;
+  for(t : range(48)) c += 1;
+  print(sum_const(w), sum_known(w), c);
+}

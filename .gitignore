@@ -2,3 +2,7 @@ out/
 *.vish.state
 qemu_*.core
 *.vish.storage/
+# следы прогонов и внешних инструментов (не часть проекта)
+:memory:.ses
+tests/*.tzdb
+tests/*.vishdb

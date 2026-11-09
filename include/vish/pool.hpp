@@ -80,13 +80,15 @@ struct node_pool {
       it->second.pop_back();
       return at;
     }
-    if(uint64_t(used) + words > cap) throw std::bad_alloc();
-    if(uint64_t(used) + words > ready) {
-      grow_to(uint64_t(used) + words);
-      ready = std::min<uint64_t>(cap, std::max<uint64_t>(ready, uint64_t(used) + words));
+    // chunks - with an even word: elements with 8-byte fields (uint64 t, stored_entry, reuse_snap ...) require alignment of 8 (word - 4 bytes; on
+    // AArch64 and under UBSan unaligned access - an error, not just slowly); the extra word disappears before compaction
+    uint32_t at = (used + 1) & ~uint32_t{1};
+    if(uint64_t(at) + words > cap) throw std::bad_alloc();
+    if(uint64_t(at) + words > ready) {
+      grow_to(uint64_t(at) + words);
+      ready = std::min<uint64_t>(cap, std::max<uint64_t>(ready, uint64_t(at) + words));
     }
-    uint32_t at = used;
-    used += uint32_t(words);
+    used = at + uint32_t(words);
     return at;
   }
   void give(uint32_t at, uint64_t words) {
