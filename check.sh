@@ -58,6 +58,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
       wait
       [ "$(cat $d/writer.out)" = "ok 2000 6890" ] ) > $L/t_ipc_two.log 2>&1
     echo "ipc_two: код $?" > $L/r_ipc_two
+    # Ed25519 (RFC 8032): Slow (~4s staircase with JIT), so once, not in five dial modes
+    ( timeout 300 $b run --jit tests/slow/ed25519.vish > $L/ed25519.out 2> $L/t_ed25519.log; cmp -s $L/ed25519.out tests/slow/ed25519.out || { echo "ed25519: вывод отличается от tests/slow/ed25519.out" >> $L/t_ed25519.log; diff $L/ed25519.out tests/slow/ed25519.out >> $L/t_ed25519.log; false; } )
+    echo "ed25519: код $?" > $L/r_ed25519
     if [ -d editor/node_modules ]; then
       $b schema > editor/src/protocol/schema.json
       (cd editor && npx tsc --noEmit && npx vitest run) > $L/t_editor.log 2>&1

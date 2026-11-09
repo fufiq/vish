@@ -9350,7 +9350,7 @@ struct interpreter {
 //.
   std::vector<jit_query> * jit_trace = nullptr;
   static bool jit_question(std::string_view n) {
-    return n == "jit_type" || n == "jit_const" || n == "jit_known" || n == "jit_proven" || n == "jit_loop_keeps" || n == "jit_chain" || n == "jit_ref_keeps";
+    return n == "jit_writes" || n == "jit_type" || n == "jit_const" || n == "jit_known" || n == "jit_proven" || n == "jit_loop_keeps" || n == "jit_chain" || n == "jit_ref_keeps";
   }
   std::string jit_answer(value const & v) {
     if(code_agg(v)) return v.as<agg_v>().fields[0].second.is<int64_t>() ? cat("c", v.as<agg_v>().fields[0].second.as<int64_t>()) : std::string("c");
@@ -9629,6 +9629,8 @@ struct interpreter {
     // The node array indexing c for the entire cycle l did not change completely (replacement, growth)
     // - according to journal records parsing:
 // parsing fact, not the compiler's guess; its data and size - once before the cycle
+    // function f changes the parameter k (output over the body): the argument-place (p[0], x.y) when inserted is a copy, the record would be lost
+    if(n == "jit_writes" && a.size() == 2 && a[1].is<int64_t>() && a[1].as<int64_t>() >= 0) return value(writes_param(code_node(a[0], where), uint32_t(a[1].as<int64_t>())));
     if(n == "jit_loop_keeps" && a.size() == 2) return value(jit_analysis && jit_analysis->loop_keeps(code_node(a[0], where), code_node(a[1], where)));
     // link decl (&e = xs[k]): the array did not change completely during her life - the element is the same
     if(n == "jit_ref_keeps" && a.size() == 1) return value(jit_analysis && jit_analysis->ref_keeps(code_node(a[0], where)));

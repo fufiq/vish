@@ -1447,6 +1447,318 @@ x25519_base(str scalar) {
   x25519(scalar, nine)
 }
 
+// Signature Ed25519 (RFC 8032), step 4 cryptography: SHA-512 (FIPS 180-4) and Edwards points above field X25519 (gf *). Scheme - TweetNaCl:
+// extended coordinates, staircase with exchange, the remainder of the module L.; quotes about the signatures he has - the device *mine*. API:
+// `ed25519_public(seed32)`, `ed25519_sign(seed32, текст)` → 64 bytes, `ed25519_verify(открытый32, текст, подпись64)` → bool; `sha512`,
+// `sha512_hex`. Signature - one staircase call (~4 with JIT, ~15 with interpreter), verification - three: for signature and verification you
+// need `--jit`. Private key (seed) - 32 random bytes (Q`random_bytes`). SHA-512 (FIPS 180-4) - words of 64 bits in i64 (add and multiplication
+// turn, shift to the right - with a sign: logical - mask)
+sha512_k() => array{
+  0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
+  0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+  0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+  0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
+  0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+  0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
+  0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
+  0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
+  0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
+  0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+  0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
+  0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
+  0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
+  0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
+  0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+  0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
+  0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
+  0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
+  0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
+  0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817};
+sha512_lsr(i64 x, i64 n) => (x >> n) & ((1 << (64 - n)) - 1);
+sha512_rotr(i64 x, i64 n) => sha512_lsr(x, n) | (x << (64 - n));
+sha512_block(h, w, k) {
+  for(t : range(64)) {
+    x = w[t + 1];
+    y = w[t + 14];
+    s0 = (sha512_rotr(x, 1) ^ sha512_rotr(x, 8)) ^ sha512_lsr(x, 7);
+    s1 = (sha512_rotr(y, 19) ^ sha512_rotr(y, 61)) ^ sha512_lsr(y, 6);
+    w[t + 16] = ((w[t] + s0) + w[t + 9]) + s1;
+  }
+  a = h[0];
+  b = h[1];
+  c = h[2];
+  d = h[3];
+  e = h[4];
+  f = h[5];
+  g = h[6];
+  hh = h[7];
+  for(r : range(80)) {
+    big1 = (sha512_rotr(e, 14) ^ sha512_rotr(e, 18)) ^ sha512_rotr(e, 41);
+    ch = (e & f) ^ ((e ^ -1) & g);
+    t1 = (((hh + big1) + ch) + k[r]) + w[r];
+    big0 = (sha512_rotr(a, 28) ^ sha512_rotr(a, 34)) ^ sha512_rotr(a, 39);
+    maj = ((a & b) ^ (a & c)) ^ (b & c);
+    t2 = big0 + maj;
+    hh = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+  }
+  h[0] = h[0] + a;
+  h[1] = h[1] + b;
+  h[2] = h[2] + c;
+  h[3] = h[3] + d;
+  h[4] = h[4] + e;
+  h[5] = h[5] + f;
+  h[6] = h[6] + g;
+  h[7] = h[7] + hh;
+}
+// word from 8 bytes of the block (older forward); tail: 0x80, zeros, length in bits (16 bytes, senior 8 - zeros)
+sha512_word(str data, i64 n, i64 total, i64 bits, i64 at) {
+  word = 0;
+  for(j : range(8)) {
+    pos = at + j;
+    b = if(pos < n) data[pos] else if(pos == n) 128 else if(pos >= total - 8) (bits >> (8 * ((total - 1) - pos))) & 255 else 0;
+    word = (word << 8) | b;
+  }
+  word
+}
+sha512_load(str data, i64 n, i64 total, i64 bits, i64 blk, w) {
+  for(t : range(16)) w[t] = sha512_word(data, n, total, bits, (blk * 128) + (t * 8));
+}
+sha512_words(str data) {
+  n = data.size;
+  total = (((n + 17) + 127) / 128) * 128;
+  bits = n * 8;
+  h = array{
+  0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+  0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179};
+  k = sha512_k();
+  w = sha256_zeros(80);
+  for(blk : range(total / 128)) {
+    sha512_load(data, n, total, bits, blk, w);
+    sha512_block(h, w, k);
+  }
+  h
+}
+// 64 bytes of hash by string of bytes
+sha512(str data) {
+  h = sha512_words(data);
+  r = "";
+  for(x : h) for(j : range(8)) r.push(text_byte((x >> (56 - (8 * j))) & 255));
+  r
+}
+sha512_hex(str data) {
+  h = sha512_words(data);
+  r = "";
+  for(x : h) r = r + text_hex(x, 16);
+  r
+}
+
+// Ed25519 (RFC 8032) - signature; TweetNaCl scheme: Edwards points in extended coordinates, field numbers - gf * (16 limbs of 16 bits)
+ed_d() => array{0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070, 0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203};
+ed_d2() => array{0xf159, 0x26b2, 0x9b94, 0xebd6, 0xb156, 0x8283, 0x149a, 0x00e0, 0xd130, 0xeef3, 0x80f2, 0x198e, 0xfce7, 0x56df, 0xd9dc, 0x2406};
+ed_x() => array{0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c, 0xdc5c, 0xfdd6, 0xe231, 0xc0a4, 0x53fe, 0xcd6e, 0x36d3, 0x2169};
+ed_y() => array{0x6658, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666};
+ed_i() => array{0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43, 0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83};
+gf_one() {
+  o = gf_zero();
+  o[0] = 1;
+  o
+}
+ed_point() => array{gf_zero(), gf_zero(), gf_zero(), gf_zero()};
+ed_add(p, q) {
+  a = gf_zero();
+  b = gf_zero();
+  c = gf_zero();
+  d = gf_zero();
+  t = gf_zero();
+  e = gf_zero();
+  f = gf_zero();
+  g = gf_zero();
+  h = gf_zero();
+  gf_sub(a, p[1], p[0]);
+  gf_sub(t, q[1], q[0]);
+  gf_mul(a, a, t);
+  gf_add(b, p[0], p[1]);
+  gf_add(t, q[0], q[1]);
+  gf_mul(b, b, t);
+  gf_mul(c, p[3], q[3]);
+  gf_mul(c, c, ed_d2());
+  gf_mul(d, p[2], q[2]);
+  gf_add(d, d, d);
+  gf_sub(e, b, a);
+  gf_sub(f, d, c);
+  gf_add(g, d, c);
+  gf_add(h, b, a);
+  gf_mul(p[0], e, f);
+  gf_mul(p[1], h, g);
+  gf_mul(p[2], g, f);
+  gf_mul(p[3], e, h);
+}
+ed_cswap(p, q, i64 b) {
+  for(i : range(4)) gf_sel(p[i], q[i], b);
+}
+gf_parity(a) => gf_pack(a)[0] & 1;
+ed_pack(p) {
+  zi = gf_zero();
+  tx = gf_zero();
+  ty = gf_zero();
+  gf_inv(zi, p[2]);
+  gf_mul(tx, p[0], zi);
+  gf_mul(ty, p[1], zi);
+  r = gf_pack(ty);
+  crypto_slice(r, 0, 31) + text_byte(r[31] ^ (gf_parity(tx) << 7))
+}
+ed_scalarmult(p, q, str s) {
+  gf_copy(p[0], gf_zero());
+  gf_copy(p[1], gf_one());
+  gf_copy(p[2], gf_one());
+  gf_copy(p[3], gf_zero());
+  for(step : range(256)) {
+    i = 255 - step;
+    b = (s[i >> 3] >> (i & 7)) & 1;
+    ed_cswap(p, q, b);
+    ed_add(q, p);
+    ed_add(p, p);
+    ed_cswap(p, q, b);
+  }
+}
+ed_scalarbase(p, str s) {
+  q = ed_point();
+  gf_copy(q[0], ed_x());
+  gf_copy(q[1], ed_y());
+  gf_copy(q[2], gf_one());
+  gf_mul(q[3], ed_x(), ed_y());
+  ed_scalarmult(p, q, s);
+}
+ed_l() => array{0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10};
+// x - 64 numbers (bytes, possibly with transfers): the remainder of the module L, 32 bytes younger forward
+ed_modl(x) {
+  l = ed_l();
+  for(ii : range(32)) {
+    i = 63 - ii;
+    carry = 0;
+    for(jj : range(20)) {
+      j = (i - 32) + jj;
+      x[j] = (x[j] + carry) - ((16 * x[i]) * l[j - (i - 32)]);
+      carry = (x[j] + 128) >> 8;
+      x[j] = x[j] - (carry << 8);
+    }
+    x[i - 12] = x[i - 12] + carry;
+    x[i] = 0;
+  }
+  carry = 0;
+  for(j : range(32)) {
+    x[j] = (x[j] + carry) - ((x[31] >> 4) * l[j]);
+    carry = x[j] >> 8;
+    x[j] = x[j] & 255;
+  }
+  for(j : range(32)) x[j] = x[j] - (carry * l[j]);
+  r = "";
+  for(i : range(32)) {
+    x[i + 1] = x[i + 1] + (x[i] >> 8);
+    r.push(text_byte(x[i] & 255));
+  }
+  r
+}
+ed_reduce(str h) {
+  x = array{};
+  for(i : range(64)) x.push(h[i]);
+  ed_modl(x)
+}
+ed_clamp(str d) {
+  r = text_byte(d[0] & 248);
+  for(i : range(30)) r.push(text_byte(d[i + 1]));
+  r.push(text_byte((d[31] & 127) | 64));
+  r
+}
+ed25519_public(str seed) {
+  if(seed.size != 32) throw crypto_error{"Ed25519: начальное значение (seed) — 32 байта"};
+  p = ed_point();
+  ed_scalarbase(p, ed_clamp(sha512(seed)));
+  ed_pack(p)
+}
+ed25519_sign(str seed, str msg) {
+  if(seed.size != 32) throw crypto_error{"Ed25519: начальное значение (seed) — 32 байта"};
+  d = sha512(seed);
+  a = ed_clamp(d);
+  pk = ed25519_public(seed);
+  r = ed_reduce(sha512(crypto_slice(d, 32, 64) + msg));
+  p = ed_point();
+  ed_scalarbase(p, r);
+  rr = ed_pack(p);
+  h = ed_reduce(sha512((rr + pk) + msg));
+  x = array{};
+  for(i : range(64)) x.push(0);
+  for(i : range(32)) x[i] = r[i];
+  for(i : range(32)) for(j : range(32)) x[i + j] = x[i + j] + (h[i] * a[j]);
+  rr + ed_modl(x)
+}
+gf_pow2523(o, a) {
+  c = gf_zero();
+  gf_copy(c, a);
+  for(k : range(251)) {
+    e = 250 - k;
+    gf_mul(c, c, c);
+    if(e != 1) gf_mul(c, c, a);
+  }
+  gf_copy(o, c);
+}
+// point −A on the compressed record; empty is not the point of the curve
+ed_unpackneg(str pk) {
+  r = ed_point();
+  t = gf_zero();
+  chk = gf_zero();
+  num = gf_zero();
+  den = gf_zero();
+  den2 = gf_zero();
+  den4 = gf_zero();
+  den6 = gf_zero();
+  gf_copy(r[2], gf_one());
+  gf_copy(r[1], gf_unpack(pk));
+  gf_mul(num, r[1], r[1]);
+  gf_mul(den, num, ed_d());
+  gf_sub(num, num, r[2]);
+  gf_add(den, r[2], den);
+  gf_mul(den2, den, den);
+  gf_mul(den4, den2, den2);
+  gf_mul(den6, den4, den2);
+  gf_mul(t, den6, num);
+  gf_mul(t, t, den);
+  gf_pow2523(t, t);
+  gf_mul(t, t, num);
+  gf_mul(t, t, den);
+  gf_mul(t, t, den);
+  gf_mul(r[0], t, den);
+  gf_mul(chk, r[0], r[0]);
+  gf_mul(chk, chk, den);
+  if(gf_pack(chk) != gf_pack(num)) gf_mul(r[0], r[0], ed_i());
+  gf_mul(chk, r[0], r[0]);
+  gf_mul(chk, chk, den);
+  if(gf_pack(chk) != gf_pack(num)) return array{};
+  if(gf_parity(r[0]) == (pk[31] >> 7)) gf_sub(r[0], gf_zero(), r[0]);
+  gf_mul(r[3], r[0], r[1]);
+  r
+}
+ed25519_verify(str pk, str msg, str sig) {
+  if((pk.size != 32) || (sig.size != 64)) return false;
+  q = ed_unpackneg(pk);
+  if(q.size == 0) return false;
+  rr = crypto_slice(sig, 0, 32);
+  h = ed_reduce(sha512((rr + pk) + msg));
+  p = ed_point();
+  ed_scalarmult(p, q, h);
+  q2 = ed_point();
+  ed_scalarbase(q2, crypto_slice(sig, 32, 64));
+  ed_add(p, q2);
+  ed_pack(p) == rr
+}
+
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
 // error - his message.
@@ -3760,7 +4072,12 @@ jit_compile(cg, f, types, type result) {
     jump_if(cret2, trap(6, e));
     if(((code & 255) == 2) && (op == 2)) put_bytes(cg.move_to_f64(acc_f, acc)); // read the f64 stream
   };
-  // parameters of the embedded function: expr - the code of the caller, the place - alias, otherwise - the value in the slot
+  // the parameters of the embedded function: expr - the code of the caller, the place - alias, otherwise -
+  // the value in the slot expression-place: element p[i] or field x.y (not name and not value)
+  is_place_arg(a) => (code_kind(a) == ast.operation) && {
+    ast.operation{op, _, _} = a;
+    (op == "[]") || (starts(op, ".") && (op != ".size"))
+  };
   bind_args(ps, xs) => {
     binds = array{};
     for(i : range(ps.size)) {
@@ -3781,6 +4098,9 @@ jit_compile(cg, f, types, type result) {
         if(jit_resource(w.kind)) bad(fmt"ресурс-алиас аргументом {pname} — интерпретатор");
         binds.push(jc_var{pname, w.kind, w.slot, false, f, 0, 0, 0, 0}); // alias seat
       } else {
+        // argument-place (p[0], x.y) of the variable parameter: the value is considered a copy in the call memory - the record would be lost (gf_sel(p[0],
+        // q[0], b) at p, q - arrays of values VM "did not exchange"): such a call to the interpreter
+        if(is_place_arg(a) && jit_writes(f, i)) bad(fmt"изменяемый параметр {pname} получает элемент или поле — интерпретатор");
         t = if(is_call_of(a, "range")) jc_range else ty(a);
         if(jit_resource(t)) bad(fmt"ресурс аргументом {pname} (own или временное) — интерпретатор");
         else if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");

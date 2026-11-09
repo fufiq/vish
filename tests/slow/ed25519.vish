@@ -1,0 +1,38 @@
+// Ed25519 (RFC 8032): Test vectors 1 and 2 (empty message and one byte 0x72), verified with OpenSSL (Python cryptography). Slow scenario -
+// each staircase call ~4 s with JIT and ~15 s in the interpreter: runs check.sh once with --jit (not `vish test`: set goes in five modes,
+// asan - many times slower); output is checked with ed25519.out.
+hex_val(i64 c) => if(c <= 57) c - 48 else c - 87;
+unhex(str h) {
+  r = "";
+  for(k : range(h.size / 2)) r.push(text_byte((hex_val(h[2 * k]) << 4) | hex_val(h[(2 * k) + 1])));
+  r
+}
+hex_of(str b) {
+  r = "";
+  for(k : range(b.size)) r = r + text_hex(b[k], 2);
+  r
+}
+main() {
+  seed1 = unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+  pk1 = ed25519_public(seed1);
+  print(hex_of(pk1));
+  sig1 = ed25519_sign(seed1, "");
+  print(hex_of(sig1));
+  print(ed25519_verify(pk1, "", sig1));
+  print(ed25519_verify(pk1, "x", sig1));
+  seed2 = unhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+  pk2 = ed25519_public(seed2);
+  print(hex_of(pk2));
+  msg = text_byte(114);
+  sig2 = ed25519_sign(seed2, msg);
+  print(hex_of(sig2));
+  print(ed25519_verify(pk2, msg, sig2));
+  print(ed25519_verify(pk2, msg, sig1));
+  print(ed25519_verify(pk1, msg, sig2));
+  print(ed25519_verify(pk2, msg, sig2));
+  try {
+    ed25519_public("короткий");
+  } catch(crypto_error e) {
+    print("ключ: " + e.message);
+  }
+}
