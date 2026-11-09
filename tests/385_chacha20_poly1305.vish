@@ -1,0 +1,59 @@
+// ChaCha20-Poly1305 (RFC 8439) in the language. - streaming cipher, each message is sealed separately, control frames - open data (aad). Vectors -
+// RFC 8439 §2.8.2 and dimensions around the block boundaries (0, 1, 63, 64, 65, 200 bytes), are checked with OpenSSL (Python cryptography). A
+// substitution, someone else's key, someone else's open data is a mistake.
+//
+// machine
+// out: d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691
+// out: 0 b893326ad7a430db7c9e28273736336f
+// out: 1 8afc247c188ee187f672ee17ea02a95e81
+// out: 63 8af11918363188748cc176a3cf436b0fba0a336fdee2301d4d259605b20e73e00f6add0b1918bc8c2c105fe852aaca6f2ddec81c925ec51f992a40a737e12b54cbe08984c53a2fc2d7c7ee2b625494
+// out: 64 8af11918363188748cc176a3cf436b0fba0a336fdee2301d4d259605b20e73e00f6add0b1918bc8c2c105fe852aaca6f2ddec81c925ec51f992a40a737e12b6a61bcf02d9a634f7222bf3c9185de82e9
+// out: 65 8af11918363188748cc176a3cf436b0fba0a336fdee2301d4d259605b20e73e00f6add0b1918bc8c2c105fe852aaca6f2ddec81c925ec51f992a40a737e12b6aba8b2b67fcbf8f879a601f1818059414aa
+// out: 200 8af11918363188748cc176a3cf436b0fba0a336fdee2301d4d259605b20e73e00f6add0b1918bc8c2c105fe852aaca6f2ddec81c925ec51f992a40a737e12b6abab26d153af2c11d3f1444ac0f62f9dde9e4067a203cad5a6525898e5ff39723ee74dd4b481fea206ab91a47556fb28cfa757710a66b7dbc043f6dbf1e51ca3a22ec5225369572d8f2d1b6aafbe28ed6478b867a0479d17a19d39e71e355f5655cd3f090c2c2197215dccfa0d00f2acc0d8e47a2f8ad8711d30df7b14018a12c9a0d0ed73c9b626bca77f92be55064ed4a777712f7a4d3bf
+// out: открыто: true
+// out: подмена: метка не сошлась
+// out: чужой ключ: метка не сошлась
+// out: чужой aad: метка не сошлась
+// out: короткое: запечатанное сообщение короче метки
+// out: ключ: ChaCha20: ключ — 32 байта, одноразовое число — 12
+hex_of(str b) {
+  r = "";
+  for(k : range(b.size)) r = r + text_hex(b[k], 2);
+  r
+}
+bytes_from(i64 from, i64 n) {
+  r = "";
+  for(k : range(n)) r = r + text_byte(from + k);
+  r
+}
+pattern(i64 n) {
+  r = "";
+  for(k : range(n)) r = r + text_byte(((k * 7) + 3) % 256);
+  r
+}
+fails(str what, f) {
+  try {
+    f();
+  } catch(crypto_error e) {
+    print(what + ": " + e.message);
+  }
+}
+main() {
+  key = bytes_from(128, 32);
+  nonce = text_byte(7) + text_byte(0) + text_byte(0) + text_byte(0) + bytes_from(64, 8);
+  aad = text_byte(80) + text_byte(81) + text_byte(82) + text_byte(83) + bytes_from(192, 8);
+  plain = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  box = chacha20_poly1305_seal(key, nonce, aad, plain);
+  print(hex_of(box));
+  k0 = bytes_from(0, 32);
+  n0 = bytes_from(0, 12);
+  for(n : array{0, 1, 63, 64, 65, 200}) print(n, hex_of(chacha20_poly1305_seal(k0, n0, "hdr", pattern(n))));
+  print("открыто:", chacha20_poly1305_open(key, nonce, aad, box) == plain);
+  bad = box;
+  bad = text_byte(box[0] ^ 1) + crypto_slice(box, 1, box.size);
+  fails("подмена", () => chacha20_poly1305_open(key, nonce, aad, bad));
+  fails("чужой ключ", () => chacha20_poly1305_open(bytes_from(1, 32), nonce, aad, box));
+  fails("чужой aad", () => chacha20_poly1305_open(key, nonce, "x", box));
+  fails("короткое", () => chacha20_poly1305_open(key, nonce, aad, "abc"));
+  fails("ключ", () => chacha20_poly1305_seal("short", nonce, aad, plain));
+}

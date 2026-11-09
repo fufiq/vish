@@ -1,0 +1,19 @@
+// Random bytes host is the only primitive OS in VM cryptography (getrandom): keys and one-time numbers; the rest is language. parsing
+// does not fold (run-time effect): two calls are different values; the key from random_bytes seals and opens the message.
+// machine
+// out: 32 32 true
+// out: 0
+// out: true
+// out: 32 12
+fresh() => random_bytes(32);
+main() {
+  a = fresh();
+  b = fresh();
+  print(a.size, b.size, a != b);
+  print(random_bytes(0).size);
+  k = crypto_new_key();
+  n = crypto_new_nonce();
+  box = chacha20_poly1305_seal(k, n, "", "секрет");
+  print(chacha20_poly1305_open(k, n, "", box) == "секрет");
+  print(k.size, n.size);
+}

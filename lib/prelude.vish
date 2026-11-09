@@ -1079,6 +1079,377 @@ hmac_sha256_hex(str key, str data) {
   r
 }
 
+// ChaCha20-Poly1305 (RFC 8439), step 2 cryptography. Author on Stream Encryption (TLS):
+// 
+// 
+// Therefore, a stream cipher (no blocks and add-ons) and sealing EVERY message separately (its own one-time number, its own label): the
+// message is a unit of encryption, the control frames remain open, the stream is not tied to one key. *My choice of ChaCha20-Poly1305 and
+// form. Words - i64 within 32 bits; Poly1305 - five 26-bit limbs (works < 2^59 - in i64). The key is 32 bytes, a one-time number is 12
+// bytes, strings of bytes.
+struct crypto_error : vm_error {}
+// Random bytes host is the only primitive OS cryptography (keys, one-time numbers). The result is NOT deterministic: in parsing - run-time - the effect
+// (otherwise parsing would turn the call into a constant - a random "key" in the code). Whether the program needs randomness, it decides; rights do not require
+// (like a clock), “give/take” there is nothing here: the key is not a resource host, but the value of the program (its `hide` / `own` - possession, §5.6).
+random_bytes(i64 n) => native "cpp" {
+  if(vm.checking()) {
+    vm.rt_effect();
+    return erase(value(std::string("x")));
+  }
+  if(!#n.known()) return erase(value(std::string("x")));
+  int64_t n = #n.as<int64_t>();
+  if(n < 0 || n > (int64_t(1) << 20)) throw diagnostic(cat("random_bytes: от 0 до 1 МиБ, не ", n), where);
+  std::string r(std::size_t(n), '\0');
+  os::random_fill(r.data(), r.size());
+  return value(std::move(r));
+};
+crypto_new_key() => random_bytes(32);
+crypto_new_nonce() => random_bytes(12);
+crypto_slice(str s, i64 from, i64 to) {
+  r = "";
+  for(k : range(to - from)) r.push(text_byte(s[from + k]));
+  r
+}
+crypto_le32(str s, i64 at) => ((s[at] | (s[at + 1] << 8)) | (s[at + 2] << 16)) | (s[at + 3] << 24);
+crypto_put32(x) => ((text_byte(x & 255) + text_byte((x >> 8) & 255)) + text_byte((x >> 16) & 255)) + text_byte((x >> 24) & 255);
+chacha_rotl(i64 x, i64 n) => ((x << n) | (x >> (32 - n))) & 0xffffffff;
+chacha_qr(st, i64 a, i64 b, i64 c, i64 d) {
+  st[a] = (st[a] + st[b]) & 0xffffffff;
+  st[d] = chacha_rotl(st[d] ^ st[a], 16);
+  st[c] = (st[c] + st[d]) & 0xffffffff;
+  st[b] = chacha_rotl(st[b] ^ st[c], 12);
+  st[a] = (st[a] + st[b]) & 0xffffffff;
+  st[d] = chacha_rotl(st[d] ^ st[a], 8);
+  st[c] = (st[c] + st[d]) & 0xffffffff;
+  st[b] = chacha_rotl(st[b] ^ st[c], 7);
+}
+// 64 bytes of key stream: key 32 bytes, counter, one-time number 12 bytes
+chacha20_block(str key, i64 counter, str nonce) {
+  if((key.size != 32) || (nonce.size != 12)) throw crypto_error{"ChaCha20: ключ — 32 байта, одноразовое число — 12"};
+  init = array{0x61707865, 0x3320646e, 0x79622d32, 0x6b206574};
+  for(k : range(8)) init.push(crypto_le32(key, 4 * k));
+  init.push(counter & 0xffffffff);
+  for(k : range(3)) init.push(crypto_le32(nonce, 4 * k));
+  w = init;
+  for(r : range(10)) {
+    chacha_qr(w, 0, 4, 8, 12);
+    chacha_qr(w, 1, 5, 9, 13);
+    chacha_qr(w, 2, 6, 10, 14);
+    chacha_qr(w, 3, 7, 11, 15);
+    chacha_qr(w, 0, 5, 10, 15);
+    chacha_qr(w, 1, 6, 11, 12);
+    chacha_qr(w, 2, 7, 8, 13);
+    chacha_qr(w, 3, 4, 9, 14);
+  }
+  out = "";
+  for(k : range(16)) out.push(crypto_put32((w[k] + init[k]) & 0xffffffff));
+  out
+}
+// ^ key flow from the counter block (encryption and decryption are the same)
+chacha20_xor(str key, str nonce, i64 counter, str data) {
+  out = "";
+  blocks = ((data.size + 63) / 64);
+  for(b : range(blocks)) {
+    ks = chacha20_block(key, counter + b, nonce);
+    n = if(data.size - (b * 64) < 64) data.size - (b * 64) else 64;
+    for(k : range(n)) out.push(text_byte(data[(b * 64) + k] ^ ks[k]));
+  }
+  out
+}
+// Poly1305: 16 bytes tag from message and 32 byte disposable key
+poly1305(str key, str msg) {
+  if(key.size != 32) throw crypto_error{"Poly1305: ключ — 32 байта"};
+  m26 = 0x3ffffff;
+  t0 = crypto_le32(key, 0);
+  t1 = crypto_le32(key, 4);
+  t2 = crypto_le32(key, 8);
+  t3 = crypto_le32(key, 12);
+  r0 = t0 & 0x3ffffff;
+  r1 = ((t0 >> 26) | (t1 << 6)) & 0x3ffff03;
+  r2 = ((t1 >> 20) | (t2 << 12)) & 0x3ffc0ff;
+  r3 = ((t2 >> 14) | (t3 << 18)) & 0x3f03fff;
+  r4 = (t3 >> 8) & 0x00fffff;
+  s1 = r1 * 5;
+  s2 = r2 * 5;
+  s3 = r3 * 5;
+  s4 = r4 * 5;
+  h0 = 0;
+  h1 = 0;
+  h2 = 0;
+  h3 = 0;
+  h4 = 0;
+  at = 0;
+  while(at < msg.size) {
+    n = if(msg.size - at < 16) msg.size - at else 16;
+    blk = crypto_slice(msg, at, at + n);
+    hibit = 1 << 24;
+    if(n < 16) { // last incomplete block: byte 1 behind the data, without a senior bit
+      blk.push(text_byte(1));
+      while(blk.size < 16) blk.push(text_byte(0));
+      hibit = 0;
+    }
+    b0 = crypto_le32(blk, 0);
+    b1 = crypto_le32(blk, 4);
+    b2 = crypto_le32(blk, 8);
+    b3 = crypto_le32(blk, 12);
+    h0 = h0 + (b0 & m26);
+    h1 = h1 + (((b0 >> 26) | (b1 << 6)) & m26);
+    h2 = h2 + (((b1 >> 20) | (b2 << 12)) & m26);
+    h3 = h3 + (((b2 >> 14) | (b3 << 18)) & m26);
+    h4 = (h4 + (b3 >> 8)) + hibit;
+    d0 = ((((h0 * r0) + (h1 * s4)) + (h2 * s3)) + (h3 * s2)) + (h4 * s1);
+    d1 = ((((h0 * r1) + (h1 * r0)) + (h2 * s4)) + (h3 * s3)) + (h4 * s2);
+    d2 = ((((h0 * r2) + (h1 * r1)) + (h2 * r0)) + (h3 * s4)) + (h4 * s3);
+    d3 = ((((h0 * r3) + (h1 * r2)) + (h2 * r1)) + (h3 * r0)) + (h4 * s4);
+    d4 = ((((h0 * r4) + (h1 * r3)) + (h2 * r2)) + (h3 * r1)) + (h4 * r0);
+    c = d0 >> 26;
+    h0 = d0 & m26;
+    d1 = d1 + c;
+    c = d1 >> 26;
+    h1 = d1 & m26;
+    d2 = d2 + c;
+    c = d2 >> 26;
+    h2 = d2 & m26;
+    d3 = d3 + c;
+    c = d3 >> 26;
+    h3 = d3 & m26;
+    d4 = d4 + c;
+    c = d4 >> 26;
+    h4 = d4 & m26;
+    h0 = h0 + (c * 5);
+    c = h0 >> 26;
+    h0 = h0 & m26;
+    h1 = h1 + c;
+    at = at + 16;
+  }
+  // complete transfer and subtraction p = 2^130 − 5 if h ≥ p
+  c = h1 >> 26;
+  h1 = h1 & m26;
+  h2 = h2 + c;
+  c = h2 >> 26;
+  h2 = h2 & m26;
+  h3 = h3 + c;
+  c = h3 >> 26;
+  h3 = h3 & m26;
+  h4 = h4 + c;
+  c = h4 >> 26;
+  h4 = h4 & m26;
+  h0 = h0 + (c * 5);
+  c = h0 >> 26;
+  h0 = h0 & m26;
+  h1 = h1 + c;
+  g0 = h0 + 5;
+  c = g0 >> 26;
+  g0 = g0 & m26;
+  g1 = h1 + c;
+  c = g1 >> 26;
+  g1 = g1 & m26;
+  g2 = h2 + c;
+  c = g2 >> 26;
+  g2 = g2 & m26;
+  g3 = h3 + c;
+  c = g3 >> 26;
+  g3 = g3 & m26;
+  g4 = (h4 + c) - (1 << 26);
+  if(g4 >= 0) {
+    h0 = g0;
+    h1 = g1;
+    h2 = g2;
+    h3 = g3;
+    h4 = g4 & m26;
+  }
+  // h → four 32-bit words, plus s (second 16 bytes of the key) modulo 2^128
+  w0 = (h0 | (h1 << 26)) & 0xffffffff;
+  w1 = ((h1 >> 6) | (h2 << 20)) & 0xffffffff;
+  w2 = ((h2 >> 12) | (h3 << 14)) & 0xffffffff;
+  w3 = ((h3 >> 18) | (h4 << 8)) & 0xffffffff;
+  f = w0 + crypto_le32(key, 16);
+  o0 = f & 0xffffffff;
+  f = (w1 + crypto_le32(key, 20)) + (f >> 32);
+  o1 = f & 0xffffffff;
+  f = (w2 + crypto_le32(key, 24)) + (f >> 32);
+  o2 = f & 0xffffffff;
+  f = (w3 + crypto_le32(key, 28)) + (f >> 32);
+  o3 = f & 0xffffffff;
+  ((crypto_put32(o0) + crypto_put32(o1)) + crypto_put32(o2)) + crypto_put32(o3)
+}
+crypto_pad16(str s) {
+  r = "";
+  n = (16 - (s.size % 16)) % 16;
+  for(k : range(n)) r.push(text_byte(0));
+  r
+}
+crypto_le64(i64 n) => crypto_put32(n & 0xffffffff) + crypto_put32((n >> 32) & 0xffffffff);
+chacha_tag(str key, str nonce, str aad, str cipher) {
+  otk = crypto_slice(chacha20_block(key, 0, nonce), 0, 32);
+  poly1305(otk, (((((aad + crypto_pad16(aad)) + cipher) + crypto_pad16(cipher)) + crypto_le64(aad.size)) + crypto_le64(cipher.size)))
+}
+// seal the message: ciphertext and tag (16 bytes) - one line; aad - open data protected by a label (control frame)
+chacha20_poly1305_seal(str key, str nonce, str aad, str plain) {
+  cipher = chacha20_xor(key, nonce, 1, plain);
+  cipher + chacha_tag(key, nonce, aad, cipher)
+}
+// open: the label did not converge - crypto_error (message changed or other key); the result is plain text
+chacha20_poly1305_open(str key, str nonce, str aad, str box) {
+  if(box.size < 16) throw crypto_error{"запечатанное сообщение короче метки"};
+  cipher = crypto_slice(box, 0, box.size - 16);
+  tag = crypto_slice(box, box.size - 16, box.size);
+  want = chacha_tag(key, nonce, aad, cipher);
+  diff = 0;
+  for(k : range(16)) diff = diff | (tag[k] ^ want[k]); // early
+  if(diff != 0) throw crypto_error{"метка не сошлась"};
+  chacha20_xor(key, nonce, 1, cipher)
+}
+
+// X25519 (RFC 7748) - key exchange, step 3 cryptography. GF(2^255 − 19) field: number - 16 limbs of 16 bits in i64 (as in TweetNaCl: works
+// < 2^36 - stock i64 large), Montgomery staircase at 255 steps. Private key - 32 random bytes (random_bytes), public -
+// x25519_base(приватный); shared secret - x25519(мой приватный, чужой публичный): two parties have one. My form and names. Speed is the
+// author’s “base level” (the interpreter is a second per point multiplication); there is no hardware acceleration. 2n − 1 zeros: the
+// product of two numbers of n limbs
+gf_wide(i64 n) {
+  o = array{};
+  for(k : range((2 * n) - 1)) o.push(0);
+  o
+}
+gf_zero() {
+  o = array{};
+  for(k : range(16)) o.push(0);
+  o
+}
+gf_car(o) {
+  for(i : range(o.size)) {
+    o[i] = o[i] + 65536;
+    c = o[i] >> 16;
+    if(i < (o.size - 1)) o[i + 1] = (o[i + 1] + c) - 1 else o[0] = (o[0] + (c - 1)) + (37 * (c - 1));
+    o[i] = o[i] - (c << 16);
+  }
+}
+gf_sel(p, q, i64 b) {
+  c = -b; // b = 1 → all units, 0 → zeros
+  for(i : range(p.size)) {
+    t = c & (p[i] ^ q[i]);
+    p[i] = p[i] ^ t;
+    q[i] = q[i] ^ t;
+  }
+}
+gf_add(o, a, b) {
+  for(i : range(o.size)) o[i] = a[i] + b[i];
+}
+gf_sub(o, a, b) {
+  for(i : range(o.size)) o[i] = a[i] - b[i];
+}
+gf_mul(o, a, b) {
+  t = gf_wide(a.size);
+  for(i : range(a.size)) {
+    ai = a[i];
+    for(j : range(b.size)) t[i + j] = t[i + j] + (ai * b[j]);
+  }
+  for(i : range(a.size - 1)) t[i] = t[i] + (38 * t[i + a.size]);
+  for(i : range(o.size)) o[i] = t[i];
+  gf_car(o);
+  gf_car(o);
+}
+gf_copy(o, a) {
+  for(i : range(o.size)) o[i] = a[i];
+}
+// a^(p−2): inverse modulus p = 2^255 − 19
+gf_inv(o, a) {
+  c = gf_zero();
+  gf_copy(c, a);
+  for(k : range(254)) {
+    e = 253 - k;
+    gf_mul(c, c, c);
+    if((e != 2) && (e != 4)) gf_mul(c, c, a);
+  }
+  gf_copy(o, c);
+}
+gf_unpack(str n) {
+  o = gf_zero();
+  for(i : range(16)) o[i] = n[2 * i] + (n[(2 * i) + 1] << 8);
+  o[15] = o[15] & 0x7fff;
+  o
+}
+gf_pack(n) {
+  t = gf_zero();
+  gf_copy(t, n);
+  gf_car(t);
+  gf_car(t);
+  gf_car(t);
+  m = gf_zero();
+  for(j : range(2)) {
+    m[0] = t[0] - 0xffed;
+    for(i : range(14)) {
+      m[i + 1] = (t[i + 1] - 0xffff) - ((m[i] >> 16) & 1);
+      m[i] = m[i] & 0xffff;
+    }
+    m[15] = (t[15] - 0x7fff) - ((m[14] >> 16) & 1);
+    b = (m[15] >> 16) & 1;
+    m[14] = m[14] & 0xffff;
+    gf_sel(t, m, 1 - b);
+  }
+  r = "";
+  for(i : range(16)) {
+    r.push(text_byte(t[i] & 255));
+    r.push(text_byte((t[i] >> 8) & 255));
+  }
+  r
+}
+// u-coordinate point32 · scalar32 (lamp on RFC 7748 - inside)
+x25519(str scalar, str point) {
+  if((scalar.size != 32) || (point.size != 32)) throw crypto_error{"X25519: скаляр и точка — по 32 байта"};
+  z = array{};
+  for(i : range(32)) z.push(scalar[i]);
+  z[31] = (z[31] & 127) | 64;
+  z[0] = z[0] & 248;
+  x = gf_unpack(point);
+  a = gf_zero();
+  b = gf_zero();
+  c = gf_zero();
+  d = gf_zero();
+  e = gf_zero();
+  f = gf_zero();
+  gf_copy(b, x);
+  a[0] = 1;
+  d[0] = 1;
+  k121665 = gf_zero();
+  k121665[0] = 0xdb41;
+  k121665[1] = 1;
+  for(step : range(255)) {
+    i = 254 - step;
+    r = (z[i >> 3] >> (i & 7)) & 1;
+    gf_sel(a, b, r);
+    gf_sel(c, d, r);
+    gf_add(e, a, c);
+    gf_sub(a, a, c);
+    gf_add(c, b, d);
+    gf_sub(b, b, d);
+    gf_mul(d, e, e);
+    gf_mul(f, a, a);
+    gf_mul(a, c, a);
+    gf_mul(c, b, e);
+    gf_add(e, a, c);
+    gf_sub(a, a, c);
+    gf_mul(b, a, a);
+    gf_sub(c, d, f);
+    gf_mul(a, c, k121665);
+    gf_add(a, a, d);
+    gf_mul(c, c, a);
+    gf_mul(a, d, f);
+    gf_mul(d, b, x);
+    gf_mul(b, e, e);
+    gf_sel(a, b, r);
+    gf_sel(c, d, r);
+  }
+  gf_inv(c, c);
+  gf_mul(a, a, c);
+  gf_pack(a)
+}
+// Public key by private: point with u = 9
+x25519_base(str scalar) {
+  nine = text_byte(9);
+  for(k : range(31)) nine.push(text_byte(0));
+  x25519(scalar, nine)
+}
+
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
 // error - his message.

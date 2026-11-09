@@ -25,6 +25,7 @@
 #include <time.h>
 #include <sys/un.h>
 #include <sys/syscall.h>
+#include <sys/random.h>
 #include <linux/futex.h>
 #include <atomic>
 #include <sys/wait.h>
@@ -261,6 +262,20 @@ void remap_private_after_fork() {
     if(a->fd < 0 || !a->shared) continue;
     ::mmap(a->at, storage_area::range, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED | MAP_NORESERVE, a->fd, 0);
     a->shared = false;
+  }
+}
+
+// Random bytes of host (getrandom(2): kernel, not /dev/urandom - file system not concerned). The only thing VM cryptography needs from the OS: the
+// rest (hashes, cipher) is a language. It is unacceptable to give less than what is requested: a cycle of partial responses and signals.
+void random_fill(char * p, std::size_t n) {
+  while(n) {
+    ssize_t k = ::getrandom(p, n, 0);
+    if(k < 0) {
+      if(errno == EINTR) continue;
+      throw diagnostic(cat("случайные байты хоста: ", std::strerror(errno)), {});
+    }
+    p += k;
+    n -= std::size_t(k);
   }
 }
 

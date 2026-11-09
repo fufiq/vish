@@ -23,9 +23,9 @@ key 1 ArrowDown
 // expect-not: cursor
 key 1 ArrowUp
 key 1 ArrowUp
-// (ArrowUp from first to last: number of eligible names prelude; IPC added five)
-// expect: selected=35
-// Enter - Accept: word replaced by selected, list closed
+// ArrowUp from the first point to the last: the number of points - the number of suitable names prelude and grows with it, so the turnover is
+// checked by the result: the next ArrowDown gives a zero point, and Enter accepts it (print) Enter - accept: the word is replaced by the
+// selected, the list is closed
 key 1 ArrowDown
 key 1 Enter
 // expect: курсор:   print‸
