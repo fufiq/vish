@@ -199,6 +199,104 @@ def program(seed):
     main.append("}\n")
     return PRE + "".join(fs) + "".join(main)
 
+
+PRE2 = """struct pt { i64 x; i64 y; }
+bumpx(pt q, i64 v) {
+  q.x = (q.x + v) & 0xffffffff;
+}
+"""
+
+class sgen:
+    """Строки и структуры (код редактора — в основном такой): s[k], push, ==, size, поля структуры, изменяемый параметр-структура."""
+    def __init__(self, rnd):
+        self.r = rnd
+        self.loop = []
+        self.fresh = 0
+    def idx(self):
+        if self.loop and self.r.random() < 0.6:
+            return f"({self.r.choice(self.loop)} % s.size)"
+        return f"({self.r.randrange(0, 9)} % s.size)"
+    def atom(self):
+        r = self.r
+        k = r.random()
+        if k < 0.30:
+            return f"s[{self.idx()}]"
+        if k < 0.45:
+            return "r"
+        if k < 0.55 and self.loop:
+            return r.choice(self.loop)
+        if k < 0.62:
+            return "q.x"
+        if k < 0.68:
+            return "q.y"
+        if k < 0.74:
+            return "t.size"
+        return str(r.randrange(0, 200))
+    def expr(self, d=0):
+        r = self.r
+        if d >= 3 or r.random() < 0.3:
+            return self.atom()
+        a = self.expr(d + 1)
+        b = self.expr(d + 1)
+        k = r.random()
+        if k < 0.3:
+            return f"(({a} + {b}) & {M})"
+        if k < 0.45:
+            return f"({a} ^ {b})"
+        if k < 0.6:
+            return f"(({a} * {r.randrange(2, 9)}) & {M})"
+        if k < 0.75:
+            return f"({a} & {b})"
+        return f"({a} >> {r.randrange(0, 7)})"
+    def stmt(self, depth):
+        r = self.r
+        pad = "  " * (depth + 1)
+        k = r.random()
+        if k < 0.20:
+            return f"{pad}r = (r + {self.expr()}) & {M};\n"
+        if k < 0.34:
+            return f"{pad}t.push(text_byte((({self.expr()}) & 25) + 65));\n"
+        if k < 0.42:
+            return f"{pad}bumpx(q, {self.expr()});\n"
+        if k < 0.48:
+            return f"{pad}q.y = {self.expr()};\n"
+        if k < 0.54:
+            return f"{pad}if(t == s) r = (r + 1) & {M};\n"
+        if k < 0.60:
+            return f"{pad}r = (r + (q.x ^ q.y)) & {M};\n"
+        if k < 0.66:
+            return f"{pad}q = pt{{r, {self.expr()}}};\n"
+        if k < 0.84 and depth < 3:
+            v = f"k{self.fresh}"
+            self.fresh += 1
+            lim = r.choice([str(r.randrange(2, 20)), "s.size", "n", "(s.size + 2)"])
+            self.loop.append(v)
+            body = "".join(self.stmt(depth + 1) for _ in range(r.randrange(1, 4)))
+            if r.random() < 0.15:
+                body += f"{pad}  if(({v} & 3) == 1) continue;\n"
+            self.loop.pop()
+            return f"{pad}for({v} : range({lim})) {{\n{body}{pad}}}\n"
+        if k < 0.92 and depth < 3:
+            a = "".join(self.stmt(depth + 1) for _ in range(r.randrange(1, 3)))
+            return f"{pad}if(({self.expr()} & 1) == 0) {{\n{a}{pad}}}\n"
+        return f"{pad}r = ({self.expr()}) & {M};\n"
+    def function(self, name):
+        body = "".join(self.stmt(0) for _ in range(self.r.randrange(3, 8)))
+        return (f"{name}(str s, i64 n) {{\n  r = 3;\n  t = \"\";\n  q = pt{{n, 7}};\n{body}"
+                f"  (((r + t.size) + q.x) + (q.y & 255)) & {M}\n}}\n")
+
+def program2(seed):
+    rnd = random.Random(seed)
+    g = sgen(rnd)
+    nf = rnd.randrange(2, 5)
+    fs = [g.function(f"sf{i}") for i in range(nf)]
+    main = ["main() {\n", "  n = args.size + 5;\n", "  s = \"\";\n",
+            "  for(k : range(args.size + 7)) s.push(text_byte(65 + ((k * 7) % 26)));\n"]
+    for i in range(nf):
+        main.append(f"  print(sf{i}(s, n), sf{i}(s + \"xyz\", n + 1));\n")
+    main.append("}\n")
+    return PRE + PRE2 + "".join(fs) + "".join(main)
+
 def run(path, jit):
     cmd = [VISH, "run"] + (["--jit"] if jit else []) + [path, "a", "b"]
     try:
@@ -277,7 +375,7 @@ rejected = 0
 first_rej = None
 for k in range(N):
     seed = SEED * 100000 + k
-    src = program(seed)
+    src = program2(seed) if k % 2 else program(seed)   # нечётные — строки и структуры
     path = os.path.join(OUT, f"p{seed}.vish")
     open(path, "w").write(src)
     a = run(path, False)
