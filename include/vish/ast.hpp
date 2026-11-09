@@ -587,14 +587,18 @@ struct db_area {
     for(size_t i = 0; i < offsetof(db_header, checksum); ++i) v = (v ^ p[i]) * 1099511628211ull;
     return v;
   }
+  // Reserve near the area for live editing: node and the row pool do not move and do not grow beyond the capacity - do not open less stock live
+  static constexpr uint32_t node_headroom = 1u << 16, strings_headroom = 1u << 18;
+  bool has_headroom() const { return h && uint64_t(h->node_count) + node_headroom <= h->node_cap && uint64_t(h->strings_used) + strings_headroom <= h->strings_cap; }
   uint64_t nodes_off() const { return h->nodes_at; }
   node * nodes() const { return reinterpret_cast<node *>(file.at + h->nodes_at); }
   uint32_t * pool() const { return reinterpret_cast<uint32_t *>(file.at + h->pool_at); }
   uint32_t * strings() const { return reinterpret_cast<uint32_t *>(file.at + h->strings_at); }
   db_roots * roots() const { return reinterpret_cast<db_roots *>(file.at + h->roots_at); }
 
-  // 'open' (fresh - new, empty); otherwise the cause, the area is closed
-  std::string open(std::string const & dir, std::string_view name, bool create = true, bool shared = true, bool lock = true) {
+  // * open (fresh - new, empty); otherwise, the reason, the area is closed node_cap, strings_cap - capacity of the new area (0 -
+  // by default): the file is sparse, but the apparent size - their sum
+  std::string open(std::string const & dir, std::string_view name, bool create = true, bool shared = true, bool lock = true, uint32_t node_cap = 0, uint32_t strings_cap = 0) {
     if(std::string why = file.open(dir, name, shared, lock); !why.empty()) return why;
     auto fail = [&](std::string why) {
       file.close();
@@ -603,8 +607,10 @@ struct db_area {
     };
     if(file.size == 0) {
       if(!create) return fail("нет такой области");
-      uint64_t nodes_at = header_gap, strings_at = (nodes_at + uint64_t(default_node_cap) * sizeof(node) + step - 1) / step * step;
-      uint64_t pool_at = strings_at + uint64_t(default_strings_cap) * 4;
+      if(!node_cap) node_cap = default_node_cap;
+      if(!strings_cap) strings_cap = default_strings_cap;
+      uint64_t nodes_at = header_gap, strings_at = (nodes_at + uint64_t(node_cap) * sizeof(node) + step - 1) / step * step;
+      uint64_t pool_at = strings_at + uint64_t(strings_cap) * 4;
       if(std::string why = file.grow(pool_at + step); !why.empty()) return fail(why);
       h = reinterpret_cast<db_header *>(file.at);
       std::memset(h, 0, sizeof *h);
@@ -613,10 +619,10 @@ struct db_area {
       h->header_bytes = sizeof(db_header);
       h->layout = layout_hash();
       h->node_bytes = sizeof(node);
-      h->node_cap = default_node_cap;
+      h->node_cap = node_cap;
       h->nodes_at = nodes_at;
       h->strings_at = strings_at;
-      h->strings_cap = default_strings_cap;
+      h->strings_cap = strings_cap;
       h->strings_used = 1;
       h->roots_at = (sizeof(db_header) + 63) / 64 * 64;
       h->pool_at = pool_at;
@@ -705,14 +711,19 @@ struct ast_db {
   // Pool of lines of the interner: text symbols - a separate pool (grows, does not shrink, does not move)
   node_pool spool;
   std::unique_ptr<db_roots> own_roots; // roots in the process heap (ordinary memory); in the area, in its header
-  db_roots * roots;
+  // Roots: Lists inside are read through the THIS database pool - access only through R() (exhibits the current pool); raw pointer - for the constructor
+  db_roots * unsafe_roots;
+  db_roots & R() const {
+    use_pool();
+    return *unsafe_roots;
+  }
   interner strings;
   explicit ast_db(db_area * a = nullptr)
       : own_area(a ? nullptr : scratch_area()), area(a ? a : own_area.get()), pool(make_pool(area)), spool(make_spool(area)), own_roots(area ? nullptr : std::make_unique<db_roots>()),
-        roots(area ? area->roots() : own_roots.get()), strings(&spool, &pool, &roots->strings), nodes(make_nodes(area)) {
+        unsafe_roots(area ? area->roots() : own_roots.get()), strings(&spool, &pool, &unsafe_roots->strings), nodes(make_nodes(area)) {
     nodes.owner = &pool;
     use_pool();
-    if(area && !area->fresh && roots->valid) restore_state();
+    if(area && !area->fresh && R().valid) restore_state();
   }
   static node_pool make_pool(db_area * a) {
     if(!a) return node_pool();
@@ -742,48 +753,51 @@ struct ast_db {
       },
           k);
     };
+    // The container communicates before its elements - only through own(): in the second pass (after the shift), its descriptor
+    // must already point to a new place, otherwise the elements are read from unmoved (S5.3 trap, now structurally)
+    auto own = [&](auto & l, auto && elements) {
+      f(l.off, l.meta, std::remove_cvref_t<decltype(l)>::ew);
+      elements();
+    };
     auto note = [&](pnote & p) {
-      f(p.lead.off, p.lead.meta, list<node_text>::ew);
-      for(node_text & t: p.lead) f(t.off, t.meta, 0u);
+      own(p.lead, [&] { for(node_text & t: p.lead) f(t.off, t.meta, 0u); });
       f(p.tail.off, p.tail.meta, 0u);
-      f(p.end.off, p.end.meta, list<node_text>::ew);
-      for(node_text & t: p.end) f(t.off, t.meta, 0u);
+      own(p.end, [&] { for(node_text & t: p.end) f(t.off, t.meta, 0u); });
     };
     for(uint32_t i = 0, n = nodes.size(); i < n; ++i) kind(nodes[node_id(i)].kind);
-    // The container is before its elements: in the second pass (after the shift), its descriptor must already point to a new place.
-    f(roots->oplog.off, roots->oplog.meta, list<stored_entry>::ew);
-    for(stored_entry & e: roots->oplog) {
-      if(auto * x = std::get_if<s_add>(&e.op)) kind(x->kind);
-      else if(auto * y = std::get_if<s_replace>(&e.op)) kind(y->kind);
-      else if(auto * z = std::get_if<s_mutate>(&e.op)) kind(z->kind);
-      else if(auto * w = std::get_if<s_note>(&e.op)) note(w->note);
-    }
-    f(roots->mutations.off, roots->mutations.meta, list<mutation_rec>::ew);
-    for(mutation_rec & m: roots->mutations) kind(m.old);
-    f(roots->node_rev.off, roots->node_rev.meta, list<uint64_t>::ew);
-    f(roots->edited_at.off, roots->edited_at.meta, list<uint64_t>::ew);
-    f(roots->born.off, roots->born.meta, list<born_snap>::ew);
-    for(born_snap & b: roots->born) kind(b.kind);
-    f(roots->born_ix.off, roots->born_ix.meta, list<uint32_t>::ew);
-    f(roots->reuse.off, roots->reuse.meta, list<reuse_snap>::ew);
-    for(reuse_snap & u: roots->reuse) f(u.ids.off, u.ids.meta, list<uint32_t>::ew);
-    f(roots->reuse_tab.off, roots->reuse_tab.meta, list<uint32_t>::ew);
-    f(roots->notes.off, roots->notes.meta, list<note_rec>::ew);
-    for(note_rec & n: roots->notes)
-      if(n.id != ~uint32_t{0}) note(n.note);
-    f(roots->note_ix.off, roots->note_ix.meta, list<uint32_t>::ew);
+    db_roots & r = R();
+    own(r.oplog, [&] {
+      for(stored_entry & e: r.oplog) {
+        if(auto * x = std::get_if<s_add>(&e.op)) kind(x->kind);
+        else if(auto * y = std::get_if<s_replace>(&e.op)) kind(y->kind);
+        else if(auto * z = std::get_if<s_mutate>(&e.op)) kind(z->kind);
+        else if(auto * w = std::get_if<s_note>(&e.op)) note(w->note);
+      }
+    });
+    own(r.mutations, [&] { for(mutation_rec & m: r.mutations) kind(m.old); });
+    own(r.node_rev, [] {});
+    own(r.edited_at, [] {});
+    own(r.born, [&] { for(born_snap & b: r.born) kind(b.kind); });
+    own(r.born_ix, [] {});
+    own(r.reuse, [&] { for(reuse_snap & u: r.reuse) own(u.ids, [] {}); });
+    own(r.reuse_tab, [] {});
+    own(r.notes, [&] {
+      for(note_rec & n: r.notes)
+        if(n.id != ~uint32_t{0}) note(n.note);
+    });
+    own(r.note_ix, [] {});
     for(auto & r: reborn) kind(r.was);
     for(auto & k: retired) kind(k);
     // roots live: arrays of interns and sources - in the main pool (the texts themselves - in the pool of lines, he does not move)
-    f(roots->strings.strs.off, roots->strings.strs.meta, list<node_text>::ew);
-    f(roots->strings.table.off, roots->strings.table.meta, list<uint32_t>::ew);
-    f(roots->sources.off, roots->sources.meta, list<node_text>::ew);
-    f(roots->labels.off, roots->labels.meta, list<node_text>::ew);
+    own(r.strings.strs, [] {});
+    own(r.strings.table, [] {});
+    own(r.sources, [] {});
+    own(r.labels, [] {});
   }
   // A state shot (journal, comments...) divides the pieces with node and the compaction shift is not updated:
   // before the shift it is reset (the pieces go away as abandoned), the next fixation collects it again.
   void drop_snapshot() {
-    db_roots & r = *roots;
+    db_roots & r = R();
     auto zero = [](auto & l) { l.off = 0; l.meta = 0; };
     r.valid = 0;
   }
@@ -886,14 +900,14 @@ struct ast_db {
   }
   // text from a pool of lines (its descriptor is not from the main pool, the current base is not decreed to it)
   std::string spool_str(node_text const & t) const { return std::string(reinterpret_cast<char const *>(spool.base + t.off), t.size()); }
-  node_text source_text(uint32_t i) const { return reinterpret_cast<node_text const *>(pool.base + roots->sources.off)[i]; }
-  node_text source_label_text(uint32_t i) const { return reinterpret_cast<node_text const *>(pool.base + roots->labels.off)[i]; }
+  node_text source_text(uint32_t i) const { return reinterpret_cast<node_text const *>(pool.base + R().sources.off)[i]; }
+  node_text source_label_text(uint32_t i) const { return reinterpret_cast<node_text const *>(pool.base + R().labels.off)[i]; }
   // Working state (journal, comments, mutations, derivatives of node, tables on node) - in the roots of the field
   void snapshot_save() {
     use_pool();
     pool_scope in_pool(&pool);
     lane_guard g(pool.lock);
-    db_roots & r = *roots;
+    db_roots & r = R();
     r.revision = revision;
     r.births = births;
     r.edits = edits;
@@ -903,7 +917,7 @@ struct ast_db {
   // Base over the open area: working structures - from the snapshot of roots (without journal); caches - again
   void restore_state() {
     use_pool();
-    db_roots & r = *roots;
+    db_roots & r = R();
     revision = r.revision;
     births = r.births;
     edits = r.edits;
@@ -1262,7 +1276,7 @@ struct ast_db {
     elab_ct.clear();
     elab_pass_error.reset();
     elab_changes.clear();
-    elab_mark m{{}, roots->oplog.size(), changed.size(), false, reborn.size()};
+    elab_mark m{{}, R().oplog.size(), changed.size(), false, reborn.size()};
     for(auto const & x: mutations)
       if(std::ranges::none_of(m.was, [&](auto const & w) { return w.first == x.target; })) m.was.push_back({x.target, nodes[node_id(x.target)].kind});
     touch_undo.clear();
@@ -1284,7 +1298,7 @@ struct ast_db {
     if(same) {
       for(std::size_t i = touch_undo.size(); i-- > 0;) node_rev[touch_undo[i].first] = touch_undo[i].second;
       changed.resize(m.changed_from);
-      auto & lg = roots->oplog;
+      auto & lg = R().oplog;
       std::size_t w = m.log_from;
       for(std::size_t i = m.log_from; i < lg.size(); ++i) {
         stored_entry const & e = lg[i];
@@ -1474,22 +1488,22 @@ struct ast_db {
   // --- derivatives of node live (S5.3): born - a list in the roots, born_ix - by node ; reuse - by key, hash table ---
   born_snap const * born_find(uint32_t id) const {
     use_pool();
-    auto const & ix = roots->born_ix;
-    return id < ix.size() && ix[id] ? &roots->born[ix[id] - 1] : nullptr;
+    auto const & ix = R().born_ix;
+    return id < ix.size() && ix[id] ? &R().born[ix[id] - 1] : nullptr;
   }
   bool born_has(uint32_t id) const { return born_find(id) != nullptr; }
   void born_add(uint32_t id, node_kind const & k, uint64_t key) {
     use_pool();
-    auto & ix = roots->born_ix;
+    auto & ix = R().born_ix;
     if(ix.size() <= id) ix.resize(std::max<std::size_t>(id + 1, ix.size() * 2), 0);
-    roots->born.push_back(born_snap{id, 0, key, k});
-    ix[id] = roots->born.size();
+    R().born.push_back(born_snap{id, 0, key, k});
+    ix[id] = R().born.size();
   }
   static uint32_t reuse_hash(uint64_t key) { return uint32_t((key * 0x9e3779b97f4a7c15ull) >> 40); }
   // Place the key in reuse; create - open empty; ~0 - no
   uint32_t reuse_at(uint64_t key, bool create) {
     use_pool();
-    auto & tab = roots->reuse_tab;
+    auto & tab = R().reuse_tab;
     if(tab.size() == 0) {
       if(!create) return ~uint32_t{0};
       tab.resize(64, 0);
@@ -1497,23 +1511,23 @@ struct ast_db {
     uint32_t mask = tab.size() - 1;
     uint32_t i = reuse_hash(key) & mask;
     for(; tab[i]; i = (i + 1) & mask)
-      if(roots->reuse[tab[i] - 1].key == key) return tab[i] - 1;
+      if(R().reuse[tab[i] - 1].key == key) return tab[i] - 1;
     if(!create) return ~uint32_t{0};
-    roots->reuse.push_back(reuse_snap{key, 0, {}});
-    tab[i] = roots->reuse.size();
-    if(uint64_t(roots->reuse.size()) * 2 > tab.size()) { // table half: twice as much, keys moved
+    R().reuse.push_back(reuse_snap{key, 0, {}});
+    tab[i] = R().reuse.size();
+    if(uint64_t(R().reuse.size()) * 2 > tab.size()) { // table half: twice as much, keys moved
       list<uint32_t> bigger;
       bigger.resize(std::size_t(tab.size()) * 2, 0);
       uint32_t m2 = bigger.size() - 1;
-      for(uint32_t k = 0; k < roots->reuse.size(); ++k) {
-        uint32_t j = reuse_hash(roots->reuse[k].key) & m2;
+      for(uint32_t k = 0; k < R().reuse.size(); ++k) {
+        uint32_t j = reuse_hash(R().reuse[k].key) & m2;
         while(bigger[j]) j = (j + 1) & m2;
         bigger[j] = k + 1;
       }
       tab.release();
       tab = bigger;
     }
-    return roots->reuse.size() - 1;
+    return R().reuse.size() - 1;
   }
 
   // Derivative node: former free with the same view at birth and place, otherwise new. Holder is a
@@ -1523,13 +1537,13 @@ struct ast_db {
     lane_guard g(lock);
     uint64_t key = kind_hash(k, where); // place - as at the source (not the last import: editing it does not change)
     uint32_t slot = reuse_at(key, true);
-    for(std::size_t i = roots->reuse[slot].cursor, steps = 0; i < roots->reuse[slot].ids.size() && steps < 64; ++i, ++steps) {
-      uint32_t x = roots->reuse[slot].ids[i];
+    for(std::size_t i = R().reuse[slot].cursor, steps = 0; i < R().reuse[slot].ids.size() && steps < 64; ++i, ++steps) {
+      uint32_t x = R().reuse[slot].ids[i];
       node_id n(x);
       if(held_now(x) || reopened(n)) continue;
       auto const & b = *born_find(x);
       if(b.key != key || !kind_equal(b.kind, k) || nodes[n].where.begin != where.begin || nodes[n].where.end != where.end || nodes[n].where.source != where.source || installed(n)) continue;
-      roots->reuse[slot].cursor = i + 1;
+      R().reuse[slot].cursor = i + 1;
       if(reopen.size() <= x) reopen.resize(x + 1, 0);
       reopen[x] = 1;
       node_kind was = std::move(nodes[n].kind);
@@ -1545,8 +1559,8 @@ struct ast_db {
     node_id n = add(k, where);
     pinned_source = saved;
     born_add(n.value, k, key);
-    roots->reuse[slot].ids.push_back(n.value);
-    roots->reuse[slot].cursor = roots->reuse[slot].ids.size();
+    R().reuse[slot].ids.push_back(n.value);
+    R().reuse[slot].cursor = R().reuse[slot].ids.size();
     log({j_derived{n.value}});
     hold(n.value, holder);
     return n;
@@ -1563,7 +1577,7 @@ struct ast_db {
     flush_reborn(0, &holder);
     for(uint32_t x: holder) {
       --held[x];
-      if(auto b = born_find(x)) roots->reuse[reuse_at(b->key, true)].cursor = 0;
+      if(auto b = born_find(x)) R().reuse[reuse_at(b->key, true)].cursor = 0;
     }
     holder.clear();
   }
@@ -1618,23 +1632,23 @@ struct ast_db {
       l = node_text(label);
     }
     pool_scope in_pool(&pool);
-    roots->sources.push_back(t);
-    roots->labels.push_back(l);
+    R().sources.push_back(t);
+    R().labels.push_back(l);
     log({j_import{std::move(text), std::move(label)}});
-    return uint32_t(roots->sources.size() - 1);
+    return uint32_t(R().sources.size() - 1);
   }
-  uint32_t source_count() const { return roots->sources.size(); }
+  uint32_t source_count() const { return R().sources.size(); }
 
   // Import tag for diagnostics (empty - main file).
   std::string_view source_label(uint32_t i) const {
-    if(i >= roots->labels.size()) return {};
-    node_text const t = reinterpret_cast<node_text const *>(pool.base + roots->labels.off)[i];
+    if(i >= R().labels.size()) return {};
+    node_text const t = reinterpret_cast<node_text const *>(pool.base + R().labels.off)[i];
     return {reinterpret_cast<char const *>(spool.base + t.off), t.size()};
   }
 
   std::string_view source(uint32_t i = 0) const {
-    if(i >= roots->sources.size()) return {};
-    node_text const t = reinterpret_cast<node_text const *>(pool.base + roots->sources.off)[i];
+    if(i >= R().sources.size()) return {};
+    node_text const t = reinterpret_cast<node_text const *>(pool.base + R().sources.off)[i];
     return {reinterpret_cast<char const *>(spool.base + t.off), t.size()};
   }
 
@@ -1643,7 +1657,7 @@ struct ast_db {
     use_pool(); // journal is the pool listings of this database, and the current one may be alien (save_area: domain base created later)
     std::vector<journal_entry> out;
     uint32_t emitted = 0;
-    for(stored_entry const & e: roots->oplog) {
+    for(stored_entry const & e: R().oplog) {
       for(; emitted < e.strings; ++emitted)
         out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
       out.push_back(journal_entry{e.revision, const_cast<ast_db *>(this)->from_stored(e.op)});
@@ -1726,9 +1740,9 @@ struct ast_db {
       (gap[i] == 1 ? g.nodes : g.imports) += 1;
     }
     // Back to the roots: import numbers in order (j_import is one, j_gap is as many as imports)
-    roots->oplog.clear();
+    R().oplog.clear();
     uint32_t src = 0;
-    for(auto const & [count, e]: out) roots->oplog.push_back(stored_entry{e.revision, count, to_stored(e.op, src)});
+    for(auto const & [count, e]: out) R().oplog.push_back(stored_entry{e.revision, count, to_stored(e.op, src)});
   }
 
   // Play journal to an empty database.
@@ -1760,7 +1774,7 @@ struct ast_db {
           node_id n(op.id);
           uint64_t key = kind_hash(nodes[n].kind, nodes[n].where);
           born_add(op.id, nodes[n].kind, key);
-          roots->reuse[reuse_at(key, true)].ids.push_back(op.id); // free: cursor from the beginning
+          R().reuse[reuse_at(key, true)].ids.push_back(op.id); // free: cursor from the beginning
           log({j_derived{op.id}});
         } else if constexpr(std::is_same_v<T, j_gap>) {
           for(uint32_t i = 0; i < op.nodes; ++i) {
@@ -1780,20 +1794,20 @@ struct ast_db {
   // node (node_note) comments: Empty, no. Write in journal (as blank).
   node_note const * note_of(node_id n) const {
     use_pool();
-    auto const & ix = roots->note_ix;
+    auto const & ix = R().note_ix;
     if(n.value >= ix.size() || !ix[n.value]) return nullptr;
     auto it = note_cache.find(n.value);
-    if(it == note_cache.end()) it = note_cache.emplace(n.value, plain_note(roots->notes[ix[n.value] - 1].note)).first;
+    if(it == note_cache.end()) it = note_cache.emplace(n.value, plain_note(R().notes[ix[n.value] - 1].note)).first;
     return &it->second;
   }
   void set_note(node_id n, node_note x) {
     use_pool();
     bool empty = x.lead.empty() && x.tail.empty() && x.end.empty();
-    auto & ix = roots->note_ix;
+    auto & ix = R().note_ix;
     bool has = n.value < ix.size() && ix[n.value];
     if(empty && !has) return;
     if(has) {
-      note_rec & old = roots->notes[ix[n.value] - 1];
+      note_rec & old = R().notes[ix[n.value] - 1];
       release_note(old.note);
       if(empty) {
         old.id = ~uint32_t{0};
@@ -1801,13 +1815,13 @@ struct ast_db {
         ix[n.value] = 0;
         note_cache.erase(n.value);
       } else {
-        roots->notes[ix[n.value] - 1].note = pool_note(x);
+        R().notes[ix[n.value] - 1].note = pool_note(x);
         note_cache[n.value] = x;
       }
     } else {
       if(ix.size() <= n.value) ix.resize(std::max<std::size_t>(n.value + 1, ix.size() * 2), 0);
-      roots->notes.push_back(note_rec{n.value, 0, pool_note(x)});
-      ix[n.value] = roots->notes.size();
+      R().notes.push_back(note_rec{n.value, 0, pool_note(x)});
+      ix[n.value] = R().notes.size();
       note_cache[n.value] = x;
     }
     log({j_note{n.value, std::move(x)}});
@@ -1885,16 +1899,16 @@ struct ast_db {
   std::vector<std::pair<uint32_t, journal_entry>> log_entries() {
     use_pool();
     std::vector<std::pair<uint32_t, journal_entry>> out;
-    out.reserve(roots->oplog.size());
-    for(stored_entry const & e: roots->oplog) out.push_back({e.strings, journal_entry{e.revision, from_stored(e.op)}});
+    out.reserve(R().oplog.size());
+    for(stored_entry const & e: R().oplog) out.push_back({e.strings, journal_entry{e.revision, from_stored(e.op)}});
     return out;
   }
   void log(journal_op op) {
     use_pool();
     lane_guard g(lock);
-    uint32_t src = std::holds_alternative<j_import>(op) ? uint32_t(roots->sources.size() - 1) : 0;
+    uint32_t src = std::holds_alternative<j_import>(op) ? uint32_t(R().sources.size() - 1) : 0;
     stored_op st = to_stored(op, src);
-    roots->oplog.push_back(stored_entry{revision, strings.size(), st});
+    R().oplog.push_back(stored_entry{revision, strings.size(), st});
   }
 
   void link_rec(node_id root) {
@@ -1941,9 +1955,9 @@ struct ast_db {
   bool loading_prelude = false;
   uint64_t revision = 0;
   // Live in the roots of the area (S5.3): pool lists, not std::vector - fixing them does not copy
-  list<uint64_t> & node_rev = roots->node_rev;
-  list<uint64_t> & edited_at = roots->edited_at; // revision of the last node edit (not mutations)
-  list<mutation_rec> & mutations = roots->mutations; // active ct-code mutations in order
+  list<uint64_t> & node_rev = R().node_rev;
+  list<uint64_t> & edited_at = R().edited_at; // revision of the last node edit (not mutations)
+  list<mutation_rec> & mutations = R().mutations; // active ct-code mutations in order
   std::deque<node_kind> retired; // Species filmed by mutation and rollback: bypasses can keep their lists
   std::vector<uint32_t> changed; // node modified by mutation/rollback (editor updates them)
   std::vector<std::pair<uint32_t, uint64_t>> touch_undo; // previous revisions (elaboration with the same result)
@@ -1979,7 +1993,7 @@ struct ast_db {
   // its revision, base edits and arguments → the result (0/1, -1 - error: conservative choice). A pure
   // function is one sum to the same arguments; printing does not change the base, so mutable.
   mutable std::unordered_map<std::string, int8_t> print_choices;
-  // Cache for note_of (pointer to plain view): truth - roots -> notes; filled on demand, set_note leads it
+  // Cache for note_of (pointer to plain view): truth - R() .notes; filled on demand, set_note leads it
   mutable std::unordered_map<uint32_t, node_note> note_cache;
 };
 

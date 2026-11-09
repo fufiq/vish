@@ -58,7 +58,7 @@ version_save(i64 v, str path) => native "cpp" {
   auto * x = tools_host->at((a[0]).as<int64_t>());
   if(!x) return value(std::string("нет версии"));
   try {
-    save_db(*x->db, x->root, std::string((a[1]).as<str_v>().view()));
+    save_area(*x->db, x->root, std::string((a[1]).as<str_v>().view()));
   } catch(std::exception const & e) {
     return value(std::string(e.what()));
   }

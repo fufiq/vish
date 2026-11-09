@@ -41,11 +41,15 @@ void save_area(ast_db const & db, node_id root, std::string const & path) {
   std::filesystem::remove(dir / tmp);
   {
     db_area area;
-    if(std::string why = area.open(dir.string(), tmp); !why.empty()) throw diagnostic(why, {});
+    // Capacity - from content with a margin (the apparent file size is their sum, not 200+ MiB): node × 4, lines × 4 + margin for editing
+    auto up = [](uint64_t x, uint64_t m) { return uint32_t((x + m - 1) / m * m); };
+    uint32_t node_cap = std::max<uint32_t>(up(uint64_t(db.size()) * 4, 1u << 16), db_area::node_headroom * 2);
+    uint32_t strings_cap = std::max<uint32_t>(up(uint64_t(db.spool.used) * 4, 1u << 18), db_area::strings_headroom * 2);
+    if(std::string why = area.open(dir.string(), tmp, true, true, true, node_cap, strings_cap); !why.empty()) throw diagnostic(why, {});
     ast_db out(&area);
     out.replay(db.journal());
     out.use_pool();
-    out.roots->program_root = root.value + 1;
+    out.R().program_root = root.value + 1;
     if(std::string why = out.commit_area(); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
   }
   std::error_code ec;
@@ -133,7 +137,7 @@ std::vector<journal_entry> read_journal(std::string const & path, node_id & root
       db_area area;
       if(std::string why = open_area_private(area, path); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
       ast_db src(&area);
-      root = node_id(src.roots->program_root - 1);
+      root = node_id(src.R().program_root - 1);
       for(auto const & e: src.journal()) w.put(e);
     }
     pool_scope in(&staging);
@@ -161,8 +165,8 @@ node_id load_db(ast_db & db, std::string const & path) {
     db_area area;
     if(std::string why = open_area_private(area, path); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
     ast_db src(&area);
-    if(!src.roots->program_root) throw diagnostic(cat(path, ": в области нет корня программы"), {});
-    root = node_id(src.roots->program_root - 1);
+    if(!src.R().program_root) throw diagnostic(cat(path, ": в области нет корня программы"), {});
+    root = node_id(src.R().program_root - 1);
     db.replay(src.journal());
     return root;
   }

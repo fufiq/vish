@@ -328,9 +328,20 @@ int main(int argc, char ** argv) {
       db_area one, two;
       assert(open_area_private(one, file).empty() && open_area_private(two, file).empty());
       ast_db live(&one), other(&two);
-      assert(live.roots->program_root == root.value + 1 && dump(live) == want);
+      assert(live.R().program_root == root.value + 1 && dump(live) == want);
       live.add(n_str{"правка"}, {});
       assert(other.size() + 1 == live.size());
+    }
+    { // capacity for content: the file is not hundreds of MiB, there is a reserve for live editing; almost a full area - without a reserve
+      assert(std::filesystem::file_size(file) < (uint64_t(64) << 20));
+      db_area roomy;
+      assert(open_area_private(roomy, file).empty() && roomy.has_headroom());
+      db_area tight;
+      std::string tname = cat(dir, "/тесная.vishdb");
+      std::remove(tname.c_str());
+      assert(tight.open(dir, "тесная.vishdb", true, true, true, 1024, 4096).empty());
+      tight.h->node_count = 1000;
+      assert(!tight.has_headroom());
     }
     ast_db again;
     load_db(again, file);

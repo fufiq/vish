@@ -60,9 +60,15 @@ struct cli_host {
       p.repository = std::move(file.state);
     } else if(is_area_file(path)) { // area (S5.3): opens privately and immediately, without journal
       if(std::string why = open_area_private(p.area.emplace(), path); !why.empty()) throw diagnostic(cat(path, ": ", why), {});
-      p.db = &p.own.emplace(&*p.area);
-      if(!p.db->roots->program_root) throw diagnostic(cat(path, ": в области нет корня программы"), {});
-      p.root = node_id(p.db->roots->program_root - 1);
+      if(!p.area->has_headroom()) { // small margin for editing (node do not grow for capacity): base in memory, journal - from the region
+        p.area.reset();
+        p.db = &p.own.emplace();
+        p.root = load_db(*p.db, path);
+      } else {
+        p.db = &p.own.emplace(&*p.area);
+        if(!p.db->R().program_root) throw diagnostic(cat(path, ": в области нет корня программы"), {});
+        p.root = node_id(p.db->R().program_root - 1);
+      }
     } else if(path.ends_with(".vishdb") || path.ends_with(".tzdb")) { // .tzdb - before renaming the language
       p.db = &p.own.emplace();
       p.root = load_db(*p.db, path);
