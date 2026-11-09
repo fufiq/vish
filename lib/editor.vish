@@ -3010,6 +3010,9 @@ outer_known = false;
 outer_found = array{};
 outer_low = array{};
 outer_tail = array{};
+outer_names = array{}; // Names in order outer_found (by name): binary search for repeats
+outer_ord = array{}; // outer_found numbers by tail increase (depth, name)
+outer_blocked = array{}; // The name of the caller is given to the caller.
 outer_ready() {
   if(outer_known) return 0;
   found = array{};
@@ -3019,7 +3022,10 @@ outer_ready() {
   for(x : outer_found) {
     outer_low.push(lower(x.name));
     outer_tail.push(digits3(x.depth) + x.name);
+    outer_names.push(x.name);
+    outer_blocked.push(false);
   }
+  outer_ord = sorted_indices(outer_tail);
   outer_known = true;
   0
 }
@@ -3100,45 +3106,111 @@ rank(str n, str w) {
 // node AST (struct programs generated from VM) - only on the typed prefix: they are needed by the
 // code that works with the code, the rest - noise (*mine*)
 shown(x, str n, str w) => !((x.kind == "тип") && (core_node_kind(x.name) && ((w.size == 0) || (find_text(n, w) != 0))));
-// Suitable: kept - options, keys - order (rank, depth, name: tail - depth and name)
-take(kept, keys, x, str n, str w, str tail) {
-  r = rank(n, w);
-  if((r >= 0) && shown(x, n, w)) {
-    kept.push(x);
-    keys.push(text(r) + tail);
+// The order of withdrawal is (rank, depth, name); with equality, the near (from near) is the first. prelude and VM (outer *) are
+// arranged by tail once (outer_ord), the appropriate words go in this order - they remain to be decomposed by rank, without sorting
+// by each key. Name repeats: Near names are searched by binary search among prelude (outer_names).
+near_before(i64 r1, str t1, i64 r2, str t2) => (r1 < r2) || ((r1 == r2) && !key_less(t2, t1));
+// one step on prelude : place number p in outer_ord ; rank by word, approached in hits, shown by rank
+outer_step(i64 p, str w, hits, bk0, bk1, bk2) {
+  k = outer_ord[p];
+  r = rank(outer_low[k], w);
+  if(r >= 0) {
+    hits.push(p);
+    if(shown(outer_found[k], outer_low[k], w)) {
+      if(r == 0) bk0.push(k) else if(r == 1) bk1.push(k) else bk2.push(k);
+    }
   }
-  r >= 0
+  0
 }
 // near (closer), far, and prelude with VM; distant, eponymous
 filtered(near, bool far, str word) {
   w = lower(word);
-  kept = array{};
-  keys = array{};
-  for(x : near) take(kept, keys, x, lower(x.name), w, digits3(x.depth) + x.name);
-  if(far) {
-    outer_ready();
-    hits = array{};
-    if((outer_word != "") && starts_with(w, outer_word)) {
-      for(k : outer_hits) if(take(kept, keys, outer_found[k], outer_low[k], w, outer_tail[k])) hits.push(k);
-    } else for(k : range(outer_found.size)) if(take(kept, keys, outer_found[k], outer_low[k], w, outer_tail[k])) hits.push(k);
-    outer_word = w;
-    outer_hits = hits;
+  nk = array{};
+  nr = array{};
+  nt = array{};
+  for(x : near) {
+    n = lower(x.name);
+    r = rank(n, w);
+    if((r >= 0) && shown(x, n, w)) {
+      nk.push(x);
+      nr.push(r);
+      nt.push(digits3(x.depth) + x.name);
+    }
   }
-  // Repeat names among the approached: the neighbor remains (by name, then by depth; sorting is
-  // stable - with equal in order of finds)
+  keys = array{};
   by_name = array{};
-  for(x : kept) by_name.push((x.name + "\n") + digits3(x.depth));
+  for(k : range(nk.size)) {
+    keys.push(text(nr[k]) + nt[k]);
+    by_name.push((nk[k].name + "\n") + digits3(nk[k].depth));
+  }
   hidden = array{};
-  for(k : range(kept.size)) hidden.push(false);
+  for(k : range(nk.size)) hidden.push(false);
   last = "";
   first = true;
   for(k : sorted_indices(by_name)) {
-    if(!first && (kept[k].name == last)) hidden[k] = true;
-    last = kept[k].name;
+    if(!first && (nk[k].name == last)) hidden[k] = true;
+    last = nk[k].name;
     first = false;
   }
+  ni = sorted_indices(keys);
+  ok = array{};
+  okr = array{};
+  blocked = array{};
+  if(far) {
+    outer_ready();
+    hits = array{};
+    bk0 = array{};
+    bk1 = array{};
+    bk2 = array{};
+    if((outer_word != "") && starts_with(w, outer_word)) {
+      for(p : outer_hits) outer_step(p, w, hits, bk0, bk1, bk2);
+    } else for(p : range(outer_ord.size)) outer_step(p, w, hits, bk0, bk1, bk2);
+    outer_word = w;
+    outer_hits = hits;
+    for(k : bk0) {
+      ok.push(k);
+      okr.push(0);
+    }
+    for(k : bk1) {
+      ok.push(k);
+      okr.push(1);
+    }
+    for(k : bk2) {
+      ok.push(k);
+      okr.push(2);
+    }
+    for(x : nk) {
+      p = lower_bound(outer_names, x.name);
+      if((p < outer_names.size) && (outer_names[p] == x.name)) {
+        outer_blocked[p] = true;
+        blocked.push(p);
+      }
+    }
+  }
   found = array{};
-  for(k : sorted_indices(keys)) if(!hidden[k] && (found.size < 400)) found.push(kept[k]);
+  a = 0;
+  b = 0;
+  loop {
+    if(found.size >= 400) break;
+    if((a >= ni.size) && (b >= ok.size)) break;
+    if(b >= ok.size) {
+      j = ni[a];
+      a += 1;
+      if(!hidden[j]) found.push(nk[j]);
+    } else {
+      k = ok[b];
+      take_near = if(a >= ni.size) false else near_before(nr[ni[a]], nt[ni[a]], okr[b], outer_tail[k]);
+      if(take_near) {
+        j = ni[a];
+        a += 1;
+        if(!hidden[j]) found.push(nk[j]);
+      } else {
+        b += 1;
+        if(!outer_blocked[k]) found.push(outer_found[k]);
+      }
+    }
+  }
+  for(p : blocked) outer_blocked[p] = false;
   found
 }
 // Live addition to the word in front of the cursor; forced (Ctrl + Space) - and without a word.
