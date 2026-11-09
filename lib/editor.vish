@@ -2319,6 +2319,7 @@ breaks_entity(i64 v, i64 a, i64 b) {
 // The cursor is moved (solution - move_to): the word set is over, the addition is closed; outside the draft
 // - the canon; the cursor and the hint - to the client.
 cursor_moved(i64 v) {
+  near_open = false;
   views[v].typing = false;
   close_completion(v);
   r = draft_region(v);
@@ -2508,6 +2509,7 @@ apply_after(i64 av, target, spot s, i64 n_new, found, str edited, change ch, i64
       }
     }
     if(w != av) close_completion(w); // crossword
+    near_open = false;
     send_cursor(w);
   }
   refresh_changed(); // representations which the amendment did not concern
@@ -3034,6 +3036,12 @@ outer_ready() {
 // word).
 outer_word = "";
 outer_hits = array{};
+near_open = false; // cache of place names for complete
+near_v = -1;
+near_b = -1;
+near_dot = false;
+near_prefix = "";
+near_items = array{};
 // name in the list of members: without repetition
 add_member(found, str name, str kind, str detail, i64 depth) {
   for(x : found) if(x.name == name) return false;
@@ -3226,11 +3234,24 @@ complete(i64 v, bool forced) {
   // after `.` - members of the value on the left (by its types in all instance); the list - immediately on the point
   dot = (b > 0) && (lead(v, b - 1) == '.');
   if(!dot && (!forced && (word.size == 0))) return close_completion(v);
-  pm = if(dot) module_before(v, b - 1) else code(); // geo.vec. entity module (named by way)
-  types = if(dot && !given(pm)) object_types(v, b - 1) else array{};
-  if(dot && (!given(pm) && (types.size == 0))) return close_completion(v);
+  // Names depend on the place of the word, not on the typed letters: while the addition is open and the word grows (decreases)
+  // from the same beginning - they are the same.; the cache is mine, reset explicitly (key other than the letter and Backspace,
+  // input, cursor movement, someone else's editing) and checking that the text to the word is the same.
   near = array{};
-  if(given(pm)) entities(near, pm, 0) else near = if(dot) member_names(types) else context_names(at);
+  prefix = text_of(v, 0, b); // The text does not change, the names of the place are the same.
+  if(near_open && (near_v == v) && (near_b == b) && (near_dot == dot) && (near_prefix == prefix) && !forced) near = near_items
+  else {
+    pm = if(dot) module_before(v, b - 1) else code(); // geo.vec. entity module (named by way)
+    types = if(dot && !given(pm)) object_types(v, b - 1) else array{};
+    if(dot && (!given(pm) && (types.size == 0))) return close_completion(v);
+    if(given(pm)) entities(near, pm, 0) else near = if(dot) member_names(types) else context_names(at);
+    near_items = near;
+    near_v = v;
+    near_b = b;
+    near_dot = dot;
+    near_prefix = prefix;
+    near_open = true;
+  }
   items = filtered(near, !dot, word);
   // The only option that matches the typed one is to show nothing.
   if((items.size == 0) || ((items.size == 1) && (items[0].name == word))) return close_completion(v);
@@ -5888,6 +5909,7 @@ on_key(i64 id, str key, i64 mods) {
   if(v < 0) no_view(id) else key_at(v, key, mods)
 }
 key_at(i64 v, str key, i64 mods) {
+  if(!(((code_points(key) == 1) && ((mods & 14) == 0)) || (key == "Backspace"))) near_open = false; // spelling
   if(debugging() && debug_key(v, key, mods)) return true; // step keys, debugger
   if(completing(v)) {
     if((key == "ArrowDown") || (key == "ArrowUp")) {
@@ -5936,6 +5958,7 @@ key_at(i64 v, str key, i64 mods) {
 }
 // text input (insert, IME): the typing of the word is over
 on_input(i64 id, str text) {
+  near_open = false;
   v = view_of(id);
   if(v < 0) return no_view(id);
   finalize_others(v);
