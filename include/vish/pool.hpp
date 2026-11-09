@@ -93,6 +93,10 @@ struct node_pool {
     lane_guard g(lock);
     touch();
     free_runs[uint32_t(words)].push_back(at);
+    if(words >= 16384 && base) { // large abandoned piece (journal increase by doubling): pages to the system; contents are garbage, not zeros
+      uintptr_t b = reinterpret_cast<uintptr_t>(base + at), from = (b + 4095) & ~uintptr_t(4095), to = (b + words * 4) & ~uintptr_t(4095);
+      if(to > from) ::madvise(reinterpret_cast<void *>(from), to - from, MADV_DONTNEED);
+    }
   }
   uint64_t free_words() const {
     uint64_t w = 0;

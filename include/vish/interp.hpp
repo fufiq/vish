@@ -4267,7 +4267,7 @@ struct interpreter {
   // Derivatives node subtree holds this interpreter: they will not be retaken by another
   void hold_tree(node_id n) {
     if(!n || n.value >= db.size()) return;
-    if(db.born.contains(n.value)) db.hold(n.value, derived_nodes);
+    if(db.born_has(n.value)) db.hold(n.value, derived_nodes);
     db.for_each_child(n, [&](node_id c) { hold_tree(c); });
   }
 
@@ -9777,7 +9777,7 @@ struct interpreter {
       rt_effect();
       if(checking()) return n == "journal_size" ? erase(value(int64_t(0))) : value(rt_v{});
       // journal image one on the base state: writing by number - not bypassing the entire journal for each call
-      std::array<uint64_t, 4> key{db.oplog.size(), db.strings.size(), db.reborn.size(), db.revision};
+      std::array<uint64_t, 4> key{db.roots->oplog.size(), db.strings.size(), db.reborn.size(), db.revision};
       if(journal_snapshot.empty() || key != journal_key) {
         journal_snapshot = db.journal();
         journal_key = key;

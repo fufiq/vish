@@ -522,10 +522,13 @@ struct db_roots {
   uint32_t prelude;
   uint32_t program_root; // Program root +1 (0 is not written): saving the product puts it at save_area
   list<stored_entry> oplog;
-  list<note_rec> notes;
+  list<note_rec> notes; // live (S5.3): comments node; erased - id = ~0
+  list<uint32_t> note_ix; // node → place in notes + 1 (0 - no comments)
   list<mutation_rec> mutations;
-  list<born_snap> born;
-  list<reuse_snap> reuse;
+  list<born_snap> born; // live (S5.3): derivatives of node in order of birth
+  list<uint32_t> born_ix; // node → place in born + 1 (0 - non-derivative)
+  list<reuse_snap> reuse; // live: free derivatives by key type and place
+  list<uint32_t> reuse_tab; // hash table of keys (open addressing, degree of two): place in reuse + 1
   list<uint64_t> node_rev;
   list<uint64_t> edited_at;
 };
@@ -552,7 +555,7 @@ struct db_header {
 };
 
 struct db_area {
-  static constexpr uint32_t format_version = 2; // 2 - Sh5.2: base roots and row pool (1 - Sh5.1: only node and pool)
+  static constexpr uint32_t format_version = 3; // 3 - Sh5.3: born and reusable live in the roots; 2 - Sh5.2: base roots and row pool (1 - Sh5.1: only node and pool)
   static constexpr uint32_t default_node_cap = 1u << 21;
   static constexpr uint32_t default_strings_cap = 1u << 24; // words (64 MiB addresses)
   static constexpr uint64_t header_gap = uint64_t(1) << 16; // subtitle
@@ -739,17 +742,36 @@ struct ast_db {
       },
           k);
     };
+    auto note = [&](pnote & p) {
+      f(p.lead.off, p.lead.meta, list<node_text>::ew);
+      for(node_text & t: p.lead) f(t.off, t.meta, 0u);
+      f(p.tail.off, p.tail.meta, 0u);
+      f(p.end.off, p.end.meta, list<node_text>::ew);
+      for(node_text & t: p.end) f(t.off, t.meta, 0u);
+    };
     for(uint32_t i = 0, n = nodes.size(); i < n; ++i) kind(nodes[node_id(i)].kind);
-    for(auto & e: oplog) {
-      if(auto * x = std::get_if<j_add>(&e.second.op)) kind(x->kind);
-      else if(auto * y = std::get_if<j_replace>(&e.second.op)) kind(y->kind);
-      else if(auto * z = std::get_if<j_mutate>(&e.second.op)) kind(z->kind);
+    // The container is before its elements: in the second pass (after the shift), its descriptor must already point to a new place.
+    f(roots->oplog.off, roots->oplog.meta, list<stored_entry>::ew);
+    for(stored_entry & e: roots->oplog) {
+      if(auto * x = std::get_if<s_add>(&e.op)) kind(x->kind);
+      else if(auto * y = std::get_if<s_replace>(&e.op)) kind(y->kind);
+      else if(auto * z = std::get_if<s_mutate>(&e.op)) kind(z->kind);
+      else if(auto * w = std::get_if<s_note>(&e.op)) note(w->note);
     }
-    for(auto & m: mutations) kind(m.old);
     f(roots->mutations.off, roots->mutations.meta, list<mutation_rec>::ew);
+    for(mutation_rec & m: roots->mutations) kind(m.old);
     f(roots->node_rev.off, roots->node_rev.meta, list<uint64_t>::ew);
     f(roots->edited_at.off, roots->edited_at.meta, list<uint64_t>::ew);
-    for(auto & b: born) kind(b.second.kind);
+    f(roots->born.off, roots->born.meta, list<born_snap>::ew);
+    for(born_snap & b: roots->born) kind(b.kind);
+    f(roots->born_ix.off, roots->born_ix.meta, list<uint32_t>::ew);
+    f(roots->reuse.off, roots->reuse.meta, list<reuse_snap>::ew);
+    for(reuse_snap & u: roots->reuse) f(u.ids.off, u.ids.meta, list<uint32_t>::ew);
+    f(roots->reuse_tab.off, roots->reuse_tab.meta, list<uint32_t>::ew);
+    f(roots->notes.off, roots->notes.meta, list<note_rec>::ew);
+    for(note_rec & n: roots->notes)
+      if(n.id != ~uint32_t{0}) note(n.note);
+    f(roots->note_ix.off, roots->note_ix.meta, list<uint32_t>::ew);
     for(auto & r: reborn) kind(r.was);
     for(auto & k: retired) kind(k);
     // roots live: arrays of interns and sources - in the main pool (the texts themselves - in the pool of lines, he does not move)
@@ -763,10 +785,6 @@ struct ast_db {
   void drop_snapshot() {
     db_roots & r = *roots;
     auto zero = [](auto & l) { l.off = 0; l.meta = 0; };
-    zero(r.oplog);
-    zero(r.notes);
-    zero(r.born);
-    zero(r.reuse);
     r.valid = 0;
   }
   struct pool_stat {
@@ -876,53 +894,6 @@ struct ast_db {
     pool_scope in_pool(&pool);
     lane_guard g(pool.lock);
     db_roots & r = *roots;
-    for(note_rec & n: r.notes) release_note(n.note);
-    for(stored_entry & e: r.oplog)
-      if(auto * x = std::get_if<s_note>(&e.op)) release_note(x->note);
-    for(reuse_snap & u: r.reuse) u.ids.release();
-    list<stored_entry> log_snap;
-    log_snap.reserve(oplog.size()); // Just one piece: not abandoned when growing
-    uint32_t src = 0;
-    for(auto const & [count, e]: oplog) {
-      stored_op op = std::visit([&](auto const & x) -> stored_op {
-        using T = std::remove_cvref_t<decltype(x)>;
-        if constexpr(std::is_same_v<T, j_add>) return s_add{x.id, x.kind, x.where};
-        else if constexpr(std::is_same_v<T, j_replace>) return s_replace{x.id, x.kind};
-        else if constexpr(std::is_same_v<T, j_link>) return s_link{x.root};
-        else if constexpr(std::is_same_v<T, j_import>) {
-          s_import i{source_text(src), source_label_text(src)};
-          ++src;
-          return i;
-        } else if constexpr(std::is_same_v<T, j_mutate>) return s_mutate{x.id, x.kind, x.source};
-        else if constexpr(std::is_same_v<T, j_rollback>) return s_rollback{x.source};
-        else if constexpr(std::is_same_v<T, j_place>) return s_place{x.id, x.where};
-        else if constexpr(std::is_same_v<T, j_note>) return s_note{x.id, pool_note(x.note)};
-        else if constexpr(std::is_same_v<T, j_gap>) {
-          src += x.imports;
-          return s_gap{x.nodes, x.imports};
-        } else if constexpr(std::is_same_v<T, j_derived>) return s_derived{x.id};
-        else throw diagnostic("снимок: запись j_intern не хранится в журнале базы", {});
-      },
-          e.op);
-      log_snap.push_back(stored_entry{e.revision, count, op});
-    }
-    r.oplog.release();
-    r.oplog = log_snap;
-    r.notes.clear();
-    r.notes.release();
-    r.notes.reserve(notes.size());
-    for(auto const & [id, n]: notes) r.notes.push_back(note_rec{id, 0, pool_note(n)});
-    r.born.clear();
-    r.born.release();
-    r.born.reserve(born.size());
-    for(auto const & [id, b]: born) r.born.push_back(born_snap{id, 0, b.key, b.kind});
-    r.reuse.release();
-    r.reuse.reserve(reusable.size());
-    for(auto const & [key, u]: reusable) {
-      reuse_snap x{key, u.cursor, {}};
-      x.ids.assign(u.ids.begin(), u.ids.end());
-      r.reuse.push_back(x);
-    }
     r.revision = revision;
     r.births = births;
     r.edits = edits;
@@ -937,35 +908,7 @@ struct ast_db {
     births = r.births;
     edits = r.edits;
     prelude = node_id(r.prelude);
-    oplog.clear();
-    oplog.reserve(r.oplog.size());
-    for(stored_entry const & e: r.oplog) {
-      journal_op op = std::visit([&](auto const & x) -> journal_op {
-        using T = std::remove_cvref_t<decltype(x)>;
-        if constexpr(std::is_same_v<T, s_add>) return j_add{x.id, x.kind, x.where, &pool};
-        else if constexpr(std::is_same_v<T, s_replace>) return j_replace{x.id, x.kind, &pool};
-        else if constexpr(std::is_same_v<T, s_link>) return j_link{x.root};
-        else if constexpr(std::is_same_v<T, s_import>) return j_import{spool_str(x.text), spool_str(x.label)};
-        else if constexpr(std::is_same_v<T, s_mutate>) return j_mutate{x.id, x.kind, x.source, &pool};
-        else if constexpr(std::is_same_v<T, s_rollback>) return j_rollback{x.source};
-        else if constexpr(std::is_same_v<T, s_place>) return j_place{x.id, x.where};
-        else if constexpr(std::is_same_v<T, s_note>) return j_note{x.id, plain_note(x.note)};
-        else if constexpr(std::is_same_v<T, s_gap>) return j_gap{x.nodes, x.imports};
-        else return j_derived{x.id};
-      },
-          e.op);
-      oplog.push_back({e.strings, journal_entry{e.revision, std::move(op)}});
-    }
-    notes.clear();
-    for(note_rec const & n: r.notes) notes[n.id] = plain_note(n.note);
-    born.clear();
-    for(born_snap const & b: r.born) born.emplace(b.id, born_rec{b.kind, b.key});
-    reusable.clear();
-    for(reuse_snap const & u: r.reuse) {
-      auto & l = reusable[u.key];
-      l.ids.assign(u.ids.begin(), u.ids.end());
-      l.cursor = std::size_t(u.cursor);
-    }
+    note_cache.clear();
     uint32_t n = nodes.size();
     node_rev.resize(n, revision);
     birth.assign(n, 0);
@@ -1319,7 +1262,7 @@ struct ast_db {
     elab_ct.clear();
     elab_pass_error.reset();
     elab_changes.clear();
-    elab_mark m{{}, oplog.size(), changed.size(), false, reborn.size()};
+    elab_mark m{{}, roots->oplog.size(), changed.size(), false, reborn.size()};
     for(auto const & x: mutations)
       if(std::ranges::none_of(m.was, [&](auto const & w) { return w.first == x.target; })) m.was.push_back({x.target, nodes[node_id(x.target)].kind});
     touch_undo.clear();
@@ -1341,10 +1284,14 @@ struct ast_db {
     if(same) {
       for(std::size_t i = touch_undo.size(); i-- > 0;) node_rev[touch_undo[i].first] = touch_undo[i].second;
       changed.resize(m.changed_from);
-      auto tail = std::ranges::remove_if(oplog.begin() + std::ptrdiff_t(m.log_from), oplog.end(), [](auto const & e) {
-        return std::holds_alternative<j_rollback>(e.second.op) || (std::holds_alternative<j_mutate>(e.second.op) && std::get<j_mutate>(e.second.op).source);
-      });
-      oplog.erase(tail.begin(), tail.end());
+      auto & lg = roots->oplog;
+      std::size_t w = m.log_from;
+      for(std::size_t i = m.log_from; i < lg.size(); ++i) {
+        stored_entry const & e = lg[i];
+        bool drop = std::holds_alternative<s_rollback>(e.op) || (std::holds_alternative<s_mutate>(e.op) && std::get<s_mutate>(e.op).source);
+        if(!drop) lg[w++] = e;
+      }
+      lg.resize(w);
     }
     touch_undo.clear();
   }
@@ -1383,19 +1330,11 @@ struct ast_db {
   // do not grow the base and journal; the derivative numbers are stable (JIT and audit caches,
   // editor). The new node is completed without journal; at the end (reconciliation - flush_reborn)
   // in journal there is only a difference from the previous result.
-  struct born_rec {
-    node_kind kind; // type at birth (before completion)
-    uint64_t key;
-  };
   struct reborn_rec {
     uint32_t id;
     node_kind was; // pre-capture
     node_id parent;
     void const * holder;
-  };
-  struct reuse_list {
-    std::vector<uint32_t> ids;
-    std::size_t cursor = 0; // What to look for free (liberation returns to the beginning)
   };
 
   static void hash_mix(uint64_t & h, uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); }
@@ -1532,20 +1471,65 @@ struct ast_db {
   bool held_now(uint32_t x) const { return x < held.size() && held[x]; }
   uint64_t birth_of(node_id n) const { return birth[n.value]; }
 
+  // --- derivatives of node live (S5.3): born - a list in the roots, born_ix - by node ; reuse - by key, hash table ---
+  born_snap const * born_find(uint32_t id) const {
+    use_pool();
+    auto const & ix = roots->born_ix;
+    return id < ix.size() && ix[id] ? &roots->born[ix[id] - 1] : nullptr;
+  }
+  bool born_has(uint32_t id) const { return born_find(id) != nullptr; }
+  void born_add(uint32_t id, node_kind const & k, uint64_t key) {
+    use_pool();
+    auto & ix = roots->born_ix;
+    if(ix.size() <= id) ix.resize(std::max<std::size_t>(id + 1, ix.size() * 2), 0);
+    roots->born.push_back(born_snap{id, 0, key, k});
+    ix[id] = roots->born.size();
+  }
+  static uint32_t reuse_hash(uint64_t key) { return uint32_t((key * 0x9e3779b97f4a7c15ull) >> 40); }
+  // Place the key in reuse; create - open empty; ~0 - no
+  uint32_t reuse_at(uint64_t key, bool create) {
+    use_pool();
+    auto & tab = roots->reuse_tab;
+    if(tab.size() == 0) {
+      if(!create) return ~uint32_t{0};
+      tab.resize(64, 0);
+    }
+    uint32_t mask = tab.size() - 1;
+    uint32_t i = reuse_hash(key) & mask;
+    for(; tab[i]; i = (i + 1) & mask)
+      if(roots->reuse[tab[i] - 1].key == key) return tab[i] - 1;
+    if(!create) return ~uint32_t{0};
+    roots->reuse.push_back(reuse_snap{key, 0, {}});
+    tab[i] = roots->reuse.size();
+    if(uint64_t(roots->reuse.size()) * 2 > tab.size()) { // table half: twice as much, keys moved
+      list<uint32_t> bigger;
+      bigger.resize(std::size_t(tab.size()) * 2, 0);
+      uint32_t m2 = bigger.size() - 1;
+      for(uint32_t k = 0; k < roots->reuse.size(); ++k) {
+        uint32_t j = reuse_hash(roots->reuse[k].key) & m2;
+        while(bigger[j]) j = (j + 1) & m2;
+        bigger[j] = k + 1;
+      }
+      tab.release();
+      tab = bigger;
+    }
+    return roots->reuse.size() - 1;
+  }
+
   // Derivative node: former free with the same view at birth and place, otherwise new. Holder is a
   // list of node that the interpreter holds (releases release).
   node_id derive(node_kind k, span where, std::vector<uint32_t> & holder) {
     use_pool();
     lane_guard g(lock);
     uint64_t key = kind_hash(k, where); // place - as at the source (not the last import: editing it does not change)
-    auto & list = reusable[key];
-    for(std::size_t i = list.cursor, steps = 0; i < list.ids.size() && steps < 64; ++i, ++steps) {
-      uint32_t x = list.ids[i];
+    uint32_t slot = reuse_at(key, true);
+    for(std::size_t i = roots->reuse[slot].cursor, steps = 0; i < roots->reuse[slot].ids.size() && steps < 64; ++i, ++steps) {
+      uint32_t x = roots->reuse[slot].ids[i];
       node_id n(x);
       if(held_now(x) || reopened(n)) continue;
-      auto const & b = born.at(x);
+      auto const & b = *born_find(x);
       if(b.key != key || !kind_equal(b.kind, k) || nodes[n].where.begin != where.begin || nodes[n].where.end != where.end || nodes[n].where.source != where.source || installed(n)) continue;
-      list.cursor = i + 1;
+      roots->reuse[slot].cursor = i + 1;
       if(reopen.size() <= x) reopen.resize(x + 1, 0);
       reopen[x] = 1;
       node_kind was = std::move(nodes[n].kind);
@@ -1560,9 +1544,9 @@ struct ast_db {
     uint32_t saved = std::exchange(pinned_source, where.source);
     node_id n = add(k, where);
     pinned_source = saved;
-    born.emplace(n.value, born_rec{std::move(k), key});
-    list.ids.push_back(n.value);
-    list.cursor = list.ids.size();
+    born_add(n.value, k, key);
+    roots->reuse[slot].ids.push_back(n.value);
+    roots->reuse[slot].cursor = roots->reuse[slot].ids.size();
     log({j_derived{n.value}});
     hold(n.value, holder);
     return n;
@@ -1579,7 +1563,7 @@ struct ast_db {
     flush_reborn(0, &holder);
     for(uint32_t x: holder) {
       --held[x];
-      if(auto b = born.find(x); b != born.end()) reusable[b->second.key].cursor = 0;
+      if(auto b = born_find(x)) roots->reuse[reuse_at(b->key, true)].cursor = 0;
     }
     holder.clear();
   }
@@ -1656,12 +1640,13 @@ struct ast_db {
 
   // journal with new strings before each operation.
   std::vector<journal_entry> journal() const {
+    use_pool(); // journal is the pool listings of this database, and the current one may be alien (save_area: domain base created later)
     std::vector<journal_entry> out;
     uint32_t emitted = 0;
-    for(auto const & [strings_count, e]: oplog) {
-      for(; emitted < strings_count; ++emitted)
+    for(stored_entry const & e: roots->oplog) {
+      for(; emitted < e.strings; ++emitted)
         out.push_back({e.revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
-      out.push_back(e);
+      out.push_back(journal_entry{e.revision, const_cast<ast_db *>(this)->from_stored(e.op)});
     }
     for(; emitted < strings.size(); ++emitted)
       out.push_back({revision, j_intern{emitted, std::string(strings.text(symbol(emitted)))}});
@@ -1683,6 +1668,8 @@ struct ast_db {
   // The state of the program tree after playback is the same, journal grows by the total, not by
   // every key.
   void squash_log(uint64_t since, std::vector<uint32_t> const & drafts, uint32_t keep) {
+    use_pool();
+    auto oplog = log_entries();
     std::size_t from = 0;
     while(from < oplog.size() && oplog[from].second.revision < since) ++from;
     if(from == oplog.size()) return;
@@ -1695,7 +1682,7 @@ struct ast_db {
     auto draft_source = [&](uint32_t x) { return x != keep && std::ranges::contains(drafts, x) && !used.contains(x); };
     auto garbage = [&](uint32_t id) {
       node_id n(id);
-      return id < nodes.size() && std::ranges::contains(drafts, nodes[n].where.source) && !born.contains(id) && !installed(n);
+      return id < nodes.size() && std::ranges::contains(drafts, nodes[n].where.source) && !born_has(id) && !installed(n);
     };
     std::vector<std::pair<uint32_t, journal_entry>> out(oplog.begin(), oplog.begin() + std::ptrdiff_t(from));
     // last edit of node in the segment without mutations: (option type, id) → record number
@@ -1738,7 +1725,10 @@ struct ast_db {
       auto & g = std::get<j_gap>(out.back().second.op);
       (gap[i] == 1 ? g.nodes : g.imports) += 1;
     }
-    oplog = std::move(out);
+    // Back to the roots: import numbers in order (j_import is one, j_gap is as many as imports)
+    roots->oplog.clear();
+    uint32_t src = 0;
+    for(auto const & [count, e]: out) roots->oplog.push_back(stored_entry{e.revision, count, to_stored(e.op, src)});
   }
 
   // Play journal to an empty database.
@@ -1769,8 +1759,8 @@ struct ast_db {
         } else if constexpr(std::is_same_v<T, j_derived>) {
           node_id n(op.id);
           uint64_t key = kind_hash(nodes[n].kind, nodes[n].where);
-          born.emplace(op.id, born_rec{nodes[n].kind, key});
-          reusable[key].ids.push_back(op.id); // free: cursor from the beginning
+          born_add(op.id, nodes[n].kind, key);
+          roots->reuse[reuse_at(key, true)].ids.push_back(op.id); // free: cursor from the beginning
           log({j_derived{op.id}});
         } else if constexpr(std::is_same_v<T, j_gap>) {
           for(uint32_t i = 0; i < op.nodes; ++i) {
@@ -1789,15 +1779,37 @@ struct ast_db {
 
   // node (node_note) comments: Empty, no. Write in journal (as blank).
   node_note const * note_of(node_id n) const {
-    if(notes.empty()) return nullptr;
-    auto it = notes.find(n.value);
-    return it == notes.end() ? nullptr : &it->second;
+    use_pool();
+    auto const & ix = roots->note_ix;
+    if(n.value >= ix.size() || !ix[n.value]) return nullptr;
+    auto it = note_cache.find(n.value);
+    if(it == note_cache.end()) it = note_cache.emplace(n.value, plain_note(roots->notes[ix[n.value] - 1].note)).first;
+    return &it->second;
   }
   void set_note(node_id n, node_note x) {
+    use_pool();
     bool empty = x.lead.empty() && x.tail.empty() && x.end.empty();
-    if(empty && !notes.contains(n.value)) return;
-    if(empty) notes.erase(n.value);
-    else notes[n.value] = x;
+    auto & ix = roots->note_ix;
+    bool has = n.value < ix.size() && ix[n.value];
+    if(empty && !has) return;
+    if(has) {
+      note_rec & old = roots->notes[ix[n.value] - 1];
+      release_note(old.note);
+      if(empty) {
+        old.id = ~uint32_t{0};
+        old.note = {};
+        ix[n.value] = 0;
+        note_cache.erase(n.value);
+      } else {
+        roots->notes[ix[n.value] - 1].note = pool_note(x);
+        note_cache[n.value] = x;
+      }
+    } else {
+      if(ix.size() <= n.value) ix.resize(std::max<std::size_t>(n.value + 1, ix.size() * 2), 0);
+      roots->notes.push_back(note_rec{n.value, 0, pool_note(x)});
+      ix[n.value] = roots->notes.size();
+      note_cache[n.value] = x;
+    }
     log({j_note{n.value, std::move(x)}});
   }
   // Node to saved id, and disassembled anew as from: the text of the unit - without lines in
@@ -1829,9 +1841,60 @@ struct ast_db {
   uint32_t size() const { return nodes.size(); }
 
   mutable std::unordered_map<std::string, uint32_t> program_kinds; // ast.X → node announcement (program_kind)
+  // Write journal live at roots (S5.3): stored_entry - without pointers, species share pieces of pool with the src
+  // record - the import number that will occupy j_import (grows by j_import and imports by j_gap)
+  stored_op to_stored(journal_op const & op, uint32_t & src) const {
+    return std::visit([&](auto const & x) -> stored_op {
+      using T = std::remove_cvref_t<decltype(x)>;
+      if constexpr(std::is_same_v<T, j_add>) return s_add{x.id, x.kind, x.where};
+      else if constexpr(std::is_same_v<T, j_replace>) return s_replace{x.id, x.kind};
+      else if constexpr(std::is_same_v<T, j_link>) return s_link{x.root};
+      else if constexpr(std::is_same_v<T, j_import>) {
+        s_import i{source_text(src), source_label_text(src)};
+        ++src;
+        return i;
+      } else if constexpr(std::is_same_v<T, j_mutate>) return s_mutate{x.id, x.kind, x.source};
+      else if constexpr(std::is_same_v<T, j_rollback>) return s_rollback{x.source};
+      else if constexpr(std::is_same_v<T, j_place>) return s_place{x.id, x.where};
+      else if constexpr(std::is_same_v<T, j_note>) return s_note{x.id, pool_note(x.note)};
+      else if constexpr(std::is_same_v<T, j_gap>) {
+        src += x.imports;
+        return s_gap{x.nodes, x.imports};
+      } else if constexpr(std::is_same_v<T, j_derived>) return s_derived{x.id};
+      else throw diagnostic("журнал: запись j_intern не хранится в журнале базы", {});
+    },
+        op);
+  }
+  journal_op from_stored(stored_op const & op) {
+    return std::visit([&](auto const & x) -> journal_op {
+      using T = std::remove_cvref_t<decltype(x)>;
+      if constexpr(std::is_same_v<T, s_add>) return j_add{x.id, x.kind, x.where, &pool};
+      else if constexpr(std::is_same_v<T, s_replace>) return j_replace{x.id, x.kind, &pool};
+      else if constexpr(std::is_same_v<T, s_link>) return j_link{x.root};
+      else if constexpr(std::is_same_v<T, s_import>) return j_import{spool_str(x.text), spool_str(x.label)};
+      else if constexpr(std::is_same_v<T, s_mutate>) return j_mutate{x.id, x.kind, x.source, &pool};
+      else if constexpr(std::is_same_v<T, s_rollback>) return j_rollback{x.source};
+      else if constexpr(std::is_same_v<T, s_place>) return j_place{x.id, x.where};
+      else if constexpr(std::is_same_v<T, s_note>) return j_note{x.id, plain_note(x.note)};
+      else if constexpr(std::is_same_v<T, s_gap>) return j_gap{x.nodes, x.imports};
+      else return j_derived{x.id};
+    },
+        op);
+  }
+  // journal as a whole (line to time, record) - for squash_log and export
+  std::vector<std::pair<uint32_t, journal_entry>> log_entries() {
+    use_pool();
+    std::vector<std::pair<uint32_t, journal_entry>> out;
+    out.reserve(roots->oplog.size());
+    for(stored_entry const & e: roots->oplog) out.push_back({e.strings, journal_entry{e.revision, from_stored(e.op)}});
+    return out;
+  }
   void log(journal_op op) {
+    use_pool();
     lane_guard g(lock);
-    oplog.push_back({strings.size(), journal_entry{revision, std::move(op)}});
+    uint32_t src = std::holds_alternative<j_import>(op) ? uint32_t(roots->sources.size() - 1) : 0;
+    stored_op st = to_stored(op, src);
+    roots->oplog.push_back(stored_entry{revision, strings.size(), st});
   }
 
   void link_rec(node_id root) {
@@ -1877,7 +1940,6 @@ struct ast_db {
   node_id prelude; // prelude module: kernel designs written in language
   bool loading_prelude = false;
   uint64_t revision = 0;
-  std::vector<std::pair<uint32_t, journal_entry>> oplog; // (line interned at time, operation)
   // Live in the roots of the area (S5.3): pool lists, not std::vector - fixing them does not copy
   list<uint64_t> & node_rev = roots->node_rev;
   list<uint64_t> & edited_at = roots->edited_at; // revision of the last node edit (not mutations)
@@ -1908,8 +1970,6 @@ struct ast_db {
   std::unordered_map<uint32_t, derived_rec> derived;
   uint64_t edits = 0; // replacement
   // derivatives of node (derive)
-  std::unordered_map<uint32_t, born_rec> born;
-  std::unordered_map<uint64_t, reuse_list> reusable; // Key to birth and location node
   std::vector<uint32_t> held; // interpreters holding the knot
   std::vector<uint8_t> reopen; // It's taken over, it hasn't been reconciled yet.
   std::vector<reborn_rec> reborn;
@@ -1919,7 +1979,8 @@ struct ast_db {
   // its revision, base edits and arguments → the result (0/1, -1 - error: conservative choice). A pure
   // function is one sum to the same arguments; printing does not change the base, so mutable.
   mutable std::unordered_map<std::string, int8_t> print_choices;
-  std::unordered_map<uint32_t, node_note> notes; // Node → comments (layout)
+  // Cache for note_of (pointer to plain view): truth - roots -> notes; filled on demand, set_note leads it
+  mutable std::unordered_map<uint32_t, node_note> note_cache;
 };
 
 // The parsing rule of the decl blocks is: `syntax {r} => f(r);` in her body. The ad repeats the
