@@ -221,7 +221,7 @@ struct m_stream {
   m_list<mval> buf;
   bool closed = false;
   m_list<uint32_t> readers, writers;
-  uint8_t host = 0; // host resource (§9.5 step 12.1): 1 file to read, 2 file to write, 3 network; resource itself outside the dump
+  uint8_t host = 0; // host resource (§9.5 step 12.1): 1 file to read, 2 to write, 3 to network, 4 to IPC reader, 5 to IPC writer; the resource itself is outside the dump
 };
 
 // Body area entity functions: its local functions declared (entity .f(…)).
@@ -313,6 +313,8 @@ struct process_machine {
     int file_fd = -1;
     bool connected = false;
     bool io_busy = false;
+    int ipc = -1; // IPC stream (host 4 reader, 5 writer): end number in ipcs
+    bool ipc_armed = false, ipc_ticking = false;
     uint64_t offset = 0;
     std::string io_buf;
     sockaddr_in addr{};
@@ -339,6 +341,12 @@ struct process_machine {
     }
     if(kind == "ipc") {
       for(auto & c: ipcs) c.close();
+      for(auto & s: st.streams)
+        if((s.host == 4 || s.host == 5) && !s.closed) { // IPC streams - closed externally
+          s.closed = true;
+          for(uint32_t r: std::exchange(s.readers, {})) wake(r);
+          for(uint32_t w: std::exchange(s.writers, {})) wake(w);
+        }
       return;
     }
     uint8_t want = kind == "net" ? 3 : 0;
@@ -692,7 +700,7 @@ struct process_machine {
 
   // --- host resources (step 12.1) ---
 
-  enum : uint64_t { op_accept = 1, op_recv, op_send, op_connect, op_fread, op_fwrite, op_psi };
+  enum : uint64_t { op_accept = 1, op_recv, op_send, op_connect, op_fread, op_fwrite, op_psi, op_ipc, op_ipc_tick };
   static uint64_t io_tag(uint64_t op, uint64_t sid, uint64_t peer) { return (op << 56) | (sid << 24) | peer; }
   [[noreturn]] static void rt_fail(std::string_view type, std::string what, span where) {
     diagnostic d(std::move(what), where, diag_kind::runtime);
@@ -760,6 +768,56 @@ struct process_machine {
     if(pr.fd < 0) return;
     ++io_pending;
     io({}).recv_all(pr.fd, io_tag(op_recv, sid, p));
+  }
+  // IPC as a stream (as in the interpreter, ipc_pump): the reader is messages from the ring to the stream queue; the wait is a futex
+  // order from io_uring plus a 200 ms timer (another process could die without waking); the word futex is taken to the parsing ring.
+  void ipc_pump(uint64_t sid, bool want) {
+    host_rec * h = host_of(sid);
+    m_stream & s = st.streams[sid];
+    if(!h || h->ipc < 0 || s.closed) return;
+    bool reads = s.host == 4;
+    os::ipc_channel & c = ipcs[std::size_t(h->ipc)];
+    if(!c.alive()) {
+      s.closed = true;
+      for(uint32_t r: std::exchange(s.readers, {})) wake(r);
+      for(uint32_t w: std::exchange(s.writers, {})) wake(w);
+      return;
+    }
+    uint32_t seen = reads ? c.data_seen() : c.space_seen();
+    if(reads) {
+      for(std::string m;;) {
+        int r = c.recv(m, 0);
+        if(r == 0) {
+          deliver(sid, mval{std::string_view(m)});
+          continue;
+        }
+        if(r == 6 && s.buf.empty()) { // The writer left and read it.
+          s.closed = true;
+          for(uint32_t w: std::exchange(s.readers, {})) wake(w);
+          return;
+        }
+        break;
+      }
+      want = want || !s.readers.empty();
+    } else {
+      for(uint32_t w: std::exchange(s.writers, {})) wake(w); // The place could have appeared: let them repeat
+      return;
+    }
+    if(want && !s.closed) ipc_arm(sid, seen);
+  }
+  void ipc_arm(uint64_t sid, uint32_t seen) {
+    host_rec & h = host[sid];
+    os::ipc_channel & c = ipcs[std::size_t(h.ipc)];
+    if(!h.ipc_armed) {
+      h.ipc_armed = true;
+      ++io_pending;
+      io({}).futex_wait(st.streams[sid].host == 4 ? c.data_word() : c.space_word(), seen, io_tag(op_ipc, sid, 0));
+    }
+    if(!h.ipc_ticking) {
+      h.ipc_ticking = true;
+      ++io_pending;
+      io({}).timeout(200, io_tag(op_ipc_tick, sid, 0));
+    }
   }
   void file_write_next(uint64_t sid) {
     host_rec & h = host[sid];
@@ -853,6 +911,14 @@ struct process_machine {
           for(uint32_t r: std::exchange(s.readers, {})) wake(r);
         }
         break;
+      case op_ipc:
+        h.ipc_armed = false;
+        ipc_pump(sid, false);
+        break;
+      case op_ipc_tick:
+        h.ipc_ticking = false;
+        ipc_pump(sid, false);
+        break;
       case op_fwrite: {
         h.io_busy = false;
         host_peer & q = h.peers[0];
@@ -873,6 +939,10 @@ struct process_machine {
   void close_host(uint64_t sid) {
     host_rec * h = host_of(sid);
     if(!h) return;
+    if(h->ipc >= 0) { // The end of the channel is closed (the other will see it)
+      ipcs[std::size_t(h->ipc)].close();
+      h->ipc = -1;
+    }
     if(h->listen_fd >= 0) {
       io({}).cancel_fd(h->listen_fd);
       ::close(h->listen_fd);
@@ -3066,6 +3136,17 @@ struct process_machine {
       return finish(std::move(out));
     }
     if(helper.str(name).starts_with("net_") || helper.str(name).starts_with("file_")) return finish(host_op(helper.str(name), a, db[n].where));
+    if(helper.str(name) == "ipc_raw_stream") { // (Name, Role, Capacity) → Flow by number, like an interpreter
+      std::vector<value> va;
+      for(auto const & x: a) va.push_back(to_value(x));
+      std::size_t before = ipcs.size();
+      mval r = from_value(helper.ipc_call(ipcs, machine_granted("ipc"), "ipc_raw_open", va, db[n].where), db[n].where);
+      if(ipcs.size() == before) return finish(std::move(r)); // Not open: kernel status as it is
+      uint64_t sid = host_stream(std::string(a[1].as<m_str>()) == "r" ? 4 : 5);
+      st.streams[sid].cap = 16;
+      host[sid].ipc = int(before);
+      return finish(from_value(helper.host_status(0, int64_t(sid)), db[n].where));
+    }
     if(helper.str(name).starts_with("ipc_raw_")) { // as storage : execution - the assistant, table and rights - the machine
       std::vector<value> va;
       for(auto const & x: a) va.push_back(to_value(x));
@@ -3295,6 +3376,22 @@ struct process_machine {
     m_stream & s = st.streams[sid];
     uint32_t me = st.current;
     out = mval{m_unit{}};
+    if(n == "stream_write" && (s.host == 4 || s.host == 5)) { // IPC: Message - ring; no space - futex application, task repeated
+      if(s.host == 4) throw diagnostic("поток IPC открыт на чтение", where);
+      host_rec * h = host_of(sid);
+      if(!h || h->ipc < 0 || s.closed || !ipcs[std::size_t(h->ipc)].alive()) rt_fail("closed_stream", "запись в закрытый поток", where);
+      if(!a[1].is<m_str>()) throw diagnostic(cat("в IPC — байты (str), получено ", describe(a[1])), where);
+      os::ipc_channel & c = ipcs[std::size_t(h->ipc)];
+      uint32_t seen = c.space_seen();
+      int r = c.send(a[1].as<m_str>(), 0);
+      if(r == 0) return true;
+      if(r == 6) rt_fail("closed_stream", "читатель канала ушёл", where);
+      if(r == 7) rt_fail("io_error", cat("сообщение больше кольца (", c.cap(), " байт)"), where);
+      if(r != 5) rt_fail("io_error", "IPC: ошибка записи", where);
+      ipc_arm(sid, seen);
+      s.writers.push_back(me);
+      return false;
+    }
     if(n == "stream_write" && s.host) { // stream host : file to write - request
       if(s.host == 3) throw diagnostic("в сеть — send(сеть, peer, байты)", where);
       if(s.host == 1) throw diagnostic("файл открыт на чтение", where);
@@ -3325,6 +3422,7 @@ struct process_machine {
       return true;
     }
     if(n == "stream_read" || n == "stream_more") {
+      if(s.host == 4 && s.buf.empty() && !s.closed) ipc_pump(sid, true); // IPC: Remove from the ring; empty - waiting
       if(s.buf.empty() && !s.closed) {
         if(host_rec * h = s.host == 1 ? host_of(sid) : nullptr; h && !h->io_busy) { // File: The next piece is the application
           h->io_busy = true;

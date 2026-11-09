@@ -2,6 +2,7 @@
 // futex, reader - data; other fiber go while someone waits. Closing the writer - the reader finishes reading and sees a closed stream.
 //
 // grant: ipc
+// machine
 // out: 300 сообщений, байт 790 , первое 0 , последнее 299
 // out: закрыт: true
 // out: уже закрыт
