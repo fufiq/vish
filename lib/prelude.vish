@@ -944,6 +944,141 @@ ipc_send(ipc c, str msg, i64 ms) {
 ipc_recv(ipc c, i64 ms) => ipc_checked(ipc_raw_recv(c.id, ms)).text;
 close(ipc c) => ipc_raw_close(c.id);
 
+// Cryptography is a VM service in a language.
+// 
+// 
+// 
+// 
+// Therefore, in the language itself, and not the wrapper over the system eithera (C++ - only the VM connection with the OS). *My:*
+// order (hash → MAC → cipher → signature), names and forms. SHA-256 (FIPS 180-4) over bytes of string, words - i64 within 32 bits
+// (mask); the cycle over dense arrays i64 - what takes JIT.
+sha256_k() => array{
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+sha256_rotr(i64 x, i64 n) => ((x >> n) | (x << (32 - n))) & 0xffffffff;
+// Schedule: w[16..63] of w[0..15]. Cycle boundaries - parameters: JIT does not take `for(…: range(<константа>))`
+// (HANDOFF debt) range(n) with a short-term value - takes
+sha256_schedule(w, i64 steps) {
+  for(t : range(steps)) {
+    x = w[t + 1];
+    y = w[t + 14];
+    s0 = (sha256_rotr(x, 7) ^ sha256_rotr(x, 18)) ^ (x >> 3);
+    s1 = (sha256_rotr(y, 17) ^ sha256_rotr(y, 19)) ^ (y >> 10);
+    w[t + 16] = (((w[t] + s0) + w[t + 9]) + s1) & 0xffffffff;
+  }
+}
+// 64 rounds; result in h (addition to previous state)
+sha256_rounds(h, w, k, i64 steps) {
+  a = h[0];
+  b = h[1];
+  c = h[2];
+  d = h[3];
+  e = h[4];
+  f = h[5];
+  g = h[6];
+  hh = h[7];
+  for(r : range(steps)) {
+    big1 = (sha256_rotr(e, 6) ^ sha256_rotr(e, 11)) ^ sha256_rotr(e, 25);
+    ch = (e & f) ^ ((e ^ 0xffffffff) & g);
+    t1 = ((((hh + big1) + ch) + k[r]) + w[r]) & 0xffffffff;
+    big0 = (sha256_rotr(a, 2) ^ sha256_rotr(a, 13)) ^ sha256_rotr(a, 22);
+    maj = ((a & b) ^ (a & c)) ^ (b & c);
+    t2 = (big0 + maj) & 0xffffffff;
+    hh = g;
+    g = f;
+    f = e;
+    e = (d + t1) & 0xffffffff;
+    d = c;
+    c = b;
+    b = a;
+    a = (t1 + t2) & 0xffffffff;
+  }
+  h[0] = (h[0] + a) & 0xffffffff;
+  h[1] = (h[1] + b) & 0xffffffff;
+  h[2] = (h[2] + c) & 0xffffffff;
+  h[3] = (h[3] + d) & 0xffffffff;
+  h[4] = (h[4] + e) & 0xffffffff;
+  h[5] = (h[5] + f) & 0xffffffff;
+  h[6] = (h[6] + g) & 0xffffffff;
+  h[7] = (h[7] + hh) & 0xffffffff;
+}
+sha256_block(h, w, k) {
+  sha256_schedule(w, 48);
+  sha256_rounds(h, w, k, 64);
+}
+// byte in the word: 4 (cycle boundary - runtime - value, not constant: JIT does not take range(<константа>) - debt HANDOFF)
+sha256_four(i64 at) => 4 + (at - at);
+// the word t block blk (4 bytes to the senior ahead) with the addition: 0x80 for the data, zeros, length in bits at the end
+sha256_word(str data, i64 n, i64 total, i64 bits, i64 at) {
+  word = 0;
+  for(j : range(sha256_four(at))) {
+    pos = at + j;
+    b = if(pos < n) data[pos] else if(pos == n) 128 else if(pos >= total - 8) (bits >> (8 * ((total - 1) - pos))) & 255 else 0;
+    word = (word << 8) | b;
+  }
+  word
+}
+sha256_load(str data, i64 n, i64 total, i64 bits, i64 blk, w, i64 words) {
+  for(t : range(words)) w[t] = sha256_word(data, n, total, bits, (blk * 64) + (t * 4));
+}
+sha256_zeros(i64 n) {
+  w = array{};
+  for(t : range(n)) w.push(0);
+  w
+}
+// 8 hash words (32 bits each) from string bytes
+sha256_words(str data) {
+  n = data.size;
+  total = (((n + 9) + 63) / 64) * 64; // data, byte 0x80, zeros, 8 bytes of length in bits (older forward)
+  bits = n * 8;
+  h = array{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  k = sha256_k();
+  w = sha256_zeros(64);
+  for(blk : range(total / 64)) {
+    sha256_load(data, n, total, bits, blk, w, 16);
+    sha256_block(h, w, k);
+  }
+  h
+}
+// 32 bytes of hash - byte string
+sha256(str data) {
+  h = sha256_words(data);
+  r = "";
+  for(x : h) r = (((r + text_byte((x >> 24) & 255)) + text_byte((x >> 16) & 255)) + text_byte((x >> 8) & 255)) + text_byte(x & 255);
+  r
+}
+// hash - hexadecimal record (64 characters)
+sha256_hex(str data) {
+  h = sha256_words(data);
+  r = "";
+  for(x : h) r = r + text_hex(x, 8);
+  r
+}
+// HMAC-SHA-256 (RFC 2104): key of any length; total 32 bytes in row
+hmac_sha256(str key, str data) {
+  k = if(key.size > 64) sha256(key) else key;
+  while(k.size < 64) k = k + text_byte(0);
+  ipad = "";
+  opad = "";
+  for(j : range(64)) {
+    ipad = ipad + text_byte(k[j] ^ 0x36);
+    opad = opad + text_byte(k[j] ^ 0x5c);
+  }
+  sha256(opad + sha256(ipad + data))
+}
+hmac_sha256_hex(str key, str data) {
+  m = hmac_sha256(key, data);
+  r = "";
+  for(j : range(32)) r = r + text_hex(m[j], 2);
+  r
+}
+
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
 // error - his message.
@@ -3124,7 +3259,7 @@ jit_compile(cg, f, types, type result) {
     } else gen_named_call(e, callee_name(callee), xs0);
   };
   gen_named_call(e, str name, xs) => {
-    kc = jit_const(e, ctx);
+    kc = if(name == "range") array{} else jit_const(e, ctx); // range(48) with a known boundary is still the boundary of the cycle, not the value-constant.
     v = find(name);
     if(kc.size == 1) gen_const(kc[0]);
     else if(name == "") bad("вызов значения");
