@@ -1,6 +1,10 @@
-// JIT regression (found 2026-11-09 when editing `!is_index`): a range(<константа>) cycle with the sum of two calls of one function - `s
-// += rot(x, 7) + rot(x, 18)` - after the JIT began taking such cycles, returned 0 instead of the sum: calls went node VM (service), the
-// result was lost. Ranner compares the JIT with the interpreter: silently incorrect machine code is worse than the interpreter.
+// range(<константа>) cycle in JIT (found and corrected 2026-11-09): an argument-expression call (body for) was considered “folded into compile-time”,
+// observations of its node were discarded - JIT did not know body types, some expressions left node VM, and `s += rot(x, 7) + rot(x, 18)` gave 0
+// (tacitly incorrect code; the first attempt to consider `!is_index` the value of bool - this was opened and pumped out). Now the call is not folded if
+// the run-time value was observed inside: functions are compiled into machine code (jit-compiled), the runner compares the JIT with the interpreter.
+// jit-compiled: two_calls
+// jit-compiled: twice
+// jit-compiled: neighbors
 // out: 37867880448 2256 2304
 rot(i64 x, i64 n) => ((x >> n) | (x << (32 - n))) & 0xffffffff;
 two_calls(w) {

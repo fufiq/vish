@@ -8874,6 +8874,15 @@ struct interpreter {
 
     // curled up in compile-time: all arguments and result known, runtime no effects
     bool folded_now = checking() && all_known && r.normal() && r.v.known() && !last_rt_effect;
+    // Argument-expression (expr: body for, while...) reads and changes the variables of the caller: all arguments are “known”, the result is also, but
+    // inside there was a runtime-value (w[t] at run-time-array). Such a challenge will not be curtailed: observations of its node need JIT (cycle body
+    // types according to range(<константа>)); before they were discarded, some expressions went node VM - and `s += f(x, 7) + f(x, 18)` gave 0.
+    if(folded_now)
+      for(std::size_t i = journal_mark; i < journal.size(); ++i)
+        if(journal[i].seen && !journal[i].v.known()) {
+          folded_now = false;
+          break;
+        }
     if(checking()) note_layer(f, key, journal_mark, folded_now);
     if(folded_now) {
       emit({report_event::folded, std::string(str(fn.name)), {}, {}, {}, {}});

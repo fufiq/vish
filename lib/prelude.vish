@@ -962,10 +962,9 @@ sha256_k() => array{
   0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 sha256_rotr(i64 x, i64 n) => ((x >> n) | (x << (32 - n))) & 0xffffffff;
-// Schedule: w[16..63] of w[0..15]. Cycle boundaries - parameters: JIT does not take `for(…: range(<константа>))`
-// (HANDOFF debt) range(n) with a short-term value - takes
-sha256_schedule(w, i64 steps) {
-  for(t : range(steps)) {
+// Schedule: w[16..63] of w[0..15]
+sha256_schedule(w) {
+  for(t : range(48)) {
     x = w[t + 1];
     y = w[t + 14];
     s0 = (sha256_rotr(x, 7) ^ sha256_rotr(x, 18)) ^ (x >> 3);
@@ -974,7 +973,7 @@ sha256_schedule(w, i64 steps) {
   }
 }
 // 64 rounds; result in h (addition to previous state)
-sha256_rounds(h, w, k, i64 steps) {
+sha256_rounds(h, w, k) {
   a = h[0];
   b = h[1];
   c = h[2];
@@ -983,7 +982,7 @@ sha256_rounds(h, w, k, i64 steps) {
   f = h[5];
   g = h[6];
   hh = h[7];
-  for(r : range(steps)) {
+  for(r : range(64)) {
     big1 = (sha256_rotr(e, 6) ^ sha256_rotr(e, 11)) ^ sha256_rotr(e, 25);
     ch = (e & f) ^ ((e ^ 0xffffffff) & g);
     t1 = ((((hh + big1) + ch) + k[r]) + w[r]) & 0xffffffff;
@@ -1009,23 +1008,21 @@ sha256_rounds(h, w, k, i64 steps) {
   h[7] = (h[7] + hh) & 0xffffffff;
 }
 sha256_block(h, w, k) {
-  sha256_schedule(w, 48);
-  sha256_rounds(h, w, k, 64);
+  sha256_schedule(w);
+  sha256_rounds(h, w, k);
 }
-// byte in the word: 4 (cycle boundary - runtime - value, not constant: JIT does not take range(<константа>) - debt HANDOFF)
-sha256_four(i64 at) => 4 + (at - at);
 // the word t block blk (4 bytes to the senior ahead) with the addition: 0x80 for the data, zeros, length in bits at the end
 sha256_word(str data, i64 n, i64 total, i64 bits, i64 at) {
   word = 0;
-  for(j : range(sha256_four(at))) {
+  for(j : range(4)) {
     pos = at + j;
     b = if(pos < n) data[pos] else if(pos == n) 128 else if(pos >= total - 8) (bits >> (8 * ((total - 1) - pos))) & 255 else 0;
     word = (word << 8) | b;
   }
   word
 }
-sha256_load(str data, i64 n, i64 total, i64 bits, i64 blk, w, i64 words) {
-  for(t : range(words)) w[t] = sha256_word(data, n, total, bits, (blk * 64) + (t * 4));
+sha256_load(str data, i64 n, i64 total, i64 bits, i64 blk, w) {
+  for(t : range(16)) w[t] = sha256_word(data, n, total, bits, (blk * 64) + (t * 4));
 }
 sha256_zeros(i64 n) {
   w = array{};
@@ -1041,7 +1038,7 @@ sha256_words(str data) {
   k = sha256_k();
   w = sha256_zeros(64);
   for(blk : range(total / 64)) {
-    sha256_load(data, n, total, bits, blk, w, 16);
+    sha256_load(data, n, total, bits, blk, w);
     sha256_block(h, w, k);
   }
   h
@@ -2462,6 +2459,15 @@ jit_compile(cg, f, types, type result) {
   };
   // ct-state of value (§5.6) machine code does not carry: the code with it is executed by the interpreter
   ct_state_op(str name) => (name == "ct_state") || ((name == "set_ct_state") || (name == "call_site"));
+  // calling the local function of the compiled function: the VM node does not see it (the ad is executed by the interpreter, it is not in the machine code)
+  uses_local_fn(e) => {
+    found = (code_kind(e) == ast.call) && {
+      ast.call{c, _, _, _, _, _, _} = e;
+      (callee_name(c) != "") && (local_fns(callee_name(c)).size > 0)
+    };
+    for(x : code_items(e)) if(!found) found = uses_local_fn(x);
+    found
+  };
   uses_ct_state(e) => {
     found = (code_kind(e) == ast.call) && {
       ast.call{c, _, _, _, _, _, _} = e;
@@ -4574,6 +4580,7 @@ jit_compile(cg, f, types, type result) {
   vm_or_bad(e, str why) => {
     t = ty(e);
     if(uses_ct_state(e)) bad("ct-состояние — интерпретатор");
+    else if(uses_local_fn(e)) bad(fmt"{why}: узел VM вызывает локальную функцию — интерпретатор");
     else if(fusing && !in_b) bad(fmt"генератор: {why}");
     else if(tries.size > 0) bad(fmt"{why} (внутри try)");
     else if((t == jc_range) || is_stream(t)) bad(why);
