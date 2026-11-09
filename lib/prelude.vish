@@ -1297,56 +1297,49 @@ chacha20_poly1305_open(str key, str nonce, str aad, str box) {
   chacha20_xor(key, nonce, 1, cipher)
 }
 
-// X25519 (RFC 7748) - key exchange, step 3 cryptography. GF(2^255 − 19) field: number - 16 limbs of 16 bits in i64 (as in TweetNaCl: works
-// < 2^36 - stock i64 large), Montgomery staircase at 255 steps. Private key - 32 random bytes (random_bytes), public -
-// x25519_base(приватный); shared secret - x25519(мой приватный, чужой публичный): two parties have one. My form and names. Speed is the
-// author’s “base level” (the interpreter is a second per point multiplication); there is no hardware acceleration. 2n − 1 zeros: the
-// product of two numbers of n limbs
-gf_wide(i64 n) {
-  o = array{};
-  for(k : range((2 * n) - 1)) o.push(0);
-  o
-}
-gf_zero() {
-  o = array{};
-  for(k : range(16)) o.push(0);
-  o
-}
+// X25519 (RFC 7748) - key exchange, step 3 cryptography. GF(2^255 − 19) field: number - 16 limbs of 16 bits in i64 (as in TweetNaCl: works < 2^36 -
+// stock i64 large), Montgomery staircase at 255 steps. The private key is 32 random bytes (random_bytes), the public key is x25519_base(приватный);
+// the common secret is x25519(мой приватный, чужой публичный): two parties have one. My form and names. Speed is the author’s “base level” (the
+// interpreter is a second per point multiplication); there is no hardware acceleration. Zeros are an array literal, not a cycle: `for(k : range(31))
+// t.push(0)` is entirely known as parsing (purely compiler computation) - JIT gives this function to the interpreter; a literal of known zeros is a
+// "known array", the same (see gf_mul).
+gf_zero() => array{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 gf_car(o) {
-  for(i : range(o.size)) {
+  for(i : range(16)) {
     o[i] = o[i] + 65536;
     c = o[i] >> 16;
-    if(i < (o.size - 1)) o[i + 1] = (o[i + 1] + c) - 1 else o[0] = (o[0] + (c - 1)) + (37 * (c - 1));
+    if(i < 15) o[i + 1] = (o[i + 1] + c) - 1 else o[0] = (o[0] + (c - 1)) + (37 * (c - 1));
     o[i] = o[i] - (c << 16);
   }
 }
 gf_sel(p, q, i64 b) {
   c = -b; // b = 1 → all units, 0 → zeros
-  for(i : range(p.size)) {
+  for(i : range(16)) {
     t = c & (p[i] ^ q[i]);
     p[i] = p[i] ^ t;
     q[i] = q[i] ^ t;
   }
 }
 gf_add(o, a, b) {
-  for(i : range(o.size)) o[i] = a[i] + b[i];
+  for(i : range(16)) o[i] = a[i] + b[i];
 }
 gf_sub(o, a, b) {
-  for(i : range(o.size)) o[i] = a[i] - b[i];
+  for(i : range(16)) o[i] = a[i] - b[i];
 }
 gf_mul(o, a, b) {
-  t = gf_wide(a.size);
-  for(i : range(a.size)) {
+  z = a[0] - a[0]; // run-time-zero: the array of LETTERAL ZERO parsing considers known, and the JIT gives the function to the interpreter (spec §9.5)
+  t = array{z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z};
+  for(i : range(16)) {
     ai = a[i];
-    for(j : range(b.size)) t[i + j] = t[i + j] + (ai * b[j]);
+    for(j : range(16)) t[i + j] = t[i + j] + (ai * b[j]);
   }
-  for(i : range(a.size - 1)) t[i] = t[i] + (38 * t[i + a.size]);
-  for(i : range(o.size)) o[i] = t[i];
+  for(i : range(15)) t[i] = t[i] + (38 * t[i + 16]);
+  for(i : range(16)) o[i] = t[i];
   gf_car(o);
   gf_car(o);
 }
 gf_copy(o, a) {
-  for(i : range(o.size)) o[i] = a[i];
+  for(i : range(16)) o[i] = a[i];
 }
 // a^(p−2): inverse modulus p = 2^255 − 19
 gf_inv(o, a) {
