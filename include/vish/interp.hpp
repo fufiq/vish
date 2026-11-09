@@ -7399,7 +7399,7 @@ struct interpreter {
       auto const & i = db.index_of(n);
       value * arr = place(i.object, env, frame);
       flow idx = eval(i.index, env, frame);
-      if(!arr || arr->is<rt_v>() || !idx.v.known()) return nullptr;
+      if(!arr || arr->is<rt_v>() || !idx.v.known() || !arr->is<array_v>()) return nullptr; // not array (line, unit, unit) - no space, not std::get
       return arr->as<array_v>().generic_cell(checked_index(*arr, idx.v, db[n].where));
     }
     if(db.is_member(n)) { // field

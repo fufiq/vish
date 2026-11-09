@@ -1,0 +1,40 @@
+// JIT: Variable Argument-Place Parameter (p[1], q[1]) - no record is lost (tools/jit_fuzz .py 2026-11-09 found). In the past, embedding asked if the
+// parameter changed the COMPOUNDING function (jit_writes(f, i)) rather than the called function: swap_b(p[1], q[1], 1) received a copy of q[1] and
+// the sum was 0 instead of 4. Runner checks the JIT with the interpreter.
+// out: 4 4
+swap_b(a, b, i64 sel) {
+  c = -sel;
+  for(i : range(4)) {
+    t = c & 1;
+    b[i] = b[i] ^ t;
+  }
+}
+mk(i64 seed) {
+  a = array{};
+  for(k : range(4)) a.push(1);
+  a
+}
+f(p, q) {
+  swap_b(p[1], q[1], 1);
+  0
+}
+g(p, q) {
+  swap_b(p[0], q[0], 1);
+  swap_b(p[1], q[1], 0);
+  0
+}
+total(p, q) {
+  s = 0;
+  for(i : range(2)) for(j : range(4)) s = s + (p[i][j] ^ q[i][j]);
+  s
+}
+main() {
+  p = array{mk(args.size), mk(args.size)};
+  q = array{mk(args.size), mk(args.size)};
+  f(p, q);
+  a = total(p, q);
+  p2 = array{mk(args.size), mk(args.size)};
+  q2 = array{mk(args.size), mk(args.size)};
+  g(p2, q2);
+  print(a, total(p2, q2));
+}

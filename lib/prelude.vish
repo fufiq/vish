@@ -4071,7 +4071,8 @@ jit_compile(cg, f, types, type result) {
     ast.operation{op, _, _} = a;
     (op == "[]") || (starts(op, ".") && (op != ".size"))
   };
-  bind_args(ps, xs) => {
+  // callee - called function (code): jit_writes asks its parameters that do not encompass the function f
+  bind_args(ps, xs, callee) => {
     binds = array{};
     for(i : range(ps.size)) {
       ast.parameter{pname, _, mode, _, _, _, _} = ps[i];
@@ -4093,7 +4094,7 @@ jit_compile(cg, f, types, type result) {
       } else {
         // argument-place (p[0], x.y) of the variable parameter: the value is considered a copy in the call memory - the record would be lost (gf_sel(p[0],
         // q[0], b) at p, q - arrays of values VM "did not exchange"): such a call to the interpreter
-        if(is_place_arg(a) && jit_writes(f, i)) bad(fmt"изменяемый параметр {pname} получает элемент или поле — интерпретатор");
+        if(is_place_arg(a) && jit_writes(callee, i)) bad(fmt"изменяемый параметр {pname} получает элемент или поле — интерпретатор");
         t = if(is_call_of(a, "range")) jc_range else ty(a);
         if(jit_resource(t)) bad(fmt"ресурс аргументом {pname} (own или временное) — интерпретатор");
         else if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");
@@ -4131,7 +4132,7 @@ jit_compile(cg, f, types, type result) {
       for(l : lfns) if(code_id(l.f) == code_id(g[0])) lf = l;
       lres.push(array{code_id(g[0]), ty(e)});
       ast.function{_, ps, _, body, _, _, _, _, _} = g[0];
-      binds = bind_args(ps, xs); // argumentation
+      binds = bind_args(ps, xs, g[0]); // argumentation
       if(ok) {
         exit = label();
         saved = array{};
@@ -4340,7 +4341,7 @@ jit_compile(cg, f, types, type result) {
     else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор");
     else {
       fn = g[0];
-      binds = bind_args(ps, xs);
+      binds = bind_args(ps, xs, g[0]);
       if(ok) {
         exit = label();
         old_top = top;

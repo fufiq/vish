@@ -536,6 +536,10 @@ void jit_machine<A>::compile(node_id fn, jit_fn & out) {
     out.reason = cat(u.why, " (строка ", lc.line, ")");
   } catch(diagnostic const & d) {
     out.reason = cat("разбор: ", d.what());
+  } catch(std::exception const & e) {
+    // internal error of the compiler (its code is in the language, under the interpreter; std::get, bad_alloc ...): the function is to the
+    // interpreter with the cause, not the break of the program (found by checking JIT with random programs, tools / jit_fuzz .py)
+    out.reason = cat("внутренняя ошибка компилятора: ", e.what());
   }
 }
 
