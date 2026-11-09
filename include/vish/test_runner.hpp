@@ -388,7 +388,9 @@ struct test_host {
       for(; busy < jobs && next < files.size(); ++next, ++busy)
         kids[next].c = os::fork_child([&] {
           try {
-            return std::string(1, '\1') + body(files[next]); // tongue performed the test to the end
+            auto text = std::string(1, '\1') + body(files[next]); // tongue performed the test to the end
+            if(fn_profile::on()) fn_profile::get().report(); // The child comes out via exit - the profile is printed by yourself.
+            return text;
           } catch(diagnostic const & d) {
             return std::string(1, '\0') + cat("    ", d.what(), "\n");
           }

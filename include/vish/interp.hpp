@@ -277,6 +277,42 @@ void code_pause() {
   code_lock.lock_shared();
 }
 
+// Profile of vish functions (VISH_PROFILE = 1): calls, own and full time; printing at the end of the process. You need
+// to choose what to raise in the JIT Single-thread counter.
+//
+struct fn_profile {
+  struct row {
+    std::string name;
+    uint64_t calls = 0, self = 0, incl = 0;
+  };
+  std::unordered_map<std::string, row> rows;
+  std::vector<uint64_t> kids; // call time at each level
+  static bool on() {
+    static bool v = std::getenv("VISH_PROFILE") != nullptr;
+    return v;
+  }
+  static fn_profile & get() {
+    static fn_profile p;
+    return p;
+  }
+  static uint64_t now() {
+    timespec t;
+    ::clock_gettime(CLOCK_MONOTONIC, &t);
+    return uint64_t(t.tv_sec) * 1000000000ull + uint64_t(t.tv_nsec);
+  }
+  ~fn_profile() { report(); }
+  void report() {
+    std::vector<row const *> v;
+    for(auto const & [k, r]: rows) v.push_back(&r);
+    std::ranges::sort(v, [](auto a, auto b) { return a->self > b->self; });
+    uint64_t total = 0;
+    for(auto r: v) total += r->self;
+    std::fprintf(stderr, "профиль vish: собственное время %.3f с\n  %-9s %-9s %-9s %-9s  функция\n", double(total) / 1e9, "самo, мс", "полно, мс", "вызовов", "мкс/выз");
+    for(std::size_t i = 0; i < v.size() && i < 40; ++i)
+      std::fprintf(stderr, "  %9.1f %9.1f %9llu %9.2f  %s\n", double(v[i]->self) / 1e6, double(v[i]->incl) / 1e6, (unsigned long long)v[i]->calls, double(v[i]->self) / 1e3 / double(v[i]->calls ? v[i]->calls : 1), v[i]->name.c_str());
+  }
+};
+
 struct interpreter {
   // residual program inputs: known arguments and strings of stdin (§13.2).
   struct known_inputs {
@@ -8430,6 +8466,29 @@ struct interpreter {
   }
 
   flow invoke(node_id f, std::vector<value> & vals, node_span args, scope * env, call_site const & site) {
+    if(!fn_profile::on()) return invoke_body(f, vals, args, env, site);
+    auto & pr = fn_profile::get();
+    pr.kids.push_back(0);
+    uint64_t t0 = fn_profile::now();
+    struct done {
+      fn_profile & pr;
+      interpreter & vm;
+      node_id f;
+      uint64_t t0;
+      ~done() {
+        uint64_t d = fn_profile::now() - t0, kids = pr.kids.back();
+        pr.kids.pop_back();
+        if(!pr.kids.empty()) pr.kids.back() += d;
+        auto & r = pr.rows[cat(vm.str(vm.db.as<n_fn>(f).name), "#", f.value)];
+        if(r.name.empty()) r.name = cat(vm.str(vm.db.as<n_fn>(f).name), " (узел ", f.value, ")");
+        ++r.calls;
+        r.self += d - std::min(d, kids);
+        r.incl += d;
+      }
+    } guard{pr, *this, f, t0};
+    return invoke_body(f, vals, args, env, site);
+  }
+  flow invoke_body(node_id f, std::vector<value> & vals, node_span args, scope * env, call_site const & site) {
     if(!checking() && site.node && tail_self(f, site.node)) { // tail challenge itself - transition: values - working call
       for(value & v: vals) // The loan of the outgoing frame cell would hang - its value; the owner's loan above - lives.
         if(v.is<array_v>() && v.as<array_v>().borrowed && in_frame(v.as<array_v>().borrowed, env, f)) v.as<array_v>().own();
