@@ -50,6 +50,14 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # IPC between VM (shared memory + futex): two processes, ring rotation, end closure, occupied roles
     ( rm -rf $L/ipc; mkdir -p $L/ipc; $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/ipc_ring.cpp -o $L/ipc_ring && $L/ipc_ring $L/ipc ) > $L/t_ipc.log 2>&1
     echo "ipc: код $?" > $L/r_ipc
+    # Two true VMs: Writer and reader by IPC streams (futex via io_uring in shared memory), the total of the reader to the writer
+    ( d=$L/ipc_two; rm -rf $d; mkdir -p $d
+      export VISH_GRANT=ipc VISH_IPC_DIR=$PWD/$d/ch
+      timeout 60 $b run tests/ipc/reader.vish > $d/reader.out 2>&1 &
+      timeout 60 $b run tests/ipc/writer.vish > $d/writer.out 2>&1
+      wait
+      [ "$(cat $d/writer.out)" = "ok 2000 6890" ] ) > $L/t_ipc_two.log 2>&1
+    echo "ipc_two: код $?" > $L/r_ipc_two
     if [ -d editor/node_modules ]; then
       $b schema > editor/src/protocol/schema.json
       (cd editor && npx tsc --noEmit && npx vitest run) > $L/t_editor.log 2>&1

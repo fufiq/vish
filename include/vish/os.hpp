@@ -433,6 +433,11 @@ struct ipc_channel {
     return true;
   }
   uint32_t cap() const { return h->cap; }
+  // Waiting words and their values "now" - for the application futex from io_uring (take before checking the queue: do not lose awakening)
+  uint32_t * data_word() { return reinterpret_cast<uint32_t *>(&h->data_seq); }
+  uint32_t * space_word() { return reinterpret_cast<uint32_t *>(&h->space_seq); }
+  uint32_t data_seen() const { return h->data_seq.load(std::memory_order_acquire); }
+  uint32_t space_seen() const { return h->space_seq.load(std::memory_order_acquire); }
   // put a message: 0, 4 no, 5 time out (ring full), 6 reader left, 7 more ring
   int send(std::string_view msg, int64_t ms) {
     if(!alive() || !writer) return 4;
@@ -797,6 +802,14 @@ struct uring {
   void poll(int fd, unsigned mask, uint64_t tag) {
     io_uring_sqe * s = sqe();
     io_uring_prep_poll_add(s, fd, mask);
+    io_uring_sqe_set_data64(s, tag);
+    io_uring_submit(&ring);
+  }
+  // Wait for a word change in shared memory (futex, without PRIVATE - shared with another process): completion with a tag when *addr!=val is already now
+  // (res ==-EAGAIN) or after FUTEX_WAKE. Does not interfere with the rest of the ring's orders: waiting for fiber on an IPC is an order, not a stream.
+  void futex_wait(uint32_t * addr, uint32_t val, uint64_t tag) {
+    io_uring_sqe * s = sqe();
+    io_uring_prep_futex_wait(s, addr, val, FUTEX_BITSET_MATCH_ANY, FUTEX2_SIZE_U32, 0);
     io_uring_sqe_set_data64(s, tag);
     io_uring_submit(&ring);
   }

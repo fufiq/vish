@@ -1830,6 +1830,8 @@ struct interpreter {
       bool sending = false;
     };
     bool net = false, connected = false, file_write = false, io_busy = false;
+    int ipc = -1; // IPC (ends in vm_root -> ipcs): Message stream between VMs; -1 is not IPC
+    bool ipc_reads = false, ipc_armed = false, ipc_ticking = false;
     int listen_fd = -1, file_fd = -1;
     std::vector<peer> peers;
     sockaddr_in addr{};
@@ -6693,7 +6695,9 @@ struct interpreter {
     op_fread,
     op_fwrite,
     op_psi,
-    op_wake };
+    op_wake,
+    op_ipc, // futex shared IPC memory worked (data came/place vacant)
+    op_ipc_tick }; // once in 200 ms: is the other end alive (died without waking)
   static uint64_t io_tag(io_op op, std::size_t stream, std::size_t peer) { return (uint64_t(op) << 56) | (uint64_t(stream) << 24) | uint64_t(peer); }
 
   os::uring & io() {
@@ -6825,6 +6829,14 @@ struct interpreter {
           for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
         }
         break;
+      case op_ipc:
+        s.ipc_armed = false;
+        ipc_pump(sid, false);
+        break;
+      case op_ipc_tick:
+        s.ipc_ticking = false;
+        ipc_pump(sid, false);
+        break;
       case op_fwrite:
         s.io_busy = false;
         if(c.res > 0) {
@@ -6837,6 +6849,58 @@ struct interpreter {
         } else if(!s.peers[0].out.empty()) s.peers[0].out.clear(); // record
         file_write_next(sid);
         break;
+    }
+  }
+
+  // IPC is like a stream. The reader is messages from the ring to the flow queue (each str); the writer is a place in the ring. Waiting
+  // for fiber is a futex bid for io_uring (does not hold VM stream) plus a 200ms timer: another process could die without waking up.
+  // Someone is waiting (reader without data / writer without space): to whip up anticipation.
+  //
+  void ipc_pump(std::size_t sid, bool want) {
+    stream_rec & s = vm_root->streams[sid];
+    if(s.ipc < 0 || s.closed) return;
+    os::ipc_channel & c = vm_root->ipcs[std::size_t(s.ipc)];
+    if(!c.alive()) {
+      s.closed = true;
+      for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
+      for(fiber_rec * w: std::exchange(s.writers, {})) wake(w);
+      return;
+    }
+    uint32_t seen = s.ipc_reads ? c.data_seen() : c.space_seen(); // parsing queue: Awakening between them is not lost
+    if(s.ipc_reads) {
+      for(std::string m;;) {
+        int st = c.recv(m, 0);
+        if(st == 0) {
+          deliver(s, value(std::move(m)));
+          continue;
+        }
+        if(st == 6 && s.buf.empty()) { // The writer left and read it.
+          s.closed = true;
+          for(fiber_rec * r: std::exchange(s.readers, {})) wake(r);
+          return;
+        }
+        break;
+      }
+      want = want || !s.readers.empty();
+    } else {
+      for(fiber_rec * w: std::exchange(s.writers, {})) wake(w); // The place could appear (or the other end left): let them repeat and raise the wait themselves.
+      return;
+    }
+    if(want && !s.closed) ipc_arm(sid, seen);
+  }
+  // Expect a word change (reader - data, writer - place) and a timer to check the other end
+  void ipc_arm(std::size_t sid, uint32_t seen) {
+    stream_rec & s = vm_root->streams[sid];
+    os::ipc_channel & c = vm_root->ipcs[std::size_t(s.ipc)];
+    if(!s.ipc_armed) {
+      s.ipc_armed = true;
+      ++root->io_pending;
+      io().futex_wait(s.ipc_reads ? c.data_word() : c.space_word(), seen, io_tag(op_ipc, sid, 0));
+    }
+    if(!s.ipc_ticking) {
+      s.ipc_ticking = true;
+      ++root->io_pending;
+      io().timeout(200, io_tag(op_ipc_tick, sid, 0));
     }
   }
 
@@ -6894,7 +6958,7 @@ struct interpreter {
     lane_guard g(vm_lock); // flow table - common for bands
     auto & ss = vm_root->streams;
     bool raw_open = n == "net_raw_listen" || n == "net_raw_connect" || n == "file_raw_open" || n == "file_raw_create";
-    bool attach = n == "net_stream" || n == "file_stream";
+    bool attach = n == "net_stream" || n == "file_stream"; // file_stream - stream by number in general: and IPC (lines), and files
     if(checking()) {
       rt_effect();
       if(raw_open) return host_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
@@ -7100,6 +7164,17 @@ struct interpreter {
       rt_effect();
       return host_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
     }
+    if(n == "ipc_raw_stream") { // (name, role, capacity) → stream by number: reader - messages (str), writer - write(s, str)
+      if(a.size() != 3) fail("ipc_raw_stream(имя, роль, ёмкость)", where);
+      std::size_t before = vm_root->ipcs.size();
+      value r = ipc_call(vm_root->ipcs, granted("ipc"), "ipc_raw_open", a, where);
+      if(vm_root->ipcs.size() == before) return r; // Not open: kernel status as it is
+      auto & ss = vm_root->streams;
+      ss.emplace_back();
+      ss.back().ipc = int(before);
+      ss.back().ipc_reads = a[1].as<str_v>().str() == "r";
+      return host_status(0, int64_t(ss.size() - 1));
+    }
     return ipc_call(vm_root->ipcs, granted("ipc"), n, a, where);
   }
   value ipc_call(std::deque<os::ipc_channel> & table, bool given, std::string_view n, std::vector<value> const & a, span where) {
@@ -7150,6 +7225,10 @@ struct interpreter {
   // Flow host: Closing cancels orders; file adds queue.
   void close_host(std::size_t sid) { // The queue of the file has already been completed (stream_do)
     stream_rec & s = vm_root->streams[sid];
+    if(s.ipc >= 0) { // the end of the channel is closed (the other will see it); the expectations of the ring will sleep and find the flow closed
+      vm_root->ipcs[std::size_t(s.ipc)].close();
+      s.closed = true;
+    }
     if(s.listen_fd >= 0) {
       io().cancel_fd(s.listen_fd);
       ::close(s.listen_fd);
@@ -7218,6 +7297,24 @@ struct interpreter {
     fiber_rec * me = &running();
     if(op == s_write) {
       if(s.net) fail("в сеть — send(сеть, peer, байты)", where);
+      if(s.ipc >= 0) { // IPC: Message to ring; no place to wait for futex application, other fiibers go
+        if(s.ipc_reads) fail("поток IPC открыт на чтение", where);
+        if(!x.is<str_v>()) fail(cat("в IPC — байты (str), получено ", types.describe(x)), where);
+        std::string bytes = x.as<str_v>().str();
+        for(;;) {
+          os::ipc_channel & c = vm_root->ipcs[std::size_t(s.ipc)];
+          if(!c.alive() || s.closed) fail_rt("closed_stream", "запись в закрытый поток", where);
+          uint32_t seen = c.space_seen();
+          int st = c.send(bytes, 0);
+          if(st == 0) return value();
+          if(st == 6) fail_rt("closed_stream", "читатель канала ушёл", where);
+          if(st == 7) fail_rt("io_error", cat("сообщение больше кольца (", c.cap(), " байт)"), where);
+          if(st != 5) fail_rt("io_error", "IPC: ошибка записи", where);
+          ipc_arm(sid, seen);
+          s.writers.push_back(me);
+          sl.park(*this);
+        }
+      }
       if(s.file_fd >= 0) {
         if(!s.file_write) fail("файл открыт на чтение", where);
         if(!x.is<str_v>()) fail(cat("в файл — байты (str), получено ", types.describe(x)), where);
@@ -7240,6 +7337,11 @@ struct interpreter {
     }
     if(op == s_read || op == s_more) {
       while(s.buf.empty() && !s.closed) {
+        if(s.ipc >= 0) { // IPC: Take out of the ring; empty - futex and wait
+          if(!s.ipc_reads) fail("поток IPC открыт на запись", where);
+          ipc_pump(sid, true);
+          if(!s.buf.empty() || s.closed) continue;
+        }
         if(s.file_fd >= 0 && !s.file_write && !s.io_busy) { // File: The next piece is the application
           s.io_busy = true;
           s.io_buf.resize(65536);

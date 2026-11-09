@@ -1,0 +1,14 @@
+// Reader of the second VM: counts messages and their bytes to "end", the result - to the writer on the reverse channel.
+main() {
+  inp = ipc_in("two_a2b", 256);
+  back = ipc_out("two_b2a");
+  n = 0;
+  total = 0;
+  loop {
+    m = read(inp);
+    if(m == "end") break;
+    n += 1;
+    total += m.size;
+  }
+  write(back, "ok " + text(n) + " " + text(total));
+}

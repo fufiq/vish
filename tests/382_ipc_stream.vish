@@ -1,0 +1,29 @@
+// IPC streams write/read both ends in one VM, exchange via fiber - writer faster than ring (128 bytes) waits for the place application
+// futex, reader - data; other fiber go while someone waits. Closing the writer - the reader finishes reading and sees a closed stream.
+//
+// grant: ipc
+// out: 300 сообщений, байт 790 , первое 0 , последнее 299
+// out: закрыт: true
+// out: уже закрыт
+main() {
+  w = ipc_out("t382", 128);
+  r = ipc_in("t382", 128);
+  got = array{};
+  done = stream();
+  spawn {
+    while(more(r)) got.push(read(r));
+    write(done, 1);
+  }
+  for(k : range(300)) write(w, text(k));
+  close(w);
+  read(done);
+  total = 0;
+  for(m : got) total += m.size;
+  print(got.size, "сообщений, байт", total, ", первое", got[0], ", последнее", got[299]);
+  print("закрыт:", !more(r));
+  try {
+    write(w, "x");
+  } catch(closed_stream e) {
+    print("уже закрыт");
+  }
+}

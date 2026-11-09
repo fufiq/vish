@@ -925,6 +925,19 @@ ipc_checked(r) {
   if(r.status == 7) throw ipc_too_large{"сообщение больше кольца (" + text(r.num) + " байт)"};
   r
 }
+// Write/read: ipc_out(имя) - writer, write(s, "текст"); ipc_in(имя) - reader, read(s) → text of the following message. Waiting -
+// io_uring (futex), other fiber go; closing - close(s) (the other end reads the remainder and sees the closed stream). Same kernel
+// statuses; capacitance is ipc_out(имя, ёмкость).
+ipc_stream(str name, str role, i64 cap) {
+  r = ipc_raw_stream(name, role, cap);
+  if(r.status == 1) throw io_error{name + ": IPC " + ipc_not_given()};
+  if(r.status != 0) throw io_error{"канал " + name + ": " + r.text};
+  file_stream(r.num)
+}
+ipc_out(str name) => ipc_stream(name, "w", 0);
+ipc_out(str name, i64 cap) => ipc_stream(name, "w", cap);
+ipc_in(str name) => ipc_stream(name, "r", 0);
+ipc_in(str name, i64 cap) => ipc_stream(name, "r", cap);
 ipc_send(ipc c, str msg, i64 ms) {
   ipc_checked(ipc_raw_send(c.id, msg, ms));
 }

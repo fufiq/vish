@@ -1,0 +1,9 @@
+// Two VMs via IPC (check.sh, not a runner test): The writer sends 2,000 messages in a stream and waits for the result of the reader on the reverse channel.
+//.
+main() {
+  out = ipc_out("two_a2b", 256);
+  back = ipc_in("two_b2a");
+  for(k : range(2000)) write(out, text(k));
+  write(out, "end");
+  print(read(back));
+}
