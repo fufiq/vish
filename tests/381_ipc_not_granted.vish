@@ -1,0 +1,15 @@
+// IPC without `ipc` : - Like storage and network: io_error with a hint how to give
+// the right.
+// machine
+// out: дано: false
+// out: io_error
+// out: t381: IPC программе не даны (даёт пользователь: vish run --grant ipc)
+main() {
+  print("дано:", granted("ipc"));
+  try {
+    ipc_reader("t381");
+  } catch(io_error e) {
+    print("io_error");
+    print(e.message);
+  }
+}

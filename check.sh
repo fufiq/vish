@@ -16,7 +16,8 @@ suite() { # имя лог бинарь аргументы…
   n=$1 l=$2 b=$3; shift 3
   d=$L/run_$n
   rm -rf "$d"; mkdir -p "$d/out"; ln -s "$PWD/tests" "$d/tests"
-  (cd "$d" && "$OLDPWD/$b" "$@") > "$l" 2>&1; c=$?
+  # IPC channels (test 380) - also its own directory: otherwise simultaneous runs share one channel name
+  (cd "$d" && VISH_IPC_DIR="$PWD/ipc" "$OLDPWD/$b" "$@") > "$l" 2>&1; c=$?
   echo "$n: $(tail -1 "$l") (код $c)" > $L/r_$n
 }
 mode() { # режим: сборка → тесты; release — ещё --a64 и самокомпиляция (full: и asan)
@@ -46,6 +47,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # base area in the storage (S5.1): close / open, another version, cropping, copy for samples, compaction
     ( rm -rf $L/area; mkdir -p $L/area; $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/pool_area.cpp -o $L/pool_area && $L/pool_area $L/area ) > $L/t_area.log 2>&1
     echo "area: код $?" > $L/r_area
+    # IPC between VM (shared memory + futex): two processes, ring rotation, end closure, occupied roles
+    ( rm -rf $L/ipc; mkdir -p $L/ipc; $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/ipc_ring.cpp -o $L/ipc_ring && $L/ipc_ring $L/ipc ) > $L/t_ipc.log 2>&1
+    echo "ipc: код $?" > $L/r_ipc
     if [ -d editor/node_modules ]; then
       $b schema > editor/src/protocol/schema.json
       (cd editor && npx tsc --noEmit && npx vitest run) > $L/t_editor.log 2>&1

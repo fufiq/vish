@@ -24,6 +24,9 @@
 #include <sys/file.h>
 #include <time.h>
 #include <sys/un.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
+#include <atomic>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -260,6 +263,251 @@ void remap_private_after_fork() {
     a->shared = false;
   }
 }
+
+// IPC between VMs on one machine (plan "VM OS", author's decision 2026-11-09): shared memory + signal.
+// 
+// ; - VM service, common to instances. Everything else is **mine**: channel is a named file in the IPC
+// machine directory displayed by MAP_SHARED in both VMs; messages are a ring of bytes (length u32 +
+// bytes), one writer and one reader (role holds flock of individual files: the process dies - the lock is
+// removed itself); signal is futex in common memory (not sockets and not pipes). The channel lives as long
+// as at least one end is held: having opened both ends free, the ring begins anew (obsolete messages from
+// the previous launch are not read).
+//
+struct ipc_header {
+  char magic[8];
+  uint32_t version;
+  uint32_t cap; // byte ring, degree two
+  alignas(64) std::atomic<uint64_t> head; // Read byte (moves the reader)
+  alignas(64) std::atomic<uint64_t> tail; // byte (moves the writer)
+  alignas(64) std::atomic<uint32_t> data_seq; // Reader’s futex: Increases by each entry and closing
+  alignas(64) std::atomic<uint32_t> space_seq; // Writer's futex: grows by every reading and closing
+};
+
+struct ipc_channel {
+  static constexpr uint32_t header_bytes = 4096;
+  static constexpr uint32_t default_cap = 1u << 16;
+  static constexpr uint32_t max_cap = 1u << 28;
+  // kernel response statuses: 0 yes, 4 host error (cause), 5 time out, 6 other end closed, 7 message larger than ring
+  int fd = -1, lock_fd = -1;
+  ipc_header * h = nullptr;
+  std::byte * ring = nullptr;
+  uint64_t map_bytes = 0;
+  bool writer = false;
+
+  ipc_channel() = default;
+  ipc_channel(ipc_channel const &) = delete;
+  ipc_channel & operator=(ipc_channel const &) = delete;
+  ~ipc_channel() { close(); }
+
+  bool alive() const { return h != nullptr; }
+  // IPC machine directory: VISH_IPC_DIR, otherwise $ XDG_RUNTIME_DIR (or /tmp)/vish-ipc-<uid >>
+  static std::string dir() {
+    if(char const * d = std::getenv("VISH_IPC_DIR"); d && *d) return d;
+    char const * run = std::getenv("XDG_RUNTIME_DIR");
+    return cat(run && *run ? run : "/tmp", "/vish-ipc-", ::getuid());
+  }
+  static bool good_name(std::string_view name) { return storage_area::good_name(name); }
+  static uint64_t now_ms() {
+    timespec t;
+    ::clock_gettime(CLOCK_MONOTONIC, &t);
+    return uint64_t(t.tv_sec) * 1000 + uint64_t(t.tv_nsec) / 1000000;
+  }
+  static int open_lock(std::string const & path) {
+    int f = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    return f;
+  }
+  // The end is occupied (the process holds it): the role lock is not taken
+  static bool end_held(std::string const & base, char role) {
+    int f = open_lock(cat(base, ".", role));
+    if(f < 0) return false;
+    bool held = ::flock(f, LOCK_EX | LOCK_NB) != 0;
+    ::close(f); // locks off
+    return held;
+  }
+  // 'is open; otherwise the cause. role - 'w' writer, 'r' reader; cap - for new channel (0 - default)
+  std::string open(std::string_view name, char role, uint32_t want_cap = 0) {
+    if(alive()) close();
+    if(!good_name(name)) return "имя канала — ключ без '/' и ведущей точки";
+    if(role != 'w' && role != 'r') return "роль — w или r";
+    std::string d = dir();
+    if(::mkdir(d.c_str(), 0700) != 0 && errno != EEXIST) return cat("каталог IPC недоступен: ", std::strerror(errno));
+    std::string base = cat(d, "/", name);
+    int lf = open_lock(cat(base, ".", role));
+    if(lf < 0) return std::strerror(errno);
+    if(::flock(lf, LOCK_EX | LOCK_NB) != 0) {
+      ::close(lf);
+      return cat("конец «", role == 'w' ? "писатель" : "читатель", "» канала занят другим процессом");
+    }
+    int f = ::open(base.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if(f < 0) {
+      ::close(lf);
+      return std::strerror(errno);
+    }
+    ::flock(f, LOCK_EX); // Creating and restarting the ring - one at a time
+    struct stat st{};
+    ::fstat(f, &st);
+    uint32_t cap = want_cap ? want_cap : default_cap;
+    if(cap < 64 || cap > max_cap || (cap & (cap - 1))) {
+      ::close(f);
+      ::close(lf);
+      return "ёмкость кольца — степень двойки от 64 байт до 256 МиБ";
+    }
+    bool fresh = st.st_size == 0 || !end_held(base, role == 'w' ? 'r' : 'w'); // There is no other end, the last ring is not necessary.
+    if(fresh) {
+      uint64_t old = st.st_size > header_bytes ? uint64_t(st.st_size) - header_bytes : 0;
+      if(!want_cap && old >= 64 && old <= max_cap && !(old & (old - 1))) cap = uint32_t(old); // capacitance
+      if(uint64_t(st.st_size) != uint64_t(header_bytes) + cap && ::ftruncate(f, off_t(header_bytes + cap)) != 0) {
+        std::string why = std::strerror(errno);
+        ::close(f);
+        ::close(lf);
+        return why;
+      }
+    }
+    ::fstat(f, &st);
+    void * m = ::mmap(nullptr, size_t(st.st_size), PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+    if(m == MAP_FAILED) {
+      std::string why = std::strerror(errno);
+      ::close(f);
+      ::close(lf);
+      return cat("не отобразить: ", why);
+    }
+    auto * hh = static_cast<ipc_header *>(m);
+    if(fresh) {
+      std::memcpy(hh->magic, "VISHIPC1", 8);
+      hh->version = 1;
+      hh->cap = cap;
+      hh->head.store(0);
+      hh->tail.store(0);
+      hh->data_seq.store(0);
+      hh->space_seq.store(0);
+    } else if(std::memcmp(hh->magic, "VISHIPC1", 8) != 0 || hh->version != 1 || uint64_t(st.st_size) < header_bytes + uint64_t(hh->cap)) {
+      ::munmap(m, size_t(st.st_size));
+      ::close(f);
+      ::close(lf);
+      return "не канал vish (или другой версии)";
+    }
+    ::flock(f, LOCK_UN);
+    fd = f;
+    lock_fd = lf;
+    h = hh;
+    ring = static_cast<std::byte *>(m) + header_bytes;
+    map_bytes = uint64_t(st.st_size);
+    writer = role == 'w';
+    base_name = base;
+    peer_seen = false;
+    return "";
+  }
+  // The other end is alive (holds its lock)
+  bool peer_alive(std::string const & base) const { return end_held(base, writer ? 'r' : 'w'); }
+  std::string base_name;
+  bool peer_seen = false; // The other end was alive: leaving after that is closing, not "not yet come."
+  // The other end is alive now; true is remembered, false after true - channel closed
+  bool peer_gone() {
+    if(peer_alive(base_name)) {
+      peer_seen = true;
+      return false;
+    }
+    return peer_seen;
+  }
+  static long futex(std::atomic<uint32_t> * addr, int op, uint32_t val, timespec const * to) {
+    return ::syscall(SYS_futex, reinterpret_cast<uint32_t *>(addr), op, val, to, nullptr, 0); // without PRIVATE: shared memory of different processes
+  }
+  // wait for the change *seq from the value seen to ms milliseconds (0 - do not wait, <0 - without limit); true - not out of time
+  bool wait_on(std::atomic<uint32_t> * seq, uint32_t seen, int64_t ms, uint64_t until) {
+    if(ms == 0) return false;
+    timespec ts{}, * pts = nullptr;
+    if(ms > 0) {
+      uint64_t now = now_ms();
+      if(now >= until) return false;
+      uint64_t left = until - now;
+      // Another end could die without waking up: wake up at least once in 200 ms to check his lock
+      left = std::min<uint64_t>(left, 200);
+      ts.tv_sec = time_t(left / 1000);
+      ts.tv_nsec = long(left % 1000) * 1000000;
+      pts = &ts;
+    } else {
+      ts.tv_nsec = 200 * 1000000;
+      pts = &ts;
+    }
+    futex(seq, FUTEX_WAIT, seen, pts);
+    return true;
+  }
+  uint32_t cap() const { return h->cap; }
+  // put a message: 0, 4 no, 5 time out (ring full), 6 reader left, 7 more ring
+  int send(std::string_view msg, int64_t ms) {
+    if(!alive() || !writer) return 4;
+    uint64_t need = uint64_t(msg.size()) + 4;
+    if(need > h->cap) return 7;
+    uint64_t until = ms > 0 ? now_ms() + uint64_t(ms) : 0;
+    for(;;) {
+      uint32_t seen = h->space_seq.load(std::memory_order_acquire);
+      uint64_t tail = h->tail.load(std::memory_order_relaxed), head = h->head.load(std::memory_order_acquire);
+      if(h->cap - (tail - head) >= need) {
+        uint32_t len = uint32_t(msg.size());
+        auto put = [&](uint64_t at, void const * p, uint64_t n) {
+          uint64_t o = at & (h->cap - 1), first = std::min<uint64_t>(n, h->cap - o);
+          std::memcpy(ring + o, p, size_t(first));
+          if(first < n) std::memcpy(ring, static_cast<std::byte const *>(p) + first, size_t(n - first));
+        };
+        put(tail, &len, 4);
+        put(tail + 4, msg.data(), msg.size());
+        h->tail.store(tail + need, std::memory_order_release);
+        h->data_seq.fetch_add(1, std::memory_order_release);
+        futex(&h->data_seq, FUTEX_WAKE, 1, nullptr);
+        return 0;
+      }
+      if(peer_gone()) return 6;
+      if(ms == 0) return 5;
+      if(ms > 0 && now_ms() >= until) return 5;
+      wait_on(&h->space_seq, seen, ms, until);
+    }
+  }
+  // Take a message: 0 (msg), 5 is empty and time is up, 6 is empty and the writer is gone.
+  int recv(std::string & msg, int64_t ms) {
+    if(!alive() || writer) return 4;
+    uint64_t until = ms > 0 ? now_ms() + uint64_t(ms) : 0;
+    for(;;) {
+      uint32_t seen = h->data_seq.load(std::memory_order_acquire);
+      uint64_t head = h->head.load(std::memory_order_relaxed), tail = h->tail.load(std::memory_order_acquire);
+      if(tail != head) {
+        auto get = [&](uint64_t at, void * p, uint64_t n) {
+          uint64_t o = at & (h->cap - 1), first = std::min<uint64_t>(n, h->cap - o);
+          std::memcpy(p, ring + o, size_t(first));
+          if(first < n) std::memcpy(static_cast<std::byte *>(p) + first, ring, size_t(n - first));
+        };
+        uint32_t len = 0;
+        get(head, &len, 4);
+        msg.resize(len);
+        get(head + 4, msg.data(), len);
+        h->head.store(head + 4 + len, std::memory_order_release);
+        h->space_seq.fetch_add(1, std::memory_order_release);
+        futex(&h->space_seq, FUTEX_WAKE, 1, nullptr);
+        return 0;
+      }
+      if(peer_gone()) {
+        if(h->tail.load(std::memory_order_acquire) != head) continue; // I finished writing before leaving.
+        return 6;
+      }
+      if(ms == 0) return 5;
+      if(ms > 0 && now_ms() >= until) return 5;
+      wait_on(&h->data_seq, seen, ms, until);
+    }
+  }
+  void close() {
+    if(!alive()) return;
+    // The lock of the role is to remove the first, then wake the other end: he will wake up and see that there is no end.
+    if(lock_fd >= 0) ::close(lock_fd);
+    lock_fd = -1;
+    std::atomic<uint32_t> * other = writer ? &h->data_seq : &h->space_seq;
+    other->fetch_add(1, std::memory_order_release);
+    futex(other, FUTEX_WAKE, INT32_MAX, nullptr);
+    ::munmap(h, size_t(map_bytes));
+    h = nullptr;
+    ring = nullptr;
+    if(fd >= 0) ::close(fd);
+    fd = -1;
+  }
+};
 
 // Descriptor lines (stdin host): your buffer, read in chunks.
 struct line_reader {

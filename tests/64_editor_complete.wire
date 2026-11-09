@@ -23,7 +23,8 @@ key 1 ArrowDown
 // expect-not: cursor
 key 1 ArrowUp
 key 1 ArrowUp
-// expect: selected=30
+// (ArrowUp from first to last: number of eligible names prelude; IPC added four)
+// expect: selected=34
 // Enter - Accept: word replaced by selected, list closed
 key 1 ArrowDown
 key 1 Enter

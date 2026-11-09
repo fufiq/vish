@@ -7087,6 +7087,66 @@ struct interpreter {
     fail(cat("неизвестная операция ", n), where);
   }
 
+  // IPC between VM - kernel (VM service, author's decision 2026-11-09):
+// 
+// Rights, liveliness of the descriptor and safety
+  // Memory - here, responds Status (as in storage): 0 - yes, 1 - not given, 2 - closed, 4 - host error (text), 5 - time out, 6
+  // - the other end closed, 7 - message more ring (number - capacity). APIs, exceptions and texts - service on vish (prelude,
+  // "IPC Service"). Waiting is at the core and holds the VM stream (the other fibers stand): the next step is waiting through
+  // io uring (futex), like host threads. Mine. *
+  value ipc_op(std::string_view n, std::vector<value> & a, span where) {
+    lane_guard g(vm_lock); // table at the root of VM, common to the bands
+    if(checking()) {
+      rt_effect();
+      return host_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
+    }
+    return ipc_call(vm_root->ipcs, granted("ipc"), n, a, where);
+  }
+  value ipc_call(std::deque<os::ipc_channel> & table, bool given, std::string_view n, std::vector<value> const & a, span where) {
+    auto bad_args = [&](std::string_view sig) { fail(cat(n.substr(4), sig), where); };
+    auto num = [&](std::size_t i) {
+      if(a.size() <= i || !a[i].is<int64_t>()) bad_args("(…, число, …)");
+      return a[i].as<int64_t>();
+    };
+    if(n == "ipc_raw_open") { // (Name, role 'w'|'r', ring capacity or 0)
+      if(a.size() != 3 || !a[0].is<str_v>() || !a[1].is<str_v>()) bad_args("(имя, роль, ёмкость)");
+      if(!given) return host_status(1);
+      std::string role = a[1].as<str_v>().str();
+      int64_t cap = num(2);
+      if(role.size() != 1 || cap < 0 || cap > int64_t(os::ipc_channel::max_cap)) return host_status(4, 0, "роль — w или r, ёмкость — от 0 до 256 МиБ");
+      os::ipc_channel & c = table.emplace_back();
+      if(std::string why = c.open(a[0].as<str_v>().str(), role[0], uint32_t(cap)); !why.empty()) {
+        table.pop_back();
+        return host_status(4, 0, why);
+      }
+      return host_status(0, int64_t(table.size() - 1));
+    }
+    int64_t id = num(0);
+    if(n == "ipc_raw_close") {
+      if(id >= 0 && uint64_t(id) < table.size()) table[std::size_t(id)].close();
+      return host_status(0);
+    }
+    // Closed, withdrawn (proc revoke ipc) or came from another VM:
+    if(id < 0 || uint64_t(id) >= table.size() || !table[std::size_t(id)].alive()) return host_status(2);
+    os::ipc_channel & c = table[std::size_t(id)];
+    if(n == "ipc_raw_send") { // (descriptor, bytes, ms: 0 - no waiting, <0 - no limit)
+      if(a.size() != 3 || !a[1].is<str_v>()) bad_args("(дескриптор, байты, мс)");
+      int st = c.send(a[1].as<str_v>().view(), num(2));
+      if(st == 0) return host_status(0);
+      if(st == 7) return host_status(7, int64_t(c.cap()));
+      if(st == 4) return host_status(4, 0, "конец только для чтения");
+      return host_status(st);
+    }
+    if(n == "ipc_raw_recv") { // (descriptor, MS)
+      std::string msg;
+      int st = c.recv(msg, num(1));
+      if(st == 0) return host_status(0, int64_t(msg.size()), std::move(msg));
+      if(st == 4) return host_status(4, 0, "конец только для записи");
+      return host_status(st);
+    }
+    fail(cat("неизвестная операция ", n), where);
+  }
+
   // Flow host: Closing cancels orders; file adds queue.
   void close_host(std::size_t sid) { // The queue of the file has already been completed (stream_do)
     stream_rec & s = vm_root->streams[sid];
@@ -9845,6 +9905,7 @@ struct interpreter {
     if(n.starts_with("stream_")) return stream_op(n, a, where);
     if(n.starts_with("net_") || n.starts_with("file_")) return io_op_call(n, a, where);
     if(n.starts_with("storage_")) return storage_op(n, a, where);
+    if(n.starts_with("ipc_raw_")) return ipc_op(n, a, where);
     if(n == "process_wait" || n == "process_error") return process_op(n, a, where);
     if(n == "index" && a.size() == 2) { // a[i] kernel (operator(a)[i] prelude): array element, byte string
       if(!a[0].known() || !a[1].known()) return element_type(a[0], where);
@@ -10079,6 +10140,7 @@ struct interpreter {
   std::vector<fiber_rec *> joiners;
   std::deque<stream_rec> streams;
   std::deque<os::storage_area> storages; // state storage (S1) by number; closed with VM
+  std::deque<os::ipc_channel> ipcs; // ends of IPC channels between VM by number; closes with VM
   std::optional<os::uring> ring; // io_uring host (as required)
   uint32_t io_pending = 0; // nucleus
   std::deque<interpreter> procs;

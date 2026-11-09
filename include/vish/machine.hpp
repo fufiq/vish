@@ -322,6 +322,7 @@ struct process_machine {
   // state storage (S1, as in the interpreter): not part of the process - the dump is not included,
   // after resume the descriptor is unknown (closed); proc revoke storage - closes everything
   std::deque<os::storage_area> storages;
+  std::deque<os::ipc_channel> ipcs; // end of IPC channels (as storages: after resume, descriptor unknown; proc revoke ipc closed)
   // What the author gave (as in the interpreter, VISH_GRANT at launch): not part of the process - in the new VM
   // gives it to the user; proc grant/revoke - on the go: took - streams of this kind are closed by the external side
   std::set<std::string, std::less<>> grants = interpreter::granted_by_user();
@@ -334,6 +335,10 @@ struct process_machine {
     grants.erase(std::string(kind));
     if(kind == "storage") {
       for(auto & s: storages) s.close();
+      return;
+    }
+    if(kind == "ipc") {
+      for(auto & c: ipcs) c.close();
       return;
     }
     uint8_t want = kind == "net" ? 3 : 0;
@@ -3061,6 +3066,11 @@ struct process_machine {
       return finish(std::move(out));
     }
     if(helper.str(name).starts_with("net_") || helper.str(name).starts_with("file_")) return finish(host_op(helper.str(name), a, db[n].where));
+    if(helper.str(name).starts_with("ipc_raw_")) { // as storage : execution - the assistant, table and rights - the machine
+      std::vector<value> va;
+      for(auto const & x: a) va.push_back(to_value(x));
+      return finish(from_value(helper.ipc_call(ipcs, machine_granted("ipc"), helper.str(name), va, db[n].where), db[n].where));
+    }
     if(helper.str(name).starts_with("storage_")) { // execution - at the assistant, table and rights - the machine
       std::vector<value> va;
       for(auto const & x: a) va.push_back(to_value(x));

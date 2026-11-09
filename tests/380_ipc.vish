@@ -1,0 +1,51 @@
+// IPC service between VM (total memory + signal, os::ipc_channel; author's decision 2026-11-09): Both ends are in one VM: order,
+// empty (“time is up”), big message, busy end, closing of the other end. Interprocess exchange - C++ test tests / ipc_ring .cpp
+// (check.sh); here are rights, exceptions and calls of the service by the interpreter and machine.
+//
+// grant: ipc
+// machine
+// out: дано: true
+// out: привет|мир||
+// out: время вышло
+// out: сообщение больше кольца (128 байт)
+// out: конец занят
+// out: закрыт
+// out: 240
+main() {
+  print("дано:", granted("ipc"));
+  w = ipc_writer("t380", 128);
+  r = ipc_reader("t380");
+  ipc_send(w, "привет", 0);
+  ipc_send(w, "мир", 0);
+  ipc_send(w, "", 0);
+  print(ipc_recv(r, 0) + "|" + ipc_recv(r, 0) + "|" + ipc_recv(r, 0) + "|");
+  try {
+    ipc_recv(r, 10);
+  } catch(ipc_timeout e) {
+    print(e.message);
+  }
+  big = "";
+  for(k : range(130)) big += "y";
+  try {
+    ipc_send(w, big, 0);
+  } catch(ipc_too_large e) {
+    print(e.message);
+  }
+  try {
+    ipc_writer("t380");
+  } catch(io_error e) {
+    print("конец занят");
+  }
+  total = 0;
+  for(k : range(50)) {
+    ipc_send(w, text(k), 0);
+    total += ipc_recv(r, 0).size + 1;
+  }
+  close(w);
+  try {
+    ipc_recv(r, 0);
+  } catch(ipc_closed e) {
+    print("закрыт");
+  }
+  print(total + 100);
+}

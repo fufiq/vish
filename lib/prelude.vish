@@ -892,6 +892,45 @@ commit(storage s) {
 }
 close(storage s) => storage_raw_close(s.id);
 
+// IPC service between VM (author's decision 2026-11-09; plan "VM ение OS").
+// 
+// VM service, common to instances. Within one VM, processes exchange threads (M3c); this service is between VM (OS
+// processes) of one machine. *My:* channel is a named ring of messages in common memory (os::ipc channel), one writer and
+// one reader (the end is occupied by another process - io error), the channel lives as long as at least one end is held; the
+// signal "there is data / there is a place" - futex in common memory, not sockets. Rights -- `ipc` (vish run-grant ipc), the
+// kernel responds with a STATUS (like a storage): 0 - yes, 1 - not given, 2 - closed, 4 - host error, 5 - time out, 6 - the
+// other end is closed, 7 - message more ring. Waiting keeps the VM stream as a whole (the other fibers are standing) - not
+// yet io uring; ms: 0 - not waiting, < 0 - without limit.
+//
+struct ipc_timeout : io_error {}
+struct ipc_closed : io_error {}
+struct ipc_too_large : io_error {}
+struct ipc { i64 id; bool writer; }
+ipc_not_given() => if(process_class() == "фоновый") "процессу не даны (ресурс даёт программа)" else "программе не даны (даёт пользователь: vish run --grant ipc)";
+ipc_open(str name, str role, i64 cap) {
+  r = ipc_raw_open(name, role, cap);
+  if(r.status == 1) throw io_error{name + ": IPC " + ipc_not_given()};
+  if(r.status != 0) throw io_error{"канал " + name + ": " + r.text};
+  ipc{r.num, role == "w"}
+}
+ipc_writer(str name) => ipc_open(name, "w", 0);
+ipc_writer(str name, i64 cap) => ipc_open(name, "w", cap);
+ipc_reader(str name) => ipc_open(name, "r", 0);
+ipc_reader(str name, i64 cap) => ipc_open(name, "r", cap);
+ipc_checked(r) {
+  if(r.status == 2) throw io_error{"канал закрыт"};
+  if(r.status == 4) throw io_error{"канал: " + r.text};
+  if(r.status == 5) throw ipc_timeout{"время вышло"};
+  if(r.status == 6) throw ipc_closed{"другой конец канала закрыт"};
+  if(r.status == 7) throw ipc_too_large{"сообщение больше кольца (" + text(r.num) + " байт)"};
+  r
+}
+ipc_send(ipc c, str msg, i64 ms) {
+  ipc_checked(ipc_raw_send(c.id, msg, ms));
+}
+ipc_recv(ipc c, i64 ms) => ipc_checked(ipc_raw_recv(c.id, ms)).text;
+close(ipc c) => ipc_raw_close(c.id);
+
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
 // error - his message.
