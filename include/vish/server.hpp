@@ -1542,6 +1542,8 @@ struct editor_server {
   uint32_t edits = 0;
   os::uring ring;
   int listen_fd = -1;
+  bool autosave = false;      // auto-save the base after the set pause - only `vish serve` (scripts do not write file tests)
+  uint64_t saved_edits = 0;   // db.edits to the last preservation
   std::deque<peer> peers; // Deque: Client links are stable; language number
 };
 

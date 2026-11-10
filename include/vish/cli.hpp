@@ -202,6 +202,9 @@ struct cli_host {
   [[noreturn]] void serve(int64_t h, std::string const & socket) {
     vm_session & s = session(h);
     editor_server server(s);
+    char const * off = std::getenv("VISH_NO_AUTOSAVE"); // Editor's tests with programs from the repository database do not write
+    server.autosave = !(off && *off);
+    server.saved_edits = s.db.edits;
     server.listen(socket);
     put(stderr, cat("vish serve: ", at(h).path, " на ", socket, "\n"));
     for(;;) server.step();

@@ -855,12 +855,18 @@ show_output(str text, bool ok) => native "cpp" {
 };
 // name of the program of the session (the way is open)
 program_name() => native "cpp" { return value(editor_host->session.name); };
-// base - in the file .vishdb area (S5.3): new file next to, renaming over the former
+// base - to the .vishdb file by area (S5.3): new file next to, renaming over the previous base edit
+// after the last save and is autosave allowed (vish serve)
+autosave_due() => native "cpp" {
+  auto & s = *editor_host;
+  return value(s.autosave && s.session.db.edits != s.saved_edits);
+};
 save_program(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(0)));
   auto & s = *editor_host;
   std::string path((a[0]).as<str_v>().view());
   save_area(s.session.db, s.session.root, path);
+  s.saved_edits = s.session.db.edits;
   if(s.now_peer) s.send(*s.now_peer, proto::s_saved{path});
   return value(int64_t(0));
 };
@@ -1908,7 +1914,7 @@ idle() {
     r = repository_raw(program_session(), "save", "", "", 0, 0);
     if(!r[0]) repository_save_failed(r[1]);
     else repository_reply(0, true, "", "");
-  }
+  } else if(autosave_due() && !any_draft_open()) save_program(save_path());
   0
 }
 any_draft_open() {
@@ -5216,17 +5222,21 @@ file_of(str path) {
   for(k : range(path.size)) if(path[k] == '/') slash = k;
   slice_text(path, slash + 1, path.size)
 }
-// .vishdb next to the program: stats.vish → stats.vishdb §3.1)
+// .vishdb next to the program: stats.vish → stats.vishdb (base is the source of truth, §3.1) Program base
+// on the disk: .vish → X.vishdb near (text is not overwritten), .vishdb - it itself
+save_path() {
+  name = program_name();
+  if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb"
+}
 on_save() {
   finalize_views();
   if(repo_branch(program_session()) != "") {
     r = repository_command(program_session(), "save", "", "");
     return repository_reply(0, r[0], r[1], r[2]);
   }
-  name = program_name();
-  path = if(ends_with(name, ".vish")) name + "db" else if(ends_with(name, ".vishdb")) name else name + ".vishdb";
+  path = save_path();
   save_program(path);
-  send_status(now_peer(), "done", "сохранено: " + file_of(path), (("база — рядом с программой: " + file_of(name)) + " → ") + file_of(path));
+  send_status(now_peer(), "done", "сохранено: " + file_of(path), (("база — рядом с программой: " + file_of(program_name())) + " → ") + file_of(path));
   calm_status(now_peer());
 }
 repository_reply(i64 request, bool ok, str message, str diff) {

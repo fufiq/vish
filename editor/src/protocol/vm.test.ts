@@ -343,6 +343,65 @@ describe('живая VM', () => {
     }
   });
 
+  it('автосохранение: правка без Ctrl+S попадает в .vishdb по паузе набора, текст не тронут', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const prog = join(dir, 'p.vish');
+    copyFileSync(program, prog);
+    const before = readFileSync(prog, 'utf8');
+    const sock = join(dir, 's');
+    const vm = spawn(vish, ['serve', prog, sock], {
+      stdio: 'ignore',
+      env: { ...process.env, VISH_NO_AUTOSAVE: '' }, // Here we need auto-save.
+    });
+    try {
+      for (let i = 0; i < 250 && !existsSync(sock); ++i) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const got: ServerMsg[] = [];
+      const split = new FrameSplitter();
+      const c = connect(sock);
+      await new Promise<void>((ok, fail) => {
+        c.on('connect', ok).on('error', fail);
+      });
+      c.on('data', (d: Buffer) => {
+        split.push(new Uint8Array(d), (b) => {
+          got.push(decodeServer(b));
+        });
+      });
+      c.write(encodeClient({ type: 'c_hello', version: schema.version }));
+      c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
+      for (let i = 0; i < 500 && got.length < 4; ++i) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const view = got.at(1);
+      if (view?.type !== 's_view') throw new Error('нет представления');
+      const fn = view.nodes.find((n) => n.kind === 'n_fn');
+      if (!fn) throw new Error('нет функции');
+      expect(existsSync(`${prog}db`)).toBe(false); // open-write
+      c.write(
+        encodeClient({
+          type: 'c_pointer',
+          view: 1,
+          node: fn.id,
+          piece: 0,
+          offset: 0,
+        }),
+      );
+      for (const key of ['End', 'y', '=', '2', ';', 'Escape']) {
+        c.write(encodeClient({ type: 'c_key', view: 1, key, mods: 0 }));
+      }
+      // set pause - 1 s; wait for base up to 6 s
+      for (let i = 0; i < 600 && !existsSync(`${prog}db`); ++i) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(existsSync(`${prog}db`)).toBe(true);
+      expect(readFileSync(prog, 'utf8')).toBe(before);
+      c.end();
+    } finally {
+      vm.kill();
+    }
+  });
+
   it('версии: трёхстороннее слияние копий базы — CLI и редактор', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vish-'));
     const prog = join(dir, 'p.vish');
