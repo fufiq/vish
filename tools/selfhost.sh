@@ -24,7 +24,7 @@ case "$1" in
     rm -rf out/lib.bak; mkdir -p out/lib.bak; cp lib/*.vish out/lib.bak/
     restore() { cp out/lib.bak/*.vish lib/; cp out/vish.stable out/vish; echo "сборка не удалась: lib/ и out/vish возвращены"; exit 1; }
     out/vish.stable lib export "$repo" lib || restore
-    out/vish.stable native out/native.hpp lib/tools.vish lib/versions.vish lib/tests.vish lib/cli.vish lib/editor.vish || true
+    out/vish.stable native out/native.hpp lib/tools.vish lib/versions.vish lib/tests.vish lib/cli.vish lib/lexer.vish lib/editor.vish || true
     ./build.sh release > out/selfhost.log 2>&1 || true
     ./build.sh release >> out/selfhost.log 2>&1 || restore
     out/vish test tests > out/selfhost.tests 2>&1 || { tail -5 out/selfhost.tests; restore; }

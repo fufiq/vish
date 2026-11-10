@@ -238,7 +238,7 @@ merge_command(args) => if(args.size >= 2) merge_files(args[0], args[1], if(args.
 // and merger solutions are here. This is our development of the original ideas of key
 // => ast and stable semantic links. Names, directory, photo numbers/parents and state
 // application are on Vish.
-repo_builtin(str name) => has_text(array{"prelude", "tools", "versions", "tests", "cli", "editor"}, name);
+repo_builtin(str name) => has_text(array{"prelude", "tools", "versions", "tests", "cli", "editor", "lexer"}, name);
 repo_ident_start(i64 c) => ((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || ((c == '_') || (c >= 128)));
 repo_name_ok(str name) {
   if((name.size == 0) || ((name.size > 256) || repo_builtin(name))) return false;
@@ -1161,7 +1161,7 @@ repository_import_cli(args) {
 // under the keys src.<name>: when importing "module X;" → "module src.X;", "use X" → "use src.X", when exporting - back. The text
 // lib/ after export is the canonical projection base.
 //
-lib_names() => array{"prelude", "tools", "versions", "tests", "cli", "editor"};
+lib_names() => array{"prelude", "tools", "versions", "tests", "cli", "editor", "lexer"};
 lib_rename(str line, bool into) {
   from = if(into) "" else "src.";
   to = if(into) "src." else "";

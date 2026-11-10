@@ -114,7 +114,7 @@ void restore_nodes(ast_db & live, ast_db const & target, std::vector<node_id> co
       if(!std::ranges::contains(module_roots, owner) && live.is<n_module>(owner)) {
         auto name = live.as<n_module>(owner).name;
         auto key = name ? live.strings.text(name) : std::string_view();
-        if(key == "prelude" || key == "editor" || key == "tools" || key == "versions" || key == "cli" || key == "tests") reject();
+        if(key == "prelude" || key == "editor" || key == "tools" || key == "versions" || key == "cli" || key == "tests" || key == "lexer") reject();
       }
     }
     copies.push_back({n, node.kind, node.where, target.note_of(n) ? *target.note_of(n) : node_note{}});

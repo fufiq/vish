@@ -73,6 +73,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # host itself : lib/*.vish through the repository back and forth (vish lib import/export), second circle - the same text
     ( sh tests/selfhost.sh $PWD/$b $L/selfhost ) > $L/t_selfhost.log 2>&1
     echo "selfhost: код $?" > $L/r_selfhost
+    # Transfer of C++ to vish: Lexer in language (lib/lexer.vish) vs C++ stage0 - dumps of tokens, comments and causes of holes coincide
+    ( $b lexcheck tests/data/lexer_edge*.txt lib/cli.vish lib/lexer.vish $(ls tests/*.vish | head -60) ) > $L/t_lexer.log 2>&1
+    echo "lexer: код $?" > $L/r_lexer
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore

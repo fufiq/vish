@@ -32,12 +32,16 @@ constexpr unsigned char tests_bytes[] = {
 constexpr unsigned char cli_bytes[] = {
 #embed "../../lib/cli.vish"
 };
+constexpr unsigned char lexer_bytes[] = {
+#embed "../../lib/lexer.vish"
+};
 std::string_view builtin_text(std::string_view key) {
   auto view = [](auto const & bytes) { return std::string_view(reinterpret_cast<char const *>(bytes), sizeof bytes); };
   if(key == "tools") return view(tools_bytes);
   if(key == "versions") return view(versions_bytes);
   if(key == "tests") return view(tests_bytes);
   if(key == "cli") return view(cli_bytes);
+  if(key == "lexer") return view(lexer_bytes);
   return {};
 }
 
@@ -98,7 +102,7 @@ node_id load_tools(ast_db & db) { return load_builtin(db, "tools"); }
 
 // the file name of the embedded module, where the error text (import source); not built-in - "tools.vish"
 std::string builtin_file(ast_db const & db, uint32_t source) {
-  for(std::string_view key: {"tools", "versions", "tests", "cli"})
+  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer"})
     for(uint32_t i = 0; i < db.size(); ++i)
       if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == key && db[node_id(i)].where.source == source)
         return cat(key, ".vish");

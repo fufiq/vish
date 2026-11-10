@@ -1,0 +1,181 @@
+// Lexer text projection in language (transfer from C++, branch t3/cpp-to-vish-migration; user goal: ). Same algorithm as
+// include/vish/lexer.hpp (stage0): The C++ version remains until the computer is assembled from the image; the equivalence is
+// `vish lexcheck <файлы>` (tokens, comments, causes of holes are line by line the same). "the operator is always
+// single-character": multi-character operators (`==`, `=>`, `<=`) - chains of single-character without spaces; the lexer gives
+// each character separately and notes whether it is glued to the previous one. Indistinguishable is a token hole (kind_bad)
+// with a cause.
+module lexer;
+use tools;
+
+kind_ident() => 0;
+kind_int() => 1;
+kind_float() => 2;
+kind_str() => 3;
+kind_char() => 4;
+kind_op() => 5;
+kind_open() => 6;
+kind_close() => 7;
+kind_bad() => 8;
+kind_end() => 9;
+
+struct token { i64 kind; i64 from; i64 to; bool glued; i64 err; }
+struct lspan { i64 from; i64 to; }
+struct lex_error { str what; i64 from; i64 to; }
+struct lexed { array tokens; array comments; array errors; }
+
+is_space(i64 c) => (c == 32) || ((c == 9) || ((c == 10) || (c == 13)));
+is_digit(i64 c) => (c >= 48) && (c <= 57);
+// UTF-8 bytes ≥ 0x80 - letters of the name (Cyrillic, etc.)
+is_ident_start(i64 c) => ((c >= 97) && (c <= 122)) || (((c >= 65) && (c <= 90)) || ((c == 95) || (c >= 128)));
+is_ident(i64 c) => is_ident_start(c) || is_digit(c);
+is_xdigit(i64 c) => is_digit(c) || (((c >= 97) && (c <= 102)) || ((c >= 65) && (c <= 70)));
+// + - * / % < > = ! & | ^ ~ ? : . , ; @ # $ \
+is_op(i64 c) => has_number(array{43, 45, 42, 47, 37, 60, 62, 61, 33, 38, 124, 94, 126, 63, 58, 46, 44, 59, 64, 35, 36, 92}, c);
+is_open(i64 c) => (c == 40) || ((c == 91) || (c == 123));
+is_close(i64 c) => (c == 41) || ((c == 93) || (c == 125));
+known(i64 c) => is_space(c) || (is_ident(c) || (is_op(c) || (is_open(c) || (is_close(c) || ((c == 34) || (c == 39))))));
+byte_at_or(str s, i64 k) => if(k < s.size) s[k] else 0;
+
+// The lexer does not fall: the result is tokens (the last is the end), comments in order (`//…` to the end of the line, `/*…*/`) and the causes of holes.
+lex(str src) {
+  n = src.size;
+  toks = array{};
+  comments = array{};
+  errors = array{};
+  pos = 0;
+  glued = false;
+  loop {
+    if(!(pos < n)) break;
+    c = src[pos];
+    if(is_space(c)) {
+      pos += 1;
+      glued = false;
+      continue;
+    }
+    if((c == 47) && (byte_at_or(src, pos + 1) == 47)) {
+      start = pos;
+      while((pos < n) && (src[pos] != 10)) pos += 1;
+      end = pos;
+      if((end > start) && (src[end - 1] == 13)) end -= 1;
+      comments.push(lspan{start, end});
+      glued = false;
+      continue;
+    }
+    if((c == 47) && (byte_at_or(src, pos + 1) == 42)) {
+      start = pos;
+      e = pos + 2;
+      while(((e + 1) < n) && !((src[e] == 42) && (src[e + 1] == 47))) e += 1;
+      if((e + 1) < n) {
+        pos = e + 2;
+        comments.push(lspan{start, pos});
+        glued = false;
+        continue;
+      }
+    }
+    start = pos;
+    kind = kind_end();
+    err = -1;
+    if(is_ident_start(c)) {
+      while((pos < n) && is_ident(src[pos])) pos += 1;
+      kind = kind_ident();
+    } else if(is_digit(c)) {
+      kind = kind_int();
+      if((c == 48) && ((byte_at_or(src, pos + 1) == 120) || (byte_at_or(src, pos + 1) == 88))) {
+        pos += 2;
+        while((pos < n) && (is_xdigit(src[pos]) || (src[pos] == 95))) pos += 1;
+      } else {
+        while((pos < n) && (is_digit(src[pos]) || (src[pos] == 95))) pos += 1;
+        // 1.5 - fractional; 1..5 and 1.foo() - none
+        if((byte_at_or(src, pos) == 46) && is_digit(byte_at_or(src, pos + 1))) {
+          pos += 1;
+          while((pos < n) && (is_digit(src[pos]) || (src[pos] == 95))) pos += 1;
+          kind = kind_float();
+        }
+      }
+    } else if((c == 47) && (byte_at_or(src, pos + 1) == 42)) {
+      // An open comment is a hole to the end of the text; the spaces at the end are not a hole (fmtаfmt = fmt)
+      pos = n;
+      while(is_space(src[pos - 1])) pos -= 1;
+      kind = kind_bad();
+      errors.push(lex_error{"незакрытый комментарий", start, start + 2});
+      err = errors.size - 1;
+    } else if((c == 34) || (c == 39)) {
+      kind = if(c == 34) kind_str() else kind_char();
+      // line - within a line of text (translation inside - `\\n`): unclosed does not eat the following lines
+      pos += 1;
+      while((pos < n) && ((src[pos] != c) && (src[pos] != 10))) {
+        if((src[pos] == 92) && (byte_at_or(src, pos + 1) != 10)) pos += 1;
+        pos += 1;
+      }
+      if(pos > n) pos = n;
+      if((pos >= n) || (src[pos] != c)) {
+        kind = kind_bad();
+        errors.push(lex_error{if(c == 34) "незакрытая строка" else "незакрытый символ", start, start + 1});
+        err = errors.size - 1;
+      } else pos += 1;
+    } else if(is_open(c)) {
+      pos += 1;
+      kind = kind_open();
+    } else if(is_close(c)) {
+      pos += 1;
+      kind = kind_close();
+    } else if(is_op(c)) {
+      pos += 1;
+      kind = kind_op();
+    } else {
+      // Unknown Symbols: One Hole
+      while((pos < n) && !known(src[pos])) pos += 1;
+      kind = kind_bad();
+      errors.push(lex_error{"неизвестный символ '" + text_range(src, start, pos) + "'", start, pos});
+      err = errors.size - 1;
+    }
+    toks.push(token{kind, start, pos, glued, err});
+    glued = true;
+  }
+  toks.push(token{kind_end(), pos, pos, false, -1});
+  lexed{toks, comments, errors}
+}
+
+// Line Dump of the result (general view from lex_reference - C++ stage0): reconciliation of two implementations.
+dump(lexed r) {
+  out = "";
+  for(t : r.tokens) out = out + ("t " + text(t.kind) + " " + text(t.from) + " " + text(t.to) + " " + (if(t.glued) "1" else "0") + " " + text(t.err) + "\n");
+  for(c : r.comments) out = out + ("c " + text(c.from) + " " + text(c.to) + "\n");
+  for(e : r.errors) out = out + ("e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
+  out
+}
+
+// The C++ lexer (stage0) is the same dump; it exists until the computer is assembled from the image.
+lex_reference(str src) => native "cpp" {
+  if(!a[0].known()) return erase(value(std::string()));
+  std::string src(a[0].as<str_v>().view());
+  lexer lx(src);
+  auto toks = lx.run();
+  std::string out;
+  for(auto const & t: toks) out += cat("t ", int(t.kind), " ", t.where.begin, " ", t.where.end, " ", t.glued ? 1 : 0, " ", t.err == ~uint32_t{0} ? int64_t(-1) : int64_t(t.err), "\n");
+  for(auto const & c: lx.comments) out += cat("c ", c.begin, " ", c.end, "\n");
+  for(std::size_t i = 0; i < lx.errors.size(); ++i) out += cat("e ", lx.errors[i].where.begin, " ", lx.errors[i].where.end, " ", std::string_view(lx.errors[i].what()), "\n");
+  return value(std::move(out));
+};
+
+// vish lexcheck <files>: vish dump = C++ dump on each file; code 0 - all matched
+check_cli(args) {
+  bad = 0;
+  total = 0;
+  for(f : args) {
+    src = read_text(f);
+    mine = dump(lex(src));
+    ref = lex_reference(src);
+    total += 1;
+    if(mine != ref) {
+      bad += 1;
+      a = lines_of(mine);
+      b = lines_of(ref);
+      k = 0;
+      while((k < a.size) && ((k < b.size) && (a[k] == b[k]))) k += 1;
+      write_out(f + ": расхождение в строке дампа " + text(k) + "\n  vish: " + (if(k < a.size) a[k] else "—") + "\n  C++:  " + (if(k < b.size) b[k] else "—") + "\n");
+    }
+  }
+  write_out("лексер: файлов " + text(total) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}
