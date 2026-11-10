@@ -851,6 +851,42 @@ repository_exchange_cli(args) {
     fail(said)
   }
 }
+// Text export (vish repo export, 2026-11-10): live program and its modules are ordinary .vish files that are read by any
+// main.vish build - main text + use for modules that are not in it; geo.vec → geo/vec.vish; history.txt - a list of images
+// (help: history is not restored). Inverse: vish repo init <catalogue> /main.vish new. vishrepo. Determined: The same
+// repository is the same bytes.
+//
+repo_export(i64 s, str dir) {
+  repo_verify(s);
+  repo_direct(s, "live", "", "", 0, 0);
+  root = version_root(0);
+  mods = repo_native_modules(s, 0);
+  main = repo_module_text(module_items(0, root, array{}));
+  uses = "";
+  for(m : mods) if(m.node != root) if(find_text(main, "use " + m.name) < 0) uses = ((uses + "use ") + m.name) + ";\n";
+  why = write_text(dir + "/main.vish", uses + main);
+  if(why != "") throw why;
+  count = 1;
+  for(m : mods) if(m.node != root) {
+    path = dir + "/";
+    for(k : range(m.name.size)) path = path + (if(m.name[k] == '.') "/" else slice_text(m.name, k, k + 1));
+    why = write_text(path + ".vish", ("module " + m.name + ";\n") + repo_module_text(module_items(0, m.node, array{})));
+    if(why != "") throw why;
+    count = count + 1;
+  }
+  hist = "";
+  for(x : repo_rows(s)) if(x[0] == "snapshot") hist = (((((hist + text(x[1])) + " ") + text(x[2])) + " ") + text(x[6])) + (" " + x[4] + "\n");
+  why = write_text(dir + "/history.txt", hist);
+  if(why != "") throw why;
+  count
+}
+repository_export_cli(args) {
+  try {
+    n = repo_export(number_of(args[0]), args[1]);
+    write_out((("экспорт: файлов .vish " + text(n)) + " в ") + args[1] + "\n");
+    0
+  } catch(e) { fail(text(e)) }
+}
 repository_cli(args) {
   s = number_of(args[0]);
   r = repository_command(s, args[1], args[2], args[3]);

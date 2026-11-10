@@ -67,6 +67,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # exchange between repositories: pull/push, repeat, your pictures on the branch, discrepancy journal
     ( sh tests/exchange.sh $PWD/$b $L/exchange ) > $L/t_exchange.log 2>&1
     echo "exchange: код $?" > $L/r_exchange
+    # Text export of the repository (vish repo export) and return via vish repo init
+    ( sh tests/export.sh $PWD/$b $L/export ) > $L/t_export.log 2>&1
+    echo "export: код $?" > $L/r_export
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore

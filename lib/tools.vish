@@ -386,6 +386,21 @@ read_text(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(std::string()));
   return value(std::string(os::mapped_file(std::string((a[0]).as<str_v>().view())).text()));
 };
+// write text to a file (catalogues are created along the way); an empty line is a success, otherwise the reason
+write_text(str path, str body) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(std::string()));
+  namespace fs = std::filesystem;
+  fs::path f(std::string(a[0].as<str_v>().view()));
+  std::error_code e;
+  if(f.has_parent_path()) fs::create_directories(f.parent_path(), e);
+  if(e) return value(e.message());
+  auto data = a[1].as<str_v>().view();
+  FILE * out = fopen(f.c_str(), "wb");
+  if(!out) return value(std::string("не удалось открыть ") + f.string());
+  bool ok = fwrite(data.data(), 1, data.size(), out) == data.size();
+  ok = (fclose(out) == 0) && ok;
+  return value(ok ? std::string() : std::string("не удалось записать ") + f.string());
+};
 // directory files (path - file: it itself)
 files_in(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(array_v::of({})));
