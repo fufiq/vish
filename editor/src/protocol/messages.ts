@@ -141,6 +141,11 @@ export interface ItemsAsk {
 export interface ExtensionsAsk {
   type: 'c_extensions';
 }
+// Plugin command (command <name>): result - suggestion of editing, like AI
+export interface CommandAsk {
+  type: 'c_command';
+  name: string;
+}
 export interface ProposeAsk {
   type: 'c_propose';
   key: string;
@@ -221,6 +226,7 @@ export type ClientMsg =
   | NameAsk
   | ItemsAsk
   | ExtensionsAsk
+  | CommandAsk
   | ProposeAsk
   | DecideAsk
   | ContextAsk

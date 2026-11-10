@@ -10,3 +10,16 @@ hover 1 @trio:2
 extensions
 // expect: extensions points=
 // expect: module="geo.card_plugin" name="visual_trio" sig="[[editor]] visual_trio(c)" kind="visual"
+// Checking node from the plugin is a plugin prompt, not a bug
+hover 1 @trio:2
+// expect: kind="подсказка плагина" text="trio складывает аргументы: порядок не важен"
+// expect-not: kind="ошибка"
+// Plugin command: cursor in trio function - sentence from “command_mark_function plugins”, code untouched
+pointer 1 @trio 0 0
+command command_mark_function
+// expect: from="плагин command_mark_function"
+// expect: key="trio(i64, i64, i64)"
+// expect: why="метка от плагина geo.card_plugin"
+// Accept the sentence: the function is replaced (labeled), through the same check as the AI
+decide 1 1
+// expect: проверено плагином

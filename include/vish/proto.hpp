@@ -139,6 +139,9 @@ struct c_name {
 };
 struct c_items {};
 struct c_extensions {};
+struct c_command {
+  std::string name;
+};
 struct c_propose {
   std::string key;
   std::string text;
@@ -172,7 +175,7 @@ struct c_repository {
   std::string text;
   uint64_t revision;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_command, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
 
 // --- VM customer ---
 

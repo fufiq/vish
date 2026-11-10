@@ -5,6 +5,7 @@
 // modeled on the cards "canvas"; *my*.
 //
 import type { Extensions } from '../../../protocol/messages';
+import type { Host } from '../../theme';
 
 const make = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -21,10 +22,13 @@ const make = <K extends keyof HTMLElementTagNameMap>(
 const kinds: Record<string, string> = {
   decision: 'решение',
   visual: 'схема',
+  check: 'проверка',
+  complete: 'дополнение',
+  command: 'команда',
   other: 'своё',
 };
 
-export function extensions(el: HTMLElement, m: Extensions): void {
+export function extensions(el: HTMLElement, m: Extensions, host: Host): void {
   // groups by module in search order: program, then plugins
   const groups = new Map<string, Extensions['points']>();
   for (const p of m.points) {
@@ -55,6 +59,15 @@ export function extensions(el: HTMLElement, m: Extensions): void {
         const chip = make('span', `chip ${p.kind}`, kinds[p.kind] ?? p.kind);
         row.append(chip, make('code', 'sig', p.sig));
         if (p.shadowed) row.append(make('span', 'note', 'перекрыта'));
+        // Plugin command - click: VM takes the node under the cursor and responds with a suggestion of editing (panel “AI”)
+        if (p.kind === 'command') {
+          row.classList.add('action');
+          row.title = 'Применить к функции под курсором — предложением';
+          row.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            host.send({ type: 'c_command', name: p.name });
+          });
+        }
         return row;
       }),
     );

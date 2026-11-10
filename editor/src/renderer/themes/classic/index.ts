@@ -195,7 +195,7 @@ const theme: Theme = {
 
     // Expansion points (plugins - modules in the language): module, name, view, signature; overlapped - crossed
     // out. A simple list; the "canvas" draws its own (themes/canvas/extensions.ts).
-    extensions(el, m) {
+    extensions(el, m, host) {
       el.replaceChildren(
         make('div', 'head', `Расширения: ${String(m.points.length)}`),
         ...m.points.map((p) => {
@@ -204,6 +204,10 @@ const theme: Theme = {
             make('b', '', p.module === '' ? 'программа' : p.module),
             make('span', '', ` ${p.kind} · ${p.sig}`),
           );
+          if (p.kind === 'command')
+            press(row, () => {
+              host.send({ type: 'c_command', name: p.name });
+            });
           return row;
         }),
       );

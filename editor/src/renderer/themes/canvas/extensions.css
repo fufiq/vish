@@ -96,3 +96,18 @@
   padding: 8px;
   color: #8b8880;
 }
+#extensions .chip.check {
+  background: #f6efdc;
+  color: #977a3c;
+}
+#extensions .chip.complete {
+  background: #e8eefb;
+  color: #1e3a8a;
+}
+#extensions .chip.command {
+  background: #fde9dd;
+  color: #c2410c;
+}
+#extensions .point.action {
+  cursor: pointer;
+}

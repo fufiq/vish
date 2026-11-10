@@ -3427,6 +3427,22 @@ on_hover(i64 id, n) {
   v = view_of(id);
   if(v < 0) no_view(id) else hover_at(v, n)
 }
+// node checks from plugins: functions with [[editor]] check <name>(code node) - an array of comment strings.
+// These are plugin hints, not language errors:
+// - the type of the line "Plugin prompt", the verification and language types do not
+// replace and the program does not change. *My agreement check <name>, type of line.
+plugin_checks(n) {
+  r = array{};
+  seen = array{};
+  for(p : extension_points()) {
+    nm = code_name(p[1]);
+    if(starts_with(nm, "check_") && !has_text(seen, nm)) {
+      seen.push(nm);
+      for(t : editor_extension(nm, n)) r.push(t);
+    }
+  }
+  r
+}
 // pointing
 hover_at(i64 v, n) {
   lines = array{};
@@ -3454,6 +3470,7 @@ hover_at(i64 v, n) {
     if(!called) entity_lines(lines, v, n, k);
     bar_lines(lines, n);
     for(e : error_lines(v, n)) lines.push(e);
+    for(t : plugin_checks(n)) lines.push(line{"подсказка плагина", t, code(), 0, 0});
     // function or design name - ads with links (selected in instance - first)
     name = "";
     if(k == ast.function) {
@@ -5630,18 +5647,36 @@ on_extensions() {
   for(p : extension_points()) {
     f = p[1];
     n = code_name(f);
-    kind = if(starts_with(n, "on_")) "decision" else if(starts_with(n, "visual_")) "visual" else "other";
+    kind = if(starts_with(n, "on_")) "decision" else if(starts_with(n, "visual_")) "visual" else if(starts_with(n, "check_")) "check" else if(starts_with(n, "complete_")) "complete" else if(starts_with(n, "command_")) "command" else "other";
     xs.push(array{p[0], n, head_text(f), kind, if(has_text(seen, n)) "1" else ""});
     seen.push(n);
   }
   send_extensions_list(xs);
 }
 on_propose(str key, str body, str why) {
-  it = find_key(module_items(0, -1, array{}), key);
   who = clients[client_of(now_peer())].name;
+  add_proposal(if(who == "") "клиент " + text(now_peer() + 1) else who, key, body, why);
+}
+add_proposal(str who, str key, str body, str why) {
+  it = find_key(module_items(0, -1, array{}), key);
   next_proposal += 1;
-  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, if(who == "") "клиент " + text(now_peer() + 1) else who, it.node, array{}, 0, ""});
+  proposals.push(proposal{next_proposal, key, if(it.present) it.text else "", body, why, who, it.node, array{}, 0, ""});
   share_proposals();
+}
+// Plugin command: [[editor]] command <name>(code node under cursor) → array {новый текст функции, зачем}; empty -
+// not applicable here. The team does not rule anything itself: the result is a sentence from the “plugins <name>”,
+// as in the AI, and the person accepts it through the same reconciliation of the original version and parsing.
+// 
+// * My: * command "name" agreement, sentence as a way of application.
+on_command(str name) {
+  v = view_of(-1);
+  if(v < 0) return report("команда " + name + ": нет открытого представления");
+  n = place_node(v, cursor(v));
+  f = if(given(n) && (code_kind(n) == ast.function)) n else if(given(n)) enclosing_fn(n) else code();
+  if(!given(f)) return report("команда " + name + ": курсор не в функции");
+  xs = editor_extension(name, n);
+  if(xs.size < 2) return report("команда " + name + ": здесь не применима");
+  add_proposal("плагин " + name, fn_key(f), xs[0], xs[1]);
 }
 // Human decision: Accept - the key element is replaced by text (no - added), with hot replacement in a
 // live process (edit_command, as vish vm edit); reject - remove

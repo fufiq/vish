@@ -427,6 +427,7 @@ struct editor_server {
   void handle(peer & p, proto::c_name const & m) { decide(&p, -1, "on_name", {value(m.name)}); }
   void handle(peer & p, proto::c_items const &) { decide(&p, -1, "on_items", {}); }
   void handle(peer & p, proto::c_extensions const &) { decide(&p, -1, "on_extensions", {}); }
+  void handle(peer & p, proto::c_command const & m) { decide(&p, -1, "on_command", {value(m.name)}); }
   void handle(peer & p, proto::c_propose const & m) { decide(&p, -1, "on_propose", {value(m.key), value(m.text), value(m.why)}); }
   void handle(peer & p, proto::c_decide const & m) { decide(&p, -1, "on_decide", {value(int64_t(m.id)), value(m.accept)}); }
   void handle(peer & p, proto::c_context const & m) { decide(&p, m.view, "on_context", {value(int64_t(m.request)), value(int64_t(m.view)), value(int64_t(m.node.value)), value(int64_t(m.revision))}); }

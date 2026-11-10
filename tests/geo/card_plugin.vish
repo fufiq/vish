@@ -2,3 +2,15 @@
 [[editor]] visual_trio(c) => array{"trio", "", "первый", "a", "второй", "b", "третий", "c"};
 // Source of addition: names at the place of the set (name, explanation in pairs)
 [[editor]] complete_trio_helpers(c) => array{"trio_helper", "из плагина geo.card_plugin"};
+// node Verification: Tip the plugin on the trio name in the call (not a language error)
+[[editor]] check_trio_use(c) {
+  if(code_kind(c) != ast.name) return array{};
+  ast.name{nm} = c;
+  if(nm == "trio") array{"trio складывает аргументы: порядок не важен"} else array{}
+}
+// Command: Transform function under cursor - sentence, not editing (adds comment-tag)
+[[editor]] command_mark_function(c) {
+  f = if(code_kind(c) == ast.function) c else code_parent(c);
+  while(code_kind(f) != ast.function) f = code_parent(f);
+  array{"// проверено плагином\n" + code_text(f), "метка от плагина geo.card_plugin"}
+}
