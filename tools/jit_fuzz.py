@@ -5,7 +5,7 @@
 находились случайно.  у JIT (2022-11-03 10:52) — гарантия
 здесь одна: тот же результат, что у интерпретатора. Генератор собирает программы из конструкций, на которых JIT уже ошибался (циклы по
 range(константа), вложенные, вызовы с литеральными аргументами, изменяемые параметры с аргументом-местом, массивы массивов, локальные функции,
-break/continue); данные — от args.size (рантайм), чтобы разбор ничего не свернул. Запуск: tools/jit_fuzz.py [число] [зерно] [путь к vish].
+break/continue; отдельные режимы — строки и структуры, f64); данные — от args.size (рантайм), чтобы разбор ничего не свернул. Запуск: tools/jit_fuzz.py [число] [зерно] [путь к vish].
 Расхождение — программа сохраняется в out/fuzz/ (минимизировать вручную) и код выхода 1.
 """
 import os, random, subprocess, sys
@@ -297,6 +297,85 @@ def program2(seed):
     main.append("}\n")
     return PRE + PRE2 + "".join(fs) + "".join(main)
 
+class fgen:
+    """f64: массив fw, скаляры, + - * / на константу, сравнения, f64(i)/i64(x); значения ограничены (r = r*0.5 + e), чтобы i64() не переполнялся."""
+    def __init__(self, rnd):
+        self.r = rnd
+        self.loop = []
+        self.fresh = 0
+    def atom(self):
+        r = self.r
+        k = r.random()
+        if k < 0.30:
+            return f"fw[{self.r.randrange(0, 8) if not self.loop or r.random() < 0.4 else '(' + r.choice(self.loop) + ' & 7)'}]"
+        if k < 0.45:
+            return "a"
+        if k < 0.55:
+            return "b"
+        if k < 0.65 and self.loop:
+            return f"f64({r.choice(self.loop)})"
+        return f"{r.randrange(0, 50)}.{r.choice([0, 25, 5, 75])}"
+    def expr(self, d=0):
+        r = self.r
+        if d >= 3 or r.random() < 0.3:
+            return self.atom()
+        x = self.expr(d + 1)
+        y = self.expr(d + 1)
+        k = r.random()
+        if k < 0.25:
+            return f"({x} + {y})"
+        if k < 0.45:
+            return f"({x} - {y})"
+        if k < 0.60:
+            return f"({x} * {r.choice(['0.5', '1.5', '2.0', '0.25'])})"
+        if k < 0.75:
+            return f"({x} / {r.choice(['2.0', '3.0', '7.5', '0.5'])})"
+        if k < 0.85:
+            return f"f64(i64({x}) & 255)"
+        return f"({x} * 0.5)"
+    def stmt(self, depth):
+        r = self.r
+        pad = "  " * (depth + 1)
+        k = r.random()
+        if k < 0.25:
+            return f"{pad}a = (a * 0.5) + {self.expr()};\n"
+        if k < 0.40:
+            return f"{pad}b = (b * 0.25) - {self.expr()};\n"
+        if k < 0.55:
+            return f"{pad}fw[{r.randrange(0, 8)}] = ({self.expr()}) * 0.5;\n"
+        if k < 0.62:
+            return f"{pad}n2 = (n2 + (i64({self.expr()}) & 255)) & {M};\n"
+        if k < 0.80 and depth < 3:
+            v = f"k{self.fresh}"
+            self.fresh += 1
+            lim = r.choice([str(r.randrange(2, 20)), "n", "fw.size"])
+            self.loop.append(v)
+            body = "".join(self.stmt(depth + 1) for _ in range(r.randrange(1, 4)))
+            self.loop.pop()
+            return f"{pad}for({v} : range({lim})) {{\n{body}{pad}}}\n"
+        if k < 0.92 and depth < 3:
+            cmp = r.choice(["<", ">", "<=", ">="])
+            ya = "".join(self.stmt(depth + 1) for _ in range(r.randrange(1, 3)))
+            yb = "".join(self.stmt(depth + 1) for _ in range(r.randrange(1, 3)))
+            return f"{pad}if({self.expr()} {cmp} {self.expr()}) {{\n{ya}{pad}}} else {{\n{yb}{pad}}}\n"
+        return f"{pad}a = a + {self.expr()};\n"
+    def function(self, name):
+        body = "".join(self.stmt(0) for _ in range(self.r.randrange(3, 8)))
+        return (f"{name}(fw, i64 n) {{\n  a = 1.5;\n  b = 0.5;\n  n2 = 0;\n{body}"
+                f"  print(a, b);\n  n2 + i64(a * 0.001)\n}}\n")
+
+def program3(seed):
+    rnd = random.Random(seed)
+    g = fgen(rnd)
+    nf = rnd.randrange(2, 5)
+    fs = [g.function(f"ff{i}") for i in range(nf)]
+    main = ["main() {\n", "  n = args.size + 5;\n", "  fw = array{};\n",
+            "  for(k : range(8)) fw.push(f64(k + args.size) * 1.25);\n"]
+    for i in range(nf):
+        main.append(f"  print(ff{i}(fw, n), fw[0], fw[3], fw[7]);\n")
+    main.append("}\n")
+    return PRE + "".join(fs) + "".join(main)
+
 def run(path, jit):
     cmd = [VISH, "run"] + (["--jit"] if jit else []) + [path, "a", "b"]
     try:
@@ -375,7 +454,7 @@ rejected = 0
 first_rej = None
 for k in range(N):
     seed = SEED * 100000 + k
-    src = program2(seed) if k % 2 else program(seed)   # нечётные — строки и структуры
+    src = (program, program2, program3)[k % 3](seed)   # 1 — строки и структуры, 2 — f64
     path = os.path.join(OUT, f"p{seed}.vish")
     open(path, "w").write(src)
     a = run(path, False)
