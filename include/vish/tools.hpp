@@ -41,12 +41,25 @@ std::string_view builtin_text(std::string_view key) {
   return {};
 }
 
-// Built-in name module (editor, tools...): it is already in the database (the database is saved with
-// it) - it, otherwise parsing text; parsing error - with space in the file.
+// Built-in name module (editor, tools...) is VM code, not program data.
+// 
+// The database, saved by the assembly with other text of the module, carries its outdated copy (foreign native, old logic): the copy is
+// renamed name@old, the module is disassembled again from the assembly text. That the copy of this build, knows the label build: <name>:
+// <hash text>: <number node module> in the rows of the base (set at parsing); error parsing - with space in the file.
+//
 node_id load_builtin_module(ast_db & db, std::string_view name, std::string_view text, std::string_view file) {
+  uint64_t h = 1469598103934665603ull; // FNV-1a: text hash is independent of compiler assembly
+  for(unsigned char c: text) h = (h ^ c) * 1099511628211ull;
+  std::string mark = cat("build:", name, ":", std::to_string(h), ":");
+  node_id stored; // The last root with this name is found by name.
   for(uint32_t i = 0; i < db.size(); ++i)
-    if(db.is<n_module>(node_id(i)) && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == name && !db[node_id(i)].parent)
-      return node_id(i);
+    if(db.is<n_module>(node_id(i)) && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == name && !db[node_id(i)].parent) stored = node_id(i);
+  if(stored && db.strings.index.contains(mark + std::to_string(stored.value))) return stored; // this assembly
+  if(stored) { // obsolete copy: the name is released for the module of this assembly
+    n_module old = db.as<n_module>(stored);
+    old.name = db.strings.intern(cat(name, "@старый"));
+    db.replace(stored, std::move(old));
+  }
   parser p(db, text, std::string(file));
   node_id m = p.parse_module();
   if(!p.errors().empty()) {
@@ -54,6 +67,7 @@ node_id load_builtin_module(ast_db & db, std::string_view name, std::string_view
     auto lc = locate(text, d.where.begin);
     throw diagnostic(cat(file, ":", lc.line, ":", lc.col, ": ", d.what()), d.where);
   }
+  db.strings.intern(mark + std::to_string(m.value));
   return m;
 }
 // Tuling module by key; tools - before the rest (they use tools)

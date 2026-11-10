@@ -61,6 +61,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # Ed25519 (RFC 8032): Slow (~4s staircase with JIT), so once, not in five dial modes
     ( timeout 300 $b run --jit tests/slow/ed25519.vish > $L/ed25519.out 2> $L/t_ed25519.log; cmp -s $L/ed25519.out tests/slow/ed25519.out || { echo "ed25519: вывод отличается от tests/slow/ed25519.out" >> $L/t_ed25519.log; diff $L/ed25519.out tests/slow/ed25519.out >> $L/t_ed25519.log; false; } )
     echo "ed25519: код $?" > $L/r_ed25519
+    # Built-in modules of the base - from the assembly: a copy of another build is replaced, the same - remains (a separate executable file)
+    ( $CXX -std=c++26 -freflection -fcontracts -O0 -Iinclude -Iout tests/builtin_modules.cpp -o $L/builtin_modules -luring && $L/builtin_modules ) > $L/t_builtin.log 2>&1
+    echo "builtin: код $?" > $L/r_builtin
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore
