@@ -19,6 +19,18 @@ flush_out() => native "cpp" {
   std::fflush(stdout);
   return value(int64_t(0));
 };
+// The database next to the program, saved after the text (Ctrl+S editor writes X.vish → X.vishdb): its path,
+// otherwise empty. AST is the source of truth, text - projection edits from the saved database are not lost on the
+// next opening of X.vish.
+prog_saved_db(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(std::string()));
+  namespace fs = std::filesystem;
+  std::string p(std::string((a[0]).as<str_v>().view()));
+  std::string db = p + "db";
+  std::error_code e1, e2;
+  auto t = fs::last_write_time(p, e1), d = fs::last_write_time(db, e2);
+  return value(std::string(!e1 && !e2 && d >= t ? db : std::string()));
+};
 // team program (.vish - to the team database, .vishdb - its database on the journal): number; errors in
 // parsing the text; disassembled; in .vishdb; projection: array{text, errors, whether the projection module
 // was found}; after elaboration (vish fmt --ct); tree; cut
@@ -238,8 +250,16 @@ cli(args) {
     } else return usage();
   }
   if(at >= args.size) return usage();
-  if((cmd == "serve") && !ends_with(args[at], ".vishdb") && !ends_with(args[at], ".tzdb") && !ends_with(args[at], ".vishrepo")) load_editor_module();
-  p = prog_open(args[at]);
+  target = args[at];
+  if((cmd == "serve") && ends_with(target, ".vish")) {
+    saved = prog_saved_db(target);
+    if(saved != "") {
+      write_err(("восстановлено из " + saved) + (" (сохранено позже " + target) + ")\n");
+      target = saved;
+    }
+  }
+  if((cmd == "serve") && !ends_with(target, ".vishdb") && !ends_with(target, ".tzdb") && !ends_with(target, ".vishrepo")) load_editor_module();
+  p = prog_open(target);
   if(prog_is_repository(p)) {
     if(run_module("versions", "repository_verify_cli", array{text(prog_session(p))}) != 0) return 1;
   }
