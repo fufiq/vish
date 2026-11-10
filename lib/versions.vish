@@ -787,24 +787,124 @@ repository_merge_cli(args) {
     if(r[2] == "") 0 else 1
   } catch(e) { fail(text(e)) }
 }
+// Exchange between independent repositories (2026-11-10, author's decision: import with renaming, fast-forward only;
+// transferred from C++ to 2026-11-10 -). journal is a single growing, operations are recorded sequentially from copies that
+// have diverged from a common ancestor, the common prefix journal . pull in s takes y o (alien session, repo_side_open ): the
+// tail of journal (if journal s is the prefix journal o; compares and adds host , repository_graft ) and pictures - with new
+// local numbers (the same content - border, name, parents, modules - the same), branches o - as a name / branch, move only
+// forward. journal diverged - rejection with numbers. The live program s is then the end of someone else's journal: it is
+// returned by repo_settle.
+//
+repo_snapshot_modules(i64 s, i64 id) => repo_catalog_data(repo_native_modules(s, id));
+repo_same_modules(xs, ys) {
+  if(xs.size != ys.size) return false;
+  for(k : range(xs.size)) if((xs[k][0] != ys[k][0]) || (xs[k][1] != ys[k][1])) return false;
+  true
+}
+repo_import_state(i64 s, i64 o, str name) {
+  if((name.size == 0) || ((name.size > 100) || (find_text(name, "/") >= 0))) throw "имя источника: непусто, без «/», до 100 байт";
+  g = repository_graft(s, o);
+  if(!g[0]) throw ((((("журналы разошлись: общее начало " + text(g[1])) + " операций (у вас ") + text(g[2])) + ", у них ") + text(g[3])) + ") — слейте копии через vish merge";
+  renamed_from = array{0}; renamed_to = array{0};
+  added = 0;
+  theirs = repo_direct(o, "state", "", "", 0, 0)[3];
+  for(x : theirs) if(x[0] == "snapshot") {
+    p = 0; q = 0;
+    for(k : range(renamed_from.size)) { if(renamed_from[k] == x[2]) p = renamed_to[k]; if(renamed_from[k] == x[6]) q = renamed_to[k]; }
+    end = parse_int(x[5]).value;
+    mods = repo_snapshot_modules(o, x[1]);
+    found = 0;
+    mine = repo_direct(s, "state", "", "", 0, 0)[3];
+    for(y : mine) if((found == 0) && (y[0] == "snapshot")) {
+      if((parse_int(y[5]).value == end) && ((y[4] == x[4]) && ((y[2] == p) && ((y[6] == q) && repo_same_modules(repo_snapshot_modules(s, y[1]), mods))))) found = y[1];
+    }
+    if(found != 0) { renamed_from.push(x[1]); renamed_to.push(found); }
+    else {
+      next = 0;
+      for(y : mine) if(y[0] == "current") next = y[1];
+      repository_snapshot_add(s, next, x[4], p, q, end, mods);
+      renamed_from.push(x[1]); renamed_to.push(next);
+      added += 1;
+    }
+  }
+  kept = "";
+  nbranches = 0;
+  for(x : theirs) if(x[0] == "branch") {
+    nbranches += 1;
+    tracked = (name + "/") + x[4];
+    head = 0;
+    for(k : range(renamed_from.size)) if(renamed_from[k] == x[6]) head = renamed_to[k];
+    mine = repo_direct(s, "state", "", "", 0, 0)[3];
+    has = false; old = 0;
+    for(y : mine) if((y[0] == "branch") && (y[4] == tracked)) { has = true; old = y[6]; }
+    if(!has) repo_direct(s, "branch", tracked, "", head, 0);
+    else if(repo_reaches(mine, head, old)) repo_direct(s, "branch", tracked, "", head, 0); // forward
+    else if(!repo_reaches(mine, old, head)) kept = (kept + " ") + tracked; // On the branch of our pictures - do not move
+  }
+  said = (((((("получено: операций журнала " + text(g[4])) + ", снимков ") + text(added)) + ", веток ") + text(nbranches)) + " (имена ") + name + "/…)";
+  if(kept != "") said = (said + "; не сдвинуты (на них свои снимки):") + kept;
+  said
+}
+// ancestor of the old head picture (by parents, including the picture itself)
+repo_reaches(rows, i64 old, i64 head) {
+  found = array{head};
+  k = 0;
+  while(k < found.size) {
+    if(found[k] == old) return true;
+    for(x : rows) if((x[0] == "snapshot") && (x[1] == found[k])) for(p : array{x[2], x[6]}) if((p > 0) && !has_number(found, p)) found.push(p);
+    k += 1;
+  }
+  false
+}
 // pull to the open repository of the session s: the file is a living base (save), the tail of journal and the source pictures
 // are in the living base and state (without saving: the live program became the end of someone else's journal - it is first
 // returned by repo_settle); journal diverged - "error: journal diverged..." (hereinafter merge_foreign ). journal live session
 // also carries built-in modules (editor, tools), so with someone else's copy it often "parted".
-repo_import_live(i64 s, str from, str name) => native "cpp" {
-  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
+repo_import_live(i64 s, str from, str name) {
   try {
-    auto & sess = repository_session(vm, (a[0]).as<int64_t>());
-    if(!sess.repository) return value(std::string("ошибка: репозиторий не открыт"));
-    auto & r = *sess.repository;
-    repository_save(r, sess.db, sess.root);
-    auto const b = repository_load(std::string((a[1]).as<str_v>().view()));
-    auto got = repository_import(r, sess.db.journal(), b, std::string((a[2]).as<str_v>().view()));
-    sess.db.replay(got.tail); // Live program is now the end of someone else's journal: saves repo_settle after returning to its head
-    return value(got.message);
-  } catch(diagnostic const & d) {
-    return value(cat("ошибка: ", d.what()));
+    repo_op(s, "save", "", "", 0, 0);
+    o = repo_side_open(from);
+    if(o < 0) return "ошибка: " + version_error();
+    try {
+      r = repo_import_state(s, o, name);
+      repo_side_close(o);
+      r
+    } catch(e) { repo_side_close(o); throw e; }
+  } catch(e) { "ошибка: " + text(e) }
+}
+// Compare journal sessions s and o: the common prefix is to add tail o to s (playback); array {ок, общее начало, длина s,
+// длина o, дописано}. The only thing host does for pull is byte recording comparison and replay.
+repository_graft(i64 s, i64 o) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  auto & mine = repository_session(vm, a[0].as<int64_t>());
+  auto & theirs = repository_session(vm, a[1].as<int64_t>());
+  auto local = mine.db.journal(), other = theirs.db.journal();
+  auto bytes = [](journal_entry const & e) { writer w; w.put(e); return w.bytes; };
+  std::size_t shared = 0;
+  while(shared < local.size() && shared < other.size() && bytes(local[shared]) == bytes(other[shared])) ++shared;
+  auto ints = [&](bool ok, std::size_t tail) { return value(array_v::of({value(ok), value(int64_t(shared)), value(int64_t(local.size())), value(int64_t(other.size())), value(int64_t(tail))})); };
+  if(shared < local.size() && shared < other.size()) return ints(false, 0);
+  std::vector<journal_entry> tail(other.begin() + std::ptrdiff_t(shared), other.end());
+  mine.db.replay(tail);
+  return ints(true, tail.size());
+};
+// a snapshot of the repository with a given boundary journal and a catalog of modules (an alien snapshot when pull); modules - [node, name]
+repository_snapshot_add(i64 s, i64 id, str name, i64 parent, i64 second, i64 end, modules) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(int64_t(0)));
+  auto & host = repository_session(vm, a[0].as<int64_t>());
+  std::vector<uint32_t> parents;
+  for(auto k: {3, 4}) if(a[k].as<int64_t>()) parents.push_back(uint32_t(a[k].as<int64_t>()));
+  std::vector<repository_module> mods;
+  auto const & xs = a[6].as<array_v>();
+  for(uint32_t k = 0; k < xs.size(); ++k) {
+    auto item = xs.get(k); auto const & row = item.as<array_v>();
+    mods.push_back({node_id(uint32_t(row.get(0).as<int64_t>())), std::string(row.get(1).as<str_v>().view())});
   }
+  auto & r = *host.repository;
+  r.snapshots.push_back({uint32_t(a[1].as<int64_t>()), std::move(parents), std::string(a[2].as<str_v>().view()), std::move(mods), uint64_t(a[5].as<int64_t>())});
+  r.next_id = uint32_t(a[1].as<int64_t>()) + 1;
+  ++r.generation;
+  return value(int64_t(0));
 };
 // • someone else's repository - session at the time of the merger; -1 - not opened (version_error - why)
 repo_side_open(str path) => native "cpp" {
