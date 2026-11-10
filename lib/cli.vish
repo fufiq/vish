@@ -182,10 +182,17 @@ cli(args) {
   }
   if(args.size < 2) return usage();
   cmd = args[0];
-  if(cmd == "lexcheck") { // vish lexcheck <files>: Lexer in language (lib/lexer.vish) vs. C++ stage0 - dumps of tokens match
+  if(cmd == "lexcheck") {
+    // vish lexcheck <files>: Lexer in language (lib/lexer.vish) vs. C++ stage0 - dumps of tokens match
     files = array{};
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("lexer", "check_cli", files);
+  }
+  if(cmd == "parsecheck") {
+    // vish parsecheck <files>: Phase 1 parser in language (lib/parser.vish) vs. C++ stage0
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("parser", "check_cli", files);
   }
   if((cmd == "lib") && (args.size > 3)) {
     // vish lib import <lib> <repo.vishrepo> | vish lib export <repo.vishrepo> <lib >>

@@ -1,12 +1,12 @@
+module lexer;
 // Lexer text projection in language (transfer from C++, branch t3/cpp-to-vish-migration; user goal: ). Same algorithm as
 // include/vish/lexer.hpp (stage0): The C++ version remains until the computer is assembled from the image; the equivalence is
 // `vish lexcheck <файлы>` (tokens, comments, causes of holes are line by line the same). "the operator is always
 // single-character": multi-character operators (`==`, `=>`, `<=`) - chains of single-character without spaces; the lexer gives
 // each character separately and notes whether it is glued to the previous one. Indistinguishable is a token hole (kind_bad)
 // with a cause.
-module lexer;
-use tools;
 
+use tools;
 kind_ident() => 0;
 kind_int() => 1;
 kind_float() => 2;
@@ -17,12 +17,10 @@ kind_open() => 6;
 kind_close() => 7;
 kind_bad() => 8;
 kind_end() => 9;
-
 struct token { i64 kind; i64 from; i64 to; bool glued; i64 err; }
 struct lspan { i64 from; i64 to; }
 struct lex_error { str what; i64 from; i64 to; }
 struct lexed { array tokens; array comments; array errors; }
-
 is_space(i64 c) => (c == 32) || ((c == 9) || ((c == 10) || (c == 13)));
 is_digit(i64 c) => (c >= 48) && (c <= 57);
 // UTF-8 bytes ≥ 0x80 - letters of the name (Cyrillic, etc.)
@@ -35,7 +33,6 @@ is_open(i64 c) => (c == 40) || ((c == 91) || (c == 123));
 is_close(i64 c) => (c == 41) || ((c == 93) || (c == 125));
 known(i64 c) => is_space(c) || (is_ident(c) || (is_op(c) || (is_open(c) || (is_close(c) || ((c == 34) || (c == 39))))));
 byte_at_or(str s, i64 k) => if(k < s.size) s[k] else 0;
-
 // The lexer does not fall: the result is tokens (the last is the end), comments in order (`//…` to the end of the line, `/*…*/`) and the causes of holes.
 lex(str src) {
   n = src.size;
@@ -135,7 +132,6 @@ lex(str src) {
   toks.push(token{kind_end(), pos, pos, false, -1});
   lexed{toks, comments, errors}
 }
-
 // Line Dump of the result (general view from lex_reference - C++ stage0): reconciliation of two implementations.
 dump(lexed r) {
   out = "";
@@ -144,7 +140,6 @@ dump(lexed r) {
   for(e : r.errors) out = out + ("e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
   out
 }
-
 // The C++ lexer (stage0) is the same dump; it exists until the computer is assembled from the image.
 lex_reference(str src) => native "cpp" {
   if(!a[0].known()) return erase(value(std::string()));
@@ -157,7 +152,6 @@ lex_reference(str src) => native "cpp" {
   for(std::size_t i = 0; i < lx.errors.size(); ++i) out += cat("e ", lx.errors[i].where.begin, " ", lx.errors[i].where.end, " ", std::string_view(lx.errors[i].what()), "\n");
   return value(std::move(out));
 };
-
 // vish lexcheck <files>: vish dump = C++ dump on each file; code 0 - all matched
 check_cli(args) {
   bad = 0;

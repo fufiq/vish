@@ -76,6 +76,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # Transfer of C++ to vish: Lexer in language (lib/lexer.vish) vs C++ stage0 - dumps of tokens, comments and causes of holes coincide
     ( $b lexcheck tests/data/lexer_edge*.txt lib/cli.vish lib/lexer.vish $(ls tests/*.vish | head -60) ) > $L/t_lexer.log 2>&1
     echo "lexer: код $?" > $L/r_lexer
+    # transfer to vish, step 2: phase 1 parser (brackets, indentation repairs, names ast.*) in language vs. C++ stage0
+    ( $b parsecheck tests/data/*.txt lib/lexer.vish lib/parser.vish $(ls tests/*.vish | head -30) ) > $L/t_parser.log 2>&1
+    echo "parser: код $?" > $L/r_parser
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore

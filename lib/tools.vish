@@ -480,7 +480,8 @@ has_number(xs, i64 x) {
 }
 // number of strings of numbers (not number - 0)
 number_of(str s) => parse_int(s).value;
-starts_with(str s, str p) => p.size <= s.size && slice_text(s, 0, p.size) == p; // No full line search: called 180,000 times, find_text sought entry to the end
+starts_with(str s, str p) => p.size <= s.size && slice_text(s, 0, p.size) == p;
+// No full line search: called 180,000 times, find_text sought entry to the end
 contains(str s, str p) => find_text(s, p) >= 0;
 ends_with(str s, str tail) => (tail.size <= s.size) && (find_text(text_from(s, s.size - tail.size), tail) == 0);
 // spaceless

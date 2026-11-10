@@ -1,0 +1,177 @@
+module parser;
+// parsing text projection in language (transfer from C++, branch t3/cpp-to-vish-migration; user goal: ). Step 2 - phase 1 parser
+// (include/vish/parser.hpp, stage0): names `ast.вид` one token, repairing unpaired brackets in indentation, table of paired brackets.
+// Equivalence - `vish parsecheck <файлы>`: tokens, match table and reasons coincide with C++.; with an unbalanced bracket (§4.1
+// stack), Further steps (Phase 2, operators, constructions) - according to the same technique: your dump against C++ on the entire
+// body.
+//
+
+use tools;
+use lexer;
+// Phase 1: token as in the lexer + byte ch (for brackets and operators; inserted closing brackets positions are empty)
+struct ptok { i64 kind; i64 from; i64 to; bool glued; i64 err; i64 ch; }
+struct phase1 { array tokens; array match; array errors; bool bracket_error; }
+pairs(i64 o, i64 c) => ((o == 40) && (c == 41)) || (((o == 91) && (c == 93)) || ((o == 123) && (c == 125)));
+closer_of(i64 o) => if(o == 40) 41 else if(o == 91) 93 else 125;
+line_begin(str src, i64 at) {
+  k = at;
+  while((k > 0) && (src[k - 1] != 10)) k -= 1;
+  k
+}
+// indentation of the line of text on which the position at: spaces and tabs at the beginning of the line
+indent_of(str src, i64 at) {
+  b = line_begin(src, at);
+  ind = 0;
+  while(((b + ind) < src.size) && ((src[b + ind] == 32) || (src[b + ind] == 9))) ind += 1;
+  ind
+}
+// Lexer tokens → ptok; the name node AST is one lexeme: `ast` `.` word close (words of the types node after `ast.` are not words of the language)
+fold_ast_names(str src, toks) {
+  out = array{};
+  i = 0;
+  while(i < toks.size) {
+    t = toks[i];
+    ch = if((t.kind == kind_op()) || ((t.kind == kind_open()) || (t.kind == kind_close()))) src[t.from] else 0;
+    p = ptok{t.kind, t.from, t.to, t.glued, t.err, ch};
+    after_dot = (out.size > 0) && ((out[out.size - 1].kind == kind_op()) && ((out[out.size - 1].ch == 46) && t.glued));
+    if((t.kind == kind_ident()) && ((text_range(src, t.from, t.to) == "ast") && (!after_dot && (((i + 2) < toks.size) && ((toks[i + 1].kind == kind_op()) && ((src[toks[i + 1].from] == 46) && (toks[i + 1].glued && ((toks[i + 2].kind == kind_ident()) && toks[i + 2].glued)))))))) {
+      p.to = toks[i + 2].to;
+      i += 2;
+    }
+    out.push(p);
+    i += 1;
+  }
+  out
+}
+// Brackets are unpaired - repair by indentation: the unclosed opener closes before the first line with indentation ≤ of its line
+// (or before someone else's closing line, or at the end of the text) empty closing with the reason "unclosed bracket"; excess
+// closing - token-hole "unpaired bracket". *Mine* (from C++): indentation - only when brackets are unpaired.
+close_by_indent(str src, toks, errors) {
+  out = array{};
+  open = array{}; // stack of numbers out; arrays only grow (pop no) - depth in on
+  indent = array{};
+  on = 0;
+  for(t0 : toks) {
+    t = t0;
+    ind = indent_of(src, t.from);
+    first = (line_begin(src, t.from) + ind) == t.from;
+    own_close = (t.kind == kind_close()) && ((on > 0) && pairs(out[open[on - 1]].ch, t.ch));
+    while((on > 0) && (!own_close && ((t.kind == kind_end()) || (first && (ind <= indent[on - 1]))))) {
+      o = out[open[on - 1]];
+      at = out[out.size - 1].to;
+      errors.push(lex_error{"незакрытая скобка", o.from, o.to});
+      out.push(ptok{kind_close(), at, at, true, errors.size - 1, closer_of(o.ch)});
+      on -= 1;
+      own_close = (t.kind == kind_close()) && ((on > 0) && pairs(out[open[on - 1]].ch, t.ch));
+    }
+    if(t.kind == kind_open()) {
+      if(on < open.size) {
+        open[on] = out.size;
+        indent[on] = ind;
+      } else {
+        open.push(out.size);
+        indent.push(ind);
+      }
+      on += 1;
+    } else if(t.kind == kind_close()) {
+      fits = false;
+      for(q : range(on)) if(pairs(out[open[q]].ch, t.ch)) fits = true;
+      if(!fits) {
+        t.kind = kind_bad();
+        t.ch = 0; // ch is available only for brackets and operators
+        errors.push(lex_error{"непарная скобка", t.from, t.to});
+        t.err = errors.size - 1;
+      } else {
+        while(!pairs(out[open[on - 1]].ch, t.ch)) {
+          // `{ ( }` - `(` closes before `}`
+          o = out[open[on - 1]];
+          at = out[out.size - 1].to;
+          errors.push(lex_error{"незакрытая скобка", o.from, o.to});
+          out.push(ptok{kind_close(), at, at, true, errors.size - 1, closer_of(o.ch)});
+          on -= 1;
+        }
+        on -= 1;
+      }
+    }
+    out.push(t);
+  }
+  out
+}
+// double bracket table: pair number or -1
+rematch(toks) {
+  match = array{};
+  for(k : range(toks.size)) match.push(-1);
+  open = array{};
+  on = 0;
+  for(i : range(toks.size)) {
+    if(toks[i].kind == kind_open()) {
+      if(on < open.size) open[on] = i else open.push(i);
+      on += 1;
+    } else if(toks[i].kind == kind_close()) {
+      on -= 1;
+      j = open[on];
+      match[j] = i;
+      match[i] = j;
+    }
+  }
+  match
+}
+phase1_of(str src) {
+  r = lex(src);
+  toks = fold_ast_names(src, r.tokens);
+  errors = r.errors;
+  stack = array{};
+  sn = 0;
+  broken = false;
+  for(t : toks) {
+    if(t.kind == kind_open()) {
+      if(sn < stack.size) stack[sn] = t.ch else stack.push(t.ch);
+      sn += 1;
+    } else if(t.kind == kind_close()) {
+      if((sn == 0) || !pairs(stack[sn - 1], t.ch)) broken = true else sn -= 1;
+    }
+  }
+  if(sn > 0) broken = true;
+  if(broken) toks = close_by_indent(src, toks, errors);
+  phase1{toks, rematch(toks), errors, broken}
+}
+dump1(phase1 r) {
+  out = "";
+  for(t : r.tokens) out = out + ("t " + text(t.kind) + " " + text(t.from) + " " + text(t.to) + " " + (if(t.glued) "1" else "0") + " " + text(t.err) + " " + text(t.ch) + "\n");
+  for(k : range(r.match.size)) out = out + ("m " + text(k) + " " + text(r.match[k]) + "\n");
+  for(e : r.errors) out = out + ("e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
+  out + ("b " + (if(r.bracket_error) "1" else "0") + "\n")
+}
+// Phase 1 C++ (stage0) - same dump
+phase1_reference(str src) => native "cpp" {
+  if(!a[0].known()) return erase(value(std::string()));
+  ast_db db;
+  parser p(db, a[0].as<str_v>().view(), "<parsecheck>");
+  std::string out;
+  for(auto const & t: p.toks) out += cat("t ", int(t.kind), " ", t.where.begin, " ", t.where.end, " ", t.glued ? 1 : 0, " ", t.err == ~uint32_t{0} ? int64_t(-1) : int64_t(t.err), " ", int(uint8_t(t.ch())), "\n");
+  for(std::size_t k = 0; k < p.match.size(); ++k) out += cat("m ", k, " ", p.match[k] == ~uint32_t{0} ? int64_t(-1) : int64_t(p.match[k]), "\n");
+  for(auto const & d: p.diags) out += cat("e ", d.where.begin, " ", d.where.end, " ", std::string_view(d.what()), "\n");
+  out += cat("b ", p.bracket_error ? 1 : 0, "\n");
+  return value(std::move(out));
+};
+// vish parsecheck <files>: Phase 1 in language = Phase 1 C++ on each file; code 0 - all matched
+check_cli(args) {
+  bad = 0;
+  total = 0;
+  for(f : args) {
+    src = read_text(f);
+    mine = dump1(phase1_of(src));
+    ref = phase1_reference(src);
+    total += 1;
+    if(mine != ref) {
+      bad += 1;
+      a = lines_of(mine);
+      b = lines_of(ref);
+      k = 0;
+      while((k < a.size) && ((k < b.size) && (a[k] == b[k]))) k += 1;
+      write_out(f + ": расхождение в строке дампа " + text(k) + "\n  vish: " + (if(k < a.size) a[k] else "—") + "\n  C++:  " + (if(k < b.size) b[k] else "—") + "\n");
+    }
+  }
+  write_out("парсер, фаза 1: файлов " + text(total) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}
