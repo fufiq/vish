@@ -141,6 +141,16 @@ export interface ItemsAsk {
 export interface ExtensionsAsk {
   type: 'c_extensions';
 }
+// View of another keybase module (geo.vec, src.versions): the root of the presentation is this module
+export interface OpenModuleAsk {
+  type: 'c_open_module';
+  key: string;
+}
+// Project task: external command from task <name>() of the program; output to the launch panel
+export interface TaskAsk {
+  type: 'c_task';
+  name: string;
+}
 // Plugin command (command <name>): result - suggestion of editing, like AI
 export interface CommandAsk {
   type: 'c_command';
@@ -226,6 +236,8 @@ export type ClientMsg =
   | NameAsk
   | ItemsAsk
   | ExtensionsAsk
+  | TaskAsk
+  | OpenModuleAsk
   | CommandAsk
   | ProposeAsk
   | DecideAsk

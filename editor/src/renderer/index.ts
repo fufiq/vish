@@ -1111,6 +1111,12 @@ for (const pane of [app, side]) {
       send({ type: 'c_open_view', kind: 'module' });
       return;
     }
+    // Ctrl+Shift+B is the task of the check project (task_check in the program: build and test the vish itself with host).
+    if (e.ctrlKey && e.shiftKey && (e.key === 'B' || e.key === 'И')) {
+      e.preventDefault();
+      send({ type: 'c_task', name: 'check' });
+      return;
+    }
     // Ctrl+Shift+E - Extension Panel: Extension Points for the program and its plugins (VM asks)
     if (e.ctrlKey && e.shiftKey && (e.key === 'E' || e.key === 'У')) {
       e.preventDefault();

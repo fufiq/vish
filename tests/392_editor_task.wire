@@ -1,0 +1,10 @@
+// Project task (2026-11-10, itself host; *my*): external command from task <name>() of the program, output - to the launch panel
+// In tests - synchronously.
+// program: editor_task.vish
+open_view module
+task say
+// expect: output text="привет из задачи\n" ok=true more=true state=""
+task fail
+// expect: status kind="error" text="задача не удалась: код 1"
+task nothing
+// expect: text="задача nothing: в программе нет [[editor]] task_nothing(code)"

@@ -1,8 +1,8 @@
+module versions;
 // The base versions are diff and fusion in the language (§9.4; step 2 transfer tuling). The module is
 // built into the build; it is seen by the editor (use versions) and commands vish diff, vish merge.
-module versions;
-use tools;
 
+use tools;
 // Primitives: version of the database (VM) ------------------------------------------------------- version -
 // a copy of the database on the magazine .vishdb; number 0 - the base from which they work (editor's session
 // program), the vish team - empty. The common beginning of the two versions is their common base.
@@ -69,7 +69,6 @@ version_save(i64 v, str path) => native "cpp" {
   }
   return value(std::string());
 };
-
 // --- Base versions: Semantic Diff and Tripartite Merger (§9.4) ---
 //  
 // Live editing through VM does not give conflicts. Copies of the base
@@ -85,23 +84,22 @@ version_save(i64 v, str path) => native "cpp" {
 // front of it (after - its id): - the element is transferred with everything that it has.
 struct item { bool present; i64 node; str id; str key; str text; bool inner; i64 blank; array lead; str tail; str after; }
 no_item() => item{false, -1, "", "", "", false, 0, array{}, "", ""};
-
 // Key element: function - name and types of parameters, syntax - words of form recording, struct,
 // extensions, variable - name; other - the text itself.
 item_key(i64 v, i64 n, str shown) {
   array{kind, name, parts, target} = version_signature(v, n);
   if(kind == "syntax") {
     k = "syntax";
-    for(p : parts) k = (k + " ") + p;
+    for(p : parts) k = k + " " + p;
     return k;
   }
   if(kind == "fn") {
     k = name + "(";
-    for(j : range(parts.size)) k = (k + (if(j > 0) ", " else "")) + parts[j];
+    for(j : range(parts.size)) k = k + (if(j > 0) ", " else "") + parts[j];
     return k + ")";
   }
   if(kind == "struct") return "struct " + name;
-  if(kind == "extend_ref") return ("&" + item_key(v, target, "")) + " { … }";
+  if(kind == "extend_ref") return "&" + item_key(v, target, "") + " { … }";
   if(kind == "extend") return name + " { … }";
   if(kind == "var") return name;
   shown
@@ -112,11 +110,13 @@ module_items(i64 v, i64 root, base_items) {
   prev = "";
   for(x : version_items(v, root)) {
     array{n, shown, inner, blank, lead, tail} = x;
+    kind = version_signature(v, n)[0];
+    if(((kind == "var") || ((kind == "other") || starts_with(shown, "use "))) && !ends_with(shown, ";")) shown = shown + ";"; // variable, service assignment and use are printed without ;: in the text of the module it is needed
     first = item_key(v, n, shown);
     key = first;
     j = 2;
     while(find_item(found, key).present) {
-      key = (first + " #") + text(j);
+      key = first + " #" + text(j);
       j += 1;
     }
     id = if(has_number(base_items, n)) "#" + text(n) else key;
@@ -141,7 +141,6 @@ same_state(item x, item y) {
   if(!x.present) return true;
   (x.text == y.text) && ((x.inner == y.inner) && ((x.blank == y.blank) && ((x.tail == y.tail) && same_lines(x.lead, y.lead))))
 }
-
 // Replace (or add or remove) the element id of the root module v with their element: text - parsing in place
 // of the element (§4.4), layout - as they have; new - after the same neighbor as them (no one - at the end).
 // The result is the element number (-1 - removed or not understood).
@@ -156,14 +155,12 @@ take_theirs(i64 v, i64 root, base_items, str id, item theirs) {
   body = if(starts_with(theirs.text, "use ") && !ends_with(theirs.text, ";")) theirs.text + ";" else theirs.text; // use is printed without ";"
   version_put(v, root, if(mine.present) mine.node else -1, body, id, if(prev.present) prev.node else -1, theirs.blank, theirs.inner, theirs.lead, theirs.tail)
 }
-
 // Conflict is both options for a person: the text of the common base, mine, them (there is no element in the
 // version) and their element with a layout - for "take them."
 struct conflict { str id; str key; str base; str mine; str theirs; item their; }
 // taken_why - to the self-taken: from where and whether it is visible in the module (frame "Merge")
 struct merge_result { array taken; array taken_why; array conflicts; array base_items; }
 no_merge() => merge_result{array{}, array{}, array{}, array{}};
-
 // The three-way merging of their version into mine (mine changes on the spot): what is changed is taken by
 // themselves, and conflict is different in both.
 merge_versions(i64 mine, i64 theirs) {
@@ -185,8 +182,10 @@ merge_versions(i64 mine, i64 theirs) {
     mi = find_item(m, id);
     ti = find_item(t, id);
     name = if(mi.present) mi.key else if(ti.present) ti.key else bi.key;
-    if(!same_state(mi, ti) && !same_state(ti, bi)) { // They have changed or they have not changed.
-      if(same_state(mi, bi)) { // They are only changed by themselves.
+    if(!same_state(mi, ti) && !same_state(ti, bi)) {
+      // They have changed or they have not changed.
+      if(same_state(mi, bi)) {
+        // They are only changed by themselves.
         take_theirs(mine, -1, base_items, id, ti);
         r.taken.push(name);
         r.taken_why.push(if(ti.inner) "взята из их копии — внутренняя, в модуле не видна" else "взята из их копии");
@@ -195,7 +194,6 @@ merge_versions(i64 mine, i64 theirs) {
   }
   r
 }
-
 // Bilateral diff: What is B different than A (by module elements).
 diff_versions(i64 a, i64 b) {
   xa = module_items(a, -1, array{});
@@ -203,14 +201,11 @@ diff_versions(i64 a, i64 b) {
   r = "";
   for(x : xa) {
     y = find_key(xb, x.key);
-    if(!y.present) r = r + (("- " + x.key) + "\n");
-    else if(y.text != x.text) r = r + ((((((("~ " + x.key) + "\n  было:  ") + x.text) + "\n  стало: ") + y.text) + "\n"));
-    else if(!same_state(x, y)) r = r + (("~ " + x.key) + " — раскладка (внутренний, пустые строки, комментарий)\n");
+    if(!y.present) r = r + ("- " + x.key + "\n") else if(y.text != x.text) r = r + ("~ " + x.key + "\n  было:  " + x.text + "\n  стало: " + y.text + "\n") else if(!same_state(x, y)) r = r + ("~ " + x.key + " — раскладка (внутренний, пустые строки, комментарий)\n");
   }
-  for(y : xb) if(!find_key(xa, y.key).present) r = r + (((("+ " + y.key) + "\n  ") + y.text) + "\n");
+  for(y : xb) if(!find_key(xa, y.key).present) r = r + ("+ " + y.key + "\n  " + y.text + "\n");
   if(r == "") "без различий\n" else r
 }
-
 // --- commands vish: diff, merge (cli loads the module by key) ------------------------------------------------------- vish diff a.vishdb
 // b.vishdb - semantic diff of bases
 diff_files(str a, str b) {
@@ -228,19 +223,17 @@ merge_files(str mine, str theirs, str result) {
   tv = version_open(theirs);
   if(tv < 0) return fail(version_error());
   r = merge_versions(mv, tv);
-  for(k : r.taken) write_out(("взято у них: " + k) + "\n");
-  for(c : r.conflicts) write_out(((((((("конфликт: " + c.key) + "\n  база: ") + dash(c.base)) + "\n  мой:  ") + dash(c.mine)) + "\n  их:   ") + dash(c.theirs)) + "\n");
+  for(k : r.taken) write_out("взято у них: " + k + "\n");
+  for(c : r.conflicts) write_out("конфликт: " + c.key + "\n  база: " + dash(c.base) + "\n  мой:  " + dash(c.mine) + "\n  их:   " + dash(c.theirs) + "\n");
   why = version_save(mv, result);
   if(why != "") return fail(why);
-  write_out((("записано: " + result) + (if(r.conflicts.size == 0) "" else " (конфликты — мой вариант; слить руками)")) + "\n");
+  write_out("записано: " + result + (if(r.conflicts.size == 0) "" else " (конфликты — мой вариант; слить руками)") + "\n");
   if(r.conflicts.size == 0) 0 else 1
 }
 dash(str s) => if(s == "") "—" else s;
-
 // entry points for cli: words after command
 diff_command(args) => if(args.size == 2) diff_files(args[0], args[1]) else 2;
 merge_command(args) => if(args.size >= 2) merge_files(args[0], args[1], if(args.size >= 3) args[2] else args[0]) else 2;
-
 // Local repository (§9.4). Container mechanics - host; history, choice of common base,
 // and merger solutions are here. This is our development of the original ideas of key
 // => ast and stable semantic links. Names, directory, photo numbers/parents and state
@@ -252,8 +245,13 @@ repo_name_ok(str name) {
   first = true;
   for(k : range(name.size)) {
     c = name[k];
-    if(c == '.') { if(first) return false; first = true; }
-    else { if(!repo_ident_start(c) && (first || !((c >= '0') && (c <= '9')))) return false; first = false; }
+    if(c == '.') {
+      if(first) return false;
+      first = true;
+    } else {
+      if(!repo_ident_start(c) && (first || !((c >= '0') && (c <= '9')))) return false;
+      first = false;
+    }
   }
   !first
 }
@@ -273,10 +271,12 @@ repo_native_modules(i64 s, i64 snapshot) {
   r
 }
 repo_check_catalog(mods, i64 root) {
-  ids = array{}; names = array{};
+  ids = array{};
+  names = array{};
   for(m : mods) {
     if(!repo_name_ok(m.name) || (has_number(ids, m.node) || has_text(names, m.name))) throw "повреждён каталог модулей";
-    ids.push(m.node); names.push(m.name);
+    ids.push(m.node);
+    names.push(m.name);
   }
   if(!has_number(ids, root)) throw "в каталоге нет корневого модуля";
   true
@@ -291,7 +291,10 @@ repo_normalize(i64 s) {
   for(k : range(mods.size)) {
     name = version_module_name(0, mods[k].node);
     if((name == "") && (mods[k].node == root)) name = "main";
-    if(mods[k].name != name) { mods[k].name = name; changed = true; }
+    if(mods[k].name != name) {
+      mods[k].name = name;
+      changed = true;
+    }
   }
   repo_check_catalog(mods, root);
   if(changed) repository_catalog(s, repo_catalog_data(mods));
@@ -338,15 +341,18 @@ repo_take_item(i64 s, i64 snapshot, i64 module, i64 node) {
   v = repo_direct(s, "version", "", "", snapshot, 0)[2];
   target = repo_items(v, module);
   chosen = find_item(target, text(node));
-  if(!chosen.present) version_remove(0, module, node);
-  else {
+  if(!chosen.present) version_remove(0, module, node) else {
     live = repo_items(0, module);
-    at = 0; before = true;
+    at = 0;
+    before = true;
     for(m : target) {
       if(m.node == node) before = false;
       if(before) {
         index = 0;
-        for(x : live) if(x.node != node) { if(x.node == m.node) at = index + 1; index += 1; }
+        for(x : live) if(x.node != node) {
+          if(x.node == m.node) at = index + 1;
+          index += 1;
+        }
       }
     }
     repository_tree(s, v, array{module}, array{node});
@@ -374,7 +380,8 @@ repository_raw(i64 s, str op, str key, str body, i64 n, i64 other) {
     } else if(op == "capture") {
       if((key.size == 0) || (key.size > 512)) throw "нужно имя снимка до 512 байт";
       info = repo_direct(s, "state", "", "", 0, 0);
-      next = 0; ids = array{0};
+      next = 0;
+      ids = array{0};
       for(x : info[3]) {
         if(x[0] == "current") next = x[1];
         if(x[0] == "snapshot") ids.push(x[1]);
@@ -393,19 +400,18 @@ repository_raw(i64 s, str op, str key, str body, i64 n, i64 other) {
       if(!repo_name_ok(key)) throw "недопустимое имя модуля";
       mods = repo_native_modules(s, 0);
       for(m : mods) if(m.name == key) throw "модуль уже есть";
-      result = repo_direct(s, "module", key, ("module " + key) + (";\n" + body), 0, 0);
+      result = repo_direct(s, "module", key, "module " + key + (";\n" + body), 0, 0);
       mods.push(repo_mod{result[2], key});
       repository_catalog(s, repo_catalog_data(mods));
       return result;
-    } else if(op == "restore") repo_restore_state(s, n);
-    else if(op == "take-module") repo_take_module(s, n, other, body);
-    else if(op == "take-item") repo_take_item(s, n, number_of(key), other);
+    } else if(op == "restore") repo_restore_state(s, n) else if(op == "take-module") repo_take_module(s, n, other, body) else if(op == "take-item") repo_take_item(s, n, number_of(key), other);
     if((op == "init") || ((op == "restore") || ((op == "take-module") || (op == "take-item")))) return array{true, "", 0, array{}};
     if((op == "state") || (op == "save")) repo_normalize(s);
     repo_direct(s, op, key, body, n, other)
-  } catch(e) { array{false, text(e), 0, array{}} }
+  } catch(e) {
+    array{false, text(e), 0, array{}}
+  }
 }
-
 repo_op(i64 s, str op, str key, str body, i64 n, i64 other) {
   r = repository_raw(s, op, key, body, n, other);
   if(!r[0]) throw r[1];
@@ -462,25 +468,21 @@ repo_diff(i64 s, i64 from, i64 to) {
   for(m : repo_union(am, bm)) {
     a = repo_mod_of(am, m.node);
     b = repo_mod_of(bm, m.node);
-    if(a.node < 0) shown = shown + (("+ модуль " + b.name) + "\n");
-    else if(b.node < 0) shown = shown + (("- модуль " + a.name) + "\n");
-    else if(!repo_mod_same(av, a, bv, b)) {
-      if(a.name != b.name) shown = shown + (((("~ модуль " + a.name) + " → ") + b.name) + "\n");
+    if(a.node < 0) shown = shown + ("+ модуль " + b.name + "\n") else if(b.node < 0) shown = shown + ("- модуль " + a.name + "\n") else if(!repo_mod_same(av, a, bv, b)) {
+      if(a.name != b.name) shown = shown + ("~ модуль " + a.name + " → " + b.name + "\n");
       ai = repo_items(av, a.node);
       bi = repo_items(bv, b.node);
       changes = "";
       for(x : ai) {
         y = find_item(bi, x.id);
-        place = (((a.name + "::") + x.key) + " #") + x.id;
-        if(!y.present) changes = changes + (("- " + place) + "\n");
-        else if(!repo_same(av, x, bv, y)) {
-          if(x.key != y.key) changes = changes + (((("~ переименование " + place) + " → ") + y.key) + "\n");
-          else changes = changes + (("~ " + place) + "\n");
-          changes = changes + ((((("  было:  " + x.text) + "\n  стало: ") + y.text) + "\n") + (if(x.after != y.after) "  изменён порядок\n" else ""));
+        place = a.name + "::" + x.key + " #" + x.id;
+        if(!y.present) changes = changes + ("- " + place + "\n") else if(!repo_same(av, x, bv, y)) {
+          if(x.key != y.key) changes = changes + ("~ переименование " + place + " → " + y.key + "\n") else changes = changes + ("~ " + place + "\n");
+          changes = changes + ("  было:  " + x.text + "\n  стало: " + y.text + "\n" + (if(x.after != y.after) "  изменён порядок\n" else ""));
         }
       }
-      for(y : bi) if(!find_item(ai, y.id).present) changes = changes + ((((("+ " + b.name) + "::") + y.key) + "\n  ") + (y.text + "\n"));
-      shown = shown + (if(changes != "") changes else ("~ метаданные модуля " + b.name) + "\n");
+      for(y : bi) if(!find_item(ai, y.id).present) changes = changes + ("+ " + b.name + "::" + y.key + "\n  " + (y.text + "\n"));
+      shown = shown + (if(changes != "") changes else "~ метаданные модуля " + b.name + "\n");
     }
   }
   if(from > 0) version_close(av);
@@ -557,10 +559,7 @@ repo_merge(i64 s, i64 theirs, str choice) {
         clash = false;
         if(t.node >= 0) for(q : am) if((q.node != t.node) && (q.name == t.name)) clash = true;
         picks.push(repo_pick{"take-module", m.node, m.node, clash, m.name + (if(clash) " (имя модуля)" else "")});
-      }
-      else if((a.node < 0) || ((t.node < 0) || ((b.node < 0) || ((a.name != b.name) || (t.name != b.name))))) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name});
-      else if(version_module_meta(av, a.node) != version_module_meta(tv, t.node)) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name + " (выбор целого модуля)"});
-      else {
+      } else if((a.node < 0) || ((t.node < 0) || ((b.node < 0) || ((a.name != b.name) || (t.name != b.name))))) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name}) else if(version_module_meta(av, a.node) != version_module_meta(tv, t.node)) picks.push(repo_pick{"take-module", m.node, m.node, true, m.name + " (выбор целого модуля)"}) else {
         ai = repo_items(av, a.node);
         bi = repo_items(bv, b.node);
         ti = repo_items(tv, t.node);
@@ -570,13 +569,15 @@ repo_merge(i64 s, i64 theirs, str choice) {
           x = find_item(ai, id);
           y = find_item(bi, id);
           z = find_item(ti, id);
-          if(!repo_same(av, x, tv, z) && !repo_same(tv, z, bv, y)) picks.push(repo_pick{"take-item", m.node, number_of(id), !repo_same(av, x, bv, y), ((m.name + "::") + (if(x.present) x.key else z.key))});
+          if(!repo_same(av, x, tv, z) && !repo_same(tv, z, bv, y)) picks.push(repo_pick{"take-item", m.node, number_of(id), !repo_same(av, x, bv, y), m.name + "::" + (if(x.present) x.key else z.key)});
         }
       }
     }
   }
-  for(p : picks) if(p.conflict) conflicts = conflicts + (("конфликт: " + p.name) + "\n");
-  version_close(av); version_close(bv); version_close(tv);
+  for(p : picks) if(p.conflict) conflicts = conflicts + ("конфликт: " + p.name + "\n");
+  version_close(av);
+  version_close(bv);
+  version_close(tv);
   if((conflicts != "") && ((choice != "ours") && (choice != "theirs"))) return array{false, "нужен выбор конфликтов: ours / theirs", conflicts};
   try {
     for(p : picks) if(!p.conflict || (choice == "theirs")) repo_op(s, p.kind, text(p.mod), choice, theirs, p.node);
@@ -584,7 +585,7 @@ repo_merge(i64 s, i64 theirs, str choice) {
     repo_op(s, "restore", "", "", mine, 0);
     throw e;
   }
-  repo_capture(s, ("Слияние " + text(theirs)) + " → " + repo_branch(s), theirs);
+  repo_capture(s, "Слияние " + text(theirs) + " → " + repo_branch(s), theirs);
   array{true, "слияние сохранено", conflicts}
 }
 repository_command(i64 s, str action, str key, str body) {
@@ -594,10 +595,7 @@ repository_command(i64 s, str action, str key, str body) {
     if(action == "init") {
       repo_op(s, "init", key, "", 0, 0);
       repo_capture(s, "Начало", 0);
-    } else if(action == "module") repo_op(s, "module", key, body, 0, 0);
-    else if(action == "snapshot") repo_capture(s, key, 0);
-    else if(action == "diff") return array{true, "сравнение со снимком", repo_diff(s, repo_resolve(s, key), 0)};
-    else if(action == "restore") {
+    } else if(action == "module") repo_op(s, "module", key, body, 0, 0) else if(action == "snapshot") repo_capture(s, key, 0) else if(action == "diff") return array{true, "сравнение со снимком", repo_diff(s, repo_resolve(s, key), 0)}; else if(action == "restore") {
       id = repo_resolve(s, key);
       repo_op(s, "restore", "", "", id, 0);
       repo_capture(s, "Восстановление " + text(id), 0);
@@ -612,8 +610,8 @@ repository_command(i64 s, str action, str key, str body) {
       if(head == 0) throw "нет ветки";
       repo_op(s, "restore", "", "", head, 0);
       repo_op(s, "branch", key, "", head, 1);
-    } else if(action == "merge") return repo_merge(s, repo_resolve(s, key), body);
-    else if(action == "pull") { // key - other .vishrepo, body - source name (empty - by file name)
+    } else if(action == "merge") return repo_merge(s, repo_resolve(s, key), body); else if(action == "pull") {
+      // key - other .vishrepo, body - source name (empty - by file name)
       if(!ends_with(key, ".vishrepo")) throw "путь должен оканчиваться на .vishrepo";
       try {
         r = repo_pull_session(s, key, if(body != "") body else repo_source_name(key));
@@ -627,8 +625,12 @@ repository_command(i64 s, str action, str key, str body) {
         m = merge_foreign(s, o);
         repo_side_close(o);
         return array{true, m[1], m[2]};
-      } catch(e) { repo_side_close(o); throw e; }
-    } else if(action == "push") { // give another repository: pull in his session from my (saved) file
+      } catch(e) {
+        repo_side_close(o);
+        throw e;
+      }
+    } else if(action == "push") {
+      // give another repository: pull in his session from my (saved) file
       if(!ends_with(key, ".vishrepo")) throw "путь должен оканчиваться на .vishrepo";
       repo_op(s, "save", "", "", 0, 0);
       mine = repo_direct(s, "state", "", "", 0, 0)[1];
@@ -639,18 +641,26 @@ repository_command(i64 s, str action, str key, str body) {
         repo_side_close(o);
         return array{true, r, ""};
       } catch(e) {
-        if(!starts_with(text(e), "журналы разошлись")) { repo_side_close(o); throw e; }
-        try { // Merge into modules in another repository (its live program is the receiver, my head is the source)
+        if(!starts_with(text(e), "журналы разошлись")) {
+          repo_side_close(o);
+          throw e;
+        }
+        try {
+          // Merge into modules in another repository (its live program is the receiver, my head is the source)
           m = merge_foreign(o, s);
           repo_side_close(o);
           return array{true, "в другом репозитории: " + m[1], m[2]};
-        } catch(e2) { repo_side_close(o); throw e2; }
+        } catch(e2) {
+          repo_side_close(o);
+          throw e2;
+        }
       }
-    }
-    else if(action != "save") throw "неизвестная команда репозитория";
+    } else if(action != "save") throw "неизвестная команда репозитория";
     repo_op(s, "save", "", "", 0, 0);
     array{true, "сохранено", ""}
-  } catch(e) { array{false, text(e), ""} }
+  } catch(e) {
+    array{false, text(e), ""}
+  }
 }
 // Verification of the repository model is written in the language; the binary downloader
 // only checks the suitability of journal for safe playback and the node boundary.
@@ -660,17 +670,26 @@ repo_verify(i64 s) {
   repo_direct(s, "live", "", "", 0, 0);
   root = version_root(0);
   repo_check_catalog(repo_native_modules(s, 0), root);
-  ids = array{0}; names = array{}; ends = array{0};
-  last = 0; next = 0; active = "";
+  ids = array{0};
+  names = array{};
+  ends = array{0};
+  last = 0;
+  next = 0;
+  active = "";
   for(x : info[3]) {
-    if(x[0] == "current") { next = x[1]; active = x[4]; }
+    if(x[0] == "current") {
+      next = x[1];
+      active = x[4];
+    }
     if(x[0] == "snapshot") {
       if((x[1] != (last + 1)) || ((x[1] > 4096) || ((x[4].size == 0) || (x[4].size > 512)))) throw "повреждена история снимков";
       if(!has_number(ids, x[2]) || !has_number(ids, x[6])) throw "повреждены родители снимка";
       pos = parse_int(x[5]);
       // the border is not less than the boundaries of the parents (the pictures received from another copy are not in the order of the boundaries);
       if(!pos.ok || ((pos.value == 0) || ((pos.value < ends[x[2]]) || (pos.value < ends[x[6]])))) throw "повреждена граница снимка";
-      ends.push(pos.value); last = x[1]; ids.push(last);
+      ends.push(pos.value);
+      last = x[1];
+      ids.push(last);
       repo_check_catalog(repo_native_modules(s, last), root);
     }
   }
@@ -683,8 +702,12 @@ repo_verify(i64 s) {
   true
 }
 repository_verify_cli(args) {
-  try { repo_verify(number_of(args[0])); 0 }
-  catch(e) { fail(text(e)) }
+  try {
+    repo_verify(number_of(args[0]));
+    0
+  } catch(e) {
+    fail(text(e))
+  }
 }
 // Merging someone else's repository, journal of which diverged (vish repo pull, 2026-11-10; *my*): their head is version o, my live
 // program is version 0, the common base is the common prefix journal (version_base). Module with the same node and name in both
@@ -695,9 +718,9 @@ repo_module_text(items) {
   r = "";
   for(x : items) {
     for(k : range(x.blank)) r = r + "\n";
-    for(l : x.lead) r = (r + l) + "\n";
-    r = (r + x.text) + (if(starts_with(x.text, "use ") && !ends_with(x.text, ";")) ";\n" else "\n");
-    if(x.tail != "") r = (r + x.tail) + "\n";
+    for(l : x.lead) r = r + l + "\n";
+    r = r + x.text + (if(starts_with(x.text, "use ") && !ends_with(x.text, ";")) ";\n" else "\n");
+    if(x.tail != "") r = r + x.tail + "\n";
   }
   r
 }
@@ -720,8 +743,7 @@ merge_foreign(i64 s, i64 o) {
     same = repo_mod_of(am, t.node);
     clash = false; // the same name, but the modules are different (created independently: the node number may coincide - journal diverged)
     for(q : am) if((q.name == t.name) && (q.node != t.node)) clash = true;
-    if(clash) conflicts = conflicts + (("конфликт: модуль " + t.name) + " создан в обеих копиях\n");
-    else if((same.node >= 0) && (same.name == t.name)) {
+    if(clash) conflicts = conflicts + ("конфликт: модуль " + t.name + " создан в обеих копиях\n") else if((same.node >= 0) && (same.name == t.name)) {
       base_items = array{};
       for(x : version_items(bv, t.node)) base_items.push(x[0]);
       b = module_items(bv, t.node, base_items);
@@ -734,11 +756,11 @@ merge_foreign(i64 s, i64 o) {
         mi = find_item(m, id);
         ti = find_item(th, id);
         if(!same_state(mi, ti) && !same_state(ti, bi)) {
-          label = (t.name + "::") + (if(mi.present) mi.key else if(ti.present) ti.key else bi.key);
+          label = t.name + "::" + (if(mi.present) mi.key else if(ti.present) ti.key else bi.key);
           if(same_state(mi, bi)) {
             take_theirs(0, t.node, base_items, id, ti);
             taken.push(label);
-          } else conflicts = conflicts + (("конфликт: " + label) + " — оставлен мой вариант\n");
+          } else conflicts = conflicts + ("конфликт: " + label + " — оставлен мой вариант\n");
         }
       }
     } else {
@@ -759,8 +781,7 @@ merge_foreign(i64 s, i64 o) {
       mine_items = module_items(0, m.node, base_items);
       changed = b.size != mine_items.size;
       for(x : mine_items) if(!same_state(x, find_item(b, x.id))) changed = true;
-      if(changed) conflicts = conflicts + (("конфликт: модуль " + m.name) + " удалён у них, но изменён у вас — оставлен мой вариант\n");
-      else {
+      if(changed) conflicts = conflicts + ("конфликт: модуль " + m.name + " удалён у них, но изменён у вас — оставлен мой вариант\n") else {
         next = array{};
         for(q : repo_native_modules(s, 0)) if(q.node != m.node) next.push(q);
         repository_clear(s, m.node);
@@ -774,9 +795,9 @@ merge_foreign(i64 s, i64 o) {
   if((taken.size == 0) && ((added.size == 0) && (removed.size == 0))) return array{true, "у них нечего взять", conflicts};
   repo_capture(s, "Слияние: " + their_branch + " → " + repo_branch(s), 0);
   said = "слияние сохранено: взято элементов " + text(taken.size);
-  for(k : taken) said = (said + "\n  ") + k;
-  for(k : added) said = ((said + "\n  новый модуль ") + k);
-  for(k : removed) said = ((said + "\n  модуль удалён у них: ") + k);
+  for(k : taken) said = said + "\n  " + k;
+  for(k : added) said = said + "\n  новый модуль " + k;
+  for(k : removed) said = said + "\n  модуль удалён у них: " + k;
   array{true, said, conflicts}
 }
 repository_merge_cli(args) {
@@ -785,7 +806,9 @@ repository_merge_cli(args) {
     write_out(r[1] + "\n");
     write_out(r[2]);
     if(r[2] == "") 0 else 1
-  } catch(e) { fail(text(e)) }
+  } catch(e) {
+    fail(text(e))
+  }
 }
 // Exchange between independent repositories (2026-11-10, author's decision: import with renaming, fast-forward only;
 // transferred from C++ to 2026-11-10 -). journal is a single growing, operations are recorded sequentially from copies that
@@ -804,13 +827,18 @@ repo_same_modules(xs, ys) {
 repo_import_state(i64 s, i64 o, str name) {
   if((name.size == 0) || ((name.size > 100) || (find_text(name, "/") >= 0))) throw "имя источника: непусто, без «/», до 100 байт";
   g = repository_graft(s, o);
-  if(!g[0]) throw ((((("журналы разошлись: общее начало " + text(g[1])) + " операций (у вас ") + text(g[2])) + ", у них ") + text(g[3])) + ") — слейте копии через vish merge";
-  renamed_from = array{0}; renamed_to = array{0};
+  if(!g[0]) throw "журналы разошлись: общее начало " + text(g[1]) + " операций (у вас " + text(g[2]) + ", у них " + text(g[3]) + ") — слейте копии через vish merge";
+  renamed_from = array{0};
+  renamed_to = array{0};
   added = 0;
   theirs = repo_direct(o, "state", "", "", 0, 0)[3];
   for(x : theirs) if(x[0] == "snapshot") {
-    p = 0; q = 0;
-    for(k : range(renamed_from.size)) { if(renamed_from[k] == x[2]) p = renamed_to[k]; if(renamed_from[k] == x[6]) q = renamed_to[k]; }
+    p = 0;
+    q = 0;
+    for(k : range(renamed_from.size)) {
+      if(renamed_from[k] == x[2]) p = renamed_to[k];
+      if(renamed_from[k] == x[6]) q = renamed_to[k];
+    }
     end = parse_int(x[5]).value;
     mods = repo_snapshot_modules(o, x[1]);
     found = 0;
@@ -818,12 +846,15 @@ repo_import_state(i64 s, i64 o, str name) {
     for(y : mine) if((found == 0) && (y[0] == "snapshot")) {
       if((parse_int(y[5]).value == end) && ((y[4] == x[4]) && ((y[2] == p) && ((y[6] == q) && repo_same_modules(repo_snapshot_modules(s, y[1]), mods))))) found = y[1];
     }
-    if(found != 0) { renamed_from.push(x[1]); renamed_to.push(found); }
-    else {
+    if(found != 0) {
+      renamed_from.push(x[1]);
+      renamed_to.push(found);
+    } else {
       next = 0;
       for(y : mine) if(y[0] == "current") next = y[1];
       repository_snapshot_add(s, next, x[4], p, q, end, mods);
-      renamed_from.push(x[1]); renamed_to.push(next);
+      renamed_from.push(x[1]);
+      renamed_to.push(next);
       added += 1;
     }
   }
@@ -831,18 +862,21 @@ repo_import_state(i64 s, i64 o, str name) {
   nbranches = 0;
   for(x : theirs) if(x[0] == "branch") {
     nbranches += 1;
-    tracked = (name + "/") + x[4];
+    tracked = name + "/" + x[4];
     head = 0;
     for(k : range(renamed_from.size)) if(renamed_from[k] == x[6]) head = renamed_to[k];
     mine = repo_direct(s, "state", "", "", 0, 0)[3];
-    has = false; old = 0;
-    for(y : mine) if((y[0] == "branch") && (y[4] == tracked)) { has = true; old = y[6]; }
-    if(!has) repo_direct(s, "branch", tracked, "", head, 0);
-    else if(repo_reaches(mine, head, old)) repo_direct(s, "branch", tracked, "", head, 0); // forward
-    else if(!repo_reaches(mine, old, head)) kept = (kept + " ") + tracked; // On the branch of our pictures - do not move
+    has = false;
+    old = 0;
+    for(y : mine) if((y[0] == "branch") && (y[4] == tracked)) {
+      has = true;
+      old = y[6];
+    }
+    // forward
+    if(!has) repo_direct(s, "branch", tracked, "", head, 0) else if(repo_reaches(mine, head, old)) repo_direct(s, "branch", tracked, "", head, 0) else if(!repo_reaches(mine, old, head)) kept = kept + " " + tracked; // On the branch of our pictures - do not move
   }
-  said = (((((("получено: операций журнала " + text(g[4])) + ", снимков ") + text(added)) + ", веток ") + text(nbranches)) + " (имена ") + name + "/…)";
-  if(kept != "") said = (said + "; не сдвинуты (на них свои снимки):") + kept;
+  said = "получено: операций журнала " + text(g[4]) + ", снимков " + text(added) + ", веток " + text(nbranches) + " (имена " + name + "/…)";
+  if(kept != "") said = said + "; не сдвинуты (на них свои снимки):" + kept;
   said
 }
 // ancestor of the old head picture (by parents, including the picture itself)
@@ -869,8 +903,13 @@ repo_import_live(i64 s, str from, str name) {
       r = repo_import_state(s, o, name);
       repo_side_close(o);
       r
-    } catch(e) { repo_side_close(o); throw e; }
-  } catch(e) { "ошибка: " + text(e) }
+    } catch(e) {
+      repo_side_close(o);
+      throw e;
+    }
+  } catch(e) {
+    "ошибка: " + text(e)
+  }
 }
 // Compare journal sessions s and o: the common prefix is to add tail o to s (playback); array {ок, общее начало, длина s,
 // длина o, дописано}. The only thing host does for pull is byte recording comparison and replay.
@@ -974,14 +1013,14 @@ repository_exchange_cli(args) {
 repo_dump(i64 v, mods, i64 root, str dir) {
   main = repo_module_text(module_items(v, root, array{}));
   uses = "";
-  for(m : mods) if(m.node != root) if(find_text(main, "use " + m.name) < 0) uses = ((uses + "use ") + m.name) + ";\n";
+  for(m : mods) if(m.node != root) if(find_text(main, "use " + m.name) < 0) uses = uses + "use " + m.name + ";\n";
   why = write_text(dir + "/main.vish", uses + main);
   if(why != "") throw why;
   count = 1;
   for(m : mods) if(m.node != root) {
     path = dir + "/";
     for(k : range(m.name.size)) path = path + (if(m.name[k] == '.') "/" else slice_text(m.name, k, k + 1));
-    why = write_text(path + ".vish", ("module " + m.name + ";\n") + repo_module_text(module_items(v, m.node, array{})));
+    why = write_text(path + ".vish", version_module_attrs(v, m.node) + "module " + m.name + ";\n" + repo_module_text(module_items(v, m.node, array{})));
     if(why != "") throw why;
     count = count + 1;
   }
@@ -993,12 +1032,12 @@ repo_export(i64 s, str dir) {
   count = 0;
   for(x : repo_rows(s)) if(x[0] == "snapshot") {
     v = repo_version(s, x[1]);
-    count = count + repo_dump(v, repo_native_modules(s, x[1]), version_root(v), (dir + "/snapshots/") + text(x[1]));
+    count = count + repo_dump(v, repo_native_modules(s, x[1]), version_root(v), dir + "/snapshots/" + text(x[1]));
     version_close(v);
-    hist = (((((hist + "snapshot ") + text(x[1])) + " ") + text(x[2])) + " ") + text(x[6]) + (" " + x[4] + "\n");
+    hist = hist + "snapshot " + text(x[1]) + " " + text(x[2]) + " " + text(x[6]) + (" " + x[4] + "\n");
   }
-  for(x : repo_rows(s)) if(x[0] == "branch") hist = (((hist + "branch ") + x[4]) + " ") + text(x[6]) + "\n";
-  hist = (hist + "current ") + repo_branch(s) + "\n";
+  for(x : repo_rows(s)) if(x[0] == "branch") hist = hist + "branch " + x[4] + " " + text(x[6]) + "\n";
+  hist = hist + "current " + repo_branch(s) + "\n";
   repo_direct(s, "live", "", "", 0, 0); // Live - last: version 0 one for all
   count = count + repo_dump(0, repo_native_modules(s, 0), version_root(0), dir);
   why = write_text(dir + "/history.txt", hist);
@@ -1008,9 +1047,11 @@ repo_export(i64 s, str dir) {
 repository_export_cli(args) {
   try {
     n = repo_export(number_of(args[0]), args[1]);
-    write_out((("экспорт: файлов .vish " + text(n)) + " в ") + args[1] + "\n");
+    write_out("экспорт: файлов .vish " + text(n) + " в " + args[1] + "\n");
     0
-  } catch(e) { fail(text(e)) }
+  } catch(e) {
+    fail(text(e))
+  }
 }
 // Bring a live program to the text of the tv version (disassembled from the catalog): missing modules are created, module
 // elements and programs are replaced / added / removed by keys, unnecessary modules are left. *Mine* is the merge mechanics.
@@ -1045,7 +1086,10 @@ repo_sync_text(i64 s, i64 tv) {
   for(m : live) {
     wanted = m.node == version_root(0);
     for(t : tmods) if(t.name == m.name) wanted = true;
-    if(wanted) keep.push(m) else { repository_clear(s, m.node); gone = true; }
+    if(wanted) keep.push(m) else {
+      repository_clear(s, m.node);
+      gone = true;
+    }
   }
   if(gone) repository_catalog(s, repo_catalog_data(keep));
   0
@@ -1053,25 +1097,34 @@ repo_sync_text(i64 s, i64 tv) {
 // Import the export catalog to the newly created repository s (session program - the first picture, path - the repository file).
 repo_import_text(i64 s, str path, str dir) {
   lines = lines_of(read_text(dir + "/history.txt"));
-  olds = array{}; news = array{};
-  names = array{}; parents = array{}; seconds = array{};
+  olds = array{};
+  news = array{};
+  names = array{};
+  parents = array{};
+  seconds = array{};
   for(l : lines) if(starts_with(l, "snapshot ")) {
     w = words_of(l);
-    olds.push(number_of(w[1])); parents.push(number_of(w[2])); seconds.push(number_of(w[3]));
+    olds.push(number_of(w[1]));
+    parents.push(number_of(w[2]));
+    seconds.push(number_of(w[3]));
     name = "";
-    for(k : range(w.size)) if(k >= 4) name = if(k == 4) w[k] else ((name + " ") + w[k]);
+    for(k : range(w.size)) if(k >= 4) name = if(k == 4) w[k] else name + " " + w[k];
     names.push(name);
   }
   if(olds.size == 0) throw "в каталоге нет снимков (history.txt)";
   repo_op(s, "init", path, "", 0, 0);
   news.push(repo_capture(s, names[0], 0));
   for(k : range(olds.size)) if(k > 0) {
-    tv = version_from_text((dir + "/snapshots/") + text(olds[k]) + "/main.vish");
+    tv = version_from_text(dir + "/snapshots/" + text(olds[k]) + "/main.vish");
     if(tv < 0) throw version_error();
     repo_sync_text(s, tv);
     version_close(tv);
-    p = 0; q = 0;
-    for(j : range(olds.size)) if(j < news.size) { if(olds[j] == parents[k]) p = news[j]; if(olds[j] == seconds[k]) q = news[j]; }
+    p = 0;
+    q = 0;
+    for(j : range(olds.size)) if(j < news.size) {
+      if(olds[j] == parents[k]) p = news[j];
+      if(olds[j] == seconds[k]) q = news[j];
+    }
     id = repo_op(s, "capture", names[k], "", p, q)[2];
     news.push(id);
     repo_op(s, "branch", "main", "", id, 1);
@@ -1097,18 +1150,105 @@ repo_import_text(i64 s, str path, str dir) {
 repository_import_cli(args) {
   try {
     n = repo_import_text(number_of(args[0]), args[1], args[2]);
-    write_out((("импорт: снимков " + text(n)) + " в ") + args[1] + "\n");
+    write_out("импорт: снимков " + text(n) + " в " + args[1] + "\n");
     0
-  } catch(e) { fail(text(e)) }
+  } catch(e) {
+    fail(text(e))
+  }
+}
+// host itself (vish lib import|export, 2026-11-10, *my* by the user's decision): lib/*.vish are vish modules that are
+// simultaneously built into the assembly (tool names, versions, ... are occupied by built-in copies), so in the repository they lie
+// under the keys src.<name>: when importing "module X;" → "module src.X;", "use X" → "use src.X", when exporting - back. The text
+// lib/ after export is the canonical projection base.
+//
+lib_names() => array{"prelude", "tools", "versions", "tests", "cli", "editor"};
+lib_rename(str line, bool into) {
+  from = if(into) "" else "src.";
+  to = if(into) "src." else "";
+  for(n : lib_names()) {
+    mod = "module " + from + n + ";";
+    at = find_text(line, mod);
+    if((at >= 0) && (starts_with(line, "module ") || starts_with(line, "[["))) return slice_text(line, 0, at) + "module " + to + n + ";" + text_from(line, at + mod.size);
+    use = "use " + from + n;
+    if(starts_with(line, use) && ((line.size == use.size) || has_text(array{";", ".", " "}, slice_text(line, use.size, use.size + 1)))) return "use " + to + n + text_from(line, use.size);
+  }
+  line
+}
+lib_text(str source, bool into) {
+  r = "";
+  for(l : lines_of(source)) r = r + lib_rename(l, into) + "\n";
+  r
+}
+lib_prepare(str libdir, str work) {
+  why = remove_path(work);
+  if(why != "") throw why;
+  main = "";
+  for(n : lib_names()) if(n != "prelude") {
+    // prelude is the basis of the language: as a module it is not checked (its names are in the prelude base), it is added after
+    why = write_text(work + "/src/" + n + ".vish", lib_text(read_text(libdir + "/" + n + ".vish"), true));
+    if(why != "") throw why;
+    main = main + "use src." + n + ";\n";
+  }
+  tasks = "// Задачи проекта (Ctrl+Shift+B — check; c_task): lib/ и сборка — из этого репозитория (tools/selfhost.sh).\n";
+  tasks = tasks + "[[editor]] task_check(code root) => array{\"tools/selfhost.sh\", \"build\"};\n";
+  tasks = tasks + "[[editor]] task_test(code root) => array{\"out/vish\", \"test\", \"tests\"};\n";
+  why = write_text(work + "/main.vish", main + tasks + "main() {}\n");
+  if(why != "") throw why;
+  work + "/main.vish"
+}
+// prelude lib/ - Module src.prelude in the ready repository (no use: not elaborated), then save
+lib_add_prelude_cli(args) {
+  try {
+    s = number_of(args[0]);
+    body = lib_text(read_text(args[1] + "/prelude.vish"), true);
+    head = "module src.prelude;\n";
+    if(!starts_with(body, head)) throw "в prelude.vish нет «module prelude;» первой строкой";
+    repo_op(s, "module", "src.prelude", text_from(body, head.size), 0, 0);
+    repo_op(s, "save", "", "", 0, 0);
+    0
+  } catch(e) {
+    fail(text(e))
+  }
+}
+lib_prepare_cli(args) {
+  if(args.size > 2) {
+    remove_path(args[1]);
+    return 0;
+  } // Third word: Remove the working directory
+  try {
+    write_out(lib_prepare(args[0], args[1]) + "\n");
+    0
+  } catch(e) {
+    fail(text(e))
+  }
+}
+lib_export_cli(args) {
+  try {
+    work = args[1] + ".work";
+    repo_export(number_of(args[0]), work);
+    for(n : lib_names()) {
+      why = write_text(args[1] + "/" + n + ".vish", lib_text(read_text(work + "/src/" + n + ".vish"), false));
+      if(why != "") throw why;
+    }
+    why = remove_path(work);
+    if(why != "") throw why;
+    write_out("экспорт lib: " + args[1] + "\n");
+    0
+  } catch(e) {
+    fail(text(e))
+  }
 }
 repository_cli(args) {
   s = number_of(args[0]);
   r = repository_command(s, args[1], args[2], args[3]);
-  if(!r[0]) { write_err((r[1] + "\n") + r[2]); return 1; }
+  if(!r[0]) {
+    write_err(r[1] + "\n" + r[2]);
+    return 1;
+  }
   if(r[2] != "") write_out(r[2]);
   if(args[1] == "info") {
-    write_out(((("ветка: " + repo_branch(s)) + " · снимок ") + text(repo_head(s))) + (if(repo_dirty(s)) " · есть изменения\n" else " · без изменений\n"));
-    for(x : repo_rows(s)) if(x[0] != "current") write_out((((((x[0] + " ") + text(x[1])) + " ") + x[4]) + " #") + text(if(x[0] == "module") x[3] else x[6]) + "\n");
+    write_out("ветка: " + repo_branch(s) + " · снимок " + text(repo_head(s)) + (if(repo_dirty(s)) " · есть изменения\n" else " · без изменений\n"));
+    for(x : repo_rows(s)) if(x[0] != "current") write_out(x[0] + " " + text(x[1]) + " " + x[4] + " #" + text(if(x[0] == "module") x[3] else x[6]) + "\n");
   } else if(r[1] != "") write_out(r[1] + "\n");
   0
 }

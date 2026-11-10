@@ -1,0 +1,7 @@
+// Project task: [[editor]] task <name>(code) returns the words of the command; output of the process goes to the launch pad.
+// out: 1
+[[editor]] task_say(code root) => array{"echo", "привет из задачи"};
+[[editor]] task_fail(code root) => array{"false"};
+main() {
+  print(1);
+}

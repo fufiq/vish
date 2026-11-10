@@ -1,5 +1,4 @@
 module prelude;
-
 // Constructions written on top of the kernel (§3.2 steak): in the kernel - if,
 // loop/break/continue, throw, intercept.
 //  
@@ -17,7 +16,6 @@ struct bool { __bool value; }
 struct i64 { __int64 value; }
 struct f64 { __float64 value; }
 struct str { __bytes value; }
-
 // kernel entries (§4.4): How to write kernel node and kernel calls - ads, not parser.
 // 
 // 
@@ -36,7 +34,8 @@ struct str { __bytes value; }
 //
 syntax if (c) {then_} => ast.if{c, then_};
 syntax if (c) {then_} else {else_} => ast.if{c, then_, else_};
-syntax if (c) {then_}; else {else_} => ast.if{c, then_, else_}; // if(c) x = 1; else x = 2;
+syntax if (c) {then_}; else {else_} => ast.if{c, then_, else_};
+// if(c) x = 1; else x = 2;
 syntax loop {body} => ast.loop{body};
 syntax break; => ast.break{};
 syntax continue; => ast.continue{};
@@ -52,7 +51,6 @@ syntax hide {x} => hide(x);
 // try_compile { … } — 
 // 
 syntax try_compile {body} => try_compile(body);
-
 // Operators - entity language (§4.4): The announcement repeats the record: the parameters
 // are on the side of their branches. There are no priorities - a chain with several trees
 // is disassembled by types (ibid.); [[associative]] is an invariant from logic: a + b + c
@@ -98,7 +96,6 @@ operator (f64 a) >= (f64 b) => ge(a, b);
 [[associative]] operator (bool a) || (expr bool b) => or(a, b);
 operator -(i64 a) => neg(a);
 operator -(f64 a) => neg(a);
-
 // Number transformations - announcements by types, as operators (M6, author’s decision 2026-10-10-10):
 // VM - machine int_to_float / float_to_int. i64 → f64 and f64 → i64 (whole part) - a clear call;
 // f64(2.5) - f64 already, i64(2) - i64 already.
@@ -106,7 +103,6 @@ f64(i64 x) => int_to_float(x);
 f64(f64 x) => x;
 i64(f64 x) => float_to_int(x);
 i64(i64 x) => x;
-
 // i64 bits for encoding instructions in language (§10.4)
 [[associative]] operator (i64 a) & (i64 b) => band(a, b);
 [[associative]] operator (i64 a) | (i64 b) => bor(a, b);
@@ -121,7 +117,6 @@ operator (a)[i] => index(a, i);
 // try(x) caller: "growth macaque try" without macro; operator frame is transparent for
 // return(caller) - exit from the one who wrote x?
 operator (expr e)? => try(e);
-
 // Operator Print (§4.4, variant C): brackets around the operand select this code rather than
 // projection VM - There are no Priorities, so any nested infix and if, except the left operand
 // of the same associative operator, have brackets (a + b + c is one tree). kind - type of
@@ -130,9 +125,7 @@ operator (expr e)? => try(e);
 // error is bracketed (conservatively). It is closer to the place (or in projection).
 //
 //
-operand_parens(str kind, str op, bool left, str parent_op, bool assoc) =>
-  (kind == "if") || (((kind == "infix") || (kind == "chain")) && !(left && (assoc && ((op != "") && (op == parent_op)))));
-
+operand_parens(str kind, str op, bool left, str parent_op, bool assoc) => (kind == "if") || (((kind == "infix") || (kind == "chain")) && !(left && (assoc && ((op != "") && (op == parent_op)))));
 // while(c) body - the condition is calculated on each iteration (expr).
 while(expr c, expr body) {
   loop {
@@ -140,7 +133,6 @@ while(expr c, expr body) {
     body;
   }
 }
-
 // for(x : xs) body - by array or range. The index becomes safe after checking
 // is_index.
 // 
@@ -155,19 +147,16 @@ for(xs, expr body) {
     body(xs[k]);
   }
 }
-
 // try { … } catch(E e) { … } … — 
 // 
 // catch. intercept selects the first block whose parameter takes the value thrown.
 //
 try(expr body) catch(expr... handlers) => intercept(body, handlers);
-
 // push(xs, x) - Array growth: the “relocate” effect - the buffer can move. Whether
 // it breaks links, decides the model of the reference pointer (below): by default,
 // no ( ).
 //
 [[relocates(xs)]] push(mut xs, x) => append(xs, x);
-
 // Reference supports (§12.1) - code analysis in the language: ct-state + require.
 // 
 // 
@@ -221,10 +210,7 @@ ref_taken(mut xs) {
 }
 // entire array replaced (backbone again, gen-1) - the effect of "replace": breaks if it is called the
 // model from which the link was taken
-ref_used(xs, ref_anchor r) => require(if(anchor_of(xs).gen < 0) !breaks(r.model, "replace") else anchor_of(xs).gen == r.gen,
-  "ссылка на элемент использована после инвалидации опоры (опасное-опасное)",
-  "ссылка взята здесь", r.at, "опора инвалидирована здесь", if(anchor_of(xs).gen < 0) r.at else anchor_of(xs).at);
-
+ref_used(xs, ref_anchor r) => require(if(anchor_of(xs).gen < 0) !breaks(r.model, "replace") else anchor_of(xs).gen == r.gen, "ссылка на элемент использована после инвалидации опоры (опасное-опасное)", "ссылка взята здесь", r.at, "опора инвалидирована здесь", if(anchor_of(xs).gen < 0) r.at else anchor_of(xs).at);
 // [[inside(g)]] f(…) - entity exists only in the blocks of the g structure.
 // 
 // 
@@ -234,8 +220,7 @@ ref_used(xs, ref_anchor r) => require(if(anchor_of(xs).gen < 0) !breaks(r.model,
 //
 inside(expr g) {
   site = call_site();
-  require(in_blocks_of(site, code_name(code(g))),
-    code_name(site) + " существует только внутри блоков " + code_name(code(g)));
+  require(in_blocks_of(site, code_name(code(g))), code_name(site) + " существует только внутри блоков " + code_name(code(g)));
 }
 // place c - inside the block of the call g (go to the root before the function is declared)
 in_blocks_of(c, str g) {
@@ -244,8 +229,7 @@ in_blocks_of(c, str g) {
   found = false;
   done = false;
   while(!done && given(up)) {
-    if(code_kind(up) == ast.function) done = true;
-    else if(block_of_call(up, at, g)) {
+    if(code_kind(up) == ast.function) done = true else if(block_of_call(up, at, g)) {
       found = true;
       done = true;
     }
@@ -272,7 +256,6 @@ is_clause_pack(c) => (code_kind(c) == ast.construct) && {
   for(x : items) if(!is_code_block(x)) all = false;
   all
 };
-
 // Control of extensions (§9.1): [[extension(g)]] at the module or announcement g (extension,
 // substance) Executed when parsing for each extension of the entity (overload, field, &f, syntax
 // record, operator, using operator), the solution - requires.
@@ -286,22 +269,17 @@ module_title(c) => {
   if(n == "") "программы" else n
 };
 // It is possible, it is not possible (formerly sealed by the library)
-own_only(ext, entity) => require(same_module(ext, entity),
-  code_name(entity) + ": расширять сущности модуля " + module_title(entity) + " можно только в нём (own_only)",
-  "сущность объявлена здесь", entity);
+own_only(ext, entity) => require(same_module(ext, entity), code_name(entity) + ": расширять сущности модуля " + module_title(entity) + " можно только в нём (own_only)", "сущность объявлена здесь", entity);
 // conditional test: someone else's extension - only for the types of its module
 // (overload parameters, expansion field Name { … });
-same_module_types(ext, entity) => require(same_module(ext, entity) || uses_module_type(ext, code_module(ext)),
-  code_name(entity) + ": расширение сущности модуля " + module_title(entity) + " из модуля " + module_title(ext) + " — только для типов своего модуля (same_module_types)",
-  "сущность объявлена здесь", entity);
+same_module_types(ext, entity) => require(same_module(ext, entity) || uses_module_type(ext, code_module(ext)), code_name(entity) + ": расширение сущности модуля " + module_title(entity) + " из модуля " + module_title(ext) + " — только для типов своего модуля (same_module_types)", "сущность объявлена здесь", entity);
 // type t - struct declared in modulus m
 module_declares(m, str t) {
   found = false;
-  for(x : code_items(m))
-    if(code_kind(x) == ast.extension) {
-      ast.extension{name, _, _, _, of, _} = x;
-      if((of == "struct") && (name == t)) found = true;
-    }
+  for(x : code_items(m)) if(code_kind(x) == ast.extension) {
+    ast.extension{name, _, _, _, of, _} = x;
+    if((of == "struct") && (name == t)) found = true;
+  }
   found
 }
 declared_in(t, m) => given(t) && ((code_kind(t) == ast.name) && module_declares(m, code_name(t)));
@@ -321,7 +299,6 @@ uses_module_type(c, m) {
   }
   found
 }
-
 // Checked { … } - context: i64 arithmetic with overflow check for everything that is performed
 // inside the block, including the evoked functions (their instance is their own for the context):
 // . with_alloc(r) { … } - the memory level selects the program: values created in the body - in r
@@ -331,14 +308,12 @@ uses_module_type(c, m) {
 //
 //
 with_alloc(region r, expr body) => alloc_in(r, body);
-
 checked(expr body) {
   using operator (i64 a) + (i64 b) => add_checked(a, b);
   using operator (i64 a) - (i64 b) => sub_checked(a, b);
   using operator (i64 a) * (i64 b) => mul_checked(a, b);
   body
 }
-
 // code generation is the context of the goal (§10.4):
 // 
 // 
@@ -353,91 +328,63 @@ checked(expr body) {
 // second operand). *My:* registers with code generator parameters.
 //
 x64_rr(i64 op, i64 dst, i64 src) => array{0x48 | ((src >> 3) << 2) | (dst >> 3), op, 0xC0 | ((src & 7) << 3) | (dst & 7)};
-
 x64_0f(i64 op, i64 dst, i64 src) => array{0x48 | ((dst >> 3) << 2) | (src >> 3), 0xF, op, 0xC0 | ((dst & 7) << 3) | (src & 7)};
-
 // shift to cl: second operand - rcx (JIT registration model)
 x64_shift(i64 ext, i64 dst) => array{0x48 | (dst >> 3), 0xD3, 0xC0 | (ext << 3) | (dst & 7)};
-
 // comparison → 0/1 in a: cmp a, b; setcc; movzx (cc - condition x86: e 4, ne 5, l C, ge D, le E, g F)
 x64_cmp(i64 cc, i64 a, i64 b) => array{...x64_rr(0x39, a, b), 0xF, 0x90 | cc, 0xC0 | a, ...x64_0f(0xB6, a, a)};
-
 // SSE "register, register" over xmm: prefix, [REX], 0F, operation code, ModRM (reg - dst)
 x64_sse(i64 prefix, i64 op, i64 dst, i64 src) => if((dst | src) > 7) array{prefix, 0x40 | ((dst >> 3) << 2) | (src >> 3), 0xF, op, 0xC0 | ((dst & 7) << 3) | (src & 7)} else array{prefix, 0xF, op, 0xC0 | ((dst & 7) << 3) | (src & 7)};
-
 x64_rel32(i64 off) => array{off & 0xFF, (off >> 8) & 0xFF, (off >> 16) & 0xFF, (off >> 24) & 0xFF};
-
 // conditional transition compared to: cmp a, b; jcc t (t - offset from the beginning of these bytes)
 x64_jcc(i64 cc, i64 a, i64 b, i64 t) => array{...x64_rr(0x39, a, b), 0xF, 0x80 | cc, ...x64_rel32(t - 9)};
-
 // with the known second operand (imm32): op r, v (ext - /0 add, /5 sub, /4 and, 1 or, /6 xor, /7 cmp);
 // imul r, r, v; shift r to v; cmp a, v; jcc t
 x64_ri(i64 ext, i64 r, i64 v) => array{0x48 | (r >> 3), 0x81, 0xC0 | (ext << 3) | (r & 7), ...x64_rel32(v)};
 x64_imul_i(i64 r, i64 v) => array{0x48 | ((r >> 3) << 2) | (r >> 3), 0x69, 0xC0 | ((r & 7) << 3) | (r & 7), ...x64_rel32(v)};
 x64_shift_i(i64 ext, i64 r, i64 v) => array{0x48 | (r >> 3), 0xC1, 0xC0 | (ext << 3) | (r & 7), v & 63};
 x64_jcc_i(i64 cc, i64 a, i64 v, i64 t) => array{...x64_ri(7, a, v), 0xF, 0x80 | cc, ...x64_rel32(t - 13)};
-
 // Memory x86-64: [base + disp32] (mod 10; rsp/r12 via SIB 0x24); REX - only if not empty
 // (as in assembler).
 x64_rex(i64 w, i64 r, i64 x, i64 b) => {
   v = 0x40 | (w << 3) | ((r >> 3) << 2) | ((x >> 3) << 1) | (b >> 3);
   if(v == 0x40) array{} else array{v}
 };
-
-x64_mem(i64 r, i64 base, i64 disp) => array{0x80 | ((r & 7) << 3) | (base & 7), ...(if((base & 7) == 4) array{0x24} else array{}), ...x64_rel32(disp)};
-
+x64_mem(i64 r, i64 base, i64 disp) => array{0x80 | ((r & 7) << 3) | (base & 7), ...if((base & 7) == 4) array{0x24} else array{}, ...x64_rel32(disp)};
 x64_rm(i64 op, i64 r, i64 base, i64 disp) => array{...x64_rex(1, r, 0, base), op, ...x64_mem(r, base, disp)};
-
 x64_sse_rm(i64 prefix, i64 op, i64 r, i64 base, i64 disp) => array{prefix, ...x64_rex(0, r, 0, base), 0xF, op, ...x64_mem(r, base, disp)};
-
 x64_u64(i64 v) => array{v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF, (v >> 32) & 0xFF, (v >> 40) & 0xFF, (v >> 48) & 0xFF, (v >> 56) & 0xFF};
-
 // [base + index * 8]: ModRM 00 r 100 + SIB 11 index base; base rbp/r13 - via disp8 = 0
 // (mod 01) [base + index]: SIB with scale 1 - bytes of string (row - bytes, §4.0 )
 //
 x64_sib1(i64 r, i64 base, i64 index) => if((base & 7) == 5) array{0x44 | ((r & 7) << 3), ((index & 7) << 3) | (base & 7), 0x0} else array{0x4 | ((r & 7) << 3), ((index & 7) << 3) | (base & 7)};
 x64_sib(i64 r, i64 base, i64 index) => if((base & 7) == 5) array{0x44 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7), 0x0} else array{0x4 | ((r & 7) << 3), 0xC0 | ((index & 7) << 3) | (base & 7)};
-
 // f64 (ucomisd): with NaN everything except != is false; result is 0/1 in acc
 x64_set(i64 cc, i64 r) => array{0xF, 0x90 | cc, 0xC0 | r};
-
 x64_fcmp(i64 cc, i64 a, i64 b) => array{...x64_sse(0x66, 0x2E, a, b), ...x64_set(cc, acc), ...x64_0f(0xB6, acc, acc)};
-
 // / and % with a trap (fault - shift from the beginning of these bytes to the dividing
 // trap by zero): test b, b; je fault; cmp b, -1; jne ordinary; (neg a | xor a, a); jmp
 // end; ordinary: cqo; idiv b; [mov a, rdx]; end. INT_MIN / -1 is modular, without falling
 // idiv. a is rax (cqo/idiv), rem is 1 for the remainder.
-x64_divmod(i64 a, i64 b, i64 fault, i64 rem) => array{...x64_rr(0x85, b, b), 0xF, 0x84, ...x64_rel32(fault - 9), 0x48 | (b >> 3), 0x83, 0xF8 | (b & 7), 0xFF, 0x75, 0x5, ...(if(rem == 1) x64_rr(0x31, a, a) else array{0x48 | (a >> 3), 0xF7, 0xD8 | (a & 7)}), 0xEB, 5 + (3 * rem), 0x48, 0x99, 0x48 | (b >> 3), 0xF7, 0xF8 | (b & 7), ...(if(rem == 1) x64_rr(0x89, a, 2) else array{})};
-
+x64_divmod(i64 a, i64 b, i64 fault, i64 rem) => array{...x64_rr(0x85, b, b), 0xF, 0x84, ...x64_rel32(fault - 9), 0x48 | (b >> 3), 0x83, 0xF8 | (b & 7), 0xFF, 0x75, 0x5, ...if(rem == 1) x64_rr(0x31, a, a) else array{0x48 | (a >> 3), 0xF7, 0xD8 | (a & 7)}, 0xEB, 5 + (3 * rem), 0x48, 0x99, 0x48 | (b >> 3), 0xF7, 0xF8 | (b & 7), ...if(rem == 1) x64_rr(0x89, a, 2) else array{}};
 a64_word(i64 w) => array{w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF};
-
 a64_rrr(i64 op, i64 d, i64 n, i64 m) => a64_word(op | (m << 16) | (n << 5) | d);
-
 // Memory AArch64: offset -256..255 - ldur/stur, otherwise - through x16 (movz/movk) and
 // register offset; from sp slots of 16 bytes - offset twice (as in assembler).
-a64_imm64(i64 d, i64 v) => array{...a64_word(0xD2800000 | ((v & 0xFFFF) << 5) | d), ...(if(((v >> 16) & 0xFFFF) != 0) a64_word(0xF2A00000 | (((v >> 16) & 0xFFFF) << 5) | d) else array{}), ...(if(((v >> 32) & 0xFFFF) != 0) a64_word(0xF2C00000 | (((v >> 32) & 0xFFFF) << 5) | d) else array{}), ...(if(((v >> 48) & 0xFFFF) != 0) a64_word(0xF2E00000 | (((v >> 48) & 0xFFFF) << 5) | d) else array{})};
-
+a64_imm64(i64 d, i64 v) => array{...a64_word(0xD2800000 | ((v & 0xFFFF) << 5) | d), ...if(((v >> 16) & 0xFFFF) != 0) a64_word(0xF2A00000 | (((v >> 16) & 0xFFFF) << 5) | d) else array{}, ...if(((v >> 32) & 0xFFFF) != 0) a64_word(0xF2C00000 | (((v >> 32) & 0xFFFF) << 5) | d) else array{}, ...if(((v >> 48) & 0xFFFF) != 0) a64_word(0xF2E00000 | (((v >> 48) & 0xFFFF) << 5) | d) else array{}};
 a64_mem(i64 unscaled, i64 regoff, i64 t, i64 base, i64 disp) => if((disp >= -256) && (disp <= 255)) a64_word(unscaled | ((disp & 0x1FF) << 12) | (base << 5) | t) else array{...a64_imm64(16, disp), ...a64_word(regoff | (16 << 16) | (base << 5) | t)};
-
 a64_add_imm(i64 d, i64 s, i64 v) => if((v >= 0) && (v < 4096)) a64_word(0x91000000 | (v << 10) | (s << 5) | d) else if((v < 0) && (v > -4096)) a64_word(0xD1000000 | ((0 - v) << 10) | (s << 5) | d) else array{...a64_imm64(16, v), ...a64_word(0x8B206000 | (16 << 16) | (s << 5) | d)};
-
 // fcmp a, b; cset acc (AArch64 condition: gt C, ge A; real flags)
 a64_cset(i64 cc, i64 d) => a64_word(0x9A9F07E0 | ((cc ^ 1) << 12) | d);
-
 a64_fcmp(i64 cc, i64 a, i64 b) => array{...a64_word(0x1E602000 | (b << 16) | (a << 5)), ...a64_cset(cc, acc)};
-
 a64_scaled(i64 base, i64 disp) => if(base == 31) 2 * disp else disp;
-
 a64_mov(i64 d, i64 s) => if((d == 31) || (s == 31)) a64_word(0x91000000 | (s << 5) | d) else a64_word(0xAA0003E0 | (s << 16) | d);
-
 // / and % with a trap: cbz b, fault; sdiv (INT_MIN / -1 does not fall - modular); the
 // remainder is msub through x16
-a64_divmod(i64 a, i64 b, i64 fault, i64 rem) => array{...a64_word(0xB4000000 | (((fault >> 2) & 0x7FFFF) << 5) | b), ...(if(rem == 1) array{...a64_rrr(0x9AC00C00, 16, a, b), ...a64_word(0x9B008000 | (b << 16) | (a << 10) | (16 << 5) | a)} else a64_rrr(0x9AC00C00, a, a, b))};
-
+a64_divmod(i64 a, i64 b, i64 fault, i64 rem) => array{...a64_word(0xB4000000 | (((fault >> 2) & 0x7FFFF) << 5) | b), ...if(rem == 1) array{...a64_rrr(0x9AC00C00, 16, a, b), ...a64_word(0x9B008000 | (b << 16) | (a << 10) | (16 << 5) | a)} else a64_rrr(0x9AC00C00, a, a, b)};
 // comparison → 0/1 in a: cmp a, b; cset a (cc - condition AArch64: eq 0, ne 1, ge A, lt B, gt C, le D)
 // conditional transition compared to: cmp a, b; b.cc t (t - offset from the beginning of these bytes)
 a64_bcc(i64 cc, i64 a, i64 b, i64 t) => array{...a64_word(0xEB00001F | (b << 16) | (a << 5)), ...a64_word(0x54000000 | ((((t - 4) >> 2) & 0x7FFFF) << 5) | cc)};
-
 // with the known second operand: cmp a, v (imm12, otherwise through x16); b.cc t; shifts to v
 a64_cmp_i(i64 a, i64 v) => if((v >= 0) && (v < 4096)) a64_word(0xF100001F | (v << 10) | (a << 5)) else array{...a64_imm64(16, v), ...a64_word(0xEB00001F | (16 << 16) | (a << 5))};
 a64_bcc_i(i64 cc, i64 a, i64 v, i64 t) => {
@@ -446,9 +393,7 @@ a64_bcc_i(i64 cc, i64 a, i64 v, i64 t) => {
 };
 a64_lsl_i(i64 r, i64 v) => a64_word(0xD3400000 | (((64 - (v & 63)) & 63) << 16) | ((63 - (v & 63)) << 10) | (r << 5) | r);
 a64_asr_i(i64 r, i64 v) => a64_word(0x9340FC00 | ((v & 63) << 16) | (r << 5) | r);
-
 a64_cmp(i64 cc, i64 a, i64 b) => array{...a64_word(0xEB00001F | (b << 16) | (a << 5)), ...a64_word(0x9A9F07E0 | ((cc ^ 1) << 12) | a)};
-
 amd64(expr body) {
   // register model: battery, second operands, their f64, argument base, frame, stack + arguments C
   // ABI (VM services) and second result register
@@ -617,7 +562,6 @@ amd64(expr body) {
   };
   body
 }
-
 arm64(expr body) {
   model() => array{9, 3, 0, 1, 0, 29, 31, 2, 0, 1, 2, 3, 1, 19}; // x9, x3, d0, d1, x0, x29, sp, x2; x0 - x3; x1; x19 is a frame embracing the subroutine
   // Free registers for variables (scalars, classes i64 and f64): the compiler does not take them for
@@ -767,7 +711,6 @@ arm64(expr body) {
   };
   body
 }
-
 // fiber and threads (§8.3): spawn { … } - stack coroutine; stream - block write/read: The
 // value goes into the stream by moving (own).
 //
@@ -786,7 +729,8 @@ on_pressure(expr body) => pressure_handler(body);
 // closed_stream. Fibers waiting on each other with no one left to run — deadlock.
 stream() => stream_new(16);
 stream(i64 cap) => stream_new(cap);
-stream(type t) => stream_type(t); // Flow type - function over types: stream(i64)
+stream(type t) => stream_type(t);
+// Flow type - function over types: stream(i64)
 write(stream s, own x) => stream_write(s, x);
 read(stream s) => stream_read(s);
 more(stream s) => stream_more(s);
@@ -797,7 +741,6 @@ for(stream s, expr body) {
     body(read(s));
   }
 }
-
 // Network (M3b): listen - one event stream over all connections: event {peer, kind:
 // "open" | "data" | "close", data}; send - to the outgoing stream, without waiting;
 // connect - the same stream for one peer (0).
@@ -821,7 +764,6 @@ port(stream n) => net_port(n);
 send(stream n, i64 peer, str data) => net_send(n, peer, data);
 send(stream n, str data) => net_send(n, 0, data);
 drop(stream n, i64 peer) => net_drop(n, peer);
-
 // Files: open - stream of pieces (read io_uring), create - write.
 open(str path) {
   r = file_raw_open(path);
@@ -835,7 +777,6 @@ create(str path) {
   if(r.status != 0) throw io_error{path + ": " + r.text};
   file_stream(r.num)
 }
-
 // Storage status (service VM, plan C1):
 // 
 // 
@@ -856,8 +797,8 @@ create(str path) {
 //
 //
 struct vm_error { str message; }
-struct io_error : vm_error {}
-struct out_of_bounds : vm_error {}
+struct io_error : vm_error { }
+struct out_of_bounds : vm_error { }
 struct storage { i64 id; }
 struct host_reply { i64 status; i64 num; str text; }
 storage_not_given() => if(process_class() == "фоновый") "процессу не даны (ресурс даёт программа: передаёт хранилище)" else "программе не даны (даёт пользователь: vish run --grant storage)";
@@ -891,7 +832,6 @@ commit(storage s) {
   storage_checked(storage_raw_commit(s.id), 0, 0);
 }
 close(storage s) => storage_raw_close(s.id);
-
 // IPC service between VM (author's decision 2026-11-09; plan "VM ение OS").
 // 
 // VM service, common to instances. Within one VM, processes exchange threads (M3c); this service is between VM (OS
@@ -902,9 +842,9 @@ close(storage s) => storage_raw_close(s.id);
 // other end is closed, 7 - message more ring. Waiting keeps the VM stream as a whole (the other fibers are standing) - not
 // yet io uring; ms: 0 - not waiting, < 0 - without limit.
 //
-struct ipc_timeout : io_error {}
-struct ipc_closed : io_error {}
-struct ipc_too_large : io_error {}
+struct ipc_timeout : io_error { }
+struct ipc_closed : io_error { }
+struct ipc_too_large : io_error { }
 struct ipc { i64 id; bool writer; }
 ipc_not_given() => if(process_class() == "фоновый") "процессу не даны (ресурс даёт программа)" else "программе не даны (даёт пользователь: vish run --grant ipc)";
 ipc_open(str name, str role, i64 cap) {
@@ -943,7 +883,6 @@ ipc_send(ipc c, str msg, i64 ms) {
 }
 ipc_recv(ipc c, i64 ms) => ipc_checked(ipc_raw_recv(c.id, ms)).text;
 close(ipc c) => ipc_raw_close(c.id);
-
 // Cryptography is a VM service in a language.
 // 
 // 
@@ -952,24 +891,16 @@ close(ipc c) => ipc_raw_close(c.id);
 // Therefore, in the language itself, and not the wrapper over the system eithera (C++ - only the VM connection with the OS). *My:*
 // order (hash → MAC → cipher → signature), names and forms. SHA-256 (FIPS 180-4) over bytes of string, words - i64 within 32 bits
 // (mask); the cycle over dense arrays i64 - what takes JIT.
-sha256_k() => array{
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-sha256_rotr(i64 x, i64 n) => ((x >> n) | (x << (32 - n))) & 0xffffffff;
+sha256_k() => array{0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5, 0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3, 0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174, 0xE49B69C1, 0xEFBE4786, 0xFC19DC6, 0x240CA1CC, 0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA, 0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7, 0xC6E00BF3, 0xD5A79147, 0x6CA6351, 0x14292967, 0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13, 0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85, 0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3, 0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070, 0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5, 0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3, 0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208, 0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2};
+sha256_rotr(i64 x, i64 n) => ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF;
 // Schedule: w[16..63] of w[0..15]
 sha256_schedule(w) {
   for(t : range(48)) {
     x = w[t + 1];
     y = w[t + 14];
-    s0 = (sha256_rotr(x, 7) ^ sha256_rotr(x, 18)) ^ (x >> 3);
-    s1 = (sha256_rotr(y, 17) ^ sha256_rotr(y, 19)) ^ (y >> 10);
-    w[t + 16] = (((w[t] + s0) + w[t + 9]) + s1) & 0xffffffff;
+    s0 = sha256_rotr(x, 7) ^ sha256_rotr(x, 18) ^ (x >> 3);
+    s1 = sha256_rotr(y, 17) ^ sha256_rotr(y, 19) ^ (y >> 10);
+    w[t + 16] = (w[t] + s0 + w[t + 9] + s1) & 0xFFFFFFFF;
   }
 }
 // 64 rounds; result in h (addition to previous state)
@@ -983,29 +914,29 @@ sha256_rounds(h, w, k) {
   g = h[6];
   hh = h[7];
   for(r : range(64)) {
-    big1 = (sha256_rotr(e, 6) ^ sha256_rotr(e, 11)) ^ sha256_rotr(e, 25);
-    ch = (e & f) ^ ((e ^ 0xffffffff) & g);
-    t1 = ((((hh + big1) + ch) + k[r]) + w[r]) & 0xffffffff;
-    big0 = (sha256_rotr(a, 2) ^ sha256_rotr(a, 13)) ^ sha256_rotr(a, 22);
-    maj = ((a & b) ^ (a & c)) ^ (b & c);
-    t2 = (big0 + maj) & 0xffffffff;
+    big1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25);
+    ch = (e & f) ^ ((e ^ 0xFFFFFFFF) & g);
+    t1 = (hh + big1 + ch + k[r] + w[r]) & 0xFFFFFFFF;
+    big0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22);
+    maj = (a & b) ^ (a & c) ^ (b & c);
+    t2 = (big0 + maj) & 0xFFFFFFFF;
     hh = g;
     g = f;
     f = e;
-    e = (d + t1) & 0xffffffff;
+    e = (d + t1) & 0xFFFFFFFF;
     d = c;
     c = b;
     b = a;
-    a = (t1 + t2) & 0xffffffff;
+    a = (t1 + t2) & 0xFFFFFFFF;
   }
-  h[0] = (h[0] + a) & 0xffffffff;
-  h[1] = (h[1] + b) & 0xffffffff;
-  h[2] = (h[2] + c) & 0xffffffff;
-  h[3] = (h[3] + d) & 0xffffffff;
-  h[4] = (h[4] + e) & 0xffffffff;
-  h[5] = (h[5] + f) & 0xffffffff;
-  h[6] = (h[6] + g) & 0xffffffff;
-  h[7] = (h[7] + hh) & 0xffffffff;
+  h[0] = (h[0] + a) & 0xFFFFFFFF;
+  h[1] = (h[1] + b) & 0xFFFFFFFF;
+  h[2] = (h[2] + c) & 0xFFFFFFFF;
+  h[3] = (h[3] + d) & 0xFFFFFFFF;
+  h[4] = (h[4] + e) & 0xFFFFFFFF;
+  h[5] = (h[5] + f) & 0xFFFFFFFF;
+  h[6] = (h[6] + g) & 0xFFFFFFFF;
+  h[7] = (h[7] + hh) & 0xFFFFFFFF;
 }
 sha256_block(h, w, k) {
   sha256_schedule(w);
@@ -1032,9 +963,9 @@ sha256_zeros(i64 n) {
 // 8 hash words (32 bits each) from string bytes
 sha256_words(str data) {
   n = data.size;
-  total = (((n + 9) + 63) / 64) * 64; // data, byte 0x80, zeros, 8 bytes of length in bits (older forward)
+  total = ((n + 9 + 63) / 64) * 64; // data, byte 0x80, zeros, 8 bytes of length in bits (older forward)
   bits = n * 8;
-  h = array{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  h = array{0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19};
   k = sha256_k();
   w = sha256_zeros(64);
   for(blk : range(total / 64)) {
@@ -1047,7 +978,7 @@ sha256_words(str data) {
 sha256(str data) {
   h = sha256_words(data);
   r = "";
-  for(x : h) r = (((r + text_byte((x >> 24) & 255)) + text_byte((x >> 16) & 255)) + text_byte((x >> 8) & 255)) + text_byte(x & 255);
+  for(x : h) r = r + text_byte((x >> 24) & 255) + text_byte((x >> 16) & 255) + text_byte((x >> 8) & 255) + text_byte(x & 255);
   r
 }
 // hash - hexadecimal record (64 characters)
@@ -1065,7 +996,7 @@ hmac_sha256(str key, str data) {
   opad = "";
   for(j : range(64)) {
     ipad = ipad + text_byte(k[j] ^ 0x36);
-    opad = opad + text_byte(k[j] ^ 0x5c);
+    opad = opad + text_byte(k[j] ^ 0x5C);
   }
   sha256(opad + sha256(ipad + data))
 }
@@ -1075,7 +1006,6 @@ hmac_sha256_hex(str key, str data) {
   for(j : range(32)) r = r + text_hex(m[j], 2);
   r
 }
-
 // ChaCha20-Poly1305 (RFC 8439), step 2 cryptography. Author on Stream Encryption (TLS):
 // 
 // 
@@ -1083,7 +1013,7 @@ hmac_sha256_hex(str key, str data) {
 // message is a unit of encryption, the control frames remain open, the stream is not tied to one key. *My choice of ChaCha20-Poly1305 and
 // form. Words - i64 within 32 bits; Poly1305 - five 26-bit limbs (works < 2^59 - in i64). The key is 32 bytes, a one-time number is 12
 // bytes, strings of bytes.
-struct crypto_error : vm_error {}
+struct crypto_error : vm_error { }
 // Random bytes host is the only primitive OS cryptography (keys, one-time numbers). The result is NOT deterministic: in parsing - run-time - the effect
 // (otherwise parsing would turn the call into a constant - a random "key" in the code). Whether the program needs randomness, it decides; rights do not require
 // (like a clock), “give/take” there is nothing here: the key is not a resource host, but the value of the program (its `hide` / `own` - possession, §5.6).
@@ -1106,25 +1036,25 @@ crypto_slice(str s, i64 from, i64 to) {
   for(k : range(to - from)) r.push(text_byte(s[from + k]));
   r
 }
-crypto_le32(str s, i64 at) => ((s[at] | (s[at + 1] << 8)) | (s[at + 2] << 16)) | (s[at + 3] << 24);
-crypto_put32(x) => ((text_byte(x & 255) + text_byte((x >> 8) & 255)) + text_byte((x >> 16) & 255)) + text_byte((x >> 24) & 255);
-chacha_rotl(i64 x, i64 n) => ((x << n) | (x >> (32 - n))) & 0xffffffff;
+crypto_le32(str s, i64 at) => s[at] | (s[at + 1] << 8) | (s[at + 2] << 16) | (s[at + 3] << 24);
+crypto_put32(x) => text_byte(x & 255) + text_byte((x >> 8) & 255) + text_byte((x >> 16) & 255) + text_byte((x >> 24) & 255);
+chacha_rotl(i64 x, i64 n) => ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF;
 chacha_qr(st, i64 a, i64 b, i64 c, i64 d) {
-  st[a] = (st[a] + st[b]) & 0xffffffff;
+  st[a] = (st[a] + st[b]) & 0xFFFFFFFF;
   st[d] = chacha_rotl(st[d] ^ st[a], 16);
-  st[c] = (st[c] + st[d]) & 0xffffffff;
+  st[c] = (st[c] + st[d]) & 0xFFFFFFFF;
   st[b] = chacha_rotl(st[b] ^ st[c], 12);
-  st[a] = (st[a] + st[b]) & 0xffffffff;
+  st[a] = (st[a] + st[b]) & 0xFFFFFFFF;
   st[d] = chacha_rotl(st[d] ^ st[a], 8);
-  st[c] = (st[c] + st[d]) & 0xffffffff;
+  st[c] = (st[c] + st[d]) & 0xFFFFFFFF;
   st[b] = chacha_rotl(st[b] ^ st[c], 7);
 }
 // 64 bytes of key stream: key 32 bytes, counter, one-time number 12 bytes
 chacha20_block(str key, i64 counter, str nonce) {
   if((key.size != 32) || (nonce.size != 12)) throw crypto_error{"ChaCha20: ключ — 32 байта, одноразовое число — 12"};
-  init = array{0x61707865, 0x3320646e, 0x79622d32, 0x6b206574};
+  init = array{0x61707865, 0x3320646E, 0x79622D32, 0x6B206574};
   for(k : range(8)) init.push(crypto_le32(key, 4 * k));
-  init.push(counter & 0xffffffff);
+  init.push(counter & 0xFFFFFFFF);
   for(k : range(3)) init.push(crypto_le32(nonce, 4 * k));
   w = init;
   for(r : range(10)) {
@@ -1138,13 +1068,13 @@ chacha20_block(str key, i64 counter, str nonce) {
     chacha_qr(w, 3, 4, 9, 14);
   }
   out = "";
-  for(k : range(16)) out.push(crypto_put32((w[k] + init[k]) & 0xffffffff));
+  for(k : range(16)) out.push(crypto_put32((w[k] + init[k]) & 0xFFFFFFFF));
   out
 }
 // ^ key flow from the counter block (encryption and decryption are the same)
 chacha20_xor(str key, str nonce, i64 counter, str data) {
   out = "";
-  blocks = ((data.size + 63) / 64);
+  blocks = (data.size + 63) / 64;
   for(b : range(blocks)) {
     ks = chacha20_block(key, counter + b, nonce);
     n = if(data.size - (b * 64) < 64) data.size - (b * 64) else 64;
@@ -1155,16 +1085,16 @@ chacha20_xor(str key, str nonce, i64 counter, str data) {
 // Poly1305: 16 bytes tag from message and 32 byte disposable key
 poly1305(str key, str msg) {
   if(key.size != 32) throw crypto_error{"Poly1305: ключ — 32 байта"};
-  m26 = 0x3ffffff;
+  m26 = 0x3FFFFFF;
   t0 = crypto_le32(key, 0);
   t1 = crypto_le32(key, 4);
   t2 = crypto_le32(key, 8);
   t3 = crypto_le32(key, 12);
-  r0 = t0 & 0x3ffffff;
-  r1 = ((t0 >> 26) | (t1 << 6)) & 0x3ffff03;
-  r2 = ((t1 >> 20) | (t2 << 12)) & 0x3ffc0ff;
-  r3 = ((t2 >> 14) | (t3 << 18)) & 0x3f03fff;
-  r4 = (t3 >> 8) & 0x00fffff;
+  r0 = t0 & 0x3FFFFFF;
+  r1 = ((t0 >> 26) | (t1 << 6)) & 0x3FFFF03;
+  r2 = ((t1 >> 20) | (t2 << 12)) & 0x3FFC0FF;
+  r3 = ((t2 >> 14) | (t3 << 18)) & 0x3F03FFF;
+  r4 = (t3 >> 8) & 0xFFFFF;
   s1 = r1 * 5;
   s2 = r2 * 5;
   s3 = r3 * 5;
@@ -1179,7 +1109,8 @@ poly1305(str key, str msg) {
     n = if(msg.size - at < 16) msg.size - at else 16;
     blk = crypto_slice(msg, at, at + n);
     hibit = 1 << 24;
-    if(n < 16) { // last incomplete block: byte 1 behind the data, without a senior bit
+    if(n < 16) {
+      // last incomplete block: byte 1 behind the data, without a senior bit
       blk.push(text_byte(1));
       while(blk.size < 16) blk.push(text_byte(0));
       hibit = 0;
@@ -1192,12 +1123,12 @@ poly1305(str key, str msg) {
     h1 = h1 + (((b0 >> 26) | (b1 << 6)) & m26);
     h2 = h2 + (((b1 >> 20) | (b2 << 12)) & m26);
     h3 = h3 + (((b2 >> 14) | (b3 << 18)) & m26);
-    h4 = (h4 + (b3 >> 8)) + hibit;
-    d0 = ((((h0 * r0) + (h1 * s4)) + (h2 * s3)) + (h3 * s2)) + (h4 * s1);
-    d1 = ((((h0 * r1) + (h1 * r0)) + (h2 * s4)) + (h3 * s3)) + (h4 * s2);
-    d2 = ((((h0 * r2) + (h1 * r1)) + (h2 * r0)) + (h3 * s4)) + (h4 * s3);
-    d3 = ((((h0 * r3) + (h1 * r2)) + (h2 * r1)) + (h3 * r0)) + (h4 * s4);
-    d4 = ((((h0 * r4) + (h1 * r3)) + (h2 * r2)) + (h3 * r1)) + (h4 * r0);
+    h4 = h4 + (b3 >> 8) + hibit;
+    d0 = (h0 * r0) + (h1 * s4) + (h2 * s3) + (h3 * s2) + (h4 * s1);
+    d1 = (h0 * r1) + (h1 * r0) + (h2 * s4) + (h3 * s3) + (h4 * s2);
+    d2 = (h0 * r2) + (h1 * r1) + (h2 * r0) + (h3 * s4) + (h4 * s3);
+    d3 = (h0 * r3) + (h1 * r2) + (h2 * r1) + (h3 * r0) + (h4 * s4);
+    d4 = (h0 * r4) + (h1 * r3) + (h2 * r2) + (h3 * r1) + (h4 * r0);
     c = d0 >> 26;
     h0 = d0 & m26;
     d1 = d1 + c;
@@ -1255,19 +1186,19 @@ poly1305(str key, str msg) {
     h4 = g4 & m26;
   }
   // h → four 32-bit words, plus s (second 16 bytes of the key) modulo 2^128
-  w0 = (h0 | (h1 << 26)) & 0xffffffff;
-  w1 = ((h1 >> 6) | (h2 << 20)) & 0xffffffff;
-  w2 = ((h2 >> 12) | (h3 << 14)) & 0xffffffff;
-  w3 = ((h3 >> 18) | (h4 << 8)) & 0xffffffff;
+  w0 = (h0 | (h1 << 26)) & 0xFFFFFFFF;
+  w1 = ((h1 >> 6) | (h2 << 20)) & 0xFFFFFFFF;
+  w2 = ((h2 >> 12) | (h3 << 14)) & 0xFFFFFFFF;
+  w3 = ((h3 >> 18) | (h4 << 8)) & 0xFFFFFFFF;
   f = w0 + crypto_le32(key, 16);
-  o0 = f & 0xffffffff;
-  f = (w1 + crypto_le32(key, 20)) + (f >> 32);
-  o1 = f & 0xffffffff;
-  f = (w2 + crypto_le32(key, 24)) + (f >> 32);
-  o2 = f & 0xffffffff;
-  f = (w3 + crypto_le32(key, 28)) + (f >> 32);
-  o3 = f & 0xffffffff;
-  ((crypto_put32(o0) + crypto_put32(o1)) + crypto_put32(o2)) + crypto_put32(o3)
+  o0 = f & 0xFFFFFFFF;
+  f = w1 + crypto_le32(key, 20) + (f >> 32);
+  o1 = f & 0xFFFFFFFF;
+  f = w2 + crypto_le32(key, 24) + (f >> 32);
+  o2 = f & 0xFFFFFFFF;
+  f = w3 + crypto_le32(key, 28) + (f >> 32);
+  o3 = f & 0xFFFFFFFF;
+  crypto_put32(o0) + crypto_put32(o1) + crypto_put32(o2) + crypto_put32(o3)
 }
 crypto_pad16(str s) {
   r = "";
@@ -1275,10 +1206,10 @@ crypto_pad16(str s) {
   for(k : range(n)) r.push(text_byte(0));
   r
 }
-crypto_le64(i64 n) => crypto_put32(n & 0xffffffff) + crypto_put32((n >> 32) & 0xffffffff);
+crypto_le64(i64 n) => crypto_put32(n & 0xFFFFFFFF) + crypto_put32((n >> 32) & 0xFFFFFFFF);
 chacha_tag(str key, str nonce, str aad, str cipher) {
   otk = crypto_slice(chacha20_block(key, 0, nonce), 0, 32);
-  poly1305(otk, (((((aad + crypto_pad16(aad)) + cipher) + crypto_pad16(cipher)) + crypto_le64(aad.size)) + crypto_le64(cipher.size)))
+  poly1305(otk, aad + crypto_pad16(aad) + cipher + crypto_pad16(cipher) + crypto_le64(aad.size) + crypto_le64(cipher.size))
 }
 // seal the message: ciphertext and tag (16 bytes) - one line; aad - open data protected by a label (control frame)
 chacha20_poly1305_seal(str key, str nonce, str aad, str plain) {
@@ -1296,7 +1227,6 @@ chacha20_poly1305_open(str key, str nonce, str aad, str box) {
   if(diff != 0) throw crypto_error{"метка не сошлась"};
   chacha20_xor(key, nonce, 1, cipher)
 }
-
 // X25519 (RFC 7748) - key exchange, step 3 cryptography. GF(2^255 − 19) field: number - 16 limbs of 16 bits in i64 (as in TweetNaCl: works < 2^36 -
 // stock i64 large), Montgomery staircase at 255 steps. The private key is 32 random bytes (random_bytes), the public key is x25519_base(приватный);
 // the common secret is x25519(мой приватный, чужой публичный): two parties have one. My form and names. Speed is the author’s “base level” (the
@@ -1308,7 +1238,7 @@ gf_car(o) {
   for(i : range(16)) {
     o[i] = o[i] + 65536;
     c = o[i] >> 16;
-    if(i < 15) o[i + 1] = (o[i + 1] + c) - 1 else o[0] = (o[0] + (c - 1)) + (37 * (c - 1));
+    if(i < 15) o[i + 1] = (o[i + 1] + c) - 1 else o[0] = o[0] + (c - 1) + (37 * (c - 1));
     o[i] = o[i] - (c << 16);
   }
 }
@@ -1355,7 +1285,7 @@ gf_inv(o, a) {
 gf_unpack(str n) {
   o = gf_zero();
   for(i : range(16)) o[i] = n[2 * i] + (n[(2 * i) + 1] << 8);
-  o[15] = o[15] & 0x7fff;
+  o[15] = o[15] & 0x7FFF;
   o
 }
 gf_pack(n) {
@@ -1366,14 +1296,14 @@ gf_pack(n) {
   gf_car(t);
   m = gf_zero();
   for(j : range(2)) {
-    m[0] = t[0] - 0xffed;
+    m[0] = t[0] - 0xFFED;
     for(i : range(14)) {
-      m[i + 1] = (t[i + 1] - 0xffff) - ((m[i] >> 16) & 1);
-      m[i] = m[i] & 0xffff;
+      m[i + 1] = (t[i + 1] - 0xFFFF) - ((m[i] >> 16) & 1);
+      m[i] = m[i] & 0xFFFF;
     }
-    m[15] = (t[15] - 0x7fff) - ((m[14] >> 16) & 1);
+    m[15] = (t[15] - 0x7FFF) - ((m[14] >> 16) & 1);
     b = (m[15] >> 16) & 1;
-    m[14] = m[14] & 0xffff;
+    m[14] = m[14] & 0xFFFF;
     gf_sel(t, m, 1 - b);
   }
   r = "";
@@ -1401,7 +1331,7 @@ x25519(str scalar, str point) {
   a[0] = 1;
   d[0] = 1;
   k121665 = gf_zero();
-  k121665[0] = 0xdb41;
+  k121665[0] = 0xDB41;
   k121665[1] = 1;
   for(step : range(255)) {
     i = 254 - step;
@@ -1439,43 +1369,22 @@ x25519_base(str scalar) {
   for(k : range(31)) nine.push(text_byte(0));
   x25519(scalar, nine)
 }
-
 // Signature Ed25519 (RFC 8032), step 4 cryptography: SHA-512 (FIPS 180-4) and Edwards points above field X25519 (gf *). Scheme - TweetNaCl:
 // extended coordinates, staircase with exchange, the remainder of the module L.; quotes about the signatures he has - the device *mine*. API:
 // `ed25519_public(seed32)`, `ed25519_sign(seed32, текст)` → 64 bytes, `ed25519_verify(открытый32, текст, подпись64)` → bool; `sha512`,
 // `sha512_hex`. Signature - one staircase call (~4 with JIT, ~15 with interpreter), verification - three: for signature and verification you
 // need `--jit`. Private key (seed) - 32 random bytes (Q`random_bytes`). SHA-512 (FIPS 180-4) - words of 64 bits in i64 (add and multiplication
 // turn, shift to the right - with a sign: logical - mask)
-sha512_k() => array{
-  0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
-  0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
-  0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
-  0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
-  0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
-  0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
-  0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
-  0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
-  0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
-  0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
-  0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
-  0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
-  0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
-  0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
-  0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
-  0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
-  0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
-  0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
-  0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
-  0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817};
+sha512_k() => array{0x428A2F98D728AE22, 0x7137449123EF65CD, 0xB5C0FBCFEC4D3B2F, 0xE9B5DBA58189DBBC, 0x3956C25BF348B538, 0x59F111F1B605D019, 0x923F82A4AF194F9B, 0xAB1C5ED5DA6D8118, 0xD807AA98A3030242, 0x12835B0145706FBE, 0x243185BE4EE4B28C, 0x550C7DC3D5FFB4E2, 0x72BE5D74F27B896F, 0x80DEB1FE3B1696B1, 0x9BDC06A725C71235, 0xC19BF174CF692694, 0xE49B69C19EF14AD2, 0xEFBE4786384F25E3, 0xFC19DC68B8CD5B5, 0x240CA1CC77AC9C65, 0x2DE92C6F592B0275, 0x4A7484AA6EA6E483, 0x5CB0A9DCBD41FBD4, 0x76F988DA831153B5, 0x983E5152EE66DFAB, 0xA831C66D2DB43210, 0xB00327C898FB213F, 0xBF597FC7BEEF0EE4, 0xC6E00BF33DA88FC2, 0xD5A79147930AA725, 0x6CA6351E003826F, 0x142929670A0E6E70, 0x27B70A8546D22FFC, 0x2E1B21385C26C926, 0x4D2C6DFC5AC42AED, 0x53380D139D95B3DF, 0x650A73548BAF63DE, 0x766A0ABB3C77B2A8, 0x81C2C92E47EDAEE6, 0x92722C851482353B, 0xA2BFE8A14CF10364, 0xA81A664BBC423001, 0xC24B8B70D0F89791, 0xC76C51A30654BE30, 0xD192E819D6EF5218, 0xD69906245565A910, 0xF40E35855771202A, 0x106AA07032BBD1B8, 0x19A4C116B8D2D0C8, 0x1E376C085141AB53, 0x2748774CDF8EEB99, 0x34B0BCB5E19B48A8, 0x391C0CB3C5C95A63, 0x4ED8AA4AE3418ACB, 0x5B9CCA4F7763E373, 0x682E6FF3D6B2B8A3, 0x748F82EE5DEFB2FC, 0x78A5636F43172F60, 0x84C87814A1F0AB72, 0x8CC702081A6439EC, 0x90BEFFFA23631E28, 0xA4506CEBDE82BDE9, 0xBEF9A3F7B2C67915, 0xC67178F2E372532B, 0xCA273ECEEA26619C, 0xD186B8C721C0C207, 0xEADA7DD6CDE0EB1E, 0xF57D4F7FEE6ED178, 0x6F067AA72176FBA, 0xA637DC5A2C898A6, 0x113F9804BEF90DAE, 0x1B710B35131C471B, 0x28DB77F523047D84, 0x32CAAB7B40C72493, 0x3C9EBE0A15C9BEBC, 0x431D67C49C100D4C, 0x4CC5D4BECB3E42B6, 0x597F299CFC657E2A, 0x5FCB6FAB3AD6FAEC, 0x6C44198C4A475817};
 sha512_lsr(i64 x, i64 n) => (x >> n) & ((1 << (64 - n)) - 1);
 sha512_rotr(i64 x, i64 n) => sha512_lsr(x, n) | (x << (64 - n));
 sha512_block(h, w, k) {
   for(t : range(64)) {
     x = w[t + 1];
     y = w[t + 14];
-    s0 = (sha512_rotr(x, 1) ^ sha512_rotr(x, 8)) ^ sha512_lsr(x, 7);
-    s1 = (sha512_rotr(y, 19) ^ sha512_rotr(y, 61)) ^ sha512_lsr(y, 6);
-    w[t + 16] = ((w[t] + s0) + w[t + 9]) + s1;
+    s0 = sha512_rotr(x, 1) ^ sha512_rotr(x, 8) ^ sha512_lsr(x, 7);
+    s1 = sha512_rotr(y, 19) ^ sha512_rotr(y, 61) ^ sha512_lsr(y, 6);
+    w[t + 16] = w[t] + s0 + w[t + 9] + s1;
   }
   a = h[0];
   b = h[1];
@@ -1486,11 +1395,11 @@ sha512_block(h, w, k) {
   g = h[6];
   hh = h[7];
   for(r : range(80)) {
-    big1 = (sha512_rotr(e, 14) ^ sha512_rotr(e, 18)) ^ sha512_rotr(e, 41);
+    big1 = sha512_rotr(e, 14) ^ sha512_rotr(e, 18) ^ sha512_rotr(e, 41);
     ch = (e & f) ^ ((e ^ -1) & g);
-    t1 = (((hh + big1) + ch) + k[r]) + w[r];
-    big0 = (sha512_rotr(a, 28) ^ sha512_rotr(a, 34)) ^ sha512_rotr(a, 39);
-    maj = ((a & b) ^ (a & c)) ^ (b & c);
+    t1 = hh + big1 + ch + k[r] + w[r];
+    big0 = sha512_rotr(a, 28) ^ sha512_rotr(a, 34) ^ sha512_rotr(a, 39);
+    maj = (a & b) ^ (a & c) ^ (b & c);
     t2 = big0 + maj;
     hh = g;
     g = f;
@@ -1525,11 +1434,9 @@ sha512_load(str data, i64 n, i64 total, i64 bits, i64 blk, w) {
 }
 sha512_words(str data) {
   n = data.size;
-  total = (((n + 17) + 127) / 128) * 128;
+  total = ((n + 17 + 127) / 128) * 128;
   bits = n * 8;
-  h = array{
-  0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-  0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179};
+  h = array{0x6A09E667F3BCC908, 0xBB67AE8584CAA73B, 0x3C6EF372FE94F82B, 0xA54FF53A5F1D36F1, 0x510E527FADE682D1, 0x9B05688C2B3E6C1F, 0x1F83D9ABFB41BD6B, 0x5BE0CD19137E2179};
   k = sha512_k();
   w = sha256_zeros(80);
   for(blk : range(total / 128)) {
@@ -1551,13 +1458,12 @@ sha512_hex(str data) {
   for(x : h) r = r + text_hex(x, 16);
   r
 }
-
 // Ed25519 (RFC 8032) - signature; TweetNaCl scheme: Edwards points in extended coordinates, field numbers - gf * (16 limbs of 16 bits)
-ed_d() => array{0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070, 0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203};
-ed_d2() => array{0xf159, 0x26b2, 0x9b94, 0xebd6, 0xb156, 0x8283, 0x149a, 0x00e0, 0xd130, 0xeef3, 0x80f2, 0x198e, 0xfce7, 0x56df, 0xd9dc, 0x2406};
-ed_x() => array{0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c, 0xdc5c, 0xfdd6, 0xe231, 0xc0a4, 0x53fe, 0xcd6e, 0x36d3, 0x2169};
+ed_d() => array{0x78A3, 0x1359, 0x4DCA, 0x75EB, 0xD8AB, 0x4141, 0xA4D, 0x70, 0xE898, 0x7779, 0x4079, 0x8CC7, 0xFE73, 0x2B6F, 0x6CEE, 0x5203};
+ed_d2() => array{0xF159, 0x26B2, 0x9B94, 0xEBD6, 0xB156, 0x8283, 0x149A, 0xE0, 0xD130, 0xEEF3, 0x80F2, 0x198E, 0xFCE7, 0x56DF, 0xD9DC, 0x2406};
+ed_x() => array{0xD51A, 0x8F25, 0x2D60, 0xC956, 0xA7B2, 0x9525, 0xC760, 0x692C, 0xDC5C, 0xFDD6, 0xE231, 0xC0A4, 0x53FE, 0xCD6E, 0x36D3, 0x2169};
 ed_y() => array{0x6658, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666};
-ed_i() => array{0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43, 0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83};
+ed_i() => array{0xA0B0, 0x4A0E, 0x1B27, 0xC4EE, 0xE478, 0xAD2F, 0x1806, 0x2F43, 0xD7A7, 0x3DFB, 0x99, 0x2B4D, 0xDF0B, 0x4FC1, 0x2480, 0x2B83};
 gf_one() {
   o = gf_zero();
   o[0] = 1;
@@ -1629,7 +1535,7 @@ ed_scalarbase(p, str s) {
   gf_mul(q[3], ed_x(), ed_y());
   ed_scalarmult(p, q, s);
 }
-ed_l() => array{0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10};
+ed_l() => array{0xED, 0xD3, 0xF5, 0x5C, 0x1A, 0x63, 0x12, 0x58, 0xD6, 0x9C, 0xF7, 0xA2, 0xDE, 0xF9, 0xDE, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10};
 // x - 64 numbers (bytes, possibly with transfers): the remainder of the module L, 32 bytes younger forward
 ed_modl(x) {
   l = ed_l();
@@ -1638,7 +1544,7 @@ ed_modl(x) {
     carry = 0;
     for(jj : range(20)) {
       j = (i - 32) + jj;
-      x[j] = (x[j] + carry) - ((16 * x[i]) * l[j - (i - 32)]);
+      x[j] = (x[j] + carry) - (16 * x[i] * l[j - (i - 32)]);
       carry = (x[j] + 128) >> 8;
       x[j] = x[j] - (carry << 8);
     }
@@ -1685,7 +1591,7 @@ ed25519_sign(str seed, str msg) {
   p = ed_point();
   ed_scalarbase(p, r);
   rr = ed_pack(p);
-  h = ed_reduce(sha512((rr + pk) + msg));
+  h = ed_reduce(sha512(rr + pk + msg));
   x = array{};
   for(i : range(64)) x.push(0);
   for(i : range(32)) x[i] = r[i];
@@ -1743,7 +1649,7 @@ ed25519_verify(str pk, str msg, str sig) {
   q = ed_unpackneg(pk);
   if(q.size == 0) return false;
   rr = crypto_slice(sig, 0, 32);
-  h = ed_reduce(sha512((rr + pk) + msg));
+  h = ed_reduce(sha512(rr + pk + msg));
   p = ed_point();
   ed_scalarmult(p, q, h);
   q2 = ed_point();
@@ -1751,13 +1657,11 @@ ed25519_verify(str pk, str msg, str sig) {
   ed_add(p, q2);
   ed_pack(p) == rr
 }
-
 // Processes VM (M3c): process(f, аргументы…) is an isolated process; between
 // processes, only data is moved. Wait - wait; false - process fell (the rest live),
 // error - his message.
 wait(process p) => process_wait(p);
 error(process p) => process_error(p);
-
 // Formatting is not a string of format:
 //
 // 
@@ -1766,8 +1670,8 @@ error(process p) => process_error(p);
 // formatter (heir formatter) configures the following value; its format - its own
 // overload format with (formatter, value).
 //
-struct formatter {}
-struct plain : formatter {}
+struct formatter { }
+struct plain : formatter { }
 struct hex : formatter { i64 width; }
 struct fixed : formatter { i64 digits; }
 hex(i64 w) => hex{w};
@@ -1791,7 +1695,7 @@ text_hex(i64 n, i64 width) {
   w = 0;
   loop {
     s = hex_digit(k & 15) + s;
-    k = (k >> 4) & 0x0fffffffffffffff; // shifting
+    k = (k >> 4) & 0xFFFFFFFFFFFFFFF; // shifting
     w = w + 1;
     if(k == 0) break;
   }
@@ -1801,25 +1705,22 @@ text_hex(i64 n, i64 width) {
   }
   s
 }
-
 text_fixed(f64 x, i64 digits) => native "cpp" {
   if(!#x.known() || !#digits.known()) return erase(value(std::string("x")));
   char buf[64];
   snprintf(buf, sizeof buf, "%.*f", int(#digits.as<int64_t>()), #x.as<double>());
   return value(std::string(buf));
 };
-
 format_with(hex h, i64 x) => text_hex(x, h.width);
 format_with(fixed d, f64 x) => text_fixed(x, d.digits);
-
 fmt(...parts) {
   out = "";
   f = plain{};
   i = 0;
   for(p : parts) {
-    if((i % 2) == 0) out = out + p; // template
-    else if(formatter{} = p) f = p; // formatter - for the next meaning
-    else {
+    // formatter template text - for the following
+    // value
+    if((i % 2) == 0) out = out + p else if(formatter{} = p) f = p else {
       out = out + format_with(f, p);
       f = plain{};
     }
@@ -1827,7 +1728,6 @@ fmt(...parts) {
   }
   out
 }
-
 // parse_int(s) is the result of {ok, value, error}: numbers without a sign.
 struct result { bool ok; i64 value; str error; }
 parse_int(str s) {
@@ -1843,7 +1743,6 @@ parse_int(str s) {
   }
   if(good) result{true, v, ""} else result{false, 0, "не число: \"" + s + "\""}
 }
-
 // text(x) is the text of the value (bytes): the string itself, the number is the decimal record.
 text(str s) => s;
 text(bool b) => if(b) "true" else "false";
@@ -1863,13 +1762,11 @@ text(x) => native "cpp" {
   if(!#x.known()) return erase(value(std::string("x")));
   return #x.is<str_v>() ? value(#x.as<str_v>()) : value(vm.show_v(#x));
 };
-
 // text_byte(b) is a string of one byte b.
 text_byte(i64 b) => native "cpp" {
   if(!#b.known()) return erase(value(std::string("x")));
   return value(std::string(1, char(#b.as<int64_t>())));
 };
-
 // Types of strings (Sh2a, docs/plan-vm-os.md §4 in, spec §5.9): the string is bytes, and the storage method
 // chooses the code, the type is the view.
 // 
@@ -1890,7 +1787,6 @@ text_byte(i64 b) => native "cpp" {
 // into the general path of the operator - scenario 64 1.2 → 2.1 s (measured 2026-11-06). pin(s) is the str in its address
 // range (core pin_storage).
 pin(str s) => pin_storage(s);
-
 struct grown_text { str bytes; }
 grown_text() {
   g = grown_text{""};
@@ -1902,11 +1798,12 @@ grown_text(str s) {
   g.bytes.push(s);
   g
 }
-put(mut grown_text g, str s) { g.bytes.push(s); }
+put(mut grown_text g, str s) {
+  g.bytes.push(s);
+}
 size(grown_text g) => g.bytes.size;
 byte_at(grown_text g, i64 k) => g.bytes[k];
 text(grown_text g) => g.bytes;
-
 struct fixed_text { ct i64 cap; str bytes; }
 fixed_text(ct i64 n) => fixed_text{n, ""};
 // Will s fit into the remaining bytes?
@@ -1920,11 +1817,12 @@ put(mut fixed_text t, str s) {
 size(fixed_text t) => t.bytes.size;
 byte_at(fixed_text t, i64 k) => t.bytes[k];
 text(fixed_text t) => t.bytes;
-
 struct text_buffer { grown_text data; }
 text_buffer() => text_buffer{grown_text()};
 byte_at(text_buffer b, i64 k) => b.data.bytes[k];
-put(mut text_buffer b, str s) { b.data.bytes.push(s); }
+put(mut text_buffer b, str s) {
+  b.data.bytes.push(s);
+}
 size(text_buffer b) => b.data.bytes.size;
 // everything accumulated by one line; position to the beginning, buffer address range the same
 take(mut text_buffer b) {
@@ -1933,7 +1831,6 @@ take(mut text_buffer b) {
   r
 }
 text(text_buffer b) => b.data.bytes;
-
 // Output buffer with threshold (S2a):
 // 
 // . out_buffer(поток, порог) accumulates small put; not fit (size + chunk > threshold) - accumulated goes
@@ -1958,7 +1855,6 @@ put(mut out_buffer b, str s) {
   if((b.data.bytes.size + s.size) > b.limit) flush(b);
   if(s.size >= b.limit) write(b.sink, s) else b.data.bytes.push(s);
 }
-
 // Base as values (S3, spec §7.4): the journal record by number - journal_entry(i), the number of records -
 // journal_size(); the record - the value of the struct below (option type - value type, field - by type), revision
 // - revision of the base at the time of writing. Node number - code_at(i) (reverse code_id), types node -
@@ -1976,16 +1872,13 @@ struct journal_place { i64 revision; i64 id; i64 from; i64 to; }
 struct journal_note { i64 revision; i64 id; array lead; str tail; array end; }
 struct journal_gap { i64 revision; i64 nodes; i64 imports; }
 struct journal_derived { i64 revision; i64 id; }
-
 // fill(n, x) is an array of n copies of x.
 fill(i64 n, x) {
   r = array{};
   for(i : range(n)) r.push(x);
   r
 }
-
 is_err(result r) => !r.ok;
-
 // parsing code (§4.4): the block of the structure whose body declares `syntax {r} => f(r);` is
 // stored raw (ast.raw: atoms and sub-units with positions), f disassembles it during analysis and
 // returns the code (or value - VM builds the code that creates it) or parse_error - a hole with a
@@ -2011,25 +1904,39 @@ is_err(result r) => !r.ok;
 // = 0, the literal in the middle of the atom is checked by symbols.
 //
 struct parse_error { code at; str why; }
-struct parse_error_in : parse_error { i64 offset; } // The place inside the atom: shift from its beginning
-struct parser {}
-struct p_int : parser { bool sign; i64 base; i64 max; } // whole: atom-number; base 10, max > 0 or in the middle of an atom are symbols
-struct p_num : parser { bool sign; } // Number: integer or fractional - f64
-struct p_word : parser { str w; } // name ("any") - a line
-struct p_text : parser {} // string
-struct p_bool : parser {} // true / false
-struct p_sym : parser { str s; } // in a row, glued: "=", "->"
-struct p_chr : parser { i64 c; } // byte # is a symbol inside an atom
-struct p_code : parser {} // subblock {…} - standard parsing according to the rules of place (code)
-struct p_seq : parser { array ps; bool drop; } // in a row - motorcade; drop: without literary (combine)
-struct p_alt : parser { array ps; } // first-rate
-struct p_rep : parser { array ps; i64 min; } // repeat
-struct p_map : parser { type t; array names; array ps; } // aggregate t: field by name
-struct p_as : parser { array v; array ps; } // The ps[0] is the value of v[0].
-struct p_sub : parser { str open; array ps; } // subblock (...), [...], {…} - parsing entirely inside
-
-// parser of meaning by context: type - parser type, string - literal (word or symbols), byte 'c' -
-// symbol, formatter hex(n) n hexadecimal digits (*my*: same setting as fmt output)hex(2)}{x}")
+struct parse_error_in : parse_error { i64 offset; }
+// The place inside the atom: shift from its beginning
+struct parser { }
+struct p_int : parser { bool sign; i64 base; i64 max; }
+// whole: atom-number; base 10, max > 0 or in the middle of an atom are symbols
+struct p_num : parser { bool sign; }
+// Number: integer or fractional - f64
+struct p_word : parser { str w; }
+// name ("any") - a line
+struct p_text : parser { }
+// string
+struct p_bool : parser { }
+// true / false
+struct p_sym : parser { str s; }
+// in a row, glued: "=", "->"
+struct p_chr : parser { i64 c; }
+// byte # is a symbol inside an atom
+struct p_code : parser { }
+// subblock {…} - standard parsing according to the rules of place (code)
+struct p_seq : parser { array ps; bool drop; }
+// in a row - motorcade; drop: without literary (combine)
+struct p_alt : parser { array ps; }
+// first-rate
+struct p_rep : parser { array ps; i64 min; }
+// repeat
+struct p_map : parser { type t; array names; array ps; }
+// aggregate t: field by name
+struct p_as : parser { array v; array ps; }
+// The ps[0] is the value of v[0].
+struct p_sub : parser { str open; array ps; }
+// subblock (...), [...], {...} - analysis entirely inside the parser from the meaning by context:
+// type - parser type, string - literal (word or symbols), byte 'c' - symbol, formatter hex(n) n
+// hexadecimal digits (*my*: same setting as fmt output)hex(2)}{x}")
 //
 as_parser(parser p) => p;
 as_parser(type t) {
@@ -2044,7 +1951,6 @@ p_word_text(str s) => (s.size > 0) && (((s[0] >= 'a') && (s[0] <= 'z')) || (((s[
 as_parser(str s) => if(p_word_text(s)) p_word{s} else p_sym{s};
 as_parser(i64 c) => p_chr{c};
 as_parser(hex h) => p_int{false, 16, h.width};
-
 int() => p_int{true, 10, 0};
 int(bool sign) => p_int{sign, 10, 0};
 // int({sign: false, base: 16, digits: 2}) - Configuration of the parser of the whole by name:
@@ -2053,10 +1959,7 @@ int(bool sign) => p_int{sign, 10, 0};
 int(q) {
   p = p_int{true, 10, 0};
   for(f : fields(typeof(q))) {
-    if(f.name == "sign") p.sign = q.[f];
-    else if(f.name == "base") p.base = q.[f];
-    else if(f.name == "digits") p.max = q.[f];
-    else throw parse_error{code(), "int: нет настройки " + f.name};
+    if(f.name == "sign") p.sign = q.[f] else if(f.name == "base") p.base = q.[f] else if(f.name == "digits") p.max = q.[f] else throw parse_error{code(), "int: нет настройки " + f.name};
   }
   p
 }
@@ -2089,7 +1992,6 @@ map(type t, q) {
 }
 operator (parser a) | (parser b) => p_alt{array{a, b}};
 operator (p_alt a) | (parser b) => p_alt{array{...a.ps, b}};
-
 // k-atom
 p_has(xs, i64 k, type t) => (k < xs.size) && (code_kind(xs[k]) == t);
 p_ok(i64 k, i64 c, v) => array{true, k, v, code(), c};
@@ -2098,7 +2000,6 @@ p_fail(xs, i64 k, i64 c, str why) => array{false, k, why, if(k < xs.size) xs[k] 
 p_mid(xs, i64 k, i64 c) => p_fail(xs, k, c, "лишнее внутри атома");
 // further in position (failure of alternative that has gone further; promotion of repeat)
 p_further(a, b) => (a[1] > b[1]) || ((a[1] == b[1]) && (a[4] > b[4]));
-
 // symbols: byte on (k, c) or -1 is the end of a word; cont is a continuation of the same
 // word: in the next atom - only close; subblock - not symbols
 p_at(xs, i64 k, i64 c, bool cont) {
@@ -2116,9 +2017,7 @@ p_fail_at(xs, i64 k, i64 c, bool cont, str why) {
 }
 p_digit(i64 ch, i64 base) {
   d = -1;
-  if((ch >= '0') && (ch <= '9')) d = ch - '0';
-  else if((ch >= 'a') && (ch <= 'z')) d = (ch - 'a') + 10;
-  else if((ch >= 'A') && (ch <= 'Z')) d = (ch - 'A') + 10;
+  if((ch >= '0') && (ch <= '9')) d = ch - '0' else if((ch >= 'a') && (ch <= 'z')) d = (ch - 'a') + 10 else if((ch >= 'A') && (ch <= 'Z')) d = (ch - 'A') + 10;
   if(d >= base) d = -1;
   d
 }
@@ -2158,8 +2057,7 @@ p_lit_chars(xs, i64 k, i64 c, str s) {
   ok = true;
   for(i : range(s.size)) {
     if(ok) {
-      if(p_at(xs, j, d, i > 0) != s[i]) ok = false;
-      else {
+      if(p_at(xs, j, d, i > 0) != s[i]) ok = false else {
         t = p_next(xs, j, d);
         j = t[0];
         d = t[1];
@@ -2169,11 +2067,9 @@ p_lit_chars(xs, i64 k, i64 c, str s) {
   if(!ok) return p_fail(xs, k, c, "ожидалось " + s);
   p_ok(j, d, s)
 }
-
 // The literal did not coincide with the atom: the atom close to the previous one (the same word:
 // 1x2 - 1 and x2) - reconciliation by symbols
 p_glued_lit(xs, i64 k, str s) => if((k < xs.size) && code_glued(xs[k])) p_lit_chars(xs, k, 0, s) else p_fail(xs, k, 0, "ожидалось " + s);
-
 p_run(p_int p, xs, i64 k, i64 c) {
   if((c > 0) || (p.base != 10) || (p.max > 0)) return p_int_chars(p, xs, k, c);
   j = k;
@@ -2231,8 +2127,7 @@ p_run(p_sym p, xs, i64 k, i64 c) {
   if(c > 0) return p_lit_chars(xs, k, c, p.s);
   ok = true;
   for(i : range(p.s.size)) {
-    if(!p_has(xs, k + i, ast.symbol)) ok = false;
-    else {
+    if(!p_has(xs, k + i, ast.symbol)) ok = false else {
       ast.symbol{t, g} = xs[k + i];
       if((t[0] != p.s[i]) || ((i > 0) && !g)) ok = false;
     }
@@ -2343,7 +2238,6 @@ parse(code r, p) {
   if(!x[0]) return parse_error_in{if(given(x[3])) x[3] else r, x[2], x[4]};
   p_lit(x[2])
 }
-
 // The compiler in the language is a single code generation JIT (step to bootstrapping, §10.4):
 // 
 // 
@@ -2364,33 +2258,29 @@ parse(code r, p) {
 //
 //
 //
-struct jc_range {} // Tag: the value of range(n) - in the slot the boundary n
-struct jc_ref {} // Tag: link &e = xs[k] - in the slot index k, th - node xs[k], th_top - array variable
-struct jc_lane {} // Tag: instance index in the body of the cycle by stripes - in slot i (first page index)
-// domain resource (destroy, shared - tail of step 10): value slot, block depth, name
+struct jc_range { }
+// Tag: the value of range(n) - in the slot the boundary n
+struct jc_ref { }
+// Tag: link &e = xs[k] - in the slot index k, th - node xs[k], th_top - array variable
+struct jc_lane { }
+// Tag: instance index in the body of the cycle by stripes - in the slot i (first band index)
+// the region resource (destroy, shared - tail of step 10): value slot, block depth, name
 struct jc_res { i64 slot; i64 depth; str name; }
-
 // name in the environment: slot (kind - type; array - two slots: data, size; jc_range -
 // boundary) or expr-parameter (code, context, environment and caller function)
 struct jc_var { str name; type kind; i64 slot; bool thunk; code th; i64 th_ctx; i64 th_top; i64 th_base; i64 th_ret; }
-
 // Local function of the block: code and lexical form of the ad (which was visible in its place)
 struct jc_lfn { str name; code f; i64 top; i64 base; i64 ctx; i64 ret; }
-
 // Recursive local function subroutine: code, parameter types, ad type, embedding context,
 // entry label
 struct jc_sub { code f; array kinds; array envsnap; i64 base; i64 ctx; i64 entry; array lfs; }
-
 // generator waiting for its for: body spawn (expr) and its appearance, area, slots that the
 // body reads outside, spawn node
 struct jc_gen { code w; i64 w_ctx; i64 w_top; i64 w_base; i64 w_ret; i64 region; array caps; code at; }
-
 // frame of the generator convolution (conveyor: external - in the stack, while folded nested)
 struct jc_fuse { i64 stream; type elem; code body; array env; i64 top; i64 base; i64 ctx; i64 cur; array outer; array caps; i64 closes; bool fusing; bool in_b; }
-
 // catch in machine code: type (unit - any), label, variable value, stack depth
 struct jc_catch { type ty; i64 label; bool binds; str name; i64 slot; i64 depth; }
-
 // JIT prefilter (M6, step 2 - from C++ to the language): what the machine code knowingly does not
 // execute - up to parsing instance, the result is array {} or array {узел, причина}; the string
 // node puts VM. Lines, aggregates and kernel calls are not here: they are computed by VM through
@@ -2404,20 +2294,16 @@ jit_precheck(f) {
   }
   jit_rejects(body, code_module(f))
 }
-
 // ct-variables of the module: read in place in canonical order (§7.3) - not the way of execution
 jit_module_ct(m) {
   names = array{};
-  for(x : code_items(m))
-    if(code_kind(x) == ast.variable) {
-      ast.variable{name, _, _, _, is_ct, _, _, _} = x;
-      if(is_ct) names.push(name);
-    }
+  for(x : code_items(m)) if(code_kind(x) == ast.variable) {
+    ast.variable{name, _, _, _, is_ct, _, _, _} = x;
+    if(is_ct) names.push(name);
+  }
   names
 }
-
 jit_rejects(c, m) => jit_rejects_in(c, if(given(m) && (code_kind(m) == ast.module)) jit_module_ct(m) else array{});
-
 jit_rejects_in(c, cts) {
   if(!given(c)) return array{};
   kind = code_kind(c);
@@ -2437,7 +2323,6 @@ jit_rejects_in(c, cts) {
   }
   array{}
 }
-
 // Does the body create streams (stream(…) call): element types after the second pass of parsing?
 jit_makes_streams(c) {
   if(!given(c)) return false;
@@ -2445,7 +2330,6 @@ jit_makes_streams(c) {
   for(x : code_items(c)) if(jit_makes_streams(x)) return true;
   false
 }
-
 jit_compile(cg, f, types, type result) {
   array{acc, second, acc_f, second_f, argbase, frame, stack, third, ca0, ca1, ca2, ca3, cret2, outer_r} = cg.model();
   ok = true;
@@ -2574,14 +2458,7 @@ jit_compile(cg, f, types, type result) {
   fix_bytes(i64 k, i64 a, i64 b, i64 o) => {
     target = o;
     fault = o;
-    if(k == 0) cg.jump()
-    else if(k == 1) cg.jump_unless(a)
-    else if(k == 2) cg.jump_if(a)
-    else if(k == 3) cg.check_index(a, b)
-    else if(k == 4) apply_op(fix_ops[b], i64, op_codegen(cg, fix_ops[b], array{i64, i64}))
-    else if(k == 6) cond_bytes(a, fix_conds[b])
-    else if(k == 7) lx.over(a, b)
-    else cg.call_self()
+    if(k == 0) cg.jump() else if(k == 1) cg.jump_unless(a) else if(k == 2) cg.jump_if(a) else if(k == 3) cg.check_index(a, b) else if(k == 4) apply_op(fix_ops[b], i64, op_codegen(cg, fix_ops[b], array{i64, i64})) else if(k == 6) cond_bytes(a, fix_conds[b]) else if(k == 7) lx.over(a, b) else cg.call_self()
   };
   jump_to(i64 l, i64 k, i64 a, i64 b) => {
     fixes.push(array{out.size, l, k, a, b});
@@ -2670,8 +2547,7 @@ jit_compile(cg, f, types, type result) {
   };
   so(i64 slot_no) => off(if(slot_no >= SUB) slot_no - SUB else slot_no);
   put(v) => {
-    if(top < env.size) env[top] = v;
-    else env.push(v);
+    if(top < env.size) env[top] = v else env.push(v);
     top += 1;
   };
   declare(str name, type kind) => {
@@ -2691,8 +2567,7 @@ jit_compile(cg, f, types, type result) {
     for(cs : b_caps) if(has(cs, sl)) bad("потребитель пишет то, что читает генератор");
     if(!fusing) {
       for(g : gens) if(has(g.caps, sl)) bad("переменную генератора меняют после spawn");
-    } else if(!in_b && has(f_outer, sl)) bad("генератор пишет наружу");
-    else if(in_b && has(f_caps, sl)) bad("потребитель пишет то, что читает генератор");
+    } else if(!in_b && has(f_outer, sl)) bad("генератор пишет наружу") else if(in_b && has(f_caps, sl)) bad("потребитель пишет то, что читает генератор");
   };
   store_slot(type kind, i64 s) => {
     wrote(s);
@@ -2723,9 +2598,8 @@ jit_compile(cg, f, types, type result) {
     if(fusing && !in_b) bad("генератор может упасть: свёртка изменила бы, где ошибка");
     l = label();
     to = catch_for(vm_error_type(kind));
-    if(to.size == 0) faults.push(if(gen_sub) array{l, kind, code_id(e), 1} else array{l, kind, code_id(e)}); // from the sub-programme - a frame encompassing
-    else if(to[0].binds) bad("catch использует объект ошибки VM");
-    else faults.push(array{l, -2, to[0].label, depth - to[0].depth}); // VM error in try - transition to catch
+    // from the sub-programme - a frame encompassing
+    if(to.size == 0) faults.push(if(gen_sub) array{l, kind, code_id(e), 1} else array{l, kind, code_id(e)}) else if(to[0].binds) bad("catch использует объект ошибки VM") else faults.push(array{l, -2, to[0].label, depth - to[0].depth}); // VM error in try - transition to catch
     l
   };
   // Caller environment: records above its top - to the side, then back parameters - alias (often env
@@ -2788,28 +2662,24 @@ jit_compile(cg, f, types, type result) {
     t = jit_type(e, ctx);
     if(v >= 0) {
       w = env[v];
-      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else if(w.kind == jc_ref) ref_elem(v)
-      else if(!is_arr(w.kind) && (arr_like(w.kind) && (given(t) && late(w.kind)))) t // array {} - the type of element here knows parsing
-      else w.kind
-    } else if(given(t)) t
-    else if((k == ast.call) && (local_fns(callee_name(code_items(e)[0])).size > 0)) { // Local recursion - the type of external call
+      // array {} - the type of element here knows parsing
+      if(w.thunk) in_view(w.th_top, w.th_base, w.th_ctx, w.th_ret, () => ty(w.th)) else if(w.kind == jc_ref) ref_elem(v) else if(!is_arr(w.kind) && (arr_like(w.kind) && (given(t) && late(w.kind)))) t else w.kind
+    } else if(given(t)) t else if((k == ast.call) && (local_fns(callee_name(code_items(e)[0])).size > 0)) {
+      // Local recursion - the type of external call
       r = unit;
       for(x : local_fns(callee_name(code_items(e)[0]))) for(lr : lres) if(lr[0] == code_id(x)) r = lr[1];
       r
-    } else if(is_call_of(e, "index")) { // Primitive kernel a[i] - type of element
+    } else if(is_call_of(e, "index")) {
+      // Primitive kernel a[i] - type of element
       ast.call{_, ys, _, _, _, _, _} = e;
       a = ty(ys[0]);
       if(a == jc_range) i64 else elem(a)
-    } else if(k == ast.int) i64
-    else if(k == ast.float) f64
-    else if(k == ast.operation) {
+    } else if(k == ast.int) i64 else if(k == ast.float) f64 else if(k == ast.operation) {
       ast.operation{op, xs, _} = e;
-      if(op == ".size") i64
-      else if(op == "[]") {
+      if(op == ".size") i64 else if(op == "[]") {
         a = ty(xs[0]);
         if(a == jc_range) i64 else elem(a)
-      } else if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool
-      else ty(xs[0])
+      } else if((op == "!") || ((op == "==") || ((op == "!=") || ((op == "<") || ((op == "<=") || ((op == ">") || ((op == ">=") || ((op == "&&") || (op == "||"))))))))) bool else ty(xs[0])
     } else if(k == ast.chain) {
       c = jit_chain(e, ctx);
       if(c.size == 0) unit else ty(c[0])
@@ -2818,22 +2688,14 @@ jit_compile(cg, f, types, type result) {
   gen_name(e) => {
     ast.name{name} = e;
     k = find(name);
-    if(name == "true") put_bytes(cg.load_const(acc, 1));
-    else if(name == "false") put_bytes(cg.load_const(acc, 0));
-    else if(k < 0) bad(fmt"имя {name}");
-    else if(env[k].thunk) {
+    // VM is the address of its cell
+    if(name == "true") put_bytes(cg.load_const(acc, 1)) else if(name == "false") put_bytes(cg.load_const(acc, 0)) else if(k < 0) bad(fmt"имя {name}") else if(env[k].thunk) {
       v = env[k];
-      if(code_kind(v.th) == ast.lambda) bad("блок — только body(v)");
-      else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
-    } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for");
-    else if(is_stream(env[k].kind) && ((fusing && (in_b && (env[k].slot == f_stream))) || has(b_streams, env[k].slot))) bad("потребитель трогает поток генератора");
-    else if(is_handle(env[k].kind)) put_bytes(slot_ld(acc, env[k].slot)); // VM is the address of its cell
-    else if(env[k].kind == jc_ref) ref_load(k);
-    else if(env[k].kind == unit) {
+      if(code_kind(v.th) == ast.lambda) bad("блок — только body(v)") else in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => gen(v.th));
+    } else if(is_stream(env[k].kind) && pending(env[k].slot)) bad("поток генератора используется не через for") else if(is_stream(env[k].kind) && ((fusing && (in_b && (env[k].slot == f_stream))) || has(b_streams, env[k].slot))) bad("потребитель трогает поток генератора") else if(is_handle(env[k].kind)) put_bytes(slot_ld(acc, env[k].slot)) else if(env[k].kind == jc_ref) ref_load(k) else if(env[k].kind == unit) {
       kc = jit_const(e, ctx);
       if(kc.size == 1) gen_const(kc[0]) else bad(fmt"кт-параметр {name} в выражении");
-    }
-    else load_slot(env[k].kind, env[k].slot);
+    } else load_slot(env[k].kind, env[k].slot);
   };
   // the value of node, depending only on compile-time instance (and literals, module names): the
   // local variable parsing may not see the whole (record from recursion, which it cuts), the
@@ -2853,30 +2715,24 @@ jit_compile(cg, f, types, type result) {
     if(typeof(v) == f64) {
       put_bytes(cg.load_const(acc, f64_bits(v)));
       put_bytes(cg.move_to_f64(acc_f, acc));
-    } else if(typeof(v) == bool) put_bytes(cg.load_const(acc, if(v) 1 else 0));
-    else put_bytes(cg.load_const(acc, v));
+    } else if(typeof(v) == bool) put_bytes(cg.load_const(acc, if(v) 1 else 0)) else put_bytes(cg.load_const(acc, v));
   };
   // codegen::eval: значение узла программы — байтами в аккумулятор (f64 — в acc_f)
   gen(e) => {
     k = code_kind(e);
-    if(!ok) {
-    } else if(k == ast.int) {
+    if(!ok) {} else if(k == ast.int) {
       ast.int{v, _, _} = e;
       put_bytes(cg.load_const(acc, v));
     } else if(k == ast.float) {
       ast.float{v} = e;
       gen_const(v);
-    } else if(k == ast.name) gen_name(e);
-    else if(k == ast.operation) {
+    } else if(k == ast.name) gen_name(e) else if(k == ast.operation) {
       kc = ct_const(e); // known as parsing instance
       if(kc.size == 1) gen_const(kc[0]) else gen_op(e);
-    }
-    else if(k == ast.chain) {
+    } else if(k == ast.chain) {
       t = jit_chain(e, ctx);
-      if(t.size == 0) bad("цепочка: дерево зависит от пути");
-      else gen(t[0]);
-    } else if(k == ast.call) gen_call(e);
-    else if(k == ast.block) {
+      if(t.size == 0) bad("цепочка: дерево зависит от пути") else gen(t[0]);
+    } else if(k == ast.call) gen_call(e) else if(k == ast.block) {
       ast.block{items, hv, _} = e;
       saved_top = top;
       saved_lf = lfns.size;
@@ -2896,8 +2752,7 @@ jit_compile(cg, f, types, type result) {
       // recursion depths, and parsing saw it in the context of the first embedding
       kc = ct_const(c);
       if(kc.size == 1) {
-        if(kc[0] == true) gen(t)
-        else if(given(el)) gen(el);
+        if(kc[0] == true) gen(t) else if(given(el)) gen(el);
       } else if(!given(el) && ((loops.size > 0) && (loop_jump(t).size == 1))) {
         // if(c) break; / if(c) continue; - branch from one junction: condition in context when for the
         // purpose of the cycle, one transition
@@ -2937,8 +2792,7 @@ jit_compile(cg, f, types, type result) {
       rest = array{};
       for(h : hoists) if(h[0] == depth_l) mine.push(h) else rest.push(h);
       hoists = rest;
-      if(mine.size == 0) labels[pre] = labels[t];
-      else {
+      if(mine.size == 0) labels[pre] = labels[t] else {
         after = label();
         jump(after);
         bind(pre);
@@ -2950,22 +2804,18 @@ jit_compile(cg, f, types, type result) {
         bind(after);
       }
     } else if(k == ast.break) {
-      if(loops.size == 0) bad("break вне цикла");
-      else if(live_since(loop_blk[loop_blk.size - 1])) bad("break через живой ресурс — интерпретатор");
-      else jump(loops[loops.size - 1]);
+      if(loops.size == 0) bad("break вне цикла") else if(live_since(loop_blk[loop_blk.size - 1])) bad("break через живой ресурс — интерпретатор") else jump(loops[loops.size - 1]);
     } else if(k == ast.continue) {
-      if(loops.size == 0) bad("continue вне цикла");
-      else if(live_since(loop_blk[loop_blk.size - 1])) bad("continue через живой ресурс — интерпретатор");
-      else jump(loops[loops.size - 2]);
+      if(loops.size == 0) bad("continue вне цикла") else if(live_since(loop_blk[loop_blk.size - 1])) bad("continue через живой ресурс — интерпретатор") else jump(loops[loops.size - 2]);
     } else if(k == ast.return) {
       ast.return{v, tg} = e;
       if(res_live.size > 0) bad("return при живом ресурсе — интерпретатор");
       to = cur;
-      if(given(tg)) { // return(f) from the external function f, return(caller) from the calling function (§6.1)
+      if(given(tg)) {
+        // return(f) from the external function f, return(caller) from the calling function (§6.1)
         tn = callee_name(tg);
         to = -1;
-        if(tn == "caller") to = fr_parent[cur];
-        else {
+        if(tn == "caller") to = fr_parent[cur] else {
           i = cur;
           loop {
             if(i < 0) break;
@@ -2975,38 +2825,30 @@ jit_compile(cg, f, types, type result) {
           }
         }
       }
-      if(to < 0) bad("return(цель): цели нет в цепочке встраивания");
-      else {
+      if(to < 0) bad("return(цель): цели нет в цепочке встраивания") else {
         if(given(v)) gen(v);
         if(depth > 0) put_bytes(cg.stack_free(8 * depth)); // transient
         jump(fr_exit[to]);
       }
     } else if(k == ast.variable) {
       ast.variable{name, vt, init, _, is_ct, is_ref, _, _} = e;
-      if(is_ct) bad("ct-переменная");
-      else if(is_ref) gen_ref_decl(e, name, init);
-      else if(given(vt) && (code_kind(vt) == ast.name)) { // T x = e: value in type T (§5.8 )
+      if(is_ct) bad("ct-переменная") else if(is_ref) gen_ref_decl(e, name, init) else if(given(vt) && (code_kind(vt) == ast.name)) {
+        // T x = e: value in type T (§5.8 )
         want = type_of_code(vt);
         t = ty(init);
-        if(want == t) assign(name, init, true);
-        else if(is_handle(want) && ((code_kind(init) == ast.construct) && (jit_literal_place(init) != ""))) assign_handle(name, init, want, true); // T x = {…} : name type - T (field - by T), literal leads VM
-        else if((want == f64) && (t == i64)) {
+        // T x = {…} : name type - T (field - by T), literal leads VM
+        if(want == t) assign(name, init, true) else if(is_handle(want) && ((code_kind(init) == ast.construct) && (jit_literal_place(init) != ""))) assign_handle(name, init, want, true) else if((want == f64) && (t == i64)) {
           gen(init);
           put_bytes(cg.to_f64(acc_f, acc));
           declare(name, f64);
           store_slot(f64, env[top - 1].slot);
         } else bad(fmt"объявление {want} из {t}");
       } else assign(name, init, true);
-    } else if(k == ast.throw) gen_throw(e);
-    else if(k == ast.function) { // Local function: no code in place - built into calls
+    } else if(k == ast.throw) gen_throw(e) else if(k == ast.function) {
+      // Local function: no code in place - built into calls
       ast.function{nm, _, _, _, _, _, _, sc, _} = e;
       lfns.push(jc_lfn{nm, e, top, base, ctx, cur}); // Block operator: embedded in its operations (gen_op)
-    }
-    else if(k == ast.construct) gen_construct(e);
-    else if(k == ast.unpack) gen_unpack(e);
-    else if(k == ast.string) vm_or_bad(e, fmt"узел {k}");
-    else if(kind_functions(e, "eval").size > 0) gen_program_node(e);
-    else bad(fmt"узел {k}");
+    } else if(k == ast.construct) gen_construct(e) else if(k == ast.unpack) gen_unpack(e) else if(k == ast.string) vm_or_bad(e, fmt"узел {k}") else if(kind_functions(e, "eval").size > 0) gen_program_node(e) else bad(fmt"узел {k}");
   };
   // index in acc, check the boundaries on the size of the array (record s); data in second. The index
   // proved by parsing instance (range(xs.size) - indexes xs until xs changes) - without checking:
@@ -3049,8 +2891,7 @@ jit_compile(cg, f, types, type result) {
   gen_append(e, a, x) => {
     s = var_of(a);
     t = ty(x);
-    if((s < 0) || (env[s].thunk || (!arr_like(env[s].kind) || ((t != i64) && (t != f64))))) vm_or_bad(e, "append не в массив-переменную");
-    else {
+    if((s < 0) || (env[s].thunk || (!arr_like(env[s].kind) || ((t != i64) && (t != f64))))) vm_or_bad(e, "append не в массив-переменную") else {
       gen(x);
       if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
       push_into(env[s].slot, t, e);
@@ -3107,8 +2948,7 @@ jit_compile(cg, f, types, type result) {
   unpack_with(pat, bool test, at, vt, val, i64 vslot) => {
     names = array{};
     pattern_names(pat, names);
-    if(!is_handle(vt)) bad(fmt"распаковка {vt}");
-    else if(ok) {
+    if(!is_handle(vt)) bad(fmt"распаковка {vt}") else if(ok) {
       n = names.size;
       w = 2 + (2 * n);
       k0 = alloc(w);
@@ -3151,8 +2991,7 @@ jit_compile(cg, f, types, type result) {
     // or T x = {…} with a struct-aggregate: the literal computes VM and leads to it
     // (jit_literal_place - VM rule); otherwise (argument, scalar place) - the interpreter
     if(!given(tn)) {
-      if(jit_literal_place(e) == "") bad("анонимный литерал {…} не на месте результата или T x — интерпретатор");
-      else vm_or_bad(e, "анонимный литерал {…}");
+      if(jit_literal_place(e) == "") bad("анонимный литерал {…} не на месте результата или T x — интерпретатор") else vm_or_bad(e, "анонимный литерал {…}");
       return unit;
     }
     n = 0;
@@ -3160,11 +2999,9 @@ jit_compile(cg, f, types, type result) {
       if(code_kind(x) == ast.spread) {
         ast.spread{v} = x;
         if(ty(v) != t) fits = false;
-      } else if(ty(x) != elem(t)) fits = false;
-      else n += 1;
+      } else if(ty(x) != elem(t)) fits = false else n += 1;
     }
-    if(!fits) vm_or_bad(e, "узел ast.construct");
-    else {
+    if(!fits) vm_or_bad(e, "узел ast.construct") else {
       et = elem(t);
       c = alloc(1);
       mem_to(ca1);
@@ -3216,8 +3053,7 @@ jit_compile(cg, f, types, type result) {
   // lines, tuples - values of VM) - a list of values; an array without known elements - words
   arr_size_of(i64 r, i64 s, o) => {
     t = arr_type(s, o);
-    if(is_arr(t) || late(t)) arr_size(r, env[s].slot)
-    else {
+    if(is_arr(t) || late(t)) arr_size(r, env[s].slot) else {
       put_bytes(slot_ld(r, env[s].slot));
       put_bytes(cg.load(r, r, a_items_n));
     }
@@ -3247,8 +3083,7 @@ jit_compile(cg, f, types, type result) {
   };
   gen_index_op(e, xs) => {
     g = choose("infix[]", xs);
-    if((g.size == 1) && typed_overload(g[0])) gen_inline(e, "infix[]", xs);
-    else gen_index(e);
+    if((g.size == 1) && typed_overload(g[0])) gen_inline(e, "infix[]", xs) else gen_index(e);
   };
   // Reference &e = xs[k] (§12.1):
 // Machine code - only in fact parsing : for
@@ -3256,14 +3091,10 @@ jit_compile(cg, f, types, type result) {
   // the generation is not checked:
 // Index - in the slot (register), reading and writing - an element of the array.
   gen_ref_decl(e, str name, init) => {
-    if(index_parts(init).size != 2) bad("ссылка-путь (поле, элемент поля) — интерпретатор");
-    else if(!jit_ref_keeps(e)) bad("ссылка: массив за её жизнь меняется целиком — интерпретатор (поколения)");
-    else {
+    if(index_parts(init).size != 2) bad("ссылка-путь (поле, элемент поля) — интерпретатор") else if(!jit_ref_keeps(e)) bad("ссылка: массив за её жизнь меняется целиком — интерпретатор (поколения)") else {
       array{o, ix} = index_parts(init);
       s = var_of(o);
-      if((s < 0) || (env[s].thunk || (!arr_like(env[s].kind) || !is_arr(arr_type(s, o))))) bad("ссылка: элемент массива-переменной");
-      else if(!scalar_t(elem(arr_type(s, o)))) bad("ссылка: элемент не скаляр");
-      else {
+      if((s < 0) || (env[s].thunk || (!arr_like(env[s].kind) || !is_arr(arr_type(s, o))))) bad("ссылка: элемент массива-переменной") else if(!scalar_t(elem(arr_type(s, o)))) bad("ссылка: элемент не скаляр") else {
         gen(ix);
         checked(s, init);
         k = alloc(1);
@@ -3299,13 +3130,10 @@ jit_compile(cg, f, types, type result) {
   store_var(i64 s, type t) => if(env[s].kind == jc_ref) ref_store(s, t) else store_slot(t, env[s].slot);
   gen_index_of(e, o, ix) => {
     s = var_of(o);
-    if((s < 0) || env[s].thunk) bad("индекс не массива-переменной");
-    else if(env[s].kind == jc_range) gen(ix); // range(n) on the is_index index is the index itself.
-    else if(env[s].kind == str) gen_str_index(e, s, ix); // s[k] - byte string
-    else if(!arr_like(env[s].kind)) bad("индекс не массива");
-    else if(!is_arr(arr_type(s, o)) && !late(arr_type(s, o))) vm_or_bad(e, "элемент — значение VM"); // flashback
-    else if(!is_arr(arr_type(s, o))) bad("тип элементов массива неизвестен");
-    else {
+    // element range(n) on the index is_index - the index s[k] -
+    // byte line copy in the memory of the call
+    //
+    if((s < 0) || env[s].thunk) bad("индекс не массива-переменной") else if(env[s].kind == jc_range) gen(ix) else if(env[s].kind == str) gen_str_index(e, s, ix) else if(!arr_like(env[s].kind)) bad("индекс не массива") else if(!is_arr(arr_type(s, o)) && !late(arr_type(s, o))) vm_or_bad(e, "элемент — значение VM") else if(!is_arr(arr_type(s, o))) bad("тип элементов массива неизвестен") else {
       gen(ix);
       checked(s, e);
       put_bytes(if(arr_type(s, o) == array(f64)) cg.load_index_f64(acc_f, second, acc) else cg.load_index(acc, second, acc));
@@ -3314,25 +3142,20 @@ jit_compile(cg, f, types, type result) {
   assign(str name, e, bool fresh) => {
     if((code_kind(e) == ast.lambda) && (fresh || (find(name) < 0))) return put(jc_var{name, unit, 0, true, e, ctx, top, base, cur}); // f = (x) => ... as a local function
     t = if(is_call_of(e, "range")) jc_range else ty(e);
-    if(is_handle(t)) assign_handle(name, e, t, fresh);
-    else if(t == unit) bad("у значения нет одного типа на все шаги (кортеж растёт разнотипно) — интерпретатор"); //  
-    else if(!scalar(t) && (t != jc_range)) bad(fmt"присваивание значения {t}");
-    else assign_scalar(name, e, t, fresh);
+    //  
+    if(is_handle(t)) assign_handle(name, e, t, fresh) else if(t == unit) bad("у значения нет одного типа на все шаги (кортеж растёт разнотипно) — интерпретатор") else if(!scalar(t) && (t != jc_range)) bad(fmt"присваивание значения {t}") else assign_scalar(name, e, t, fresh);
   };
   assign_scalar(str name, e, type t, bool fresh) => {
     gen(e);
     s = if(fresh) -1 else find(name);
-    if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру");
-    else if((s >= 0) && (env[s].kind == jc_ref)) {
+    if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру") else if((s >= 0) && (env[s].kind == jc_ref)) {
       if(ref_elem(s) != t) bad("тип элемента ссылки") else ref_store(s, t);
-    }
-    else {
+    } else {
       if(s < 0) {
         declare(name, t);
         s = top - 1;
       }
-      if(env[s].kind != t) bad("тип переменной меняется");
-      else store_slot(t, env[s].slot);
+      if(env[s].kind != t) bad("тип переменной меняется") else store_slot(t, env[s].slot);
     }
   };
   // The second operand: calculate, on the stack, the first, the second - in the second from left to
@@ -3344,8 +3167,7 @@ jit_compile(cg, f, types, type result) {
   assign_ops = array{"=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="};
   calm(e) => {
     k = code_kind(e);
-    if((k == ast.name) || ((k == ast.int) || (k == ast.float))) true
-    else if(k == ast.chain) {
+    if((k == ast.name) || ((k == ast.int) || (k == ast.float))) true else if(k == ast.chain) {
       t = jit_chain(e, ctx);
       (t.size == 1) && calm(t[0])
     } else if(k == ast.operation) {
@@ -3365,17 +3187,12 @@ jit_compile(cg, f, types, type result) {
   scalar_t(type t) => (t == i64) || ((t == f64) || (t == bool));
   reg_safe(e) => {
     k = code_kind(e);
-    if((k == ast.int) || (k == ast.float)) true
-    else if(k == ast.name) plain_var(e)
-    else if(k == ast.chain) {
+    if((k == ast.int) || (k == ast.float)) true else if(k == ast.name) plain_var(e) else if(k == ast.chain) {
       t = jit_chain(e, ctx);
       (t.size == 1) && reg_safe(t[0])
     } else if(k == ast.operation) {
       ast.operation{op, xs, _} = e;
-      if(has_str(assign_ops, op) || !scalar_t(ty(e))) false
-      else if(op == "[]") (xs.size == 2) && ((var_of(xs[0]) >= 0) && (arr_like(env[var_of(xs[0])].kind) && reg_safe(xs[1])))
-      else if((op == ".size") || (field_slot(e).size == 2)) false
-      else {
+      if(has_str(assign_ops, op) || !scalar_t(ty(e))) false else if(op == "[]") (xs.size == 2) && ((var_of(xs[0]) >= 0) && (arr_like(env[var_of(xs[0])].kind) && reg_safe(xs[1]))) else if((op == ".size") || (field_slot(e).size == 2)) false else {
         r = true;
         for(x : xs) if(r && !reg_safe(x)) r = false;
         r
@@ -3430,16 +3247,11 @@ jit_compile(cg, f, types, type result) {
   // context of the known target: in the immediate operand (imm32; shift - 0.63)
   imm_of(e, str op) => {
     k = ct_const(e);
-    if(k.size != 1) array{}
-    else if(typeof(k[0]) != i64) array{}
-    else if((op == "<<") || ((op == ">>") || ((op == "<<=") || (op == ">>=")))) (if((k[0] >= 0) && (k[0] < 64)) k else array{})
-    else if((k[0] >= -2147483648) && (k[0] <= 2147483647)) k
-    else array{}
+    if(k.size != 1) array{} else if(typeof(k[0]) != i64) array{} else if((op == "<<") || ((op == ">>") || ((op == "<<=") || (op == ">>=")))) if((k[0] >= 0) && (k[0] < 64)) k else array{} else if((k[0] >= -2147483648) && (k[0] <= 2147483647)) k else array{}
   };
   known_g(cx, e, x) => {
     ast.operation{op, _, _} = e;
-    if(imm_of(x, op).size != 1) array{}
-    else {
+    if(imm_of(x, op).size != 1) array{} else {
       g = op_codegen(cx.known, e, array{i64, i64});
       if(given(g)) array{g} else array{}
     }
@@ -3459,8 +3271,7 @@ jit_compile(cg, f, types, type result) {
     cx = if(when == 1) cg.when else cg.unless;
     c = fc[0];
     v = fc[1];
-    if(code_kind(c) == ast.call) cx.is_index(acc, second)
-    else if(v.size == 1) {
+    if(code_kind(c) == ast.call) cx.is_index(acc, second) else if(v.size == 1) {
       g = op_codegen(cx.known, c, array{i64, i64});
       g(acc, v[0])
     } else {
@@ -3470,14 +3281,12 @@ jit_compile(cg, f, types, type result) {
   };
   jump_cond(c, bool when, i64 l) => {
     k = code_kind(c);
-    if(ct_const(c).size == 1) jump_value(c, when, l)
-    else if(k == ast.chain) {
+    if(ct_const(c).size == 1) jump_value(c, when, l) else if(k == ast.chain) {
       t = jit_chain(c, ctx);
       if(t.size == 0) bad("цепочка: дерево зависит от пути") else jump_cond(t[0], when, l);
     } else if(k == ast.operation) {
       ast.operation{op, xs, _} = c;
-      if((op == "!") && ((xs.size == 1) && (ty(xs[0]) == bool))) jump_cond(xs[0], !when, l)
-      else if(cmp_op(op) && ((xs.size == 2) && ((ty(xs[0]) == i64) && ((ty(xs[1]) == i64) && given(op_codegen(cg.unless, c, array{i64, i64})))))) {
+      if((op == "!") && ((xs.size == 1) && (ty(xs[0]) == bool))) jump_cond(xs[0], !when, l) else if(cmp_op(op) && ((xs.size == 2) && ((ty(xs[0]) == i64) && ((ty(xs[1]) == i64) && given(op_codegen(cg.unless, c, array{i64, i64})))))) {
         v = if(known_g(cg.unless, c, xs[1]).size == 1) imm_of(xs[1], op) else array{};
         if(v.size == 1) gen(xs[0]) else operands(xs[0], xs[1], i64);
         fix_conds.push(array{c, v});
@@ -3486,11 +3295,9 @@ jit_compile(cg, f, types, type result) {
     } else if(is_index_call(c)) {
       ast.call{_, xs, _, _, _, _, _} = c;
       s = var_of(xs[1]);
-      if((s < 0) || env[s].thunk) bad("is_index не над переменной");
-      else {
+      if((s < 0) || env[s].thunk) bad("is_index не над переменной") else {
         gen(xs[0]);
-        if(env[s].kind == jc_range) put_bytes(slot_ld(second, env[s].slot));
-        else arr_size_of(second, s, xs[1]);
+        if(env[s].kind == jc_range) put_bytes(slot_ld(second, env[s].slot)) else arr_size_of(second, s, xs[1]);
         fix_conds.push(array{c, array{}});
         jump_to(l, 6, if(when) 1 else 0, fix_conds.size - 1);
       }
@@ -3499,9 +3306,7 @@ jit_compile(cg, f, types, type result) {
   // branch - one break (1: end of cycle) or continue (2: beginning), block or no
   loop_jump(t) => {
     k = code_kind(t);
-    if(k == ast.break) array{1}
-    else if(k == ast.continue) array{2}
-    else if(k == ast.block) {
+    if(k == ast.break) array{1} else if(k == ast.continue) array{2} else if(k == ast.block) {
       ast.block{items, _, _} = t;
       if(items.size == 1) loop_jump(items[0]) else array{}
     } else array{}
@@ -3589,29 +3394,25 @@ jit_compile(cg, f, types, type result) {
     x = tree(x0);
     k = code_kind(x);
     kc = ct_const(x);
-    if(kc.size == 1) (if(typeof(kc[0]) == t) 1 else 0)
-    else if(k == ast.name) {
+    if(kc.size == 1) if(typeof(kc[0]) == t) 1 else 0 else if(k == ast.name) {
       s = var_of(x);
       if((s >= 0) && (!env[s].thunk && (env[s].kind == t))) 1 else 0
     } else if(k == ast.operation) {
       ast.operation{op, xs, _} = x;
-      if((op == "[]") && (xs.size == 2)) (if(lane_elem(xs[0], xs[1], t)) 1 else 0)
-      else if((xs.size == 1) && ((local_fns("prefix" + op).size == 0) && ((ty(x) == t) && ((ty(xs[0]) == t) && given(op_codegen(lx, x, array{t})))))) lane_expr(xs[0], t)
-      else if((xs.size == 2) && (!has_str(assign_ops, op) && ((local_fns("infix" + op).size == 0) && ((ty(x) == t) && ((ty(xs[0]) == t) && ((ty(xs[1]) == t) && given(op_codegen(lx, x, array{t, t})))))))) {
+      if((op == "[]") && (xs.size == 2)) if(lane_elem(xs[0], xs[1], t)) 1 else 0 else if((xs.size == 1) && ((local_fns("prefix" + op).size == 0) && ((ty(x) == t) && ((ty(xs[0]) == t) && given(op_codegen(lx, x, array{t})))))) lane_expr(xs[0], t) else if((xs.size == 2) && (!has_str(assign_ops, op) && ((local_fns("infix" + op).size == 0) && ((ty(x) == t) && ((ty(xs[0]) == t) && ((ty(xs[1]) == t) && given(op_codegen(lx, x, array{t, t})))))))) {
         a = lane_expr(xs[0], t);
         b = lane_expr(xs[1], t);
         if((a == 0) || (b == 0)) 0 else if(a > (b + 1)) a else b + 1
       } else 0
-    } else if(k == ast.if) { // Branches instance - mask:
+    } else if(k == ast.if) {
+      // Branches instance - mask:
 //  
       ast.if{c, a0, b0} = x;
       m = lane_mask(c);
       p = if(given(b0)) lane_expr(lane_one(a0), t) else 0;
       q = if(given(b0)) lane_expr(lane_one(b0), t) else 0;
-      if((m == 0) || ((p == 0) || (q == 0))) 0 // branches, then a mask: registers - in depth
-      else if((p >= (q + 1)) && (p >= (m + 2))) p
-      else if((q + 1) >= (m + 2)) q + 1
-      else m + 2
+      // branches, then a mask: registers - in depth
+      if((m == 0) || ((p == 0) || (q == 0))) 0 else if((p >= (q + 1)) && (p >= (m + 2))) p else if((q + 1) >= (m + 2)) q + 1 else m + 2
     } else 0
   };
   lane_one(x0) => {
@@ -3733,7 +3534,8 @@ jit_compile(cg, f, types, type result) {
         g()
       });
       if(in_lane(() => lane_stmt(lbody)) && (lane_arrs.size > 0)) {
-        for(s : lane_arrs) { // before the cycle: array data; limit - smaller of n and sizes
+        for(s : lane_arrs) {
+          // before the cycle: array data; limit - smaller of n and sizes
           d = alloc(1);
           arr_data(acc, env[s].slot);
           put_bytes(slot_st(d, acc));
@@ -3776,11 +3578,7 @@ jit_compile(cg, f, types, type result) {
   // xs.size is the postfix operator .size
   gen_size(xs) => {
     s = var_of(xs[0]);
-    if((s < 0) || env[s].thunk) bad("обращение .size не к переменной");
-    else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]);
-    else if(env[s].kind == jc_range) put_bytes(slot_ld(acc, env[s].slot));
-    else if(env[s].kind == str) str_size(acc, env[s].slot);
-    else bad(".size не массива и не строки");
+    if((s < 0) || env[s].thunk) bad("обращение .size не к переменной") else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]) else if(env[s].kind == jc_range) put_bytes(slot_ld(acc, env[s].slot)) else if(env[s].kind == str) str_size(acc, env[s].slot) else bad(".size не массива и не строки");
   };
   // line-variable (VM - cell address): length and bytes - by displacements of VM (step tail 10:
   // parse_int and parsing assistants were to the interpreter); the string does not change in place - the
@@ -3803,8 +3601,7 @@ jit_compile(cg, f, types, type result) {
   field_slot(e) => if((code_kind(e) == ast.operation) && dotted(e)) {
     ast.operation{_, ys, _} = e;
     s = var_of(ys[0]);
-    if((s < 0) || (env[s].thunk || (!is_handle(env[s].kind) || arr_like(env[s].kind)))) array{}
-    else {
+    if((s < 0) || (env[s].thunk || (!is_handle(env[s].kind) || arr_like(env[s].kind)))) array{} else {
       k = field_index(env[s].kind, code_name(e));
       if(k < 0) array{} else array{s, k}
     }
@@ -3839,30 +3636,24 @@ jit_compile(cg, f, types, type result) {
     // is embedded as a call; no one is an embedded operation (also a candidate)
     ent = if(xs.size == 2) "infix" + op else if(post) "postfix" + op else "prefix" + op;
     local = (op != "[]") && ((op != ".size") && (!starts(op, ".") && (!assign_symbol(op) && (local_fns(ent).size > 0))));
-    if(local && (choose_from(local_fns(ent), xs).size == 1)) gen_local_call(e, ent, xs);
-    else if(op == "[]") gen_index_op(e, xs);
-    else if(op == ".size") gen_size(xs);
-    else if(field_slot(e).size == 2) gen_field(e, field_slot(e));
-    else if(xs.size == 1) {
+    if(local && (choose_from(local_fns(ent), xs).size == 1)) gen_local_call(e, ent, xs) else if(op == "[]") gen_index_op(e, xs) else if(op == ".size") gen_size(xs) else if(field_slot(e).size == 2) gen_field(e, field_slot(e)) else if(xs.size == 1) {
       t = ty(xs[0]);
       g = op_codegen(cg, e, array{t});
       if((op == "-") && (t == i64)) {
         gen(xs[0]);
         put_bytes(cg.negate(acc));
-      } else if(!given(g)) vm_or_bad(e, fmt"нет кодогенератора {op} над {t}");
-      else {
+      } else if(!given(g)) vm_or_bad(e, fmt"нет кодогенератора {op} над {t}") else {
         gen(xs[0]);
         put_bytes(g(if(t == f64) acc_f else acc));
       }
     } else if((op == "=") && (code_kind(xs[0]) == ast.name)) {
       ast.name{name} = xs[0];
       assign(name, xs[1], false);
-    } else if((op == "=") && (field_slot(xs[0]).size == 2)) gen_field_store(e, xs, field_slot(xs[0]));
-    else if((op == "=") && (index_parts(xs[0]).size == 2)) { // xs[i] = v: value per stack, index, boundary, record
+    } else if((op == "=") && (field_slot(xs[0]).size == 2)) gen_field_store(e, xs, field_slot(xs[0])) else if((op == "=") && (index_parts(xs[0]).size == 2)) {
+      // xs[i] = v: value per stack, index, boundary, record
       array{o, ix} = index_parts(xs[0]);
       s = var_of(o);
-      if((s < 0) || (env[s].thunk || !arr_like(env[s].kind))) bad("запись не в элемент массива-переменной");
-      else {
+      if((s < 0) || (env[s].thunk || !arr_like(env[s].kind))) bad("запись не в элемент массива-переменной") else {
         t = ty(xs[1]);
         if(!is_arr(arr_type(s, o)) || (t != elem(arr_type(s, o)))) bad("тип элемента");
         wrote(env[s].slot);
@@ -3878,12 +3669,10 @@ jit_compile(cg, f, types, type result) {
       }
     } else if(((op == "+=") || ((op == "-=") || ((op == "*=") || (op == "/=")))) && (code_kind(xs[0]) == ast.name)) {
       s = var_of(xs[0]);
-      if((s < 0) || env[s].thunk) bad("составное присваивание");
-      else {
+      if((s < 0) || env[s].thunk) bad("составное присваивание") else {
         t = if(env[s].kind == jc_ref) ref_elem(s) else env[s].kind;
         g = op_codegen(cg, e, array{t, t}); // a op = b - cogenerator op
-        if(!given(g) || ((op == "/=") && (t != f64))) bad(fmt"{op} над {t}");
-        else if((t == i64) && (known_g(cg, e, xs[1]).size == 1)) {
+        if(!given(g) || ((op == "/=") && (t != f64))) bad(fmt"{op} над {t}") else if((t == i64) && (known_g(cg, e, xs[1]).size == 1)) {
           gen(xs[0]);
           gk = known_g(cg, e, xs[1])[0];
           put_bytes(gk(acc, imm_of(xs[1], op)[0]));
@@ -3894,7 +3683,8 @@ jit_compile(cg, f, types, type result) {
           store_var(s, t);
         }
       }
-    } else if((op == "&&") || (op == "||")) { // short logic - transitions
+    } else if((op == "&&") || (op == "||")) {
+      // short logic - transitions
       l = label();
       gen(xs[0]);
       if(op == "&&") jump_unless(acc, l) else jump_if(acc, l);
@@ -3904,9 +3694,8 @@ jit_compile(cg, f, types, type result) {
       t = ty(xs[0]);
       ot = if(t == bool) i64 else t; // --- and!= over bool - the same bits
       g = op_codegen(cg, e, array{ot, ot});
-      if(!given(g)) vm_or_bad(e, fmt"нет кодогенератора {op} над {t}");
-      else if(ty(xs[1]) != t) bad("типы операндов");
-      else if(((op == "/") || (op == "%")) && (ot == i64)) { // zero-trap
+      if(!given(g)) vm_or_bad(e, fmt"нет кодогенератора {op} над {t}") else if(ty(xs[1]) != t) bad("типы операндов") else if(((op == "/") || (op == "%")) && (ot == i64)) {
+        // zero-trap
         operands(xs[0], xs[1], ot);
         fix_ops.push(e);
         jump_to(trap(2, e), 4, 0, fix_ops.size - 1);
@@ -3932,8 +3721,7 @@ jit_compile(cg, f, types, type result) {
     for(x : jit_implicit_args(e)) xs0.push(x); // Implicit parameters (O9): names at the call location
     if(dotted(callee)) {
       ast.operation{_, ys, _} = callee;
-      if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата");
-      else {
+      if(is_handle(ty(ys[0])) && !arr_like(ty(ys[0]))) vm_or_bad(e, "вызов через точку у агрегата") else {
         args = array{ys[0]};
         for(x : xs0) args.push(x);
         gen_named_call(e, code_name(callee), args);
@@ -3943,35 +3731,21 @@ jit_compile(cg, f, types, type result) {
   gen_named_call(e, str name, xs) => {
     kc = if(name == "range") array{} else jit_const(e, ctx); // range(48) with a known boundary is still the boundary of the cycle, not the value-constant.
     v = find(name);
-    if(kc.size == 1) gen_const(kc[0]);
-    else if(name == "") bad("вызов значения");
-    else if((v < 0) && (local_fns(name).size > 0)) gen_local_call(e, name, xs);
-    else if((v >= 0) && env[v].thunk) call_block(env[v], xs);
-    else if(v >= 0) bad("значение-функция");
-    else if((name == "f64") && ((xs.size == 1) && (ty(xs[0]) == i64))) {
+    // range(n) - boundary primitive kernel a[i] Hiding name - only when
+    // compiling require(c), assume(c) - kernel calls: violated - error 3
+    //
+    //
+    if(kc.size == 1) gen_const(kc[0]) else if(name == "") bad("вызов значения") else if((v < 0) && (local_fns(name).size > 0)) gen_local_call(e, name, xs) else if((v >= 0) && env[v].thunk) call_block(env[v], xs) else if(v >= 0) bad("значение-функция") else if((name == "f64") && ((xs.size == 1) && (ty(xs[0]) == i64))) {
       gen(xs[0]);
       put_bytes(cg.to_f64(acc_f, acc));
     } else if((name == "i64") && ((xs.size == 1) && (ty(xs[0]) == f64))) {
       gen(xs[0]);
       put_bytes(cg.to_i64(acc, acc_f));
-    } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]); // range(n) - boundary
-    else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs);
-    else if((name == "alloc_in") && (xs.size == 2)) gen_alloc_in(e, xs);
-    else if((name == "fiber_start") && (xs.size == 1)) gen_spawn(e, xs[0]);
-    else if(name == "print") gen_print(e, xs);
-    else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]); // nucleus a[i]
-    else if((name == "append") && (xs.size == 2)) gen_append(e, xs[0], xs[1]);
-    else if(name == "hide") {} // Hiding the name - only when compiling
-    else if(ct_state_op(name)) bad(fmt"{name}: ct-состояние — интерпретатор");
-    else if(((name == "require") || (name == "assume")) && (xs.size == 1)) jump_cond(xs[0], false, trap(3, e)); // require(c) , assume(c) - kernel calls: broken - error 3
-    else if((name == "stream_new") || ((name == "stream_write") || ((name == "stream_read") || ((name == "stream_more") || ((name == "stream_close") || ((name == "yield") && (xs.size == 0))))))) gen_stream(e, name, xs);
-    else if((name == "is_index") && (xs.size == 2)) {
+    } else if((name == "range") && ((xs.size == 1) && (ty(xs[0]) == i64))) gen(xs[0]) else if((name == "intercept") && (xs.size == 2)) gen_intercept(xs) else if((name == "alloc_in") && (xs.size == 2)) gen_alloc_in(e, xs) else if((name == "fiber_start") && (xs.size == 1)) gen_spawn(e, xs[0]) else if(name == "print") gen_print(e, xs) else if((name == "index") && (xs.size == 2)) gen_index_of(e, xs[0], xs[1]) else if((name == "append") && (xs.size == 2)) gen_append(e, xs[0], xs[1]) else if(name == "hide") {} else if(ct_state_op(name)) bad(fmt"{name}: ct-состояние — интерпретатор") else if(((name == "require") || (name == "assume")) && (xs.size == 1)) jump_cond(xs[0], false, trap(3, e)) else if((name == "stream_new") || ((name == "stream_write") || ((name == "stream_read") || ((name == "stream_more") || ((name == "stream_close") || ((name == "yield") && (xs.size == 0))))))) gen_stream(e, name, xs) else if((name == "is_index") && (xs.size == 2)) {
       s = var_of(xs[1]);
-      if((s < 0) || env[s].thunk) bad("is_index не над переменной");
-      else {
+      if((s < 0) || env[s].thunk) bad("is_index не над переменной") else {
         gen(xs[0]);
-        if(env[s].kind == jc_range) put_bytes(slot_ld(second, env[s].slot));
-        else arr_size_of(second, s, xs[1]);
+        if(env[s].kind == jc_range) put_bytes(slot_ld(second, env[s].slot)) else arr_size_of(second, s, xs[1]);
         put_bytes(cg.is_index(acc, second));
       }
     } else gen_inline(e, name, xs);
@@ -3982,17 +3756,14 @@ jit_compile(cg, f, types, type result) {
   gen_stream(e, str name, xs) => {
     op = if(name == "stream_new") 0 else if(name == "stream_write") 1 else if(name == "stream_read") 2 else if(name == "stream_more") 3 else if(name == "stream_close") 4 else 5;
     carried = unit;
-    if(fusing && !in_b) sink(e, op, xs);
-    else if(tries.size > 0) bad("операция потока внутри try");
-    else if(op == 0) {
+    if(fusing && !in_b) sink(e, op, xs) else if(tries.size > 0) bad("операция потока внутри try") else if(op == 0) {
       if((xs.size != 1) || (ty(xs[0]) != i64)) bad("stream_new(ёмкость i64)");
       gen(xs[0]);
       put_bytes(cg.move(ca2, acc));
       put_bytes(cg.load_const(ca1, 0));
     } else if(op != 5) {
       st = ty(xs[0]);
-      if(!is_stream(st)) bad(fmt"не поток известного типа: {st}");
-      else if(op == 1) {
+      if(!is_stream(st)) bad(fmt"не поток известного типа: {st}") else if(op == 1) {
         carried = elem(st);
         gen(xs[0]);
         put_bytes(cg.push_tmp(acc));
@@ -4014,16 +3785,13 @@ jit_compile(cg, f, types, type result) {
   // print(x, …) - VM service (memory and output - VM, author's decision 2026-10-01): scalar - op 6 with
   // value and type, string literal - op 7 on node; ca1 & 1 - last
   gen_print(e, xs) => {
-    if(tries.size > 0) bad("print внутри try");
-    else if(fusing && !in_b) bad("генератор: print");
-    else if(xs.size == 0) {
+    if(tries.size > 0) bad("print внутри try") else if(fusing && !in_b) bad("генератор: print") else if(xs.size == 0) {
       mem_to(ca1);
       vm_service_code(6, 1 << 8, e);
     } else {
       simple = true;
       for(x : xs) if((code_kind(x) != ast.string) && !scalar(ty(x))) simple = false;
-      if(!simple) vm_or_bad(e, "print значения VM");
-      else {
+      if(!simple) vm_or_bad(e, "print значения VM") else {
         for(i : range(xs.size)) if(ok) gen_print_arg(e, xs[i], if((i + 1) == xs.size) 1 else 0);
       }
     }
@@ -4034,8 +3802,7 @@ jit_compile(cg, f, types, type result) {
       vm_service_code(7, last << 8, x);
     } else {
       t = ty(x);
-      if((t != i64) && ((t != f64) && (t != bool))) bad(fmt"print значения {t}");
-      else {
+      if((t != i64) && ((t != f64) && (t != bool))) bad(fmt"print значения {t}") else {
         gen(x);
         if(t == f64) put_bytes(cg.move_from_f64(acc, acc_f));
         put_bytes(cg.move(ca2, acc));
@@ -4078,8 +3845,9 @@ jit_compile(cg, f, types, type result) {
       ast.parameter{pname, _, mode, _, _, _, _} = ps[i];
       a = xs[i];
       s = var_of(a);
-      if((mode == 4) || (code_kind(a) == ast.lambda)) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur}); // lambda - definition code
-      else if((s >= 0) && env[s].thunk) { // The caller code is the same code
+      // lambda - definition code
+      if((mode == 4) || (code_kind(a) == ast.lambda)) binds.push(jc_var{pname, unit, 0, true, a, ctx, top, base, cur}) else if((s >= 0) && env[s].thunk) {
+        // The caller code is the same code
         w = env[s];
         binds.push(jc_var{pname, w.kind, w.slot, true, w.th, w.th_ctx, w.th_top, w.th_base, w.th_ret});
       } else if((s >= 0) && ((mode != 2) && (env[s].kind == jc_ref))) {
@@ -4096,8 +3864,7 @@ jit_compile(cg, f, types, type result) {
         // q[0], b) at p, q - arrays of values VM "did not exchange"): such a call to the interpreter
         if(is_place_arg(a) && jit_writes(callee, i)) bad(fmt"изменяемый параметр {pname} получает элемент или поле — интерпретатор");
         t = if(is_call_of(a, "range")) jc_range else ty(a);
-        if(jit_resource(t)) bad(fmt"ресурс аргументом {pname} (own или временное) — интерпретатор");
-        else if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");
+        if(jit_resource(t)) bad(fmt"ресурс аргументом {pname} (own или временное) — интерпретатор") else if(!scalar(t) && ((t != jc_range) && !is_handle(t))) bad(fmt"аргумент {pname} типа {t}");
         gen(a);
         sl = alloc(1);
         store_slot(t, sl);
@@ -4124,10 +3891,7 @@ jit_compile(cg, f, types, type result) {
         k = fr_parent[k];
       }
     }
-    if(g.size != 1) bad(fmt"локальная функция {name}: нет перегрузки");
-    else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор");
-    else if(rec) call_sub(e, name, g[0], xs);
-    else {
+    if(g.size != 1) bad(fmt"локальная функция {name}: нет перегрузки") else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор") else if(rec) call_sub(e, name, g[0], xs) else {
       lf = lfns[0];
       for(l : lfns) if(code_id(l.f) == code_id(g[0])) lf = l;
       lres.push(array{code_id(g[0]), ty(e)});
@@ -4173,9 +3937,7 @@ jit_compile(cg, f, types, type result) {
     si = -1;
     for(i : range(subs.size)) if((code_id(subs[i].f) == code_id(fc)) && same_types(subs[i].kinds, kinds)) si = i;
     regs4 = array{ca0, ca1, ca2, ca3};
-    if(xs.size > 4) bad(fmt"рекурсия {name}: больше четырёх параметров");
-    else if((tries.size > 0) || (fusing || (gens.size > 0))) bad(fmt"рекурсия {name} внутри try или генератора");
-    else {
+    if(xs.size > 4) bad(fmt"рекурсия {name}: больше четырёх параметров") else if((tries.size > 0) || (fusing || (gens.size > 0))) bad(fmt"рекурсия {name} внутри try или генератора") else {
       for(k : kinds) if(!scalar(k) && !is_handle(k)) bad(fmt"рекурсия {name}: параметр {k}");
       for(p : ps) {
         ast.parameter{_, _, mode, _, _, _, _} = p;
@@ -4281,9 +4043,8 @@ jit_compile(cg, f, types, type result) {
         if(given(pt)) {
           want = type_of_code(pt);
           at = ty(xs[i]);
-          if(!given(want) || (mode == 4)) fits = false;
-          else if((want != at) && (want != type_family(at))) fits = false; // stream - family of stream(i64)
-          else score += 1;
+          // stream - family of stream(i64)
+          if(!given(want) || (mode == 4)) fits = false else if((want != at) && (want != type_family(at))) fits = false else score += 1;
         }
         if(pack && (mode != 4)) fits = false; // tail ...xs; pack clauses (catch) - you can
       }
@@ -4307,7 +4068,8 @@ jit_compile(cg, f, types, type result) {
     gen_inline_of(e, fmt"{code_kind(e)}.eval", xs, choose_from(kind_functions(e, "eval"), xs));
   };
   gen_inline_of(e, str name, xs, g) => {
-    if((g.size == 1) && (code_id(g[0]) == code_id(f))) { // recursion - calling yourself; in the tail - transition (O5)
+    if((g.size == 1) && (code_id(g[0]) == code_id(f))) {
+      // recursion - calling yourself; in the tail - transition (O5)
       if((cur == 0) && (!gen_sub && jit_tail_self(f, e))) return tail_self_with(xs);
       return call_self_with(xs);
     }
@@ -4330,16 +4092,11 @@ jit_compile(cg, f, types, type result) {
       body = gbody;
       is_outline = g_outline;
     }
-    if((g.size == 0) || (rec || is_outline)) vm_or_bad(e, fmt"вызов {name}: нет встраиваемой перегрузки");
-    // Primitive native "cpp" (text_range, text_byte...) - VM code, not the body in the language: the call
-    // counts VM in place, the function around it is machine code (*mine*)
-    else if(code_kind(body) == ast.native) vm_or_bad(e, fmt"вызов {name}: примитив native");
-    // call without run-time - inputs parsing curled - the body in this place is not disassembled
-    // (no types): the value of VM considers the entire VM as an interpreter when executed
-    else if(is_handle(ty(e)) && jit_known(e, ctx)) vm_or_bad(e, fmt"вызов {name}: свёрнут разбором");
-    else if(leading_require(body)) vm_or_bad(e, fmt"вызов {name}: ведущий require — выбор перегрузки по значениям");
-    else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор");
-    else {
+    // primitive native "cpp" (text_range, text_byte ...) - VM code, not the body on the language: the call
+    // counts VM in place, the function around it - machine code (*my*) the call without run-time - inputs
+    // parsing folded - the body in this place is not disassembled (no types): the VM value considers VM as
+    // a whole, as an interpreter when executed
+    if((g.size == 0) || (rec || is_outline)) vm_or_bad(e, fmt"вызов {name}: нет встраиваемой перегрузки") else if(code_kind(body) == ast.native) vm_or_bad(e, fmt"вызов {name}: примитив native") else if(is_handle(ty(e)) && jit_known(e, ctx)) vm_or_bad(e, fmt"вызов {name}: свёрнут разбором") else if(leading_require(body)) vm_or_bad(e, fmt"вызов {name}: ведущий require — выбор перегрузки по значениям") else if(rules_in(g[0])) bad(fmt"вызов {name}: правила тела для блоков конструкции — интерпретатор") else {
       fn = g[0];
       binds = bind_args(ps, xs, g[0]);
       if(ok) {
@@ -4378,8 +4135,7 @@ jit_compile(cg, f, types, type result) {
     for(i : range(xs.size)) {
       if(is_arr(types[i])) {
         s = var_of(xs[i]);
-        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в хвостовой вызов себя");
-        else put_bytes(slot_ld(acc, env[s].slot));
+        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в хвостовой вызов себя") else put_bytes(slot_ld(acc, env[s].slot));
       } else {
         t = ty(xs[i]);
         if(t != types[i]) bad(fmt"аргумент {t} вместо {types[i]}");
@@ -4409,8 +4165,7 @@ jit_compile(cg, f, types, type result) {
     for(i : range(xs.size)) {
       if(is_arr(types[i])) {
         s = var_of(xs[i]);
-        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в рекурсивный вызов");
-        else {
+        if((s < 0) || (env[s].thunk || (env[s].kind != types[i]))) bad("массив в рекурсивный вызов") else {
           put_bytes(slot_ld(acc, env[s].slot));
           put_bytes(cg.store(frame, area(j), acc));
         }
@@ -4426,10 +4181,11 @@ jit_compile(cg, f, types, type result) {
     }
     put_bytes(cg.load_const(acc, 0));
     put_bytes(cg.store(frame, area(ws), acc));
-    for(q : range(2)) { // VM service, call memory - from your field
+    for(q : range(2)) {
+      // VM service, call memory - from your field
       put_bytes(slot_ld(acc, args_slot));
-      put_bytes(cg.load(acc, acc, 8 * ((ap + 4) + q)));
-      put_bytes(cg.store(frame, area((ws + 4) + q), acc));
+      put_bytes(cg.load(acc, acc, 8 * (ap + 4 + q)));
+      put_bytes(cg.store(frame, area(ws + 4 + q), acc));
     }
     put_bytes(cg.address(argbase, frame, area(0)));
     spill();
@@ -4448,9 +4204,7 @@ jit_compile(cg, f, types, type result) {
   gen_throw(e) => {
     ast.throw{v} = e;
     t = ty(v);
-    if(res_live.size > 0) bad("throw при живом ресурсе — интерпретатор");
-    else if(!scalar(t)) bad(fmt"throw значения {t}");
-    else {
+    if(res_live.size > 0) bad("throw при живом ресурсе — интерпретатор") else if(!scalar(t)) bad(fmt"throw значения {t}") else {
       gen(v);
       to = catch_for(t);
       if(to.size == 1) {
@@ -4483,9 +4237,7 @@ jit_compile(cg, f, types, type result) {
   // 
   gen_alloc_in(e, xs) => {
     b = var_of(xs[1]);
-    if((b < 0) || !env[b].thunk) bad("alloc_in не над expr-параметром");
-    else if(tries.size > 0) bad("with_alloc внутри try");
-    else {
+    if((b < 0) || !env[b].thunk) bad("alloc_in не над expr-параметром") else if(tries.size > 0) bad("with_alloc внутри try") else {
       vm_eval(xs[0], ty(xs[0])); // cell address region - in acc
       put_bytes(cg.move(ca2, acc));
       vm_service(13, unit, e);
@@ -4503,10 +4255,10 @@ jit_compile(cg, f, types, type result) {
   gen_intercept(xs) => {
     b = var_of(xs[0]);
     h = var_of(xs[1]);
-    if((b < 0) || ((h < 0) || (!env[b].thunk || !env[h].thunk))) bad("intercept не над expr-параметрами");
-    else {
+    if((b < 0) || ((h < 0) || (!env[b].thunk || !env[h].thunk))) bad("intercept не над expr-параметрами") else {
       hv = env[h];
-      hs = if(code_kind(hv.th) == ast.construct) { // pack-clause
+      hs = if(code_kind(hv.th) == ast.construct) {
+        // pack-clause
         ast.construct{_, items, _} = hv.th;
         items
       } else array{hv.th};
@@ -4519,8 +4271,7 @@ jit_compile(cg, f, types, type result) {
           ps = lps;
           body = lbody;
         }
-        if(ps.size != 1) bad("catch не блок с параметром");
-        else {
+        if(ps.size != 1) bad("catch не блок с параметром") else {
           ast.parameter{pname, pt, _, _, _, _, _} = ps[0];
           cty = if(given(pt)) type_of_code(pt) else unit;
           binds = (pname != "_") && (uses(body, pname) > 0);
@@ -4558,9 +4309,7 @@ jit_compile(cg, f, types, type result) {
       body = lbody;
       block = lblock;
     }
-    if(code_kind(l) != ast.lambda) bad("вызов expr-параметра, который не блок и не лямбда");
-    else if(ps.size != xs.size) bad("арность блока");
-    else {
+    if(code_kind(l) != ast.lambda) bad("вызов expr-параметра, который не блок и не лямбда") else if(ps.size != xs.size) bad("арность блока") else {
       binds = array{};
       for(i : range(xs.size)) {
         t = ty(xs[i]);
@@ -4572,13 +4321,12 @@ jit_compile(cg, f, types, type result) {
         ast.parameter{pname, _, _, _, _, _, _} = ps[i];
         binds.push(jc_var{pname, t, sl, false, f, 0, 0, 0, 0});
       }
+      // Lambda value - semantic inlining in the form of its definition (capture - location of
+      // definition), its output for return; context parsing - place of call (as call_value)
       if(ok && block) in_view(v.th_top, v.th_base, v.th_ctx, v.th_ret, () => {
         for(b : binds) put(b);
         gen(body);
-      });
-      // Lambda value - semantic inlining in the form of its definition (capture - location of
-      // definition), its output for return; context parsing - place of call (as call_value)
-      else if(ok) in_view(v.th_top, v.th_base, ctx, v.th_ret, () => {
+      }) else if(ok) in_view(v.th_top, v.th_base, ctx, v.th_ret, () => {
         for(b : binds) put(b);
         exit = label();
         fr_fn.push(l);
@@ -4618,9 +4366,7 @@ jit_compile(cg, f, types, type result) {
   // spawn { W }: the generator is waiting for its flow
   gen_spawn(e, b) => {
     v = var_of(b);
-    if(fusing) bad("spawn внутри генератора");
-    else if((v < 0) || !env[v].thunk) bad("spawn");
-    else {
+    if(fusing) bad("spawn внутри генератора") else if((v < 0) || !env[v].thunk) bad("spawn") else {
       w = env[v];
       names = array{};
       idents(w.th, names);
@@ -4637,7 +4383,8 @@ jit_compile(cg, f, types, type result) {
   // for(stream s, expr body) on the stream that the waiting spawn sees: generator number
   generator_of(a) => {
     k = -1;
-    if(!(fusing && in_b) && (gens.size > 0)) { // c W - nested convolution (conveyor)
+    if(!(fusing && in_b) && (gens.size > 0)) {
+      // c W - nested convolution (conveyor)
       v = var_of(a);
       if((v >= 0) && (!env[v].thunk && is_stream(env[v].kind))) {
         for(i : range(gens.size)) if((k < 0) && has(gens[i].caps, env[v].slot)) k = i;
@@ -4652,10 +4399,8 @@ jit_compile(cg, f, types, type result) {
   // B does not leave the cycle for: no return, break/continue - only its cycles
   consumer_stays(c, i64 inl) => {
     k = code_kind(c);
-    if(k == ast.return) false
-    else if(((k == ast.break) || (k == ast.continue)) && (inl == 0)) false
-    else {
-      inner = inl + if((k == ast.loop) || is_block(c)) 1 else 0;
+    if(k == ast.return) false else if(((k == ast.break) || (k == ast.continue)) && (inl == 0)) false else {
+      inner = inl + (if((k == ast.loop) || is_block(c)) 1 else 0);
       r = true;
       for(x : code_items(c)) if(r && !consumer_stays(x, inner)) r = false;
       r
@@ -4673,12 +4418,10 @@ jit_compile(cg, f, types, type result) {
   gen_escapes(c, seen) => {
     k = code_kind(c);
     r = false;
-    if((k == ast.return) || (k == ast.throw)) r = true;
-    else if(k == ast.call) {
+    if((k == ast.return) || (k == ast.throw)) r = true else if(k == ast.call) {
       ast.call{cal, cxs, _, _, _, _, _} = c;
       nm = callee_name(cal);
-      if(nm == "close") r = true;
-      else if(nm != "") {
+      if(nm == "close") r = true else if(nm != "") {
         for(g : arity_fns(nm, cxs.size)) if(!r && !has(seen, code_id(g))) {
           seen.push(code_id(g));
           ast.function{_, _, _, gb, _, _, _, _, _} = g;
@@ -4700,8 +4443,7 @@ jit_compile(cg, f, types, type result) {
         if(given(pt)) {
           want = type_of_code(pt);
           at = jit_type(cxs[i], cc);
-          if(!given(want) || !given(at)) fits = false;
-          else if((want != at) && (want != type_family(at))) fits = false;
+          if(!given(want) || !given(at)) fits = false else if((want != at) && (want != type_family(at))) fits = false;
         }
       }
       if(fits) fs.push(g);
@@ -4719,18 +4461,14 @@ jit_compile(cg, f, types, type result) {
       r = items.size > 0;
       for(i : range(items.size)) if(r && (((i + 1) < items.size) && gen_escapes(items[i], seen))) r = false;
       r && gen_tail(items[items.size - 1], seen, cc)
-    } else if(k != ast.call) false
-    else {
+    } else if(k != ast.call) false else {
       ast.call{cal, cxs, _, _, _, _, _} = c;
       nm = callee_name(cal);
-      if(nm == "") false
-      else if(nm == "close") true
-      else {
+      if(nm == "") false else if(nm == "close") true else {
         r = true;
         for(x : cxs) if(r && gen_escapes(x, seen)) r = false;
         fs = pick_fn(nm, cxs, cc);
-        if(!r || ((fs.size != 1) || has(seen, code_id(fs[0])))) false
-        else {
+        if(!r || ((fs.size != 1) || has(seen, code_id(fs[0])))) false else {
           seen.push(code_id(fs[0]));
           ast.function{_, _, _, fb, _, _, _, _, _} = fs[0];
           gen_tail(fb, seen, inline_context(cc, c))
@@ -4745,15 +4483,9 @@ jit_compile(cg, f, types, type result) {
     body = xs[1];
     others = false;
     for(i : range(gens.size)) if((i != k) && has(gens[i].caps, sl)) others = true;
-    if(g.region != region) bad("for по потоку генератора — не в области spawn");
-    else if(others) bad("поток видят несколько spawn");
-    else if(!is_block(body)) bad("тело for");
-    else {
+    if(g.region != region) bad("for по потоку генератора — не в области spawn") else if(others) bad("поток видят несколько spawn") else if(!is_block(body)) bad("тело for") else {
       ast.lambda{bps, bb, _} = body;
-      if(bps.size != 1) bad("тело for");
-      else if(!consumer_stays(bb, 0)) bad("тело for выходит из цикла");
-      else if(!gen_tail(g.w, array{}, g.w_ctx)) bad("генератор: close(s) — не последнее действие, или return/throw");
-      else {
+      if(bps.size != 1) bad("тело for") else if(!consumer_stays(bb, 0)) bad("тело for выходит из цикла") else if(!gen_tail(g.w, array{}, g.w_ctx)) bad("генератор: close(s) — не последнее действие, или return/throw") else {
         rest = array{};
         for(i : range(gens.size)) if(i != k) rest.push(gens[i]);
         gens = rest;
@@ -4818,12 +4550,9 @@ jit_compile(cg, f, types, type result) {
   // VM operation inside W: write(s, v) - consumer body with x = v; close(s) - end
   sink(e, i64 op, xs) => {
     v = if(xs.size > 0) var_of(xs[0]) else -1;
-    if((v < 0) || (env[v].thunk || ((env[v].slot != f_stream) || ((op != 1) && (op != 4))))) bad("генератор: другая операция VM");
-    else if(op == 4) f_closes += 1;
-    else {
+    if((v < 0) || (env[v].thunk || ((env[v].slot != f_stream) || ((op != 1) && (op != 4))))) bad("генератор: другая операция VM") else if(op == 4) f_closes += 1 else {
       t = ty(xs[1]);
-      if(t != f_elem) bad("тип записи ≠ типу потока");
-      else {
+      if(t != f_elem) bad("тип записи ≠ типу потока") else {
         gen(xs[1]);
         p = alloc(1);
         give_reg(p, t); // x consumer - variable
@@ -4842,7 +4571,8 @@ jit_compile(cg, f, types, type result) {
         cur = f_cur;
         nested = fuse_stack.size > 0;
         inner = fuse_save();
-        if(nested) { // consumer - the code of the external W: his frame (taken off the stack), checks of the attached - by security guards
+        if(nested) {
+          // consumer - the code of the external W: his frame (taken off the stack), checks of the attached - by security guards
           fuse_load(fuse_stack[fuse_stack.size - 1]);
           fuse_stack = drop_last(fuse_stack);
           b_caps.push(inner.caps);
@@ -4883,26 +4613,16 @@ jit_compile(cg, f, types, type result) {
       k = find(nm);
       if((k >= 0) && !has(seen, k)) {
         seen.push(k);
-        if(env[k].thunk) bad(fmt"узел VM читает expr-параметр {nm}");
-        else if(is_stream(env[k].kind) || (env[k].kind == jc_range)) bad(fmt"узел VM читает {env[k].kind}");
-        else if(env[k].kind == unit) bad(fmt"узел VM читает кт-параметр {nm}");
-        else vs.push(array{c, k});
+        if(env[k].thunk) bad(fmt"узел VM читает expr-параметр {nm}") else if(is_stream(env[k].kind) || (env[k].kind == jc_range)) bad(fmt"узел VM читает {env[k].kind}") else if(env[k].kind == unit) bad(fmt"узел VM читает кт-параметр {nm}") else vs.push(array{c, k});
       }
     }
     vs
   };
   vm_or_bad(e, str why) => {
     t = ty(e);
-    if(uses_ct_state(e)) bad("ct-состояние — интерпретатор");
-    else if(uses_local_fn(e)) bad(fmt"{why}: узел VM вызывает локальную функцию — интерпретатор");
-    else if(fusing && !in_b) bad(fmt"генератор: {why}");
-    else if(tries.size > 0) bad(fmt"{why} (внутри try)");
-    else if((t == jc_range) || is_stream(t)) bad(why);
     // parsing does not know the value (the element of empty array {} variable service, the path that in parsing
     // only throws): it is not the value of VM, the cell address as bool/number would be a lie (*mine*)
-    else if(fmt"{t}" == "?") bad(fmt"{why}: тип узла неизвестен разбору");
-    else if(jit_diverts(e)) bad(fmt"{why}: через узел VM — выход return(caller) — интерпретатор");
-    else vm_eval(e, t);
+    if(uses_ct_state(e)) bad("ct-состояние — интерпретатор") else if(uses_local_fn(e)) bad(fmt"{why}: узел VM вызывает локальную функцию — интерпретатор") else if(fusing && !in_b) bad(fmt"генератор: {why}") else if(tries.size > 0) bad(fmt"{why} (внутри try)") else if((t == jc_range) || is_stream(t)) bad(why) else if(fmt"{t}" == "?") bad(fmt"{why}: тип узла неизвестен разбору") else if(jit_diverts(e)) bad(fmt"{why}: через узел VM — выход return(caller) — интерпретатор") else vm_eval(e, t);
   };
   vm_kind(type t) => if(is_handle(t)) 9 else jt_code(t);
   // parsing rules in the body (operator, syntax, construction - §4.4): the blocks of the structure
@@ -4962,13 +4682,14 @@ jit_compile(cg, f, types, type result) {
       put_bytes(slot_st(bsl(4 + (3 * i)), acc));
     }
     put_bytes(cg.address(ca1, sb(bsl(0)), so(bsl(0))));
-    put_bytes(cg.load_const(ca2, if(vm_take) (vm_kind(t) | 256) else vm_kind(t)));
+    put_bytes(cg.load_const(ca2, if(vm_take) vm_kind(t) | 256 else vm_kind(t)));
     vm_service(8, unit, e);
     keep = alloc(1); // The result is sideways while the scalars and arrays are reread
     put_bytes(slot_st(keep, acc));
     for(i : range(n)) {
       v = env[vs[i][1]];
-      if(!is_handle(v.kind)) { // The scalar may have changed (mut-call parameter)
+      if(!is_handle(v.kind)) {
+        // The scalar may have changed (mut-call parameter)
         put_bytes(slot_ld(acc, bsl(4 + (3 * i))));
         if(v.kind == f64) put_bytes(cg.move_to_f64(acc_f, acc));
         store_bytes(v.kind, v.slot);
@@ -4984,18 +4705,17 @@ jit_compile(cg, f, types, type result) {
     vm_or_bad(e, fmt"значение {t}");
     vm_take = false;
     s = if(fresh) -1 else find(name);
-    if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру");
-    else if(ok) {
+    if((s >= 0) && env[s].thunk) bad("присваивание expr-параметру") else if(ok) {
       fresh_here = s < 0;
       if(s < 0) {
         declare(name, t);
         s = top - 1;
       }
-      if(env[s].kind != t) bad("тип переменной меняется");
-      else {
+      if(env[s].kind != t) bad("тип переменной меняется") else {
         sl = env[s].slot;
         wrote(sl);
-        if(res && !fresh_here) { // rewrite: the new is calculated, the former is released (like the interpreter)
+        if(res && !fresh_here) {
+          // rewrite: the new is calculated, the former is released (like the interpreter)
           nv = alloc(1);
           put_bytes(slot_st(nv, acc));
           put_bytes(slot_ld(ca2, sl));
@@ -5088,7 +4808,8 @@ jit_compile(cg, f, types, type result) {
   put_bytes(cg.move(stack, frame));
   put_bytes(cg.frame_leave());
   put_bytes(cg.ret());
-  while(ok && (sub_done < subs.size)) { // Recursive Local Functions - After the Body
+  while(ok && (sub_done < subs.size)) {
+    // Recursive Local Functions - After the Body
     gen_subroutine(subs[sub_done]);
     sub_done += 1;
   }
@@ -5096,18 +4817,21 @@ jit_compile(cg, f, types, type result) {
   for(x : faults) {
     bind(x[0]);
     if((x[1] >= 0) && (x.size == 4)) put_bytes(cg.move(frame, outer_r)); // from the sub-programme: the exit from the encompassing
-    if(x[1] == -2) { // VM error in try - in catch, removing temporary
+    if(x[1] == -2) {
+      // VM error in try - in catch, removing temporary
       if(x[3] > 0) put_bytes(cg.stack_free(8 * x[3]));
       jump(x[2]);
       continue;
     }
-    if(x[1] == 1) { // boundary: index (acc) and size (second) - in words of meaning, message as an interpreter
+    if(x[1] == 1) {
+      // boundary: index (acc) and size (second) - in words of meaning, message as an interpreter
       put_bytes(slot_ld(third, args_slot));
       put_bytes(cg.store(third, 8 * (ap + 2), acc));
       put_bytes(cg.store(third, 8 * (ap + 3), second));
     }
     put_bytes(slot_ld(second, args_slot));
-    if(x[1] < 0) { // error caused: type, node, value, type - from its area (word displacement - x[2])
+    if(x[1] < 0) {
+      // error caused: type, node, value, type - from its area (word displacement - x[2])
       for(q : range(4)) {
         put_bytes(cg.load(acc, frame, x[2] + (8 * q)));
         put_bytes(cg.store(second, 8 * (ap + q), acc));
@@ -5131,7 +4855,6 @@ jit_compile(cg, f, types, type result) {
   if(lane_loops > 0) note = if(note == "") fmt"циклов по полосам: {lane_loops}" else note + fmt", циклов по полосам: {lane_loops}";
   if(note != "") array{out, note} else out
 }
-
 // slice (§13.2, M6 step 3 - from C++ to language): . Function instructions that use the
 // variable (and everything that is computed from it), plus what it depends on, slice remains an
 // executable program; the enveloping constructs are stored along with the conditions. The
@@ -5139,7 +4862,6 @@ jit_compile(cg, f, types, type result) {
 // name); printing with a filter is VM.
 //
 struct sl_stmt { code node; array defs; array uses; }
-
 // Service functions slice - in entity sl (call outside - sl.f(…)): visibility - entity,
 // without a separate mechanism .
 //
@@ -5170,10 +4892,7 @@ sl() {
   statement(n) => {
     p = code_parent(n);
     k = if(given(p)) code_kind(p) else unit;
-    if(!given(p)) false
-    else if((k == ast.block) || (k == ast.module)) true
-    else if(k == ast.call) tail_of(p, n) && (code_kind(n) != ast.lambda)
-    else if(k == ast.lambda) {
+    if(!given(p)) false else if((k == ast.block) || (k == ast.module)) true else if(k == ast.call) tail_of(p, n) && (code_kind(n) != ast.lambda) else if(k == ast.lambda) {
       ast.lambda{_, body, block} = p;
       block && same(body, n)
     } else if(k == ast.if) {
@@ -5189,8 +4908,7 @@ sl() {
   reads(n, names) => {
     if(given(n)) {
       k = code_kind(n);
-      if(k == ast.name) add(names, code_name(n));
-      else if((k != ast.block) && (k != ast.lambda)) {
+      if(k == ast.name) add(names, code_name(n)) else if((k != ast.block) && (k != ast.lambda)) {
         for(c : code_items(n)) {
           if(!((k == ast.call) && tail_of(n, c))) reads(c, names);
         }
@@ -5276,11 +4994,9 @@ sl() {
     true
   };
 }
-
 slice_hidden(m, str fn_name, str var) {
   fs = array{};
-  for(item : code_items(m))
-    if((code_kind(item) == ast.function) && (code_name(item) == fn_name)) fs.push(item);
+  for(item : code_items(m)) if((code_kind(item) == ast.function) && (code_name(item) == fn_name)) fs.push(item);
   if(fs.size == 0) return array{};
   f = fs[fs.size - 1];
   stmts = array{};
@@ -5298,12 +5014,11 @@ slice_hidden(m, str fn_name, str var) {
   changed = true;
   while(changed) {
     changed = false;
-    for(s : stmts)
-      if(!sl.kept_has(kept, s.node) && sl.meets(s.uses, forward)) {
-        kept.push(s.node);
-        for(d : s.defs) sl.add(forward, d);
-        changed = true;
-      }
+    for(s : stmts) if(!sl.kept_has(kept, s.node) && sl.meets(s.uses, forward)) {
+      kept.push(s.node);
+      for(d : s.defs) sl.add(forward, d);
+      changed = true;
+    }
   }
   // Back: Where does x come from and everything that saves instructions use?
   for(s : stmts) {
@@ -5314,11 +5029,10 @@ slice_hidden(m, str fn_name, str var) {
   changed = true;
   while(changed) {
     changed = false;
-    for(s : stmts)
-      if(sl.meets(s.defs, backward) && sl.keep(kept, s.node)) {
-        for(u : s.uses) sl.add(backward, u);
-        changed = true;
-      }
+    for(s : stmts) if(sl.meets(s.defs, backward) && sl.keep(kept, s.node)) {
+      for(u : s.uses) sl.add(backward, u);
+      changed = true;
+    }
   }
   // control structures around and their conditions
   changed = true;
@@ -5340,11 +5054,10 @@ slice_hidden(m, str fn_name, str var) {
         p = code_parent(p);
       }
     }
-    for(s : stmts)
-      if(sl.meets(s.defs, backward) && sl.keep(kept, s.node)) {
-        for(u : s.uses) sl.add(backward, u);
-        changed = true;
-      }
+    for(s : stmts) if(sl.meets(s.defs, backward) && sl.keep(kept, s.node)) {
+      for(u : s.uses) sl.add(backward, u);
+      changed = true;
+    }
   }
   // Disclose: instructions without saved descendants
   shown = array{};
@@ -5359,7 +5072,6 @@ slice_hidden(m, str fn_name, str var) {
   for(n : all) if(!sl.kept_has(shown, n)) r.push(n);
   r
 }
-
 // residual program (§13.2, M6 step 3b - from C++ to language):
 // 
 // parsing (check) with specified inputs observes node - view_obs / view_live / view_declares;
@@ -5370,7 +5082,6 @@ struct obs { bool found; bool present; bool seen; bool effect; bool diverted; bo
 struct rs_fold { code at; code other; }
 struct rs_value { code at; str text; }
 struct rs_plan { array hidden; array folds; array values; }
-
 // The service functions of residual program are in entity rs (external rs.f(…)), as sl.
 rs() {
   kind_in(c, kinds) => {
@@ -5399,21 +5110,16 @@ rs() {
   // not replace: purpose of assignment, called, announcements and parameters
   foldable_position(n) => {
     p = code_parent(n);
-    if(kind_in(n, array{ast.variable, ast.function, ast.parameter, ast.lambda, ast.block, ast.return, ast.loop, ast.break, ast.continue}) || (is_require(n) || is_clause_pack(n))) false
-    else if(!given(p)) false
-    else if((code_kind(p) == ast.call) && {
+    if(kind_in(n, array{ast.variable, ast.function, ast.parameter, ast.lambda, ast.block, ast.return, ast.loop, ast.break, ast.continue}) || (is_require(n) || is_clause_pack(n))) false else if(!given(p)) false else if((code_kind(p) == ast.call) && {
       ast.call{c, _, _, _, _, _, _} = p;
       sl.same(c, n)
-    }) false
-    else if((code_kind(p) == ast.variable) && {
+    }) false else if((code_kind(p) == ast.variable) && {
       ast.variable{_, t, _, _, _, _, _, _} = p;
       sl.same(t, n)
-    }) false
-    else if((code_kind(p) == ast.construct) && {
+    }) false else if((code_kind(p) == ast.construct) && {
       ast.construct{t, _, _} = p;
       sl.same(t, n)
-    }) false
-    else !lvalue(n)
+    }) false else !lvalue(n)
   };
 
   // The value of node is literal - or "" (convolution not)
@@ -5487,22 +5193,19 @@ rs() {
   keep(n, used) => {
     p = code_parent(n);
     k = code_kind(n);
-    if((k == ast.function) && (given(p) && (code_kind(p) == ast.module))) (code_name(n) == "main") || view_live(n)
-    else if(!sl.statement(n)) true
-    else if({
+    // The dead variable was not executed at these inputs: it is not read
+    // anywhere, initialization without the effect x = e, declaring x that is not
+    // read.
+    if((k == ast.function) && (given(p) && (code_kind(p) == ast.module))) (code_name(n) == "main") || view_live(n) else if(!sl.statement(n)) true else if({
       o = view_obs(n);
       !o.found || !o.present
-    }) false // It was not performed at these entrances.
-    else if((k == ast.variable) && {
+    }) false else if((k == ast.variable) && {
       ast.variable{name, _, init, _, _, _, _, _} = n;
       !sl.has(used, name) && dead_init(init)
-    }) false // dead variable: not read anywhere, initialization without effect
-    else if(view_declares(n) && {
+    }) false else if(view_declares(n) && {
       ast.operation{_, args, _} = n;
       !sl.has(used, code_name(args[0])) && dead_init(args[1])
-    }) false // x = e, which declares x that is not read
-    else if(pure_noop(n)) false
-    else !drops(n) // if(ложь) without more - nothing remains
+    }) false else if(pure_noop(n)) false else !drops(n) // if(ложь) without more - nothing remains
   };
 
   // Names that are read in residual program: not folded, not discarded
@@ -5513,12 +5216,7 @@ rs() {
       o = view_obs(n);
       ignoring_dead = o.found && o.present;
       folds = fold_if(n);
-      if((k == ast.function) && ((given(p) && (code_kind(p) == ast.module)) && !keep(n, used))) {
-      } else if(sl.statement(n) && ((k != ast.variable) && (!view_declares(n) && ((k != ast.function) && (!ignoring_dead || pure_noop(n)))))) {
-      } else if(fold_value(n).size > 0) {
-      } else if(folds.size > 0) gather(folds[0], used)
-      else if(drops(n)) {
-      } else {
+      if((k == ast.function) && (given(p) && (code_kind(p) == ast.module) && !keep(n, used))) {} else if(sl.statement(n) && ((k != ast.variable) && (!view_declares(n) && ((k != ast.function) && (!ignoring_dead || pure_noop(n)))))) {} else if(fold_value(n).size > 0) {} else if(folds.size > 0) gather(folds[0], used) else if(drops(n)) {} else {
         if((k == ast.name) && !lvalue(n)) sl.add(used, code_name(n));
         for(c : code_items(n)) gather(c, used);
       }
@@ -5537,7 +5235,6 @@ rs() {
     }
   };
 }
-
 residual_plan(m) {
   used = array{};
   rs.gather(m, used);
@@ -5547,7 +5244,6 @@ residual_plan(m) {
   rs.collect_into(m, used, hidden, folds, values);
   rs_plan{hidden, folds, values}
 }
-
 // parsing chain operators by brute force (§4.4, M6 step 4 - from C++ to language):
 // 
 // Table by segments of atoms: parsing segment - type, number of trees (1 or "many"), root.
@@ -5560,7 +5256,6 @@ residual_plan(m) {
 // parsing chains do not disassemble itself.
 struct ch_entry { i64 cell; i64 shape; i64 count; i64 op; i64 li; i64 ri; }
 struct ch_result { i64 status; array tree; array notes; }
-
 chain_resolve(i64 k, ops, assoc, bool open) {
   cell(i64 kk, i64 i, i64 j) => (i * kk) + j;
   // parsing cells (i, j) - record numbers
@@ -5589,7 +5284,8 @@ chain_resolve(i64 k, ops, assoc, bool open) {
       j = i + (len - 1);
       cj = cell(k, i, j);
       m = i;
-      while(m < j) { // operator m - between atoms m and m + 1
+      while(m < j) {
+        // operator m - between atoms m and m + 1
         ls = in_cell(ents, cell(k, i, m));
         rs = in_cell(ents, cell(k, m + 1, j));
         for(li : ls) {
@@ -5603,8 +5299,8 @@ chain_resolve(i64 k, ops, assoc, bool open) {
                 if(cnt > 2) cnt = 2;
                 same = -1;
                 for(x : in_cell(ents, cj)) if(chain_key(ents[x].shape) == chain_key(t)) same = x;
-                if(same >= 0) ents[same].count = 2; // other parsing of the same type
-                else ents.push(ch_entry{cj, t, cnt, m, li, ri});
+                // other parsing of the same type
+                if(same >= 0) ents[same].count = 2 else ents.push(ch_entry{cj, t, cnt, m, li, ri});
               }
             }
           }
@@ -5630,7 +5326,6 @@ chain_resolve(i64 k, ops, assoc, bool open) {
   build(ents, top[0], tree);
   ch_result{0, tree, array{}}
 }
-
 // The choice of overload is the rule of specificity (§5.4, M6 step 5 - with C++ per language): “type equals” more specifically “can represent” (), the
 // exact number of arguments - more specifically the tail ...xs, the sample and leading require - the conditions of the candidate. Signs of the candidate
 // consider VM (whether type, unpacking, require): array{tail, require, according to the parameters: 0 - without type, 1 - imagine (new value), 2 - type
@@ -5645,8 +5340,6 @@ chain_resolve(i64 k, ops, assoc, bool open) {
 //
 //
 struct ov_pick { array order; i64 reach; bool ambiguous; i64 tied; }
-
-
 overload_pick(feats, maybes, bool checking) {
   score(f) => {
     s = if(f[0] == 1) 0 else 1;
@@ -5654,10 +5347,9 @@ overload_pick(feats, maybes, bool checking) {
     i = 2;
     while(i < f.size) {
       k = f[i];
-      if(k >= 100) s = s + (1 + (k - 100));
-      else if(k == 1) s = s - 1; // new value (i64 а f64, implicit) - below the parameter without the type
-      else if(k == 3) s = s + 1; // the same object under the general type - above without type, below "type equal"
-      else s = s + k;
+      // new value (i64 ом f64, implicit) - below the parameter without the type the same
+      // object under the general type - above without the type, below "type equals"
+      if(k >= 100) s = s + (1 + (k - 100)) else if(k == 1) s = s - 1 else if(k == 3) s = s + 1 else s = s + k;
       i = i + 1;
     }
     s
@@ -5666,7 +5358,8 @@ overload_pick(feats, maybes, bool checking) {
   scores = array{};
   for(f : feats) scores.push(score(f));
   order = array{};
-  for(i : range(n)) { // Insertion - after all with a weight not less than: the order of equals is maintained
+  for(i : range(n)) {
+    // Insertion - after all with a weight not less than: the order of equals is maintained
     pos = order.size;
     found = false;
     j = 0;
@@ -5702,13 +5395,12 @@ overload_pick(feats, maybes, bool checking) {
   if(n > 1) {
     a = order[0];
     b = order[1];
-    ambiguous = (scores[a] == scores[b]) && ((!maybes[a]) && (!maybes[b]));
+    ambiguous = (scores[a] == scores[b]) && (!maybes[a] && !maybes[b]);
   }
   tied = 0;
   for(x : order) if(scores[x] == scores[order[0]]) tied = tied + 1;
   ov_pick{order, reach, ambiguous, tied}
 }
-
 // Type relationships and path fusion (§5.8, §5.5, M6 step 6 - with C++ into the language):
 // 
 // 
@@ -5726,18 +5418,8 @@ overload_pick(feats, maybes, bool checking) {
 // 
 // explicit - only an equal type.
 fit_rule(got, want, strict, subtype, record, want_struct, empty, is_code, want_node, implicit) {
-  if(is_code && want_node) 7
-  else if(strict) 0
-  else if(implicit) 8
-  else if(subtype) 2
-  else if(record && want_struct) 3
-  else if(empty && ((want == "i64") || (want == "f64"))) 4
-  else if((got == "i64") && (want == "f64")) 5
-  else if((got == "f64") && (want == "i64")) 6
-  else 0
+  if(is_code && want_node) 7 else if(strict) 0 else if(implicit) 8 else if(subtype) 2 else if(record && want_struct) 3 else if(empty && ((want == "i64") || (want == "f64"))) 4 else if((got == "i64") && (want == "f64")) 5 else if((got == "f64") && (want == "i64")) 6 else 0
 }
-
-
 // join_rule: альтернатива y (тип ty) и значение x (тип tx) другого пути. Проход 1 —
 // empty array: late element type, array<?> е array<T> = array<T> (run-time); passage 2 - the same
 // compile-time - compile-time, one type - run-time, different types - splitting (without
@@ -5753,16 +5435,10 @@ join_rule(pass, ty, tx, same_state, same_value) {
     }
     r
   };
-  if(!same_state) 0
-  else if(pass == 1) {
-    if((tx == "array<?>") && starts(ty, "array<")) 2
-    else if((ty == "array<?>") && starts(tx, "array<")) 3
-    else 0
-  } else if(ty != tx) 0
-  else if(same_value) 1
-  else 2
+  if(!same_state) 0 else if(pass == 1) {
+    if((tx == "array<?>") && starts(ty, "array<")) 2 else if((ty == "array<?>") && starts(tx, "array<")) 3 else 0
+  } else if(ty != tx) 0 else if(same_value) 1 else 2
 }
-
 // Thresholds of static parsing (§5.5, M6 step 7 - with C++ on the language). Author's model:
 // 
 // 
@@ -5772,13 +5448,12 @@ join_rule(pass, ty, tx, same_state, same_value) {
 //
 //
 analysis_limit(what) {
-  if(what == "loop_known") 100000 // iterations of a cycle with known output
-  else if(what == "loop_types") 8 // cycles by type to a fixed point
-  else if(what == "recursion_widen") 16 // depth with which recursion is generalized to types
-  else if(what == "recursion_depth") 2000 // recursion depth limit at parsing
-  else 0
+  // iterations of a cycle with a known output of cycle passes
+  // by types to a fixed point depth from which recursion is
+  // generalized to types of recursion depth limit at parsing
+  //
+  if(what == "loop_known") 100000 else if(what == "loop_types") 8 else if(what == "recursion_widen") 16 else if(what == "recursion_depth") 2000 else 0
 }
-
 // Numbers of other widths are code, not kernel types:
 // 
 // 
@@ -5796,9 +5471,11 @@ struct u64 { __int64 value; }
 struct f32 { __float64 value; }
 num_wrap_s(i64 x, i64 bits) => (x << (64 - bits)) >> (64 - bits);
 num_wrap_u(i64 x, i64 bits) => x & ((1 << bits) - 1);
-num_srl(i64 x, i64 n) => if(n == 0) x else ((x >> n) & ((1 << (64 - n)) - 1)); // right-shift
-num_ult(i64 a, i64 b) => (a ^ (1 << 63)) < (b ^ (1 << 63)); // bit-comparison
-// Signless division of bits: "in column", 64 steps
+num_srl(i64 x, i64 n) => if(n == 0) x else (x >> n) & ((1 << (64 - n)) - 1);
+// right-shift
+num_ult(i64 a, i64 b) => (a ^ (1 << 63)) < (b ^ (1 << 63));
+// Signless comparison of bits unsigned division of bits:
+// "in a column", 64 steps
 num_udivrem(i64 a, i64 b) {
   require(b != 0, "деление на ноль");
   q = 0;

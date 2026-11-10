@@ -6,3 +6,8 @@ qemu_*.core
 :memory:.ses
 tests/*.tzdb
 tests/*.vishdb
+lib.vishrepo
+lib.vishrepo.*
+out/vish.stable
+out/lib.bak/
+out/selfhost.*

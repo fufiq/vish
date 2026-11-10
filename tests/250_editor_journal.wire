@@ -10,7 +10,7 @@ key 1 !
 key 1 Escape
 journal
 // неизменённые узлы черновика не правятся (graft): в журнале — только изменённый
-// expect: журнал: +13 записей (j_gap 1, j_import 1, j_link 1, j_note 1, j_place 8, j_replace 1)
+// expect: журнал: +17 записей (j_add 2, j_derived 2, j_gap 1, j_import 1, j_link 1, j_note 1, j_place 8, j_replace 1)
 // expect: текст импортов +214 байт
 // набор двадцати букв — рост почти тот же, что у одной (на сами буквы)
 pointer 1 @привет 0 7

@@ -32,6 +32,11 @@ struct c_hello {
 struct c_open_view {
   std::string kind;
 };
+// Representation of another module of the database (a module connected to use, or a repository module) by key: the same kind of
+// “module”, the root is this module (host itself: lib/*.vish governs the repository modules; *mine*).
+struct c_open_module {
+  std::string key;
+};
 struct c_close_view {
   uint32_t view;
 };
@@ -139,6 +144,10 @@ struct c_name {
 };
 struct c_items {};
 struct c_extensions {};
+// Project task (2026-11-10, itself host; *my*): an external command from the `[[editor]] task_<имя>()` function of the program or
+// its plugins. Output - to the launch panel (s_output), the VM process does not block.
+//
+struct c_task { std::string name; };
 struct c_command {
   std::string name;
 };
@@ -175,7 +184,7 @@ struct c_repository {
   std::string text;
   uint64_t revision;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_command, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
+using client_msg = std::variant<c_hello, c_open_view, c_open_module, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_task, c_command, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
 
 // --- VM customer ---
 

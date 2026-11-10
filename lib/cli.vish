@@ -1,8 +1,8 @@
+module cli;
 // The vish launch line is in the language (step 4 transfer tuling). The module is built into the assembly; it
 // is loaded by every vish team except the vish native bootstrap.
-module cli;
-use tools;
 
+use tools;
 // --- commands vish: start line (VM - the commands themselves on the program, cli.hpp) ---
 // 
 // The base of the command is one: prelude, this module and the .vish program (the program
@@ -141,7 +141,6 @@ journal_text(str path) => native "cpp" {
   return value(describe_journal(entries));
 };
 proto_schema() => native "cpp" { return value(proto::schema()); };
-
 // The key tuning module (tests, versions) - to the command base, if it is not there, and its function fn
 // with the words args: exit code. The team only loads what it needs.
 run_module(str key, str fn, args) => native "cpp" {
@@ -154,18 +153,17 @@ vm_loop(i64 s) {
   done = false;
   while(!done) {
     array{ok, line} = read_line();
-    if(!ok || (line == "quit")) done = true;
-    else if((line != "") && !starts_with(line, "//")) {
+    if(!ok || (line == "quit")) done = true else if((line != "") && !starts_with(line, "//")) {
       body = "";
-      if(starts_with(line, "edit ")) { // editing body - up to a line from one point
+      if(starts_with(line, "edit ")) {
+        // editing body - up to a line from one point
         more = true;
         while(more) {
           array{got, l} = read_line();
-          if(!got || (l == ".")) more = false;
-          else body = (body + l) + "\n";
+          if(!got || (l == ".")) more = false else body = body + l + "\n";
         }
       }
-      write_out(((("> " + line) + "\n") + vm_command(s, line, body)));
+      write_out("> " + line + "\n" + vm_command(s, line, body));
       flush_out();
     }
   }
@@ -177,12 +175,26 @@ usage() {
 }
 // vish <team>...: Start line words (without vish name) - output code
 cli(args) {
-  if((args.size == 1) && (args[0] == "schema")) { // Editor's Protocol Scheme (JSON)
+  if((args.size == 1) && (args[0] == "schema")) {
+    // Editor's Protocol Scheme (JSON)
     write_out(proto_schema());
     return 0;
   }
   if(args.size < 2) return usage();
   cmd = args[0];
+  if((cmd == "lib") && (args.size > 3)) {
+    // vish lib import <lib> <repo.vishrepo> | vish lib export <repo.vishrepo> <lib >>
+    if(args[1] == "import") {
+      work = args[3] + ".work";
+      if(run_module("versions", "lib_prepare_cli", array{args[2], work}) != 0) return 1;
+      session = text(prog_session(prog_open(work + "/main.vish")));
+      code = run_module("versions", "repository_cli", array{session, "init", args[3], ""});
+      if(code == 0) code = run_module("versions", "lib_add_prelude_cli", array{session, args[2]});
+      run_module("versions", "lib_prepare_cli", array{args[2], work, "clean"}); // The catalogue is no longer needed
+      return code;
+    }
+    if(args[1] == "export") return run_module("versions", "lib_export_cli", array{text(prog_session(prog_open(args[2]))), args[3]});
+  }
   if(cmd == "repo") {
     if(args.size < 3) return usage();
     action = args[1];
@@ -199,25 +211,29 @@ cli(args) {
       if(action == "push") return run_module("versions", "repository_merge_cli", array{text(prog_session(q)), text(prog_session(p))}); // merging in another repository
       return run_module("versions", "repository_merge_cli", array{text(prog_session(p)), text(prog_session(q))});
     }
-    if((action == "export") && (args.size > 3) && ends_with(args[2], ".vishrepo"))
-      return run_module("versions", "repository_export_cli", array{text(prog_session(prog_open(args[2]))), args[3]});
-    if((action == "import") && (args.size > 3) && ends_with(args[3], ".vishrepo")) { // export catalogue → new repository with pictures
+    if((action == "export") && (args.size > 3) && ends_with(args[2], ".vishrepo")) return run_module("versions", "repository_export_cli", array{text(prog_session(prog_open(args[2]))), args[3]});
+    if((action == "import") && (args.size > 3) && ends_with(args[3], ".vishrepo")) {
+      // export catalogue → new repository with pictures
       first = "";
       for(l : lines_of(read_text(args[2] + "/history.txt"))) if((first == "") && starts_with(l, "snapshot ")) first = words_of(l)[1];
       if(first == "") return fail("в каталоге нет history.txt со снимками");
-      src = (args[2] + "/snapshots/") + first + "/main.vish";
+      src = args[2] + "/snapshots/" + first + "/main.vish";
       return run_module("versions", "repository_import_cli", array{text(prog_session(prog_open(src))), args[3], args[2]});
     }
     if((action != "new") && (action != "init") && !ends_with(args[2], ".vishrepo")) return fail("ожидается путь .vishrepo");
     p = if(action == "new") prog_empty() else prog_open(args[2]);
     key = if(args.size > 3) args[3] else "";
     body = if(args.size > 4) args[4] else "";
-    if(action == "new") { action = "init"; key = args[2]; }
+    if(action == "new") {
+      action = "init";
+      key = args[2];
+    }
     return run_module("versions", "repository_cli", array{text(prog_session(p)), action, key, body});
   }
   at = 1;
   projection = ""; // vish fmt --projection <key> <program>: projection - record module (§4.4)
-  if((cmd == "fmt") && (args[1] == "--ct")) { // vish fmt --ct <program >>
+  if((cmd == "fmt") && (args[1] == "--ct")) {
+    // vish fmt --ct <program >>
     if(args.size < 3) return usage();
     cmd = "fmt-ct";
     at = 2;
@@ -230,7 +246,8 @@ cli(args) {
   // version (§9.4): semantic diff and trilateral .vishdb fusion
   if((cmd == "diff") && (args.size == 3)) return run_module("versions", "diff_command", words_from(args, 1));
   if((cmd == "merge") && (args.size >= 3)) return run_module("versions", "merge_command", words_from(args, 1));
-  if(cmd == "resume") { // The new VM resources are provided by the user.
+  if(cmd == "resume") {
+    // The new VM resources are provided by the user.
     k = 1;
     if((args[1] == "--grant") && (args.size > 3)) {
       env_set("VISH_GRANT", args[2]);
@@ -252,19 +269,19 @@ cli(args) {
   while((cmd == "run") && ((at < args.size) && starts_with(args[at], "--"))) {
     f = args[at];
     at += 1;
-    if(f == "--instances") instances = true;
-    else if(f == "--jit") jit = true;
-    else if(f == "--jit-stats") {
+    if(f == "--instances") instances = true else if(f == "--jit") jit = true else if(f == "--jit-stats") {
       jit = true;
       stats = true;
-    } else if(f == "--a64") { // code AArch64 - parallel to host, in qemu
+    } else if(f == "--a64") {
+      // code AArch64 - parallel to host, in qemu
       jit = true;
       a64 = true;
-    } else if(f == "--machine") machine = true;
-    else if((f == "--grant") && (at < args.size)) { // Resources are provided by the user: fs,net
+    } else if(f == "--machine") machine = true else if((f == "--grant") && (at < args.size)) {
+      // Resources are provided by the user: fs,net
       env_set("VISH_GRANT", args[at]);
       at += 1;
-    } else if((f == "--dump-after") && ((at + 1) < args.size)) { // -dump-after N file.vishproc
+    } else if((f == "--dump-after") && ((at + 1) < args.size)) {
+      // -dump-after N file.vishproc
       machine = true;
       dump_after = number_of(args[at]);
       dump_path = args[at + 1];
@@ -276,7 +293,7 @@ cli(args) {
   if((cmd == "serve") && ends_with(target, ".vish")) {
     saved = prog_saved_db(target);
     if(saved != "") {
-      write_err(("восстановлено из " + saved) + (" (сохранено позже " + target) + ")\n");
+      write_err("восстановлено из " + saved + (" (сохранено позже " + target) + ")\n");
       target = saved;
     }
   }
@@ -303,7 +320,8 @@ cli(args) {
     write_err(errs);
     return if(parsed) 0 else 1;
   }
-  if(cmd == "fmt-ct") { // after elaboration (ct code mutation generated by emit)
+  if(cmd == "fmt-ct") {
+    // after elaboration (ct code mutation generated by emit)
     if(!parsed) return 1;
     write_out(prog_fmt_ct(p));
     return 0;
@@ -316,14 +334,15 @@ cli(args) {
     if((at + 1) >= args.size) return usage();
     sliced = prog_slice(p, args[at], args[at + 1]);
     if(sliced == "") {
-      write_err(((("не найдены функция " + args[at]) + " или переменная ") + args[at + 1]) + "\n");
+      write_err("не найдены функция " + args[at] + " или переменная " + args[at + 1] + "\n");
       return 1;
     }
     write_out(sliced);
     return 0;
   }
   if(!parsed) return 1; // We don't do the whole thing - M0
-  if(cmd == "apply") { // editing the program function in the language (§7.4): new projection, base - with journal editing
+  if(cmd == "apply") {
+    // editing the program function in the language (§7.4): new projection, base - with journal editing
     if(at >= args.size) return usage();
     r = vm_command(prog_session(p), "apply " + args[at], "");
     write_err(r);

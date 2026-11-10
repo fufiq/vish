@@ -1,0 +1,18 @@
+// Representation of another module of the base (2026-11-10, itself host; *my*): c_open_module opens the form of a "module" with the
+// root - a key module (geo.vec from the use program); the text - projection of this module, not programs.
+// program: 95_modules.vish
+open_module geo.vec
+// expect: view view=1
+// expect: struct v2
+// expect-not: main()
+// editing in the form of another module lies in this module: open it again - Xnorm2
+pointer 1 @norm2 0 0
+key 1 X
+key 1 Escape
+open_module geo.vec
+// expect: "Xnorm2("
+// Ctrl+P: "Module <key>" - same
+goto 1 module\sgeo.vec
+// expect: view view=3
+open_module no.such
+// expect: text="нет модуля no.such"

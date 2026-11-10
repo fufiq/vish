@@ -70,6 +70,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # Text export of the repository (vish repo export) and return via vish repo init
     ( sh tests/export.sh $PWD/$b $L/export ) > $L/t_export.log 2>&1
     echo "export: код $?" > $L/r_export
+    # host itself : lib/*.vish through the repository back and forth (vish lib import/export), second circle - the same text
+    ( sh tests/selfhost.sh $PWD/$b $L/selfhost ) > $L/t_selfhost.log 2>&1
+    echo "selfhost: код $?" > $L/r_selfhost
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore

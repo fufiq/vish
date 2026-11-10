@@ -44,7 +44,7 @@ struct editor_server;
 thread_local editor_server * editor_host = nullptr;
 
 struct editor_server {
-  enum op : uint64_t { op_accept = 1, op_recv, op_send, op_timer, op_run };
+  enum op : uint64_t { op_accept = 1, op_recv, op_send, op_timer, op_run, op_task };
 
   struct peer {
     int fd = -1;
@@ -289,6 +289,9 @@ struct editor_server {
       case op_timer:
         on_timer();
         break;
+      case op_task:
+        task_tick();
+        break;
       case op_run: // the process ring is ready: the completion of the process, the steps - the next quantum
         if(live && live->gen == i) {
           live->polling = false;
@@ -397,6 +400,7 @@ struct editor_server {
     if(m.kind != "module") return send(p, proto::s_error{cat("неизвестный вид представления: ", m.kind)});
     decide(&p, -1, "on_open_view", {});
   }
+  void handle(peer & p, proto::c_open_module const & m) { decide(&p, -1, "on_open_module", {value(m.key)}); }
   void handle(peer & p, proto::c_close_view const & m) { decide(&p, m.view, "on_close_view", {value(int64_t(m.view))}); }
   void handle(peer & p, proto::c_key const & m) {
     decide(&p, m.view, "on_key", {value(int64_t(m.view)), value(m.key), value(int64_t(m.mods))});
@@ -427,6 +431,7 @@ struct editor_server {
   void handle(peer & p, proto::c_name const & m) { decide(&p, -1, "on_name", {value(m.name)}); }
   void handle(peer & p, proto::c_items const &) { decide(&p, -1, "on_items", {}); }
   void handle(peer & p, proto::c_extensions const &) { decide(&p, -1, "on_extensions", {}); }
+  void handle(peer & p, proto::c_task const & m) { decide(&p, -1, "on_task", {value(m.name)}); }
   void handle(peer & p, proto::c_command const & m) { decide(&p, -1, "on_command", {value(m.name)}); }
   void handle(peer & p, proto::c_propose const & m) { decide(&p, -1, "on_propose", {value(m.key), value(m.text), value(m.why)}); }
   void handle(peer & p, proto::c_decide const & m) { decide(&p, -1, "on_decide", {value(int64_t(m.id)), value(m.accept)}); }
@@ -436,6 +441,81 @@ struct editor_server {
   void handle(peer & p, proto::c_repository const & m) { decide(&p, -1, "on_repository", {value(int64_t(m.request)), value(m.action), value(m.key), value(m.text), value(int64_t(m.revision))}); }
   void handle(peer & p, proto::c_merge const & m) { decide(&p, -1, "on_merge", {value(m.path)}); }
   void handle(peer & p, proto::c_take const & m) { decide(&p, -1, "on_take", {value(m.key), value(m.theirs)}); }
+
+  // --- Project objectives: external team, output - on_task_output solution ---
+  //
+  // Child process (stdout + stderr - pipe, non-blocking), polling the ring timer once every 150 ms; in tests (timers = false) -
+  // synchronously: everything is output at once. What to run and what to do with output is decided by the language (lib/editor.vish).
+  pid_t task_pid = -1;
+  int task_fd = -1;
+  peer * task_who = nullptr;
+  bool task_stop = false;
+  bool start_task(std::vector<std::string> const & args, std::string const & cwd) {
+    if(task_pid > 0 || args.empty()) return false;
+    int fds[2];
+    if(::pipe(fds) != 0) return false;
+    pid_t pid = ::fork();
+    if(pid < 0) { ::close(fds[0]); ::close(fds[1]); return false; }
+    if(pid == 0) {
+      ::dup2(fds[1], 1);
+      ::dup2(fds[1], 2);
+      ::close(fds[0]);
+      ::close(fds[1]);
+      if(!cwd.empty() && ::chdir(cwd.c_str()) != 0) _exit(126);
+      std::vector<char *> argv;
+      for(auto const & a: args) argv.push_back(const_cast<char *>(a.c_str()));
+      argv.push_back(nullptr);
+      ::execvp(argv[0], argv.data());
+      _exit(127);
+    }
+    ::close(fds[1]);
+    task_pid = pid;
+    task_fd = fds[0];
+    task_who = now_peer;
+    task_stop = false;
+    if(timers) {
+      ::fcntl(task_fd, F_SETFL, ::fcntl(task_fd, F_GETFL) | O_NONBLOCK);
+      ring.timeout(150, tag(op_task, 0));
+    } else task_tick(); // tests: synchronously
+    return true;
+  }
+  void stop_task() {
+    if(task_pid > 0) {
+      task_stop = true;
+      ::kill(task_pid, SIGTERM);
+    }
+  }
+  void task_tick() {
+    if(task_pid <= 0) return;
+    std::string chunk;
+    char buf[4096];
+    bool eof = false;
+    for(;;) {
+      ssize_t n = ::read(task_fd, buf, sizeof buf);
+      if(n > 0) chunk.append(buf, std::size_t(n));
+      else if(n == 0) { eof = true; break; }
+      else if(errno == EINTR) continue;
+      else break; // EAGAIN: No data yet
+    }
+    int status = 0;
+    bool done = false;
+    if(eof) {
+      ::waitpid(task_pid, &status, 0);
+      done = true;
+    } else if(::waitpid(task_pid, &status, WNOHANG) == task_pid) {
+      done = true;
+      for(;;) { ssize_t n = ::read(task_fd, buf, sizeof buf); if(n <= 0) break; chunk.append(buf, std::size_t(n)); }
+    }
+    int64_t code = !done ? 0 : WIFEXITED(status) ? WEXITSTATUS(status) : -WTERMSIG(status);
+    if(done) {
+      ::close(task_fd);
+      task_fd = -1;
+      task_pid = -1;
+    } else if(timers) ring.timeout(150, tag(op_task, 0));
+    bool stopped = done && task_stop;
+    peer * who = task_who;
+    decide(who && who->open ? who : nullptr, -1, "on_task_output", {value(std::move(chunk)), value(done), value(code), value(stopped)});
+  }
 
   // --- set pause: OS timer ---
   //

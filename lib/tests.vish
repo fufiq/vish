@@ -1,8 +1,8 @@
+module tests;
 // Run reference tests and scenarios - in language (step 3 transfer tuling). The module is built into the
 // assembly; it is loaded with a vish test (cli - key).
-module tests;
-use tools;
 
+use tools;
 // --- Test run: vish test <catalogue> [--a64 | --projection k] ---
 // 
 // Engines are checked against each other (interpreter, JIT, AArch64, process machine); The test is a
@@ -299,7 +299,6 @@ tests_next() => native "cpp" {
   });
   return value(array_v::of({value(std::move(text)), value(int64_t(code)), value(whole)}));
 };
-
 // Header directives - `// ключ: значение` lines at the beginning of the file (up to the first line of code):
 //   args: a b c          аргументы программы          stdin: строка        строка stdin (несколько)
 //   out: текст           строка stdout по порядку     out2: текст          второй запуск с тем же состоянием
@@ -376,7 +375,7 @@ without_header(str shown, str src) {
   for(k : range(n)) if(at < shown.size) {
     if(!starts_with(text_from(shown, at), "//")) return shown;
     nl = find_text(text_from(shown, at), "\n");
-    at = if(nl < 0) shown.size else (at + nl) + 1;
+    at = if(nl < 0) shown.size else at + nl + 1;
   }
   text_from(shown, at)
 }
@@ -402,13 +401,12 @@ first_difference(str a, str b) {
   r = "";
   i = if(k >= 3) k - 3 else 0;
   while(i < (k + 3)) {
-    if(i < la.size) r = r + (((("      было  " + text(i + 1)) + ": ") + la[i]) + "\n");
-    if((i < lb.size) && (i >= k)) r = r + (((("      стало " + text(i + 1)) + ": ") + lb[i]) + "\n");
+    if(i < la.size) r = r + ("      было  " + text(i + 1) + ": " + la[i] + "\n");
+    if((i < lb.size) && (i >= k)) r = r + ("      стало " + text(i + 1) + ": " + lb[i] + "\n");
     i += 1;
   }
   r
 }
-
 // The .vish test: reasons ("" - passed").
 test_vish(str path, bool a64) {
   p = test_load(path);
@@ -418,7 +416,7 @@ test_vish(str path, bool a64) {
   q = wanted(h, "quantum");
   if(q.size == 0) env_unset("VISH_SLICE") else env_set("VISH_SLICE", q[0]);
   grants = ""; // Resources of the program: "You give" - here they give the test (VISH_GRANT )
-  for(line : wanted(h, "grant")) for(w : words_of(line)) grants = (grants + (if(grants == "") "" else ",")) + w;
+  for(line : wanted(h, "grant")) for(w : words_of(line)) grants = grants + (if(grants == "") "" else ",") + w;
   if(grants == "") env_unset("VISH_GRANT") else env_set("VISH_GRANT", grants);
   counts = array{0, 0};
   notes = array{};
@@ -439,20 +437,22 @@ test_program(i64 p, header h, str src, str dir, bool a64, counts, notes) {
   }
   if(has_key(h, "fmt-has")) {
     shown = without_header(test_print(p), src);
-    for(want : wanted(h, "fmt-has")) if(!contains(shown, want)) return (("    нет в проекции: " + in_quotes(want)) + "\n") + shown;
+    for(want : wanted(h, "fmt-has")) if(!contains(shown, want)) return "    нет в проекции: " + in_quotes(want) + "\n" + shown;
   }
-  for(key : wanted(h, "fmt-projection")) { // projection is a key recording module like use k (§4.5)
+  for(key : wanted(h, "fmt-projection")) {
+    // projection is a key recording module like use k (§4.5)
     array{ok, printed} = print_text(src, dir, key, false);
-    if(!ok) return ("    нет модуля проекции " + key) + "\n";
+    if(!ok) return "    нет модуля проекции " + key + "\n";
     shown = without_header(printed, src);
-    for(want : wanted(h, "fmt-projection-has")) if(!contains(shown, want)) return (((("    нет в проекции " + key) + ": ") + in_quotes(want)) + "\n") + shown;
+    for(want : wanted(h, "fmt-projection-has")) if(!contains(shown, want)) return "    нет в проекции " + key + ": " + in_quotes(want) + "\n" + shown;
   }
-  if((has_key(h, "fmt-ct-has") || has_key(h, "fmt-ct-lacks")) && (errors == "")) { // after elaboration (vish fmt --ct)
+  if((has_key(h, "fmt-ct-has") || has_key(h, "fmt-ct-lacks")) && (errors == "")) {
+    // after elaboration (vish fmt --ct)
     array{ok, printed} = test_elaborated(p);
     if(!ok) return "    ошибка элаборации: " + printed;
     shown = without_header(printed, src);
-    for(want : wanted(h, "fmt-ct-has")) if(!contains(shown, want)) return (("    нет в проекции после элаборации: " + in_quotes(want)) + "\n") + shown;
-    for(bad : wanted(h, "fmt-ct-lacks")) if(contains(shown, bad)) return (("    лишнее в проекции после элаборации: " + in_quotes(bad)) + "\n") + shown;
+    for(want : wanted(h, "fmt-ct-has")) if(!contains(shown, want)) return "    нет в проекции после элаборации: " + in_quotes(want) + "\n" + shown;
+    for(bad : wanted(h, "fmt-ct-lacks")) if(contains(shown, bad)) return "    лишнее в проекции после элаборации: " + in_quotes(bad) + "\n" + shown;
   }
   // Program state (§12.2) - its directory for each execution; out2: - second run with it
   state_fresh();
@@ -471,14 +471,14 @@ test_program(i64 p, header h, str src, str dir, bool a64, counts, notes) {
     want2 = wanted(h, "out2");
     k = 0;
     for(line : lines_of(again)) {
-      if((k >= want2.size) || (line != want2[k])) why_state = why_state + (((("    второй запуск, строка " + text(k + 1)) + ": ") + in_quotes(line)) + "\n");
+      if((k >= want2.size) || (line != want2[k])) why_state = why_state + ("    второй запуск, строка " + text(k + 1) + ": " + in_quotes(line) + "\n");
       k += 1;
     }
     if(k < want2.size) why_state = why_state + "    второй запуск: не всё выведено\n";
   }
   state_fresh();
   why = "";
-  for(k : range(h.keys.size)) if(h.keys[k] == "?") why = why + (("    неизвестная директива теста: " + h.values[k]) + "\n");
+  for(k : range(h.keys.size)) if(h.keys[k] == "?") why = why + ("    неизвестная директива теста: " + h.values[k] + "\n");
   // differentially (§10.5): with JIT, output and error locations - like an interpreter
   if(parsed && !has_key(h, "no-jit")) {
     array{out3, err3, stats} = test_run_jit(p, args, input, a64);
@@ -487,12 +487,12 @@ test_program(i64 p, header h, str src, str dir, bool a64, counts, notes) {
       counts[0] = c;
       counts[1] = sk;
       for(n : ns) notes.push(n);
-      for(m : ms) why = why + (("    AArch64: " + m) + "\n");
+      for(m : ms) why = why + ("    AArch64: " + m + "\n");
     }
-    if(out3 != out) why = why + ((((("    JIT: вывод отличается: " + in_quotes(out3)) + " против ") + in_quotes(out)) + "\n") + stats);
-    for(want : wanted(h, "jit-stats")) if(!contains(stats, want)) why = why + ((("    нет в статистике JIT: " + in_quotes(want)) + "\n") + stats);
-    for(fn : wanted(h, "jit-compiled")) if(!contains(stats, ("jit  " + fn) + "(")) why = why + ((("    JIT не скомпилировал " + fn) + ":\n") + stats);
-    if((first_place(err3) != first_place(errors)) && !((errors == "") && (err3 == ""))) why = why + (((("    JIT: ошибка отличается:\n" + err3) + "против\n") + errors));
+    if(out3 != out) why = why + ("    JIT: вывод отличается: " + in_quotes(out3) + " против " + in_quotes(out) + "\n" + stats);
+    for(want : wanted(h, "jit-stats")) if(!contains(stats, want)) why = why + ("    нет в статистике JIT: " + in_quotes(want) + "\n" + stats);
+    for(fn : wanted(h, "jit-compiled")) if(!contains(stats, "jit  " + fn + "(")) why = why + ("    JIT не скомпилировал " + fn + ":\n" + stats);
+    if((first_place(err3) != first_place(errors)) && !((errors == "") && (err3 == ""))) why = why + ("    JIT: ошибка отличается:\n" + err3 + "против\n" + errors);
   }
   if(has_key(h, "check") || (has_key(h, "check-lacks") || has_key(h, "check-error"))) {
     check_errors = "";
@@ -502,27 +502,27 @@ test_program(i64 p, header h, str src, str dir, bool a64, counts, notes) {
       check_errors = ce;
       report = rep;
     }
-    for(want : wanted(h, "check")) if(!contains(report, want)) why = why + ((("    нет в отчёте check: " + in_quotes(want)) + "\n") + report);
-    for(bad : wanted(h, "check-lacks")) if(contains(report, bad)) why = why + ((("    лишнее в отчёте check: " + in_quotes(bad)) + "\n") + report);
-    for(want : wanted(h, "check-error")) if(!contains(check_errors, want)) why = why + ((((("    нет ошибки check: " + in_quotes(want)) + "; есть: ") + check_errors) + "\n"));
+    for(want : wanted(h, "check")) if(!contains(report, want)) why = why + ("    нет в отчёте check: " + in_quotes(want) + "\n" + report);
+    for(bad : wanted(h, "check-lacks")) if(contains(report, bad)) why = why + ("    лишнее в отчёте check: " + in_quotes(bad) + "\n" + report);
+    for(want : wanted(h, "check-error")) if(!contains(check_errors, want)) why = why + ("    нет ошибки check: " + in_quotes(want) + "; есть: " + check_errors + "\n");
     if(!has_key(h, "check-error") && (check_errors != "")) why = why + ("    неожиданная ошибка check:\n" + check_errors);
   }
   if(has_key(h, "residual") && parsed) {
     shown = test_residual(p, words_of(wanted(h, "residual")[0]));
-    for(want : wanted(h, "residual-has")) if(!contains(shown, want)) why = why + ((("    нет в остаточной программе: " + in_quotes(want)) + "\n") + shown);
-    for(bad : wanted(h, "residual-lacks")) if(contains(shown, bad)) why = why + ((("    лишнее в остаточной программе: " + in_quotes(bad)) + "\n") + shown);
+    for(want : wanted(h, "residual-has")) if(!contains(shown, want)) why = why + ("    нет в остаточной программе: " + in_quotes(want) + "\n" + shown);
+    for(bad : wanted(h, "residual-lacks")) if(contains(shown, bad)) why = why + ("    лишнее в остаточной программе: " + in_quotes(bad) + "\n" + shown);
   }
   if(has_key(h, "slice") && parsed) {
     w = words_of(wanted(h, "slice")[0]);
     shown = test_slice(p, if(w.size > 0) w[0] else "", if(w.size > 1) w[1] else "");
-    for(want : wanted(h, "slice-has")) if(!contains(shown, want)) why = why + ((("    нет в срезе: " + in_quotes(want)) + "\n") + shown);
-    for(bad : wanted(h, "slice-lacks")) if(contains(shown, bad)) why = why + ((("    лишнее в срезе: " + in_quotes(bad)) + "\n") + shown);
+    for(want : wanted(h, "slice-has")) if(!contains(shown, want)) why = why + ("    нет в срезе: " + in_quotes(want) + "\n" + shown);
+    for(bad : wanted(h, "slice-lacks")) if(contains(shown, bad)) why = why + ("    лишнее в срезе: " + in_quotes(bad) + "\n" + shown);
   }
   if(has_key(h, "store-roundtrip")) {
     state_fresh();
     array{same, out2} = test_store_roundtrip(p, args, input);
     if(!same) why = why + "    проекция после загрузки базы отличается\n";
-    if(out2 != out) why = why + (((("    вывод из базы отличается: " + in_quotes(out2)) + " против ") + in_quotes(out)) + "\n");
+    if(out2 != out) why = why + ("    вывод из базы отличается: " + in_quotes(out2) + " против " + in_quotes(out) + "\n");
   }
   why = why + why_state;
   state_fresh();
@@ -530,17 +530,16 @@ test_program(i64 p, header h, str src, str dir, bool a64, counts, notes) {
   want_out = wanted(h, "out");
   i = 0;
   for(line : lines_of(out)) {
-    if(i >= want_out.size) why = why + (("    лишний вывод: " + line) + "\n");
-    else if(line != want_out[i]) why = why + (((((("    строка " + text(i + 1)) + ": ожидалось ") + in_quotes(want_out[i])) + ", получено ") + in_quotes(line)) + "\n");
+    if(i >= want_out.size) why = why + ("    лишний вывод: " + line + "\n") else if(line != want_out[i]) why = why + ("    строка " + text(i + 1) + ": ожидалось " + in_quotes(want_out[i]) + ", получено " + in_quotes(line) + "\n");
     i += 1;
   }
   while(i < want_out.size) {
-    why = why + (("    не выведено: " + in_quotes(want_out[i])) + "\n");
+    why = why + ("    не выведено: " + in_quotes(want_out[i]) + "\n");
     i += 1;
   }
-  for(want : wanted(h, "error")) if(!contains(errors, want)) why = why + (("    нет ожидаемой ошибки: " + in_quotes(want)) + "\n");
+  for(want : wanted(h, "error")) if(!contains(errors, want)) why = why + ("    нет ожидаемой ошибки: " + in_quotes(want) + "\n");
   if(!has_key(h, "error") && (errors != "")) why = why + ("    неожиданная ошибка:\n" + errors);
-  for(want : wanted(h, "instances")) if(!contains(instances, want)) why = why + ((((("    нет экземпляра " + in_quotes(want)) + "; есть:\n") + instances)));
+  for(want : wanted(h, "instances")) if(!contains(instances, want)) why = why + ("    нет экземпляра " + in_quotes(want) + "; есть:\n" + instances);
   why
 }
 // Process machine (M5): the same output and the same error as the interpreter; with a dump - dump after N
@@ -550,22 +549,22 @@ machine_diff(i64 p, header h, args, input, str out, str errors) {
   why = "";
   state_fresh();
   array{mout, merr} = test_machine(p, args, input);
-  if(mout != out) why = why + (((("    машина процессов: вывод " + in_quotes(mout)) + " против ") + in_quotes(out)) + "\n");
-  if(error_text(merr) != error_text(errors)) why = why + (((("    машина процессов: ошибка " + in_quotes(error_text(merr))) + " против ") + in_quotes(error_text(errors))) + "\n");
-  for(at : wanted(h, "machine-dump")) { // each directive - its launch with a dump at this step
+  if(mout != out) why = why + ("    машина процессов: вывод " + in_quotes(mout) + " против " + in_quotes(out) + "\n");
+  if(error_text(merr) != error_text(errors)) why = why + ("    машина процессов: ошибка " + in_quotes(error_text(merr)) + " против " + in_quotes(error_text(errors)) + "\n");
+  for(at : wanted(h, "machine-dump")) {
+    // each directive - its launch with a dump at this step
     state_fresh();
     array{dout, early} = test_machine_dump(p, args, input, number_of(at));
-    if(early) why = why + (("    машина: процесс закончился раньше шага дампа " + at) + "\n");
+    if(early) why = why + ("    машина: процесс закончился раньше шага дампа " + at + "\n");
     want = out;
     if(has_key(h, "dump-out")) {
       want = "";
-      for(l : wanted(h, "dump-out")) want = (want + l) + "\n";
+      for(l : wanted(h, "dump-out")) want = want + l + "\n";
     }
-    if(dout != want) why = why + (((((("    дамп на шаге " + at) + ": вывод ") + in_quotes(dout)) + " против ") + in_quotes(want)) + "\n");
+    if(dout != want) why = why + ("    дамп на шаге " + at + ": вывод " + in_quotes(dout) + " против " + in_quotes(want) + "\n");
   }
   why
 }
-
 // A second language on top of a single AST (§4.5): a program printed in projection k - the text that itself
 // tells you how to parse it (use k; at the beginning) - is disassembled into the same tree, and its printing
 // is stable. A tree is likened to a dump.
@@ -574,17 +573,17 @@ test_projection(str path, str key) {
   src = read_text(path);
   dir = path_dir(path);
   array{ok, once} = print_text(src, dir, key, true);
-  if(!ok || (once == "")) return ("    нет модуля проекции " + key) + "\n";
+  if(!ok || (once == "")) return "    нет модуля проекции " + key + "\n";
   array{errors, dump_a} = parse_dump(src, dir, "программа");
   array{errors2, dump_b} = parse_dump(once, dir, "проекция");
-  if((errors == "") && (errors2 != "")) return ("    текст в проекции не разбирается: " + errors2) + once;
+  if((errors == "") && (errors2 != "")) return "    текст в проекции не разбирается: " + errors2 + once;
   twice = print_text(once, dir, key, true)[1];
   if(once != twice) return "    печать в проекции нестабильна:\n" + first_difference(once, twice);
-  use_line = ("  n_use key=" + key) + "\n";
+  use_line = "  n_use key=" + key + "\n";
   b = dump_b;
   at = find_text(b, use_line);
   if((at >= 0) && !contains(dump_a, use_line)) b = slice_text(b, 0, at) + text_from(b, at + use_line.size);
-  if(dump_a != b) return (("    другое дерево после разбора проекции:\n" + first_difference(dump_a, b)) + "    текст:\n") + once;
+  if(dump_a != b) return "    другое дерево после разбора проекции:\n" + first_difference(dump_a, b) + "    текст:\n" + once;
   ""
 }
 // File directory (no slash at the end; no -')
@@ -595,7 +594,6 @@ path_dir(str path) {
 }
 // filename
 path_name(str path) => text_from(path, path_dir(path).size + (if(path_dir(path) == "") 0 else 1));
-
 // Scenarios: VM session (.session) and editor protocol (.wire)`check`, `edit f` … `.`) or a client
 // message in text form (`key 1 End`, `[2] …` - a second client of the same VM); after it - expectations
 // of the conclusion:
@@ -628,8 +626,7 @@ client_message(str line, kinds_all) {
       values = array{};
       for(j : range(fs.size)) if((j + 1) < ws.size) {
         w = ws[j + 1];
-        if(kinds[j] == "string") values.push(replace_all(replace_all(w, "\\s", " "), "\\n", "\n"));
-        else {
+        if(kinds[j] == "string") values.push(replace_all(replace_all(w, "\\s", " "), "\\n", "\n")) else {
           digits = if((kinds[j] == "node") && starts_with(w, "#")) text_from(w, 1) else w;
           if(!all_digits(digits)) return array{false, "", array{}, "протокол: не число: " + w};
           values.push(digits);
@@ -662,11 +659,7 @@ describe_fields(m, i64 at, parts) {
 }
 describe_value(m, i64 j, parts) {
   kind = m[0][j];
-  if(kind == "node") parts.push(if(m[3][j] < 0) "·" else ("#" + text(m[3][j])));
-  else if(kind == "num") parts.push(m[2][j]);
-  else if(kind == "str") parts.push(in_quotes(m[2][j]));
-  else if(kind == "struct") describe_fields(m, j, parts);
-  else if(m[2][j] == "structs") {
+  if(kind == "node") parts.push(if(m[3][j] < 0) "·" else "#" + text(m[3][j])) else if(kind == "num") parts.push(m[2][j]) else if(kind == "str") parts.push(in_quotes(m[2][j])) else if(kind == "struct") describe_fields(m, j, parts) else if(m[2][j] == "structs") {
     e = j + 1;
     for(k : range(m[4][j])) {
       parts.push("\n  ");
@@ -695,7 +688,6 @@ field_at(m, i64 at, str name) {
   }
   r
 }
-
 // Script client - as editor: node (number, view, chunks - text or child), representation (number → root,
 // view), projection representations; text is collected from pieces and checked with projection VM. Table node
 // - structure wtable, one per script, is transmitted by name; growth of fields (tab.ids.push) - by place:
@@ -862,9 +854,7 @@ caret_pieces(i64 c, i64 n, i64 cn, i64 cp, i64 co, path, parts, tab) {
   f = tab.info[slot * 4];
   for(i : range(tab.info[(slot * 4) + 1])) {
     kid = tab.pkid[f + i];
-    if(kid >= 0) caret_pieces(c, kid, cn, cp, co, path, parts, tab);
-    else if((cn == n) && (cp == i)) parts.push(with_caret(tab.ptext[f + i], co));
-    else parts.push(tab.ptext[f + i]);
+    if(kid >= 0) caret_pieces(c, kid, cn, cp, co, path, parts, tab) else if((cn == n) && (cp == i)) parts.push(with_caret(tab.ptext[f + i], co)) else parts.push(tab.ptext[f + i]);
   }
   true
 }
@@ -872,7 +862,7 @@ caret_pieces(i64 c, i64 n, i64 cn, i64 cp, i64 co, path, parts, tab) {
 with_caret(str t, i64 co) {
   points = 0;
   for(k : range(t.size)) if((t[k] & 0xC0) != 0x80) {
-    if(points == co) return (slice_text(t, 0, k) + "‸") + text_from(t, k);
+    if(points == co) return slice_text(t, 0, k) + "‸" + text_from(t, k);
     points += 1;
   }
   if(points == co) t + "‸" else t
@@ -890,12 +880,12 @@ checked_text(i64 h, cl, i64 c, i64 v, tab) {
   t = text_of(c, cl[c].root, -1, -1, -1, tab);
   array{typed, draft} = scn_draft(h, c, v);
   if(typed) {
-    if(t != draft) cl[c].mismatch = (("собрано:\n" + t) + "\nпредставление VM:\n") + draft;
+    if(t != draft) cl[c].mismatch = "собрано:\n" + t + "\nпредставление VM:\n" + draft;
   } else {
     want = scn_print(h, cl[c].root, view_kind_of(cl, c, v) == "module", projection_of(cl, c, v));
-    if(t != want) cl[c].mismatch = (("собрано:\n" + t) + "\nпроекция:\n") + want;
+    if(t != want) cl[c].mismatch = "собрано:\n" + t + "\nпроекция:\n" + want;
   }
-  ("текст:\n" + t) + "\n"
+  "текст:\n" + t + "\n"
 }
 // VM answers to client c in quiet mode: only the node table and views (for @links)
 take_quiet(i64 h, cl, i64 c, tab) {
@@ -932,7 +922,7 @@ collect(i64 h, cl, i64 c, tab) {
       out = out + checked_text(h, cl, c, v, tab);
     } else if(name == "cursor") {
       cl[c].root = view_root_of(cl, c, m[3][field_at(m, 0, "view")]);
-      out = ((out + "курсор: ") + cursor_line(cl, c, m[3][field_at(m, 0, "node")], m[3][field_at(m, 0, "piece")], m[3][field_at(m, 0, "offset")], tab)) + "\n";
+      out = out + "курсор: " + cursor_line(cl, c, m[3][field_at(m, 0, "node")], m[3][field_at(m, 0, "piece")], m[3][field_at(m, 0, "offset")], tab) + "\n";
     }
   }
   out
@@ -948,10 +938,10 @@ without_comments(str t) {
       i = if(nl < 0) t.size else i + nl;
     } else if(starts_with(rest, "/*")) {
       e = find_text(text_from(t, i + 2), "*/");
-      i = if(e < 0) t.size else (i + 2) + (e + 2);
+      i = if(e < 0) t.size else i + 2 + (e + 2);
     } else {
       nl = find_text(rest, "/");
-      take = if(nl < 0) rest.size else (if(nl == 0) 1 else nl);
+      take = if(nl < 0) rest.size else if(nl == 0) 1 else nl;
       r = r + slice_text(t, i, i + take);
       i += take;
     }
@@ -989,8 +979,7 @@ resolve(cl, i64 c, str line, tab) {
   for(w : ws) {
     if(r != "") r = r + " ";
     at = find_text(w, ":@"); // key with the link inside: next:@norm - next: #N
-    if(!starts_with(w, "@") && (at < 0)) r = r + w;
-    else {
+    if(!starts_with(w, "@") && (at < 0)) r = r + w else {
       if(at >= 0) r = r + slice_text(w, 0, at + 1);
       want = text_from(w, if(at >= 0) at + 2 else 1);
       nth = 1;
@@ -1054,13 +1043,15 @@ run_scenario(str path) {
   while(i < lines.size) {
     l = lines[i];
     at = text(i + 1);
+    // like vish vm
     if(starts_with(l, "// program:")) {
       failed = scn_program(h, trim_one(text_from(l, 11)));
       if(failed != "") {
         scn_close(h);
         return failed;
       }
-    } else if(wire && starts_with(l, "save_to ")) { // journal database - to file; reopen - session again from it
+    } else if(wire && starts_with(l, "save_to ")) {
+      // journal database - to file; reopen - session again from it
       scn_save(h, text_from(l, 8));
       last = "";
     } else if(wire && starts_with(l, "reopen ")) {
@@ -1085,62 +1076,61 @@ run_scenario(str path) {
       }
     } else if(wire && starts_with(l, "// grant:")) {
       g = "";
-      for(w : words_of(text_from(l, 9))) g = (g + (if(g == "") "" else ",")) + w;
+      for(w : words_of(text_from(l, 9))) g = g + (if(g == "") "" else ",") + w;
       env_set("VISH_GRANT", g);
-    } else if(wire && (l == "// run: live")) live = true;
-    else if(wire && (l == "// quiet")) quiet = true;
-    else if(wire && (starts_with(l, "// quantum:") && scn_has_server(h))) scn_quantum(h, number_of(trim_lead(text_from(l, 11))));
-    else if(starts_with(l, "// expect:")) {
+    } else if(wire && (l == "// run: live")) live = true else if(wire && (l == "// quiet")) quiet = true else if(wire && (starts_with(l, "// quantum:") && scn_has_server(h))) scn_quantum(h, number_of(trim_lead(text_from(l, 11)))) else if(starts_with(l, "// expect:")) {
       want = lines_joined(text_from(l, 10));
       order = sorted_indices(let_names);
       k = order.size;
-      while(k > 0) { // blk2 - formerly blk
+      while(k > 0) {
+        // blk2 - formerly blk
         k -= 1;
         want = replace_all(want, "$" + let_names[order[k]], let_ids[order[k]]);
       }
-      if(!contains(last, want)) why = why + ((((("    строка " + at) + ": нет ") + in_quotes(want)) + " в выводе:\n") + last);
+      if(!contains(last, want)) why = why + ("    строка " + at + ": нет " + in_quotes(want) + " в выводе:\n" + last);
     } else if(starts_with(l, "// expect-not:")) {
       bad = lines_joined(text_from(l, 14));
-      if(contains(last, bad)) why = why + ((((("    строка " + at) + ": лишнее ") + in_quotes(bad)) + " в выводе:\n") + last);
-    } else if((l == "") || (starts_with(l, "//") || !scn_ready(h))) {
-    } else if(wire && (l == "journal")) { // journal base growth since last time: records and bytes of import text
+      if(contains(last, bad)) why = why + ("    строка " + at + ": лишнее " + in_quotes(bad) + " в выводе:\n" + last);
+    } else if((l == "") || (starts_with(l, "//") || !scn_ready(h))) {} else if(wire && (l == "journal")) {
+      // journal base growth since last time: records and bytes of import text
       array{n, kinds, counts, bytes} = scn_journal(h);
       by = "";
-      for(k : range(kinds.size)) by = (((by + (if(by == "") "" else ", ")) + kinds[k]) + " ") + text(counts[k]);
-      last = (((((("журнал: +" + text(n)) + " записей (") + by) + "), текст импортов +") + text(bytes)) + " байт\n");
-    } else if(wire && (l == "roundtrip")) last = roundtrip_command(scn_session(h)); // like vish vm
-    else if(wire && ((l == "wait") || starts_with(l, "wait "))) { // launch: quanta to end (wait N - N quanta) or to wait for host
+      for(k : range(kinds.size)) by = by + (if(by == "") "" else ", ") + kinds[k] + " " + text(counts[k]);
+      last = "журнал: +" + text(n) + " записей (" + by + "), текст импортов +" + text(bytes) + " байт\n";
+    } else if(wire && (l == "roundtrip")) last = roundtrip_command(scn_session(h)) else if(wire && ((l == "wait") || starts_with(l, "wait "))) {
+      // launch: quanta to end (wait N - N quanta) or to wait for host
       scn_wait(h, if(l == "wait") -1 else number_of(text_from(l, 5)));
       last = collect(h, cl, 0, tab);
-    } else if(wire && (l == "idle")) { // Set pause: check and tags (without hours)
+    } else if(wire && (l == "idle")) {
+      // Set pause: check and tags (without hours)
       scn_idle(h);
       last = collect(h, cl, 0, tab);
       also = collect(h, cl, 1, tab);
-      if(also != "") last = (last + "другому клиенту:\n") + also;
+      if(also != "") last = last + "другому клиенту:\n" + also;
     } else if(wire && quiet) {
       array{ok, kind, values, error} = client_message(resolve(cl, 0, l, tab), kinds_all);
       failed = if(ok) scn_send(h, 0, kind, values) else error;
-      if(failed != "") why = why + (((("    строка " + at) + ": ") + failed) + "\n");
+      if(failed != "") why = why + ("    строка " + at + ": " + failed + "\n");
       take_quiet(h, cl, 0, tab);
       scn_drain(h, 1);
       last = "";
     } else if(wire) {
       who = if(starts_with(l, "[2] ")) 1 else 0;
       array{ok, got} = exchange(h, cl, who, if(who == 1) text_from(l, 4) else l, kinds_all, tab);
-      if(!ok) why = why + (((("    строка " + at) + ": ") + got) + "\n");
-      else {
+      if(!ok) why = why + ("    строка " + at + ": " + got + "\n") else {
         last = got;
-        if(!live && scn_running(h)) { // launch - to the end (quantas), unless the script requested otherwise
+        if(!live && scn_running(h)) {
+          // launch - to the end (quantas), unless the script requested otherwise
           scn_finish(h);
           last = last + collect(h, cl, who, tab);
         }
         other = 1 - who; // Answers sent to another client (one state for all)
         if(scn_sent(h, other) > 0) {
           also = collect(h, cl, other, tab);
-          if(also != "") last = (last + "другому клиенту:\n") + also;
+          if(also != "") last = last + "другому клиенту:\n" + also;
         }
         for(c : range(2)) if(cl[c].mismatch != "") {
-          why = why + (((("    строка " + at) + ": текст представления расходится с проекцией:\n") + cl[c].mismatch));
+          why = why + ("    строка " + at + ": текст представления расходится с проекцией:\n" + cl[c].mismatch);
           cl[c].mismatch = "";
         }
       }
@@ -1149,7 +1139,7 @@ run_scenario(str path) {
       if(starts_with(l, "edit ")) {
         i += 1;
         while((i < lines.size) && (lines[i] != ".")) {
-          body = (body + lines[i]) + "\n";
+          body = body + lines[i] + "\n";
           i += 1;
         }
       }
@@ -1162,13 +1152,13 @@ run_scenario(str path) {
 }
 // one-space-free
 trim_one(str s) => if(starts_with(s, " ")) text_from(s, 1) else s;
-
 // Test result: Causes ("passed") and AArch64 of this test (--a64): Verified, unverified, notes.
 struct test_result { str why; i64 checked; i64 skipped; array notes; }
 // One test: projection (-projection k) - program reversibility only; script; program.
 test_one(str path, bool a64, str projection) {
   if(projection != "") return test_result{test_projection(path, projection), 0, 0, array{}};
-  if(ends_with(path, ".session") || ends_with(path, ".wire")) { // state and storage in the temporary catalog
+  if(ends_with(path, ".session") || ends_with(path, ".wire")) {
+    // state and storage in the temporary catalog
     state_fresh();
     why = run_scenario(path);
     state_clear();
@@ -1179,8 +1169,8 @@ test_one(str path, bool a64, str projection) {
 // The result of the child's test (fork) to the parent - lines: "checked unverified notes", notes, reasons.
 test_packed(str path, bool a64, str projection) {
   r = test_one(path, a64, projection);
-  t = ((((text(r.checked) + " ") + text(r.skipped)) + " ") + text(r.notes.size)) + "\n";
-  for(n : r.notes) t = (t + n) + "\n";
+  t = text(r.checked) + " " + text(r.skipped) + " " + text(r.notes.size) + "\n";
+  for(n : r.notes) t = t + n + "\n";
   t + r.why
 }
 // vish test <catalogue> [-a64 |-projection k]: run; code 0 - all passed. Simultaneous tests -
@@ -1201,9 +1191,7 @@ run_tests(str dir, bool a64, str projection) {
     why = "";
     if(jobs > 1) {
       array{got, code, whole} = tests_next();
-      if(code != 0) why = ("    тест не закончился: " + (if(code < 0) ("сигнал " + text(0 - code)) else ("код " + text(code)))) + "\n";
-      else if(!whole) why = got;
-      else {
+      if(code != 0) why = "    тест не закончился: " + (if(code < 0) "сигнал " + text(0 - code) else "код " + text(code)) + "\n" else if(!whole) why = got else {
         // Child's AArch64 counters: "unchecked notes", notes, reasons
         nl = find_text(got, "\n");
         ws = words_of(slice_text(got, 0, nl));
@@ -1227,16 +1215,15 @@ run_tests(str dir, bool a64, str projection) {
     }
     if(why == "") {
       passed += 1;
-      write_out(("  ok   " + path_name(f)) + "\n");
-    } else write_out(((("  FAIL " + path_name(f)) + "\n") + why) + "\n");
+      write_out("  ok   " + path_name(f) + "\n");
+    } else write_out("  FAIL " + path_name(f) + "\n" + why + "\n");
   }
   if(a64) {
-    write_out(((("AArch64: проверено вызовов " + text(checked)) + ", не проверено ") + text(skipped)) + "\n");
-    for(k : sorted_indices(notes)) write_out(("  не проверено  " + notes[k]) + "\n");
+    write_out("AArch64: проверено вызовов " + text(checked) + ", не проверено " + text(skipped) + "\n");
+    for(k : sorted_indices(notes)) write_out("  не проверено  " + notes[k] + "\n");
   }
-  write_out((((text(passed) + "/") + text(files.size)) + " тестов прошло\n"));
+  write_out(text(passed) + "/" + text(files.size) + " тестов прошло\n");
   if(passed == files.size) 0 else 1
 }
-
 // entry point for cli: directory, "--a64" or "--projection key"
 test_command(args) => run_tests(args[0], (args.size > 1) && (args[1] == "--a64"), if((args.size > 2) && (args[1] == "--projection")) args[2] else "");

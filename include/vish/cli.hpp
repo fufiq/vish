@@ -8,6 +8,7 @@
 //
 #pragma once
 
+#include <csignal>
 #include "interp.hpp"
 #include "jit/jit.hpp"
 #include "machine.hpp"
@@ -204,6 +205,10 @@ struct cli_host {
   [[noreturn]] void serve(int64_t h, std::string const & socket) {
     vm_session & s = session(h);
     editor_server server(s);
+    if(fn_profile::on()) { // function profile is printed at output: SIGTERM/SIGINT server - normal output (VISH_PROFILE diagnostics)
+      ::signal(SIGTERM, [](int) { std::exit(0); });
+      ::signal(SIGINT, [](int) { std::exit(0); });
+    }
     char const * off = std::getenv("VISH_NO_AUTOSAVE"); // Editor's tests with programs from the repository database do not write
     server.autosave = !(off && *off);
     server.saved_edits = s.db.edits;

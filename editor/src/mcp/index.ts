@@ -167,6 +167,36 @@ const tools: Tool[] = [
     },
   },
   {
+    name: 'vish_open_module',
+    description:
+      'Открыть вид другого модуля базы по ключу (подключённый use модуль или модуль репозитория, например src.versions) — корень нового представления; правки в нём ложатся в этот модуль.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['key'],
+      properties: { key: { type: 'string', description: 'ключ модуля, как в use' } },
+    },
+    async run(input) {
+      send({ type: 'c_open_module', key: str(input.key) });
+      return `вид модуля ${str(input.key)} запрошен`;
+    },
+  },
+  {
+    name: 'vish_task',
+    description:
+      'Задача проекта: внешняя команда из [[editor]] task_<имя>(code) программы vish (например, check — сборка и тесты). Запуск без блокировки VM; вывод — в панель запуска редактора, здесь — только запуск.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name'],
+      properties: { name: { type: 'string', description: 'имя задачи: task_<имя>' } },
+    },
+    async run(input) {
+      send({ type: 'c_task', name: str(input.name) });
+      return `задача ${str(input.name)} запущена`;
+    },
+  },
+  {
     name: 'vish_extensions',
     description:
       'Точки расширения редактора в программе vish и её плагинах (модули с [[editor]]-функциями, подключённые use): модуль, имя, сигнатура, вид; «перекрыта» — одноимённую ближе объявлена другая.',
