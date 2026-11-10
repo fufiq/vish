@@ -24,8 +24,12 @@ echo "$out" | grep -q "не сдвинуты.*b/main" || { echo "ветка со
 cp a.vishrepo c.vishrepo                      # журналы расходятся: каждый дописал своё
 $b repo module a.vishrepo left 'l() => 1;' > /dev/null
 $b repo module c.vishrepo right 'r() => 2;' > /dev/null
-if $b repo pull a.vishrepo c.vishrepo 2> err.txt; then echo "расхождение принято"; exit 1; fi
-grep -q "журналы разошлись" err.txt || { echo "нет отказа"; cat err.txt; exit 1; }
+$b repo snapshot a.vishrepo 'A-сн' > /dev/null
+$b repo snapshot c.vishrepo 'C-сн' > /dev/null
+out=$($b repo pull a.vishrepo c.vishrepo)     # журналы разошлись — слияние по модулям: чужой модуль приходит
+echo "$out" | grep -q "новый модуль right" || { echo "слияние: $out"; exit 1; }
+$b repo info a.vishrepo | grep -q "module 0 right" || { echo "нет модуля right"; exit 1; }
+$b repo info a.vishrepo | grep -q "Слияние: " || { echo "нет снимка слияния"; exit 1; }
 $b repo push a.vishrepo b.vishrepo > /dev/null  # отдать: b — префикс a
 $b repo info b.vishrepo | grep -q "branch 0 a/main" || { echo "push не дал ветку a/main"; exit 1; }
 echo ok

@@ -646,6 +646,83 @@ repository_verify_cli(args) {
   try { repo_verify(number_of(args[0])); 0 }
   catch(e) { fail(text(e)) }
 }
+// Merging someone else's repository, journal of which diverged (vish repo pull, 2026-11-10; *my*): their head is version o, my live
+// program is version 0, the common base is the common prefix journal (version_base). Module with the same node and name in both
+// copies merges into elements like merge_versions (changed only from them is taken by itself, both have different conflict, my
+// variant remains); the module only for them is created from the texts of their elements; the same name, created independently in
+// both, is a conflict. Removal of the module is not carried over (no database directory). The result is a picture of "Merge..."
+repo_module_text(items) {
+  r = "";
+  for(x : items) {
+    for(k : range(x.blank)) r = r + "\n";
+    for(l : x.lead) r = (r + l) + "\n";
+    r = (r + x.text) + "\n";
+    if(x.tail != "") r = (r + x.tail) + "\n";
+  }
+  r
+}
+merge_foreign(i64 s, i64 o) {
+  // host version 0 has one for all sessions (repo_op of any session switches it): everything about their repository - up to the live mine
+  repo_verify(o);
+  head = repo_head(o);
+  tv = repo_version(o, head);
+  tm = repo_native_modules(o, head);
+  their_branch = repo_branch(o);
+  repo_verify(s);
+  if(repo_dirty(s)) throw "сначала создайте снимок своих изменений";
+  repo_direct(s, "live", "", "", 0, 0);
+  bv = version_base(0, tv);
+  am = repo_native_modules(s, 0);
+  taken = array{};
+  added = array{};
+  conflicts = "";
+  for(t : tm) {
+    same = repo_mod_of(am, t.node);
+    clash = false; // the same name, but the modules are different (created independently: the node number may coincide - journal diverged)
+    for(q : am) if((q.name == t.name) && (q.node != t.node)) clash = true;
+    if(clash) conflicts = conflicts + (("конфликт: модуль " + t.name) + " создан в обеих копиях\n");
+    else if((same.node >= 0) && (same.name == t.name)) {
+      base_items = array{};
+      for(x : version_items(bv, t.node)) base_items.push(x[0]);
+      b = module_items(bv, t.node, base_items);
+      m = module_items(0, t.node, base_items);
+      th = module_items(tv, t.node, base_items);
+      ids = array{};
+      for(xs : array{b, m, th}) for(x : xs) if(!has_text(ids, x.id)) ids.push(x.id);
+      for(id : ids) {
+        bi = find_item(b, id);
+        mi = find_item(m, id);
+        ti = find_item(th, id);
+        if(!same_state(mi, ti) && !same_state(ti, bi)) {
+          label = (t.name + "::") + (if(mi.present) mi.key else if(ti.present) ti.key else bi.key);
+          if(same_state(mi, bi)) {
+            take_theirs(0, t.node, base_items, id, ti);
+            taken.push(label);
+          } else conflicts = conflicts + (("конфликт: " + label) + " — оставлен мой вариант\n");
+        }
+      }
+    } else {
+      repo_op(s, "module", t.name, repo_module_text(module_items(tv, t.node, array{})), 0, 0);
+      added.push(t.name);
+    }
+  }
+  version_close(tv);
+  version_close(bv);
+  if((taken.size == 0) && (added.size == 0)) return array{true, "у них нечего взять", conflicts};
+  repo_capture(s, "Слияние: " + their_branch + " → " + repo_branch(s), 0);
+  said = "слияние сохранено: взято элементов " + text(taken.size);
+  for(k : taken) said = (said + "\n  ") + k;
+  for(k : added) said = ((said + "\n  новый модуль ") + k);
+  array{true, said, conflicts}
+}
+repository_merge_cli(args) {
+  try {
+    r = merge_foreign(number_of(args[0]), number_of(args[1]));
+    write_out(r[1] + "\n");
+    write_out(r[2]);
+    if(r[2] == "") 0 else 1
+  } catch(e) { fail(text(e)) }
+}
 // Sharing between repositories: the receiver file receives journal and source images (C++ - repository_pull)
 repo_pull(str to, str from, str name) => native "cpp" {
   if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
@@ -669,6 +746,10 @@ repository_exchange_cli(args) {
   other = args[2];
   r = if(action == "pull") repo_pull(mine, other, if(args[3] != "") args[3] else repo_source_name(other))
       else repo_pull(other, mine, if(args[3] != "") args[3] else repo_source_name(mine));
+  if((action == "pull") && starts_with(r, "ошибка: журналы разошлись")) {
+    write_out((text_from(r, "ошибка: ".size) + "\n") + "слияние по модулям…\n");
+    return 3;
+  }
   if(starts_with(r, "ошибка: ")) return fail(text_from(r, "ошибка: ".size));
   write_out(r + "\n");
   0

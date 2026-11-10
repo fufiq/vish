@@ -402,6 +402,91 @@ describe('живая VM', () => {
     }
   });
 
+  it('обмен репозиториями: разошедшиеся журналы сливаются по элементам модулей, конфликт — мой вариант', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const prog = join(dir, 'p.vish');
+    copyFileSync(program, prog);
+    const repo = (name: string) => join(dir, `${name}.vishrepo`);
+    const cli = (...args: string[]) =>
+      execFileSync(vish, args, { encoding: 'utf8', stdio: 'pipe' });
+    cli('repo', 'init', prog, repo('a'));
+    copyFileSync(repo('a'), repo('b'));
+    copyFileSync(repo('a'), repo('c'));
+    copyFileSync(repo('a'), repo('d'));
+    // edit main in the live repository editor: input at the end of the first line, Escape - accept; pause - file saved
+    const edit = async (path: string, typed: string[]) => {
+      const sock = join(dir, `s-${String(Math.random()).slice(2)}`);
+      const vm = spawn(vish, ['serve', path, sock], { stdio: 'ignore' });
+      try {
+        for (let i = 0; i < 250 && !existsSync(sock); ++i)
+          await new Promise((r) => setTimeout(r, 20));
+        const got: ServerMsg[] = [];
+        const split = new FrameSplitter();
+        const c = connect(sock);
+        await new Promise<void>((ok, fail) => {
+          c.on('connect', ok).on('error', fail);
+        });
+        c.on('data', (d: Buffer) => {
+          split.push(new Uint8Array(d), (b) => {
+            got.push(decodeServer(b));
+          });
+        });
+        c.write(encodeClient({ type: 'c_hello', version: schema.version }));
+        c.write(encodeClient({ type: 'c_open_view', kind: 'module' }));
+        for (let i = 0; i < 500 && got.length < 4; ++i)
+          await new Promise((r) => setTimeout(r, 10));
+        const view = got.at(1);
+        if (view?.type !== 's_view') throw new Error('нет представления');
+        const fn = view.nodes.find((n) => n.kind === 'n_fn');
+        if (!fn) throw new Error('нет функции');
+        const before = readFileSync(path).length;
+        c.write(
+          encodeClient({
+            type: 'c_pointer',
+            view: 1,
+            node: fn.id,
+            piece: 0,
+            offset: 0,
+          }),
+        );
+        for (const key of ['End', ...typed, 'Escape'])
+          c.write(encodeClient({ type: 'c_key', view: 1, key, mods: 0 }));
+        for (let i = 0; i < 600 && readFileSync(path).length === before; ++i)
+          await new Promise((r) => setTimeout(r, 10));
+        c.end();
+      } finally {
+        vm.kill();
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    await edit(repo('b'), ['y', '=', '2', ';']); // b rules main
+    cli('repo', 'snapshot', repo('b'), 'B');
+    await edit(repo('a'), ['z', '=', '3', ';']); // (a) Rules main differently - later
+    cli('repo', 'snapshot', repo('a'), 'A');
+    cli('repo', 'module', repo('c'), 'extra', 'g() => 1;'); // c. new module only
+    cli('repo', 'snapshot', repo('c'), 'C');
+    // d ← b: d completed its module, main rules only b - editing is taken by itself
+    cli('repo', 'module', repo('d'), 'mine', 'm() => 1;');
+    cli('repo', 'snapshot', repo('d'), 'D');
+    expect(cli('repo', 'pull', repo('d'), repo('b'))).toContain(
+      'взято элементов 1',
+    );
+    expect(cli('repo', 'diff', repo('d'), '1')).toContain('y = 2;');
+    // a ← c: main did not change y c, someone else's module comes; main y a remains its own
+    const merged = cli('repo', 'pull', repo('a'), repo('c'));
+    expect(merged).toContain('новый модуль extra');
+    expect(cli('repo', 'info', repo('a'))).toContain('module 0 extra');
+    // conflict: b and a ruled main differently - my version, code 1, message
+    let conflict = '';
+    try {
+      cli('repo', 'pull', repo('a'), repo('b'));
+    } catch (e) {
+      conflict = (e as { stdout?: string }).stdout ?? '';
+    }
+    expect(conflict).toContain('конфликт:');
+    expect(conflict).toContain('оставлен мой вариант');
+  });
+
   it('версии: трёхстороннее слияние копий базы — CLI и редактор', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vish-'));
     const prog = join(dir, 'p.vish');

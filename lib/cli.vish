@@ -186,7 +186,13 @@ cli(args) {
   if(cmd == "repo") {
     if(args.size < 3) return usage();
     action = args[1];
-    if(((action == "pull") || (action == "push")) && (args.size > 3) && (ends_with(args[2], ".vishrepo") && ends_with(args[3], ".vishrepo"))) return run_module("versions", "repository_exchange_cli", array{action, args[2], args[3], if(args.size > 4) args[4] else ""});
+    if(((action == "pull") || (action == "push")) && (args.size > 3) && (ends_with(args[2], ".vishrepo") && ends_with(args[3], ".vishrepo"))) {
+      code = run_module("versions", "repository_exchange_cli", array{action, args[2], args[3], if(args.size > 4) args[4] else ""});
+      if(code != 3) return code;
+      p = prog_open(args[2]); // journal diverged - merging by modules (my; versions.vish merge_foreign)
+      q = prog_open(args[3]);
+      return run_module("versions", "repository_merge_cli", array{text(prog_session(p)), text(prog_session(q))});
+    }
     if((action != "new") && (action != "init") && !ends_with(args[2], ".vishrepo")) return fail("ожидается путь .vishrepo");
     p = if(action == "new") prog_empty() else prog_open(args[2]);
     key = if(args.size > 3) args[3] else "";
