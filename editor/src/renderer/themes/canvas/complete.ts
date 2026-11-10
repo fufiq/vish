@@ -22,6 +22,7 @@ const roles: Record<string, string> = {
   параметр: 'param',
   тип: 'type',
   модуль: 'module',
+  плагин: 'fn',
 };
 
 export function complete(el: HTMLElement, m: Complete): void {

@@ -1,2 +1,4 @@
 // The editor plugin is a regular module: its trio call card scheme is connected via use.
 [[editor]] visual_trio(c) => array{"trio", "", "первый", "a", "второй", "b", "третий", "c"};
+// Source of addition: names at the place of the set (name, explanation in pairs)
+[[editor]] complete_trio_helpers(c) => array{"trio_helper", "из плагина geo.card_plugin"};

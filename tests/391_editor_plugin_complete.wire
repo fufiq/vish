@@ -1,0 +1,15 @@
+// Add-on source from plugin (2026-11-10): [[editor]] complete <name> of the connected use module gives names to
+// the dial location, along with context names.
+//.
+// program: editor_plugin.vish
+open_view module
+pointer 1 @print 0 0
+key 1 End
+key 1 Enter
+key 1 t
+key 1 r
+key 1 i
+key 1 o
+key 1 _
+// expect: complete view=1
+// expect: name="trio_helper" kind="плагин" detail="из плагина geo.card_plugin"

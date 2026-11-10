@@ -3247,6 +3247,22 @@ filtered(near, bool far, str word) {
   for(p : blocked) outer_blocked[p] = false;
   found
 }
+// Sources of additions from plugins: functions with [[editor]] complete <name>(code place) - rows in pairs: name,
+// explanation; names go as the nearest (with the rest of the place names), the view is "plugin". *My agreement is complete
+// <name>, couples.
+plugin_names(at) {
+  r = array{};
+  seen = array{};
+  for(p : extension_points()) {
+    n = code_name(p[1]);
+    if(starts_with(n, "complete_") && !has_text(seen, n)) {
+      seen.push(n);
+      xs = editor_extension(n, at);
+      for(k : range(xs.size / 2)) r.push(completion{xs[2 * k], "плагин", xs[(2 * k) + 1], 0});
+    }
+  }
+  r
+}
 // Live addition to the word in front of the cursor; forced (Ctrl + Space) - and without a word.
 complete(i64 v, bool forced) {
   c = cursor(v);
@@ -3271,6 +3287,7 @@ complete(i64 v, bool forced) {
     types = if(dot && !given(pm)) object_types(v, b - 1) else array{};
     if(dot && (!given(pm) && (types.size == 0))) return close_completion(v);
     if(given(pm)) entities(near, pm, 0) else near = if(dot) member_names(types) else context_names(at);
+    if(!dot) for(x : plugin_names(at)) near.push(x);
     near_items = near;
     near_v = v;
     near_b = b;
