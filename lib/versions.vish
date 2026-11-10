@@ -620,16 +620,17 @@ repo_verify(i64 s) {
   repo_direct(s, "live", "", "", 0, 0);
   root = version_root(0);
   repo_check_catalog(repo_native_modules(s, 0), root);
-  ids = array{0}; names = array{};
-  last = 0; end = 0; next = 0; active = "";
+  ids = array{0}; names = array{}; ends = array{0};
+  last = 0; next = 0; active = "";
   for(x : info[3]) {
     if(x[0] == "current") { next = x[1]; active = x[4]; }
     if(x[0] == "snapshot") {
       if((x[1] != (last + 1)) || ((x[1] > 4096) || ((x[4].size == 0) || (x[4].size > 512)))) throw "повреждена история снимков";
       if(!has_number(ids, x[2]) || !has_number(ids, x[6])) throw "повреждены родители снимка";
       pos = parse_int(x[5]);
-      if(!pos.ok || ((pos.value == 0) || (pos.value < end))) throw "повреждена граница снимка";
-      end = pos.value; last = x[1]; ids.push(last);
+      // the border is not less than the boundaries of the parents (the pictures received from another copy are not in the order of the boundaries);
+      if(!pos.ok || ((pos.value == 0) || ((pos.value < ends[x[2]]) || (pos.value < ends[x[6]])))) throw "повреждена граница снимка";
+      ends.push(pos.value); last = x[1]; ids.push(last);
       repo_check_catalog(repo_native_modules(s, last), root);
     }
   }
@@ -644,6 +645,33 @@ repo_verify(i64 s) {
 repository_verify_cli(args) {
   try { repo_verify(number_of(args[0])); 0 }
   catch(e) { fail(text(e)) }
+}
+// Sharing between repositories: the receiver file receives journal and source images (C++ - repository_pull)
+repo_pull(str to, str from, str name) => native "cpp" {
+  if(!(a[0]).known() || !(a[1]).known() || !(a[2]).known()) return erase(value(std::string()));
+  try {
+    return value(std::string(repository_pull(std::string((a[0]).as<str_v>().view()), std::string((a[1]).as<str_v>().view()), std::string((a[2]).as<str_v>().view()))));
+  } catch(diagnostic const & d) {
+    return value(cat("ошибка: ", d.what()));
+  }
+};
+// Source name along the way: file without directory and ".vishrepo"
+repo_source_name(str path) {
+  k = path.size;
+  while((k > 0) && (path[k - 1] != '/')) k -= 1;
+  n = text_from(path, k);
+  if(ends_with(n, ".vishrepo")) text_range(n, 0, n.size - ".vishrepo".size) else n
+}
+// vish repo pull|push <my.vishrepo> <other.vishrepo> [name]: pull from another, push from another
+repository_exchange_cli(args) {
+  action = args[0];
+  mine = args[1];
+  other = args[2];
+  r = if(action == "pull") repo_pull(mine, other, if(args[3] != "") args[3] else repo_source_name(other))
+      else repo_pull(other, mine, if(args[3] != "") args[3] else repo_source_name(mine));
+  if(starts_with(r, "ошибка: ")) return fail(text_from(r, "ошибка: ".size));
+  write_out(r + "\n");
+  0
 }
 repository_cli(args) {
   s = number_of(args[0]);

@@ -231,4 +231,77 @@ repository_file repository_load(std::string const & path) {
   return f;
 }
 
+// Exchange between independent repositories (2026-11-10, author's decision: import with renaming, fast-forward only).
+// journal is a single growing, operations are recorded sequentially from copies that have diverged from a common ancestor,
+// the common prefix journal . pull in `to` takes from `from`: the tail of journal (if journal `to` is the prefix journal
+// `from` ) and pictures - with new local numbers (the same content - the same), the branches of `from` - as a name /
+// branch. journal diverged - rejection with numbers. Photo numbers are local, so links are by content: border, name,
+// modules, parents after transfer. My transfer rules.
+//
+std::string repository_pull(std::string const & to_path, std::string const & from_path, std::string const & name) {
+  if(name.empty() || name.size() > 100 || name.find('/') != std::string::npos) throw diagnostic("имя источника: непусто, без «/», до 100 байт", {});
+  auto a = repository_load(to_path);
+  auto const b = repository_load(from_path);
+  auto bytes = [](journal_entry const & e) {
+    writer w;
+    w.put(e);
+    return w.bytes;
+  };
+  std::size_t shared = 0;
+  while(shared < a.journal.size() && shared < b.journal.size() && bytes(a.journal[shared]) == bytes(b.journal[shared])) ++shared;
+  if(shared < a.journal.size() && shared < b.journal.size())
+    throw diagnostic(cat("журналы разошлись: общее начало ", shared, " операций (у вас ", a.journal.size(), ", у них ", b.journal.size(), ") — слейте копии через vish merge"), {});
+  std::size_t appended = b.journal.size() - shared;
+  for(std::size_t i = shared; i < b.journal.size(); ++i) a.journal.push_back(b.journal[i]);
+  std::map<uint32_t, uint32_t> renamed{{0, 0}};
+  std::size_t added = 0;
+  for(auto const & s: b.state.snapshots) {
+    repository_snapshot x = s;
+    x.parents.clear();
+    for(uint32_t p: s.parents) x.parents.push_back(renamed.at(p));
+    auto same = [&](repository_snapshot const & y) {
+      if(y.end != x.end || y.name != x.name || y.parents != x.parents || y.modules.size() != x.modules.size()) return false;
+      for(std::size_t i = 0; i < y.modules.size(); ++i)
+        if(y.modules[i].node.value != x.modules[i].node.value || y.modules[i].name != x.modules[i].name) return false;
+      return true;
+    };
+    auto found = std::ranges::find_if(a.state.snapshots, same);
+    if(found != a.state.snapshots.end()) renamed[s.id] = found->id;
+    else {
+      x.id = a.state.next_id++;
+      renamed[s.id] = x.id;
+      a.state.snapshots.push_back(std::move(x));
+      ++added;
+    }
+  }
+  // ancestor of snapshot `old` image `head` (by parents, including the photo itself)
+  auto ancestor = [&](uint32_t old, uint32_t head) {
+    std::vector<uint32_t> todo{head};
+    std::set<uint32_t> seen;
+    while(!todo.empty()) {
+      uint32_t id = todo.back();
+      todo.pop_back();
+      if(id == old) return true;
+      if(!id || !seen.insert(id).second) continue;
+      for(auto const & s: a.state.snapshots)
+        if(s.id == id) todo.insert(todo.end(), s.parents.begin(), s.parents.end());
+    }
+    return false;
+  };
+  std::string kept;
+  for(auto const & br: b.state.branches) {
+    std::string tracked = cat(name, "/", br.name);
+    uint32_t head = renamed.at(br.head);
+    auto found = std::ranges::find(a.state.branches, tracked, &repository_branch::name);
+    if(found == a.state.branches.end()) a.state.branches.push_back({tracked, head});
+    else if(ancestor(found->head, head)) found->head = head; // forward
+    else if(!ancestor(head, found->head)) kept += cat(" ", tracked); // On the branch of our pictures - do not move
+  }
+  ++a.state.generation;
+  ast_db db;
+  repository_replay(db, a.journal);
+  repository_save(a.state, db, a.root);
+  return cat("получено: операций журнала ", appended, ", снимков ", added, ", веток ", b.state.branches.size(), " (имена ", name, "/…)", kept.empty() ? std::string() : cat("; не сдвинуты (на них свои снимки):", kept));
+}
+
 } // namespace vish

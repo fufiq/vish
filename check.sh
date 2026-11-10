@@ -64,6 +64,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # Built-in modules of the base - from the assembly: a copy of another build is replaced, the same - remains (a separate executable file)
     ( $CXX -std=c++26 -freflection -fcontracts -O0 -Iinclude -Iout tests/builtin_modules.cpp -o $L/builtin_modules -luring && $L/builtin_modules ) > $L/t_builtin.log 2>&1
     echo "builtin: код $?" > $L/r_builtin
+    # exchange between repositories: pull/push, repeat, your pictures on the branch, discrepancy journal
+    ( sh tests/exchange.sh $PWD/$b $L/exchange ) > $L/t_exchange.log 2>&1
+    echo "exchange: код $?" > $L/r_exchange
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore
