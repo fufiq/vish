@@ -14,6 +14,7 @@ import {
   encodeClient,
   schema,
   type ClientMsg,
+  type Extensions,
   type Items,
   type Output,
   type ServerMsg,
@@ -163,6 +164,25 @@ const tools: Tool[] = [
         .filter((x) => str(input.key) === '' || x.key === input.key)
         .map((x) => `${x.key}${x.inner ? ' (внутренний)' : ''}\n${x.text}`)
         .join('\n\n');
+    },
+  },
+  {
+    name: 'vish_extensions',
+    description:
+      'Точки расширения редактора в программе vish и её плагинах (модули с [[editor]]-функциями, подключённые use): модуль, имя, сигнатура, вид; «перекрыта» — одноимённую ближе объявлена другая.',
+    inputSchema: { type: 'object', additionalProperties: false },
+    async run() {
+      const got = await_((m) => (m.type === 's_extensions' ? m : undefined));
+      send({ type: 'c_extensions' });
+      const r: Extensions = await got;
+      return r.points.length === 0
+        ? 'расширений нет'
+        : r.points
+            .map(
+              (x) =>
+                `${x.module === '' ? 'программа' : x.module}: ${x.sig} — ${x.kind}${x.shadowed ? ' (перекрыта)' : ''}`,
+            )
+            .join('\n');
     },
   },
   {

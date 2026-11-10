@@ -527,6 +527,7 @@ function receive(m: ServerMsg): void {
       panels.proposals(proposalsPanel, m.proposals, host);
       return;
     case 's_items':
+    case 's_extensions':
       return;
     case 's_merge': {
       conflicts = m.conflicts.length;

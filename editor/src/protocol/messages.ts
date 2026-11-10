@@ -138,6 +138,9 @@ export interface NameAsk {
 export interface ItemsAsk {
   type: 'c_items';
 }
+export interface ExtensionsAsk {
+  type: 'c_extensions';
+}
 export interface ProposeAsk {
   type: 'c_propose';
   key: string;
@@ -217,6 +220,7 @@ export type ClientMsg =
   | TraceStepAsk
   | NameAsk
   | ItemsAsk
+  | ExtensionsAsk
   | ProposeAsk
   | DecideAsk
   | ContextAsk
@@ -510,6 +514,7 @@ export type ServerMsg =
   | Stops
   | Peers
   | Items
+  | Extensions
   | Proposals
   | AgentResult
   | RepositoryResult;
@@ -517,6 +522,19 @@ export type ServerMsg =
 export interface Items {
   type: 's_items';
   items: { type: 's_element'; key: string; text: string; inner: boolean }[];
+}
+// Editor expansion points connected to the program (plugins - modules in the language): module
+// (empty - the program itself), name, signature, view (decision | visual | other), whether blocked.
+export interface Extensions {
+  type: 's_extensions';
+  points: {
+    type: 's_ext';
+    module: string;
+    name: string;
+    sig: string;
+    kind: string;
+    shadowed: boolean;
+  }[];
 }
 // Proposals for edits (AI): current text proposed, why, from whom; the difference is place.
 export interface Proposal {

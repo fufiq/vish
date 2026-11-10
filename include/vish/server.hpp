@@ -98,6 +98,23 @@ struct editor_server {
     }
     return {};
   }
+  // all [[editor]] functions of the program and its plugins in search order (module, function)
+  std::vector<std::pair<node_id, node_id>> program_points() const {
+    auto const & db = session.db;
+    std::vector<std::pair<node_id, node_id>> out;
+    std::vector<node_id> todo{session.root};
+    std::set<uint32_t> seen;
+    for(size_t i = 0; i < todo.size(); ++i) {
+      node_id m = todo[i];
+      if(!m || !db.is<n_module>(m) || !seen.insert(m.value).second) continue;
+      for(node_id x: db.as<n_module>(m).items) {
+        if(db.is<n_fn>(x) && marked_editor(db, x)) out.push_back({m, x});
+        if(db.is<n_use>(x))
+          if(node_id u = find_module(db, db.as<n_use>(x).key)) todo.push_back(u);
+      }
+    }
+    return out;
+  }
   // name solution function: its own in projection view (its module knows the language), in the program,
   // otherwise the editor module
   node_id editor_fn(int64_t view, std::string_view name) {
@@ -409,6 +426,7 @@ struct editor_server {
   void handle(peer & p, proto::c_trace_step const & m) { decide(&p, -1, "on_trace_step", {value(int64_t(m.step))}); }
   void handle(peer & p, proto::c_name const & m) { decide(&p, -1, "on_name", {value(m.name)}); }
   void handle(peer & p, proto::c_items const &) { decide(&p, -1, "on_items", {}); }
+  void handle(peer & p, proto::c_extensions const &) { decide(&p, -1, "on_extensions", {}); }
   void handle(peer & p, proto::c_propose const & m) { decide(&p, -1, "on_propose", {value(m.key), value(m.text), value(m.why)}); }
   void handle(peer & p, proto::c_decide const & m) { decide(&p, -1, "on_decide", {value(int64_t(m.id)), value(m.accept)}); }
   void handle(peer & p, proto::c_context const & m) { decide(&p, m.view, "on_context", {value(int64_t(m.request)), value(int64_t(m.view)), value(int64_t(m.node.value)), value(int64_t(m.revision))}); }

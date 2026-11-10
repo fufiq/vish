@@ -6,3 +6,7 @@ hover 1 @trio:2
 // expect: kind="схема" text="trio"
 // expect: kind="схема первый" text="a"
 // expect: kind="схема третий" text="c"
+// list of points: own on the program - and the plugin (module geo. card_plugin); no overlapping
+extensions
+// expect: extensions points=
+// expect: module="geo.card_plugin" name="visual_trio" sig="[[editor]] visual_trio(c)" kind="visual"

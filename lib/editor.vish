@@ -429,6 +429,32 @@ send_items_list(xs) => native "cpp" {
   if(s.now_peer) s.send(*s.now_peer, out);
   return value(int64_t(0));
 };
+// Extension points and plugins: array {модуль (ключ; программа - пусто), функция}
+extension_points() => native "cpp" {
+  std::vector<value> xs;
+  auto & h = *editor_host;
+  for(auto [m, f]: h.program_points()) {
+    auto const & db = h.session.db;
+    std::string key = m == h.session.root ? std::string() : std::string(db.strings.text(db.as<n_module>(m).name));
+    xs.push_back(value(array_v::of({value(std::move(key)), vm.code_value(f)})));
+  }
+  return value(array_v::of(std::move(xs)));
+};
+// List of Expansion Points to the client whose message is served: array {модуль, имя, сигнатура, вид, перекрыта ("1")}
+send_extensions_list(xs) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  proto::s_extensions out;
+  auto const & ys = (a[0]).as<array_v>();
+  for(uint32_t k = 0; k < ys.size(); ++k) {
+    value row = ys.get(k);
+    auto const & r = row.as<array_v>();
+    auto at = [&](uint32_t i) { return std::string(r.get(i).as<str_v>().view()); };
+    out.points.push_back({at(0), at(1), at(2), at(3), at(4) == "1"});
+  }
+  if(s.now_peer) s.send(*s.now_peer, out);
+  return value(int64_t(0));
+};
 // Edit proposals to peer client (proposal + difference)
 send_proposals_list(i64 peer, ps, diffs) => native "cpp" {
   for(auto & x: a)
@@ -5578,6 +5604,20 @@ on_items() {
   xs = array{};
   for(it : module_items(0, -1, array{})) xs.push(element{it.key, it.text, it.inner});
   send_items_list(xs);
+}
+// Expansion points (plugins - modules in the language, spec §13.1): solutions on *, visualizers visual <name>;
+// the announcement further in search order is blocked by the nearest eponymous. *Mine: * View and signature.
+on_extensions() {
+  xs = array{};
+  seen = array{};
+  for(p : extension_points()) {
+    f = p[1];
+    n = code_name(f);
+    kind = if(starts_with(n, "on_")) "decision" else if(starts_with(n, "visual_")) "visual" else "other";
+    xs.push(array{p[0], n, head_text(f), kind, if(has_text(seen, n)) "1" else ""});
+    seen.push(n);
+  }
+  send_extensions_list(xs);
 }
 on_propose(str key, str body, str why) {
   it = find_key(module_items(0, -1, array{}), key);

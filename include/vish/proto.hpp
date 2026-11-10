@@ -138,6 +138,7 @@ struct c_name {
   std::string name;
 };
 struct c_items {};
+struct c_extensions {};
 struct c_propose {
   std::string key;
   std::string text;
@@ -171,7 +172,7 @@ struct c_repository {
   std::string text;
   uint64_t revision;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
+using client_msg = std::variant<c_hello, c_open_view, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
 
 // --- VM customer ---
 
@@ -458,6 +459,19 @@ struct s_element {
 struct s_items {
   std::vector<s_element> items;
 };
+// Editor expansion points connected to the program (plugins - modules in the language): module, name,
+// signature, view (decision - solution on *, visual - card scheme, other), whether blocked by the nearest
+// announcement.
+struct s_ext {
+  std::string module;
+  std::string name;
+  std::string sig;
+  std::string kind;
+  bool shadowed;
+};
+struct s_extensions {
+  std::vector<s_ext> points;
+};
 // Proposals for edits (AI): number, element key, current text (empty - new element), proposed why, from
 // which client; the difference with the current - place and signature, as in a merger.
 struct s_proposal {
@@ -505,7 +519,7 @@ struct s_repository {
   std::string diff;
   std::vector<repository_entry> entries;
 };
-using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_proposals, s_agent, s_repository>;
+using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_complete, s_decor, s_layers, s_output, s_saved, s_trace, s_merge, s_select, s_clipboard, s_hover, s_hint, s_inspect, s_status, s_stops, s_peers, s_items, s_extensions, s_proposals, s_agent, s_repository>;
 
 // --- staff ---
 
