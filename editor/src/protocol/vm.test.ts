@@ -487,6 +487,87 @@ describe('живая VM', () => {
     expect(conflict).toContain('оставлен мой вариант');
   });
 
+  it('обмен из редактора: c_repository pull — в живой сессии (перемотка или слияние), push — в файл', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const prog = join(dir, 'p.vish');
+    copyFileSync(program, prog);
+    const repo = (name: string) => join(dir, `${name}.vishrepo`);
+    const cli = (...args: string[]) =>
+      execFileSync(vish, args, { encoding: 'utf8', stdio: 'pipe' });
+    cli('repo', 'init', prog, repo('a'));
+    copyFileSync(repo('a'), repo('b'));
+    copyFileSync(repo('a'), repo('c'));
+    copyFileSync(repo('a'), repo('d'));
+    cli('repo', 'module', repo('b'), 'extra', 'g() => 1;');
+    cli('repo', 'snapshot', repo('b'), 'B');
+    cli('repo', 'module', repo('c'), 'other', 'h() => 2;');
+    cli('repo', 'snapshot', repo('c'), 'C');
+    const sock = join(dir, 's');
+    const vm = spawn(vish, ['serve', repo('a'), sock], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 250 && !existsSync(sock); ++i)
+        await new Promise((r) => setTimeout(r, 20));
+      const got: ServerMsg[] = [];
+      const split = new FrameSplitter();
+      const c = connect(sock);
+      await new Promise<void>((ok, fail) => {
+        c.on('connect', ok).on('error', fail);
+      });
+      c.on('data', (d: Buffer) => {
+        split.push(new Uint8Array(d), (b) => {
+          got.push(decodeServer(b));
+        });
+      });
+      c.write(encodeClient({ type: 'c_hello', version: schema.version }));
+      let request = 0;
+      const ask = async (action: string, key: string, wanted: number) => {
+        const id = ++request;
+        c.write(
+          encodeClient({
+            type: 'c_repository',
+            request: id,
+            action,
+            key,
+            text: '',
+            revision: wanted,
+          }),
+        );
+        for (
+          let i = 0;
+          i < 1000 &&
+          !got.some((m) => m.type === 's_repository' && m.request === id);
+          ++i
+        )
+          await new Promise((r) => setTimeout(r, 10));
+        const m = got.find(
+          (x) => x.type === 's_repository' && x.request === id,
+        );
+        if (m?.type !== 's_repository') throw new Error('нет ответа');
+        return m;
+      };
+      const info = await ask('info', '', 0);
+      // b has moved forward from a common ancestor: rewind (images come) or fusion (module comes)
+      const first = await ask('pull', repo('b'), info.revision);
+      expect(first.ok).toBe(true);
+      expect(first.message).toMatch(/снимков 1|новый модуль extra/);
+      // c - own: someone else's module comes by merging modules
+      const second = await ask('pull', repo('c'), first.revision);
+      expect(second.ok).toBe(true);
+      expect(second.message).toContain('новый модуль other');
+      // push: d — предок a, отдаём ему
+      const pushed = await ask('push', repo('d'), second.revision);
+      expect(pushed.ok).toBe(true);
+      c.end();
+    } finally {
+      vm.kill();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const out = cli('repo', 'info', repo('a'));
+    expect(out).toContain('module 0 extra');
+    expect(out).toContain('module 0 other');
+    expect(cli('repo', 'info', repo('d'))).toContain('branch 0 a/main');
+  });
+
   it('версии: трёхстороннее слияние копий базы — CLI и редактор', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vish-'));
     const prog = join(dir, 'p.vish');

@@ -159,6 +159,21 @@ export class RepositoryModel {
   checkout(branch: string): boolean {
     return this.enabled && branch !== '' && this.#ask('checkout', branch, '');
   }
+  // Exchange with another repository (.vishrepo file): get - rewind or merge by modules, give - to its file
+  pull(path: string): boolean {
+    const key = path.trim();
+    if (!this.enabled) return false;
+    return key === ''
+      ? this.#fail('Укажите путь .vishrepo')
+      : this.#ask('pull', key, '');
+  }
+  push(path: string): boolean {
+    const key = path.trim();
+    if (!this.enabled) return false;
+    return key === ''
+      ? this.#fail('Укажите путь .vishrepo')
+      : this.#ask('push', key, '');
+  }
   // parsing conflicts; 'ours' / 'theirs' - choice of party only after shown conflicts
   merge(target: string, side: '' | 'ours' | 'theirs'): boolean {
     if (!this.enabled || target === '') return false;
@@ -242,6 +257,7 @@ export class RepositoryPanel {
   readonly #branchSel = make('select');
   readonly #forkName = make('input');
   readonly #mergeSel = make('select');
+  readonly #exchangePath = make('input');
   readonly #modules = make('div', 'modules');
   readonly #modName = make('input');
   readonly #modBody = make('textarea');
@@ -304,6 +320,20 @@ export class RepositoryPanel {
     merge.append(this.#mergeSel, this.#button('Слить в текущую', 'submit'));
     branch.append(fork, merge);
 
+    // Sharing with another repository on the way to its file
+    const exchange = this.#form('section', 'Обмен', () => {
+      model.pull(this.#exchangePath.value);
+    });
+    this.#exchangePath.placeholder = '/путь/к/другому.vishrepo';
+    this.#exchangePath.setAttribute('aria-label', 'Путь другого репозитория');
+    exchange.append(
+      this.#exchangePath,
+      this.#button('Получить', 'submit'),
+      this.#button('Отдать', 'button', () => {
+        model.push(this.#exchangePath.value);
+      }),
+    );
+
     const mods = this.#form('section', 'Модули', () => {
       model.createModule(this.#modName.value, this.#modBody.value);
     });
@@ -337,7 +367,15 @@ export class RepositoryPanel {
     const save = this.#button('Сохранить (Ctrl+S)', 'button', () => {
       model.save();
     });
-    this.#main.append(branch, mods, snap, this.#review, this.#clash, save);
+    this.#main.append(
+      branch,
+      exchange,
+      mods,
+      snap,
+      this.#review,
+      this.#clash,
+      save,
+    );
     const body = make('div', 'body');
     body.append(this.#msg, this.#init, this.#main);
     root.replaceChildren(head, body);
@@ -357,6 +395,7 @@ export class RepositoryPanel {
       if (action === 'module') this.#modName.value = this.#modBody.value = '';
       if (action === 'snapshot') this.#label.value = '';
       if (action === 'fork') this.#forkName.value = '';
+      if (action === 'pull' || action === 'push') this.#exchangePath.value = '';
     };
   }
 

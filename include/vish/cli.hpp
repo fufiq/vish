@@ -77,6 +77,8 @@ struct cli_host {
       os::mapped_file file(path);
       p.root = parse_program(db, file.text(), std::filesystem::path(path).parent_path(), p.errors); // use k; next to the program
     }
+    if(std::string key = missing_prelude_native(*p.db); !key.empty())
+      throw diagnostic(cat(path, ": база создана сборкой, где есть native ", key, ", а этой сборке его нет — пересоздайте базу из текста (vish fmt)"), {});
     return int64_t(programs.size() - 1);
   }
   std::string errors(int64_t h) {

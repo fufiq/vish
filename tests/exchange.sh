@@ -13,6 +13,9 @@ out=$($b repo pull a.vishrepo b.vishrepo)
 echo "$out" | grep -q "снимков 1" || { echo "pull: $out"; exit 1; }
 $b repo info a.vishrepo | grep -q "branch 0 b/main" || { echo "нет ветки b/main"; exit 1; }
 $b repo info a.vishrepo | grep -q "snapshot 2 Математика" || { echo "нет снимка"; exit 1; }
+# The live program of the receiver remains his own: the alien module is available only through the b/main branch.
+$b repo info a.vishrepo | grep -q "module 0 math" && { echo "чужой модуль попал в живую программу"; exit 1; }
+$b repo info a.vishrepo | grep -q "ветка: main · снимок 1 · без изменений" || { echo "голова приёмника сдвинулась"; exit 1; }
 out=$($b repo pull a.vishrepo b.vishrepo)     # повтор ничего не добавляет
 echo "$out" | grep -q "операций журнала 0, снимков 0" || { echo "повтор: $out"; exit 1; }
 $b repo checkout a.vishrepo b/main > /dev/null # свои правки на отслеживаемой ветке
@@ -30,6 +33,18 @@ out=$($b repo pull a.vishrepo c.vishrepo)     # журналы разошлис�
 echo "$out" | grep -q "новый модуль right" || { echo "слияние: $out"; exit 1; }
 $b repo info a.vishrepo | grep -q "module 0 right" || { echo "нет модуля right"; exit 1; }
 $b repo info a.vishrepo | grep -q "Слияние: " || { echo "нет снимка слияния"; exit 1; }
+# They have a slew of them, and they have a slew of them, and they have a slew of them.
+$b repo module a.vishrepo x 'x() => 1;' > /dev/null
+$b repo snapshot a.vishrepo 'с x' > /dev/null
+cp a.vishrepo e.vishrepo
+$b repo restore e.vishrepo 1 > /dev/null
+$b repo module a.vishrepo y 'y() => 1;' > /dev/null
+$b repo snapshot a.vishrepo 'с y' > /dev/null
+$b repo info e.vishrepo | grep -q "module 0 x" && { echo "restore не убрал x"; exit 1; }
+out=$($b repo pull a.vishrepo e.vishrepo)
+echo "$out" | grep -q "модуль удалён у них: x" || { echo "удаление: $out"; exit 1; }
+$b repo info a.vishrepo | grep -q "module 0 x" && { echo "x остался в a"; exit 1; }
+$b repo info a.vishrepo | grep -q "module 0 y" || { echo "y пропал"; exit 1; }
 $b repo push a.vishrepo b.vishrepo > /dev/null  # отдать: b — префикс a
 $b repo info b.vishrepo | grep -q "branch 0 a/main" || { echo "push не дал ветку a/main"; exit 1; }
 echo ok

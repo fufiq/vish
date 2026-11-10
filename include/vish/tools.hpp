@@ -70,6 +70,24 @@ node_id load_builtin_module(ast_db & db, std::string_view name, std::string_view
   db.strings.intern(mark + std::to_string(m.value));
   return m;
 }
+// The prelude database is a copy of the build that created it: it is coordinated with the already disassembled program (syntax
+// forms, links), so it is not replaced as embedded modules (solution: 2026-11-10). But its native must be in this assembly:
+// otherwise the base will not open honestly - empty, if everything is, otherwise the key of the first missing. My check on opening.
+std::string missing_prelude_native(ast_db const & db) {
+  if(!db.prelude) return {};
+  for(uint32_t i = 0; i < db.size(); ++i) {
+    node_id n(i);
+    if(!db.is<n_native>(n)) continue;
+    node_id owner = db[n].parent;
+    if(!owner || !db.is<n_fn>(owner)) continue;
+    node_id root = owner;
+    while(db[root].parent) root = db[root].parent;
+    if(root != db.prelude) continue;
+    std::string key = native_key(db, owner);
+    if(!std::ranges::any_of(native_table(), [&](auto const & e) { return e.key == key; })) return key;
+  }
+  return {};
+}
 // Tuling module by key; tools - before the rest (they use tools)
 node_id load_builtin(ast_db & db, std::string_view key) {
   if(key != "tools") load_builtin_module(db, "tools", builtin_text("tools"), "tools.vish");
@@ -100,7 +118,15 @@ struct version {
   std::vector<journal_entry> journal; // journal copy; from someone else's base - taken from it
 };
 
+// Alien repository, open for the duration of the exchange operation (merger from the editor): its own database and session, as in vish repo.
+struct side_repository {
+  ast_db own;
+  node_id root;
+  std::optional<vm_session> session;
+};
+
 struct tools_context {
+  std::deque<std::unique_ptr<side_repository>> sides; // open-ended repositories
   std::deque<version> versions; // Deque: Links stable; language number
   std::string error; // opening error
   ast_db * db = nullptr; // base of the tool module (command vish): its functions - by name
@@ -115,8 +141,24 @@ struct tools_context {
     return int64_t(sessions.size() - 1);
   }
   vm_session & session(int64_t k) {
-    if(k < 0 || std::size_t(k) >= sessions.size()) throw diagnostic("tools: нет сессии", {});
+    if(k < 0 || std::size_t(k) >= sessions.size() || !sessions[std::size_t(k)]) throw diagnostic("tools: нет сессии", {});
     return *sessions[std::size_t(k)];
+  }
+  // other person's repository - session; session number
+  int64_t open_side(std::string const & path) {
+    auto file = repository_load(path);
+    auto & side = *sides.emplace_back(std::make_unique<side_repository>());
+    side.own.replay(file.journal);
+    side.root = file.root;
+    side.session.emplace(side.own, side.root, path);
+    side.session->repository = std::move(file.state);
+    return session_of(*side.session);
+  }
+  void close_side(int64_t k) {
+    vm_session * s = k >= 0 && std::size_t(k) < sessions.size() ? sessions[std::size_t(k)] : nullptr;
+    if(!s) return;
+    sessions[std::size_t(k)] = nullptr;
+    std::erase_if(sides, [&](auto const & x) { return &*x->session == s; });
   }
 
   tools_context() { versions.emplace_back(); }

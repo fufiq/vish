@@ -36,5 +36,12 @@ int main() {
   assert(load_builtin_module(db, "plug", "module plug;\nf() => 2;\n", "plug.vish") == b);
   node_id c = load_builtin_module(db, "plug", "module plug;\nf() => 1;\n", "plug.vish"); // back to the first assembly: copy b is someone else's
   assert(c != b && find_module(db, db.strings.intern("plug")) == c);
+  // prelude is a copy of the build that created: native, which is not in this one, is called when opening.
+  ast_db old;
+  load_builtin_module(old, "prelude", "module prelude;\nlost_native(i64 x) => native \"cpp\" { return value(int64_t(0)); };\n", "prelude.vish");
+  assert(old.prelude && missing_prelude_native(old).find("lost_native") == 0);
+  ast_db fine;
+  load_builtin_module(fine, "prelude", "module prelude;\nplain(i64 x) => x;\n", "prelude.vish");
+  assert(missing_prelude_native(fine).empty());
   std::puts("ok");
 }

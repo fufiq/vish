@@ -111,6 +111,21 @@ describe('репозиторий: запросы', () => {
     expect(model.result?.branch).toBe('dev');
   });
 
+  it('обмен: pull и push шлют путь другого .vishrepo с присланной ревизией; пустой путь — отказ без запроса', () => {
+    ready();
+    model.pull('  ');
+    expect(sent).toHaveLength(0);
+    model.pull(' /tmp/other.vishrepo ');
+    expect(last()).toMatchObject({
+      action: 'pull',
+      key: '/tmp/other.vishrepo',
+      revision: 5,
+    });
+    reply({ message: 'получено', revision: 6 });
+    model.push('/tmp/other.vishrepo');
+    expect(last()).toMatchObject({ action: 'push', revision: 6 });
+  });
+
   it('пока ждём ответ, второй запрос не отправляется; ответ с чужим номером игнорируется', () => {
     ready();
     model.snapshot('a');
