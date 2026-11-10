@@ -47,4 +47,14 @@ $b repo info a.vishrepo | grep -q "module 0 x" && { echo "x остался в a"
 $b repo info a.vishrepo | grep -q "module 0 y" || { echo "y пропал"; exit 1; }
 $b repo push a.vishrepo b.vishrepo > /dev/null  # отдать: b — префикс a
 $b repo info b.vishrepo | grep -q "branch 0 a/main" || { echo "push не дал ветку a/main"; exit 1; }
+# Push in journal divergence - merge by modules in another repository
+cp a.vishrepo f.vishrepo; cp a.vishrepo g.vishrepo
+$b repo module f.vishrepo fnew 'fn() => 1;' > /dev/null
+$b repo snapshot f.vishrepo 'F-сн' > /dev/null
+$b repo module g.vishrepo gnew 'gn() => 2;' > /dev/null
+$b repo snapshot g.vishrepo 'G-сн' > /dev/null
+out=$($b repo push f.vishrepo g.vishrepo)
+echo "$out" | grep -q "новый модуль fnew" || { echo "push с расхождением: $out"; exit 1; }
+$b repo info g.vishrepo | grep -q "module 0 fnew" || { echo "в g нет fnew"; exit 1; }
+$b repo info f.vishrepo | grep -q "module 0 gnew" && { echo "push изменил источник"; exit 1; }
 echo ok

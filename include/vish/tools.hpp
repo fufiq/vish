@@ -194,6 +194,30 @@ struct tools_context {
     }
     return add_copy(std::move(entries), root);
   }
+  // version from the program text (main.vish with modules next to it); -1 - not understood (error)
+  int64_t parse_text(std::string const & path) {
+    try {
+      os::mapped_file file(path);
+      std::vector<diagnostic> errors;
+      std::size_t slot = 1;
+      while(slot < versions.size() && versions[slot].db) ++slot;
+      if(slot == versions.size()) versions.emplace_back();
+      version & x = versions[slot];
+      x.db = &x.own.emplace();
+      x.root = parse_program(*x.db, file.text(), std::filesystem::path(path).parent_path(), errors);
+      if(!errors.empty()) {
+        error = cat(path, ": ", render(errors[0], path, *x.db));
+        x.db = nullptr;
+        x.own.reset();
+        return -1;
+      }
+      x.journal = x.db->journal();
+      return int64_t(slot);
+    } catch(std::exception const & e) {
+      error = cat(path, ": ", e.what());
+      return -1;
+    }
+  }
   int64_t add_copy(std::vector<journal_entry> entries, node_id root) {
     // Closed copies are reused: AI queries do not hoard arenas and empty version slots.
     std::size_t slot = 1;

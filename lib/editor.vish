@@ -5232,7 +5232,7 @@ on_save() {
   finalize_views();
   if(repo_branch(program_session()) != "") {
     r = repository_command(program_session(), "save", "", "");
-    return repository_reply(0, r[0], r[1], r[2]);
+    return repository_reply(0, r[0], if(r[0]) "сохранено: " + file_of(program_name()) else r[1], r[2]); // Same look as .vishdb
   }
   path = save_path();
   save_program(path);

@@ -12,6 +12,11 @@ version_open(str path) => native "cpp" {
   if(!(a[0]).known()) return erase(value(int64_t(-1)));
   return value(tools_host->open(std::string((a[0]).as<str_v>().view())));
 };
+// version from the program text (main.vish, modules nearby); -1 - not understood (version_error - why)
+version_from_text(str path) => native "cpp" {
+  if(!(a[0]).known()) return erase(value(int64_t(-1)));
+  return value(tools_host->parse_text(std::string((a[0]).as<str_v>().view())));
+};
 version_error() => native "cpp" { return value(tools_host->error); };
 // Common base of versions a and b (root - root a)
 version_base(i64 a, i64 b) => native "cpp" {
@@ -148,7 +153,8 @@ take_theirs(i64 v, i64 root, base_items, str id, item theirs) {
     return -1;
   }
   prev = find_item(items, theirs.after);
-  version_put(v, root, if(mine.present) mine.node else -1, theirs.text, id, if(prev.present) prev.node else -1, theirs.blank, theirs.inner, theirs.lead, theirs.tail)
+  body = if(starts_with(theirs.text, "use ") && !ends_with(theirs.text, ";")) theirs.text + ";" else theirs.text; // use is printed without ";"
+  version_put(v, root, if(mine.present) mine.node else -1, body, id, if(prev.present) prev.node else -1, theirs.blank, theirs.inner, theirs.lead, theirs.tail)
 }
 
 // Conflict is both options for a person: the text of the common base, mine, them (there is no element in the
@@ -632,7 +638,14 @@ repository_command(i64 s, str action, str key, str body) {
         r = repo_pull_session(o, mine, if(body != "") body else repo_source_name(mine));
         repo_side_close(o);
         return array{true, r, ""};
-      } catch(e) { repo_side_close(o); throw e; }
+      } catch(e) {
+        if(!starts_with(text(e), "журналы разошлись")) { repo_side_close(o); throw e; }
+        try { // Merge into modules in another repository (its live program is the receiver, my head is the source)
+          m = merge_foreign(o, s);
+          repo_side_close(o);
+          return array{true, "в другом репозитории: " + m[1], m[2]};
+        } catch(e2) { repo_side_close(o); throw e2; }
+      }
     }
     else if(action != "save") throw "неизвестная команда репозитория";
     repo_op(s, "save", "", "", 0, 0);
@@ -683,7 +696,7 @@ repo_module_text(items) {
   for(x : items) {
     for(k : range(x.blank)) r = r + "\n";
     for(l : x.lead) r = (r + l) + "\n";
-    r = (r + x.text) + "\n";
+    r = (r + x.text) + (if(starts_with(x.text, "use ") && !ends_with(x.text, ";")) ";\n" else "\n");
     if(x.tail != "") r = (r + x.tail) + "\n";
   }
   r
@@ -844,24 +857,22 @@ repository_exchange_cli(args) {
     0
   } catch(e) {
     said = text(e);
-    if((args[0] == "pull") && starts_with(said, "журналы разошлись")) {
+    if(starts_with(said, "журналы разошлись")) {
       write_out(said + "\nслияние по модулям…\n");
       return 3;
     }
     fail(said)
   }
 }
-// Text export (vish repo export, 2026-11-10): live program and its modules are ordinary .vish files that are read by any
-// main.vish build - main text + use for modules that are not in it; geo.vec → geo/vec.vish; history.txt - a list of images
-// (help: history is not restored). Inverse: vish repo init <catalogue> /main.vish new. vishrepo. Determined: The same
-// repository is the same bytes.
+// Text export (vish repo export, 2026-11-10): the live program and each snapshot are the usual .vish files read by any build
+// <catalog> /main.vish - live program (+ use for modules that are not in it), geo.vec → geo/vec.vish; snapshots / <number>/ - the
+// same for each shot; history.txt - pictures (snapshot number parent second-parent name), branches (branch name picture) and
+// current (current name). Determined. Reverse: vish repo import <catalogue> <new. vishrepo> (images, parents, branches, live
+// program) or vish repo init <catalogue> /main.vish (live program only).
 //
-repo_export(i64 s, str dir) {
-  repo_verify(s);
-  repo_direct(s, "live", "", "", 0, 0);
-  root = version_root(0);
-  mods = repo_native_modules(s, 0);
-  main = repo_module_text(module_items(0, root, array{}));
+//
+repo_dump(i64 v, mods, i64 root, str dir) {
+  main = repo_module_text(module_items(v, root, array{}));
   uses = "";
   for(m : mods) if(m.node != root) if(find_text(main, "use " + m.name) < 0) uses = ((uses + "use ") + m.name) + ";\n";
   why = write_text(dir + "/main.vish", uses + main);
@@ -870,12 +881,26 @@ repo_export(i64 s, str dir) {
   for(m : mods) if(m.node != root) {
     path = dir + "/";
     for(k : range(m.name.size)) path = path + (if(m.name[k] == '.') "/" else slice_text(m.name, k, k + 1));
-    why = write_text(path + ".vish", ("module " + m.name + ";\n") + repo_module_text(module_items(0, m.node, array{})));
+    why = write_text(path + ".vish", ("module " + m.name + ";\n") + repo_module_text(module_items(v, m.node, array{})));
     if(why != "") throw why;
     count = count + 1;
   }
+  count
+}
+repo_export(i64 s, str dir) {
+  repo_verify(s);
   hist = "";
-  for(x : repo_rows(s)) if(x[0] == "snapshot") hist = (((((hist + text(x[1])) + " ") + text(x[2])) + " ") + text(x[6])) + (" " + x[4] + "\n");
+  count = 0;
+  for(x : repo_rows(s)) if(x[0] == "snapshot") {
+    v = repo_version(s, x[1]);
+    count = count + repo_dump(v, repo_native_modules(s, x[1]), version_root(v), (dir + "/snapshots/") + text(x[1]));
+    version_close(v);
+    hist = (((((hist + "snapshot ") + text(x[1])) + " ") + text(x[2])) + " ") + text(x[6]) + (" " + x[4] + "\n");
+  }
+  for(x : repo_rows(s)) if(x[0] == "branch") hist = (((hist + "branch ") + x[4]) + " ") + text(x[6]) + "\n";
+  hist = (hist + "current ") + repo_branch(s) + "\n";
+  repo_direct(s, "live", "", "", 0, 0); // Live - last: version 0 one for all
+  count = count + repo_dump(0, repo_native_modules(s, 0), version_root(0), dir);
   why = write_text(dir + "/history.txt", hist);
   if(why != "") throw why;
   count
@@ -884,6 +909,95 @@ repository_export_cli(args) {
   try {
     n = repo_export(number_of(args[0]), args[1]);
     write_out((("экспорт: файлов .vish " + text(n)) + " в ") + args[1] + "\n");
+    0
+  } catch(e) { fail(text(e)) }
+}
+// Bring a live program to the text of the tv version (disassembled from the catalog): missing modules are created, module
+// elements and programs are replaced / added / removed by keys, unnecessary modules are left. *Mine* is the merge mechanics.
+repo_sync_items(i64 lnode, i64 tv, i64 tnode) {
+  li = module_items(0, lnode, array{});
+  ti = module_items(tv, tnode, array{});
+  ids = array{};
+  for(xs : array{li, ti}) for(x : xs) if(!has_text(ids, x.id)) ids.push(x.id);
+  for(id : ids) {
+    a = find_item(li, id);
+    b = find_item(ti, id);
+    if(!same_state(a, b)) take_theirs(0, lnode, array{}, id, b);
+  }
+  0
+}
+repo_sync_text(i64 s, i64 tv) {
+  troot = version_root(tv);
+  tmods = array{};
+  for(x : version_modules(tv)) if((x[1] != "") && !repo_builtin(x[1])) tmods.push(repo_mod{x[0], x[1]});
+  repo_direct(s, "live", "", "", 0, 0);
+  for(t : tmods) {
+    have = false;
+    for(m : repo_native_modules(s, 0)) if(m.name == t.name) have = true;
+    if(!have) repo_op(s, "module", t.name, repo_module_text(module_items(tv, t.node, array{})), 0, 0);
+  }
+  repo_direct(s, "live", "", "", 0, 0);
+  live = repo_native_modules(s, 0);
+  repo_sync_items(version_root(0), tv, troot);
+  for(t : tmods) for(m : live) if(m.name == t.name) repo_sync_items(m.node, tv, t.node);
+  keep = array{};
+  gone = false;
+  for(m : live) {
+    wanted = m.node == version_root(0);
+    for(t : tmods) if(t.name == m.name) wanted = true;
+    if(wanted) keep.push(m) else { repository_clear(s, m.node); gone = true; }
+  }
+  if(gone) repository_catalog(s, repo_catalog_data(keep));
+  0
+}
+// Import the export catalog to the newly created repository s (session program - the first picture, path - the repository file).
+repo_import_text(i64 s, str path, str dir) {
+  lines = lines_of(read_text(dir + "/history.txt"));
+  olds = array{}; news = array{};
+  names = array{}; parents = array{}; seconds = array{};
+  for(l : lines) if(starts_with(l, "snapshot ")) {
+    w = words_of(l);
+    olds.push(number_of(w[1])); parents.push(number_of(w[2])); seconds.push(number_of(w[3]));
+    name = "";
+    for(k : range(w.size)) if(k >= 4) name = if(k == 4) w[k] else ((name + " ") + w[k]);
+    names.push(name);
+  }
+  if(olds.size == 0) throw "в каталоге нет снимков (history.txt)";
+  repo_op(s, "init", path, "", 0, 0);
+  news.push(repo_capture(s, names[0], 0));
+  for(k : range(olds.size)) if(k > 0) {
+    tv = version_from_text((dir + "/snapshots/") + text(olds[k]) + "/main.vish");
+    if(tv < 0) throw version_error();
+    repo_sync_text(s, tv);
+    version_close(tv);
+    p = 0; q = 0;
+    for(j : range(olds.size)) if(j < news.size) { if(olds[j] == parents[k]) p = news[j]; if(olds[j] == seconds[k]) q = news[j]; }
+    id = repo_op(s, "capture", names[k], "", p, q)[2];
+    news.push(id);
+    repo_op(s, "branch", "main", "", id, 1);
+  }
+  current = "main";
+  for(l : lines) {
+    w = words_of(l);
+    if((w.size >= 3) && (w[0] == "branch")) {
+      head = 0;
+      for(j : range(olds.size)) if(olds[j] == number_of(w[2])) head = news[j];
+      repo_op(s, "branch", w[1], "", head, 1);
+    }
+    if((w.size >= 2) && (w[0] == "current")) current = w[1];
+  }
+  for(x : repo_rows(s)) if((x[0] == "branch") && (x[4] == current)) repo_op(s, "branch", current, "", x[6], 1);
+  tv = version_from_text(dir + "/main.vish"); // live program - as it was during export (including unsaved edits)
+  if(tv < 0) throw version_error();
+  repo_sync_text(s, tv);
+  version_close(tv);
+  repo_op(s, "save", "", "", 0, 0);
+  olds.size
+}
+repository_import_cli(args) {
+  try {
+    n = repo_import_text(number_of(args[0]), args[1], args[2]);
+    write_out((("импорт: снимков " + text(n)) + " в ") + args[1] + "\n");
     0
   } catch(e) { fail(text(e)) }
 }
