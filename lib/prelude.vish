@@ -3128,8 +3128,18 @@ jit_compile(cg, f, types, type result) {
     put_bytes(cg.store_index(second, acc, third));
   };
   store_var(i64 s, type t) => if(env[s].kind == jc_ref) ref_store(s, t) else store_slot(t, env[s].slot);
+  // o[ix], where o is not a variable (VM structure-value field, call result): the value calculates VM once in the hidden
+  // variable-handle (as assignment), then - as for the variable. Just an array and a string. Mine. *
+  materialize_indexed(o) => {
+    t = ty(o);
+    if(!arr_like(t) && (t != str)) bad("индекс не массива");
+    name = "#индекс" + text(top);
+    assign_handle(name, o, t, true);
+    find(name)
+  };
   gen_index_of(e, o, ix) => {
     s = var_of(o);
+    if(s < 0) s = materialize_indexed(o);
     // element range(n) on the index is_index - the index s[k] -
     // byte line copy in the memory of the call
     //
@@ -3575,10 +3585,24 @@ jit_compile(cg, f, types, type result) {
     r = regs(t);
     g(r[0], r[1])
   };
-  // xs.size is the postfix operator .size
+  // xs.size is a post-fix operator .size e.size, where e is not a variable (the VM structure-value field, the result of the call): the
+  // value is calculated by VM (vm_eval is the cell address), the length is read from the layout offsets, as in a variable. The
+  // numerical array is a_size, the value array is a_items_n, the string is s_len. The overload.size type is not visible here: only
+  // strings and arrays fall here. Mine. *
+  gen_size_of_value(e) => {
+    t = ty(e);
+    if(t == str) {
+      vm_or_bad(e, "размер строки-значения");
+      put_bytes(cg.load32(acc, acc, s_len));
+    } else if(arr_like(t) && !late(t)) {
+      vm_or_bad(e, "размер массива-значения");
+      put_bytes(cg.load(acc, acc, if(is_arr(t)) a_size else a_items_n));
+    } else bad(".size не массива и не строки");
+  };
   gen_size(xs) => {
     s = var_of(xs[0]);
-    if((s < 0) || env[s].thunk) bad("обращение .size не к переменной") else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]) else if(env[s].kind == jc_range) put_bytes(slot_ld(acc, env[s].slot)) else if(env[s].kind == str) str_size(acc, env[s].slot) else bad(".size не массива и не строки");
+    if(s < 0) return gen_size_of_value(xs[0]);
+    if(env[s].thunk) bad("обращение .size не к переменной") else if(arr_like(env[s].kind)) arr_size_of(acc, s, xs[0]) else if(env[s].kind == jc_range) put_bytes(slot_ld(acc, env[s].slot)) else if(env[s].kind == str) str_size(acc, env[s].slot) else bad(".size не массива и не строки");
   };
   // line-variable (VM - cell address): length and bytes - by displacements of VM (step tail 10:
   // parse_int and parsing assistants were to the interpreter); the string does not change in place - the

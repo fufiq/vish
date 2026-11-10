@@ -1,0 +1,28 @@
+// JIT: .size and non-variable index (2026-11-10): VM structure-value field (p.items.size, p.name[i]) and call result (items_of(p)
+// [i]). Previously, such functions remained in the interpreter (, ); now the value calculates VM once (hidden variable-handle for the
+// index, direct length reading for .size). Runner compares JIT with interpreter; tools/jit_fuzz .py (program4) are random
+// combinations. The places where the JIT does not take the function remain the interpreter, but each place taken must coincide with
+// it. Reception is mine.
+//
+// jit-compiled: total
+// jit-compiled: bytes_sum
+// jit-compiled: items_of
+// out: 45 394 9 15
+struct box { array items; str name; }
+items_of(box p) => p.items;
+total(box p) {
+  s = 0;
+  for(k : range(p.items.size)) s = s + p.items[k];
+  s
+}
+bytes_sum(box p) {
+  s = 0;
+  for(k : range(p.name.size)) s = s + p.name[k];
+  s
+}
+main() {
+  w = array{};
+  for(k : range(10)) w.push(k);
+  b = box{w, "abcd"};
+  print(total(b), bytes_sum(b), items_of(b)[9], (items_of(b).size + b.name.size) + 1);
+}

@@ -376,6 +376,44 @@ def program3(seed):
     main.append("}\n")
     return PRE + "".join(fs) + "".join(main)
 
+def program4(seed):
+    """Поля структуры-значения: p.items.size, p.items[i], p.name.size, p.name[i], результат вызова [i]/.size (2026-11-10:
+    JIT материализует не-переменную в скрытую переменную-handle)."""
+    rnd = random.Random(seed)
+    def num():
+        return str(rnd.randrange(1, 30))
+    def term(loopvar):
+        c = rnd.choice(["it", "nm", "sz", "ns", "call", "callsz", "mix"])
+        if c == "it":
+            return f"p.items[{loopvar} % p.items.size]"
+        if c == "nm":
+            return f"p.name[{loopvar} % p.name.size]"
+        if c == "sz":
+            return "p.items.size"
+        if c == "ns":
+            return "p.name.size"
+        if c == "call":
+            return f"items_of(p)[{loopvar} % items_of(p).size]"
+        if c == "callsz":
+            return "items_of(p).size + name_of(p).size"
+        return f"((p.items[{loopvar} % p.items.size] * {num()}) + p.name[{loopvar} % p.name.size])"
+    fs = []
+    nf = rnd.randrange(2, 5)
+    for i in range(nf):
+        body = [f"g{i}(box p, i64 n) {{\n", "  s = 0;\n"]
+        for j in range(rnd.randrange(1, 4)):
+            op = rnd.choice(["+", "-", "^"])
+            body.append(f"  for(k{j} : range(n)) s = (s {op} ({term(f'k{j}')} + {num()})) & 0xffffff;\n")
+        body.append(f"  s = (s + {term('n')}) & 0xffffff;\n  s\n}}\n")
+        fs.append("".join(body))
+    pre = "struct box { array items; str name; }\nitems_of(box p) => p.items;\nname_of(box p) => p.name;\n"
+    main = ["main() {\n", "  w = array{};\n", "  for(k : range(9)) w.push(((k * 13) + args.size) & 0xff);\n",
+            "  b = box{w, \"strawberry\"};\n"]
+    for i in range(nf):
+        main.append(f"  print(g{i}(b, {rnd.randrange(3, 17)} + args.size));\n")
+    main.append("}\n")
+    return pre + "".join(fs) + "".join(main)
+
 def run(path, jit):
     cmd = [VISH, "run"] + (["--jit"] if jit else []) + [path, "a", "b"]
     try:
@@ -454,7 +492,7 @@ rejected = 0
 first_rej = None
 for k in range(N):
     seed = SEED * 100000 + k
-    src = (program, program2, program3)[k % 3](seed)   # 1 — строки и структуры, 2 — f64
+    src = (program, program2, program3, program4)[k % 4](seed)   # 1 — строки и структуры, 2 — f64, 3 — f64 (fgen), 4 — поля структур
     path = os.path.join(OUT, f"p{seed}.vish")
     open(path, "w").write(src)
     a = run(path, False)
