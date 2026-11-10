@@ -81,6 +81,23 @@ struct editor_server {
       if(db.is<n_fn>(x) && db.strings.text(db.as<n_fn>(x).name) == name && (!marked || marked_editor(db, x))) return x;
     return {};
   }
+  // [[editor]] is a function of the program: in its module, then in modules connected to use
+//;
+  // The next announcement is the first - the plugin covers its function. *Mine: * Use in-depth.
+  node_id program_fn(std::string_view name) const {
+    auto const & db = session.db;
+    std::vector<node_id> todo{session.root};
+    std::set<uint32_t> seen;
+    for(size_t i = 0; i < todo.size(); ++i) {
+      node_id m = todo[i];
+      if(!m || !db.is<n_module>(m) || !seen.insert(m.value).second) continue;
+      if(node_id f = fn_in(m, name, true)) return f;
+      for(node_id x: db.as<n_module>(m).items)
+        if(db.is<n_use>(x))
+          if(node_id u = find_module(db, db.as<n_use>(x).key)) todo.push_back(u);
+    }
+    return {};
+  }
   // name solution function: its own in projection view (its module knows the language), in the program,
   // otherwise the editor module
   node_id editor_fn(int64_t view, std::string_view name) {
@@ -90,17 +107,19 @@ struct editor_server {
         if(node_id x = node_or_none(lang_of(editor_module), pm, {}); x && x == m) return fn_in(m, name, true);
         break;
       }
-    if(node_id f = fn_in(session.root, name, true)) return f;
+    if(node_id f = program_fn(name)) return f;
     return fn_in(editor_module, name, false);
   }
   // Extension of the editor in the program (card visualizers, visual <name>): its name function with
   // [[editor]] from node c is an array of lines; no function or error is empty (error is in stderr).
   value extension(std::string const & name, node_id c) {
-    node_id f = fn_in(session.root, name, true);
+    node_id f = program_fn(name);
     if(!f) return value(array_v::of({}));
     try {
       not_an_edit quiet{*this};
-      interpreter & l = lang_of(session.root);
+      node_id m = f;
+      while(m && !session.db.is<n_module>(m)) m = session.db[m].parent;
+      interpreter & l = lang_of(m);
       value r = l.analyze_instance(f, {l.code_value(c)});
       return r.is<array_v>() ? r : value(array_v::of({}));
     } catch(diagnostic const & d) {

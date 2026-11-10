@@ -1,0 +1,8 @@
+// Editor plugin (2026-11-10): card visualizer from the connected use module as a function of the program;
+//
+// program: editor_plugin.vish
+open_view module
+hover 1 @trio:2
+// expect: kind="схема" text="trio"
+// expect: kind="схема первый" text="a"
+// expect: kind="схема третий" text="c"

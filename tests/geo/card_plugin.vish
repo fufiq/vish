@@ -1,0 +1,2 @@
+// The editor plugin is a regular module: its trio call card scheme is connected via use.
+[[editor]] visual_trio(c) => array{"trio", "", "первый", "a", "второй", "b", "третий", "c"};

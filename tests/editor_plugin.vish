@@ -1,0 +1,10 @@
+// Editor plugin: [[editor]] functions connected via the use module (geo.card_plugin) work like their own program.
+//
+// out: 6
+use geo.card_plugin;
+
+// Three: the sum of three numbers.
+trio(i64 a, i64 b, i64 c) => a + b + c;
+main() {
+  print(trio(1, 2, 3));
+}
