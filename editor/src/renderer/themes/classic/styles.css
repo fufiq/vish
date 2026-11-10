@@ -1056,3 +1056,33 @@ body {
 #repo button.module {
   text-align: left;
 }
+#extensions {
+  position: fixed;
+  right: 16px;
+  top: 44px;
+  z-index: 15;
+  width: 420px;
+  max-height: 60%;
+  overflow: auto;
+  padding: 10px 6px 8px;
+  border-radius: 14px;
+  background: var(--vish-popup);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.12);
+  font:
+    12.5px system-ui,
+    sans-serif;
+}
+#extensions[hidden] {
+  display: none;
+}
+#extensions .head {
+  padding: 0 8px 6px;
+  font-weight: 500;
+}
+#extensions .point {
+  padding: 3px 8px;
+}
+#extensions .point.shadowed {
+  text-decoration: line-through;
+  opacity: 0.6;
+}

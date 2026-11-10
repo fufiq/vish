@@ -14,9 +14,11 @@ import { complete } from './complete';
 import { palette } from './palette';
 import { expansion, inspect } from './inspector';
 import { proposals } from './ai';
+import { extensions } from './extensions';
 import { merge, mergeNotes } from './merge';
 import { runHead, stops, traceBar } from './run';
 import css from './styles.css?inline';
+import extensionsCss from './extensions.css?inline';
 
 const backdrop =
   '<div id="backdrop" aria-hidden="true"><i></i><i></i><i></i></div>';
@@ -25,7 +27,7 @@ const header = '<header id="header"></header>';
 const theme: Theme = {
   name: 'canvas',
   base: 'classic',
-  css: [css],
+  css: [css, extensionsCss],
   shell: backdrop + header + classicShell,
   panels: {
     tip,
@@ -39,6 +41,7 @@ const theme: Theme = {
     merge,
     mergeNotes,
     proposals,
+    extensions,
     // One VM - several clients (frame “Two clients”): you, others (where the cursor is, what rules), explanation
     clients(el, m) {
       el.hidden = m.peers.length === 0;

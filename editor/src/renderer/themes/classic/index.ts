@@ -193,6 +193,22 @@ const theme: Theme = {
       );
     },
 
+    // Expansion points (plugins - modules in the language): module, name, view, signature; overlapped - crossed
+    // out. A simple list; the "canvas" draws its own (themes/canvas/extensions.ts).
+    extensions(el, m) {
+      el.replaceChildren(
+        make('div', 'head', `Расширения: ${String(m.points.length)}`),
+        ...m.points.map((p) => {
+          const row = make('div', p.shadowed ? 'point shadowed' : 'point');
+          row.append(
+            make('b', '', p.module === '' ? 'программа' : p.module),
+            make('span', '', ` ${p.kind} · ${p.sig}`),
+          );
+          return row;
+        }),
+      );
+    },
+
     // Proposals of edits (AI): element, who and why, current text and proposed with a marked difference;
     // "Accept" - one edit, "Reject" - remove (decides VM).
     proposals(el, ps, host) {

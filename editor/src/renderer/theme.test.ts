@@ -9,6 +9,7 @@ const panels: Panels = {
   stops: noop,
   output: noop,
   proposals: noop,
+  extensions: noop,
   merge: noop,
   mergeNotes: noop,
   paneHead: noop,

@@ -9,6 +9,7 @@
 import type {
   ClientMsg,
   Complete,
+  Extensions,
   Inspect,
   TraceStep,
   MergeResult,
@@ -111,6 +112,8 @@ export interface Panels {
   stops: (el: HTMLElement, m: Stops, host: Host) => void;
   output: (el: HTMLElement, rows: readonly OutRow[], host: Host) => void;
   proposals: (el: HTMLElement, ps: readonly Proposal[], host: Host) => void;
+  // Editor expansion points (plugins - modules in the language): list from VM, panel Ctrl+Shift+E
+  extensions: (el: HTMLElement, m: Extensions, host: Host) => void;
   merge: (el: HTMLElement, m: MergeResult, host: Host) => void;
   // Viewbar cap when the same tree is open in another (frame "projection")
   paneHead: (el: HTMLElement, p: PaneHead) => void;
@@ -206,6 +209,7 @@ export function resolve(
     'stops',
     'output',
     'proposals',
+    'extensions',
     'merge',
     'mergeNotes',
     'paneHead',

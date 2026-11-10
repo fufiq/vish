@@ -77,6 +77,7 @@ let paletteItems = 0; // in the palette - items on the transition list (Enter an
 const mergePanel = byId('merge');
 const proposalsPanel = byId('proposals');
 const repoEl = byId('repo');
+const extensionsPanel = byId('extensions');
 const aiPanel = byId('ai');
 const aiLog = aiPanel.querySelector<HTMLElement>('.log') ?? aiPanel;
 const aiForm = byId('ai-form') as HTMLFormElement;
@@ -527,7 +528,9 @@ function receive(m: ServerMsg): void {
       panels.proposals(proposalsPanel, m.proposals, host);
       return;
     case 's_items':
+      return;
     case 's_extensions':
+      panels.extensions(extensionsPanel, m, host);
       return;
     case 's_merge': {
       conflicts = m.conflicts.length;
@@ -1106,6 +1109,13 @@ for (const pane of [app, side]) {
       e.preventDefault();
       sideModule = true;
       send({ type: 'c_open_view', kind: 'module' });
+      return;
+    }
+    // Ctrl+Shift+E - Extension Panel: Extension Points for the program and its plugins (VM asks)
+    if (e.ctrlKey && e.shiftKey && (e.key === 'E' || e.key === 'У')) {
+      e.preventDefault();
+      extensionsPanel.hidden = !extensionsPanel.hidden;
+      if (!extensionsPanel.hidden) send({ type: 'c_extensions' });
       return;
     }
     // Ctrl+I - “AI” panel (your Claude Code, edits - sentences)

@@ -1,0 +1,98 @@
+/* Панель «Расширения» — весь визуал; разметка и классы — extensions.ts. Плавающая стеклянная карточка
+   справа сверху, как «ИИ» и «Клиенты» холста. */
+#extensions {
+  position: fixed;
+  right: 16px;
+  top: 52px;
+  z-index: 15;
+  width: 440px;
+  max-height: 62%;
+  overflow: auto;
+  padding: 10px 8px 10px;
+  border-radius: 16px;
+  background: var(--canvas-card);
+  backdrop-filter: blur(14px);
+  box-shadow:
+    inset 0 0 0 1px var(--canvas-line),
+    0 18px 40px rgb(40 36 70 / 0.14);
+  font: 13px/1.5 var(--canvas-ui);
+  color: var(--vish-fg);
+}
+#extensions[hidden] {
+  display: none;
+}
+#extensions .head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 8px 8px;
+}
+#extensions .head .title {
+  font-size: 14px;
+  font-weight: 600;
+}
+#extensions .head .count {
+  padding: 0 7px;
+  border-radius: 9px;
+  background: #ebe8f7;
+  color: #33278f;
+  font-size: 11.5px;
+}
+#extensions .group {
+  margin-top: 4px;
+  padding: 4px 0 2px;
+  border-top: 1px solid #f0eee9;
+}
+#extensions .module {
+  padding: 4px 8px;
+  font: 12px var(--canvas-code);
+  color: #8b8880;
+}
+#extensions .point {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+}
+#extensions .point:hover {
+  background: #f4f3ef;
+}
+#extensions .sig {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12.5px var(--canvas-code);
+  color: var(--vish-fn);
+}
+#extensions .chip {
+  flex: none;
+  padding: 0 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  background: #f1f0ec;
+  color: #57544d;
+}
+#extensions .chip.decision {
+  background: #ebe8f7;
+  color: #33278f;
+}
+#extensions .chip.visual {
+  background: #e3f1ee;
+  color: #0f766e;
+}
+#extensions .point.shadowed .sig {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+#extensions .note {
+  flex: none;
+  font-size: 11.5px;
+  color: #977a3c;
+}
+#extensions .empty {
+  padding: 8px;
+  color: #8b8880;
+}
