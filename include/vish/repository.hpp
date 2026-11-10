@@ -21,22 +21,16 @@ struct repository_snapshot {
   uint64_t end; // end of the image in a single, growing journal repository
 };
 
-constexpr unsigned char repository_build_bytes[] = {
-#embed "../../lib/prelude.vish" suffix(,)
-#embed "../../lib/tools.vish" suffix(,)
-#embed "../../lib/versions.vish" suffix(,)
-#embed "../../lib/editor.vish" suffix(,)
-#embed "../../lib/cli.vish" suffix(,)
-#embed "../../lib/tests.vish"
-};
 uint64_t repository_hash(std::string_view bytes) {
   uint64_t h = 14695981039346656037ull;
   for(unsigned char c: bytes) h = (h ^ c) * 1099511628211ull;
   return h;
 }
-uint64_t repository_build() {
-  return repository_hash({reinterpret_cast<char const *>(repository_build_bytes), sizeof repository_build_bytes});
-}
+// File format = layout node AST (views and fields are what journal writes), not the text of libraries: editing lib/*.vish
+// repositories does not reset Built-in modules in journal - outdated copies, load_builtin_module replaces them with build
+// modules. My:* compatibility key is the layout hash.
+//
+uint64_t repository_format() { return repository_hash(ast_structs_text()); }
 
 struct repository_branch {
   std::string name;
@@ -189,7 +183,7 @@ void repository_save(repository_state const & state, ast_db const & db, node_id 
   repository_file f{root, state, db.journal()};
   repository_validate(f, db);
   writer body;
-  body.put(repository_build());
+  body.put(repository_format());
   body.put(std::string(vishdb_magic));
   body.put(f);
   if(body.bytes.size() > repository_limit) throw diagnostic("репозиторий больше 512 МиБ", {});
@@ -219,7 +213,7 @@ repository_file repository_load(std::string const & path) {
   auto staging = std::make_shared<node_pool>();
   pool_scope in(staging.get());
   reader r(payload);
-  if(r.get<uint64_t>() != repository_build() || r.get<std::string>() != vishdb_magic) throw diagnostic("репозиторий создан другой сборкой Vish; требуется совместимый экспорт", {});
+  if(r.get<uint64_t>() != repository_format() || r.get<std::string>() != vishdb_magic) throw diagnostic("репозиторий создан сборкой с другой раскладкой узлов АСТ; требуется совместимый экспорт", {});
   auto f = r.get<repository_file>();
   f.pool = staging;
   if(!r.at_end()) throw diagnostic("лишние данные репозитория", {});

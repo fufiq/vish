@@ -69,7 +69,7 @@ int main(int argc, char ** argv) {
   assert(live.journal().size() == before);
   auto forged = [&](repository_file const & file, bool structural = true) {
     writer body, out;
-    body.put(repository_build()); body.put(std::string(vishdb_magic)); body.put(file);
+    body.put(repository_format()); body.put(std::string(vishdb_magic)); body.put(file);
     out.raw(repository_magic.data(), repository_magic.size());
     out.put(uint64_t(body.bytes.size())); out.put(repository_hash(body.bytes));
     out.raw(body.bytes.data(), body.bytes.size());
