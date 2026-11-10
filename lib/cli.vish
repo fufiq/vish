@@ -194,6 +194,12 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("parser", "check_cli", files);
   }
+  if(cmd == "exprcheck") {
+    // vish exprcheck <body>: Phase 2 parser expressions in language (lib/parser.vish) vs. C++ stage0
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("parser", "expr_check_cli", files);
+  }
   if((cmd == "lib") && (args.size > 3)) {
     // vish lib import <lib> <repo.vishrepo> | vish lib export <repo.vishrepo> <lib >>
     if(args[1] == "import") {

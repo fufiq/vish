@@ -1,0 +1,56 @@
+1
+a
+a + b
+a + b * c
+a + b + c
+a - b - c - d
+-a
+- a
+!a
+-a + b
+a < b && c
+a == b || c != d
+a << 2 | b & 3
+f(a)
+f(a, b, c)
+f()
+f(a)(b)
+a.b
+a.b.c
+a.b(c)
+f(a).b
+a[i]
+a[i][j]
+a[i + 1]
+a.[k]
+(a + b) * c
+((a))
+x?
+f(x)?
+a + b?
+-(a + b)
+- - a
+a + -b
+a - -b
+10s
+0x1f
+0xFF + 1
+1_000
+'q'
+'\n'
+"s"
+"a\tb\n"
+"q\"x"
+a = b
+a += 1
+a.b = c + d
+a[i] = f(x, y)
+a = b = c
+a +
+a ++ b
+f(a,
+(a
+a ..b
+a..b
+f(...xs)
+f(1, "x", g(h(2)))

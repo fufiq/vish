@@ -79,6 +79,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # transfer to vish, step 2: phase 1 parser (brackets, indentation repairs, names ast.*) in language vs. C++ stage0
     ( $b parsecheck tests/data/*.txt lib/lexer.vish lib/parser.vish $(ls tests/*.vish | head -30) ) > $L/t_parser.log 2>&1
     echo "parser: код $?" > $L/r_parser
+    # Transfer to vish, step 3a: Phase 2 expressions (literals, names, calls, postfixes, operator series) in language vs. C++ stage0
+    ( $b exprcheck tests/data/expr_corpus.txt tests/data/expr_random.txt ) > $L/t_expr.log 2>&1
+    echo "expr: код $?" > $L/r_expr
     # Close/Open: The database saved after the text is restored in `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore
