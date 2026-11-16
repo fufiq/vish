@@ -1,0 +1,2 @@
+use reactive;
+main() { if(react_check_cli(array{"91","300"}) != 0) throw "reactcheck failed"; }

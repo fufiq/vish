@@ -91,6 +91,8 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # E5-2: instructions, blocks and declarations in Vish - every module element, the whole module and the print -> parse round trip against C++ stage0
     ( $b fmtcheck tests/*.vish tests/data/modcheck/*.vish tests/data/fmtcheck/*.vish ) > $L/t_fmtmod.log 2>&1
     echo "fmtmod: код $?" > $L/r_fmtmod
+    ( $b reactcheck 1 300 && $b reactcheck 17 300 && $b reactcheck 91 300 && sh tests/data/reactcheck/run.sh "$PWD/$b" ) > $L/t_react.log 2>&1
+    echo "react: код $?" > $L/r_react
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules

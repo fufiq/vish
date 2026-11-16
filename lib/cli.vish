@@ -204,6 +204,11 @@ cli(args) {
     // vish syntaxrules x: the prelude's syntax records (E4c debugging)
     return run_module("parser", "syntax_rules_cli", array{});
   }
+  if(cmd == "reactcheck") {
+    rc_files = array{};
+    for(rc_k : range(args.size)) if(rc_k > 0) rc_files.push(args[rc_k]);
+    return run_module("reactive", "react_check_cli", rc_files);
+  }
   if(cmd == "modcheck") {
     // vish modcheck <files>: module functions from the Vish parser nodes against C++ stage0 (step E4a)
     files = array{};

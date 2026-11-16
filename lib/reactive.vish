@@ -1,0 +1,234 @@
+module reactive;
+// RA-2, mine: incremental queries without native. Keys are strings.
+// new_db(push, equal) takes a value comparison (for code - a dump comparison).
+// set_input(db,key,value); query_define(db,key,fn): fn(mut db) reads get(db,key).
+// get records the dynamic read-set; stats returns [computations, hits, cutoffs].
+// watch(db,key,handler): handler(key,value). batch(db){...} merges changes;
+// handlers are called when a value changes, once, dependencies before users,
+// equal keys lexicographically. Nested batches are supported.
+// Queries and handlers must not change the database. A query exception clears the stack;
+// a batch exception keeps the changes and is passed to the caller without notifications.
+struct reactive_db { array keys; array vals; array funcs; array deps; array revs; array checked; array dirty; array users; array stack; array reads; array watchers; i64 revision; i64 depth; bool push; array equal; array counts; }
+new_db(bool nd_push, nd_equal) => reactive_db{array{},array{},array{},array{},array{},array{},array{},array{},array{},array{},array{},0,0,nd_push,array{nd_equal},array{0,0,0}};
+rx_find(rx_db, str rx_key) {
+  for(rx_i : range(rx_db.keys.size)) if(rx_db.keys[rx_i] == rx_key) return rx_i;
+  return -1;
+}
+rx_slot(mut rx_db, str rx_key) {
+  rx_i = rx_find(rx_db, rx_key);
+  if(rx_i >= 0) return rx_i;
+  rx_db.keys.push(rx_key); rx_db.vals.push(array{}); rx_db.funcs.push(array{});
+  rx_db.deps.push(array{}); rx_db.revs.push(0); rx_db.checked.push(-1);
+  rx_db.dirty.push(true); rx_db.users.push(array{}); return rx_db.keys.size - 1;
+}
+rx_has(rx_xs, rx_x) { for(rx_y : rx_xs) if(rx_y == rx_x) return true; return false; }
+rx_dirty(mut rx_db, rx_i) {
+  rx_db.dirty[rx_i] = true;
+  rx_todo = array{rx_i}; rx_seen = array{rx_i}; rx_pos = 0;
+  while(rx_pos < rx_todo.size) {
+    rx_at = rx_todo[rx_pos]; rx_pos = rx_pos + 1;
+    for(rx_u : rx_db.users[rx_at]) if(!rx_has(rx_seen,rx_u)) {
+      rx_seen.push(rx_u); rx_todo.push(rx_u); rx_db.dirty[rx_u] = true;
+    }
+  }
+}
+query_define(mut qd_db, str qd_key, qd_fn) {
+  qd_i = rx_slot(qd_db,qd_key); qd_db.revision = qd_db.revision + 1;
+  qd_db.funcs[qd_i] = array{qd_fn}; qd_db.checked[qd_i] = -1; rx_dirty(qd_db,qd_i);
+}
+rx_eval(mut re_db, re_i) {
+  if(re_db.funcs[re_i].size == 0) {
+    if(re_db.vals[re_i].size == 0) throw "reactive: undefined " + re_db.keys[re_i];
+    return re_db.vals[re_i][0];
+  }
+  if(rx_has(re_db.stack,re_i)) {
+    re_path = "reactive cycle: ";
+    for(re_s : re_db.stack) re_path = re_path + re_db.keys[re_s] + " -> ";
+    throw re_path + re_db.keys[re_i];
+  }
+  re_valid = re_db.checked[re_i] >= 0;
+  if(re_valid && ((re_db.checked[re_i] == re_db.revision) || (re_db.push && !re_db.dirty[re_i]))) {
+    re_db.counts[1] = re_db.counts[1] + 1; return re_db.vals[re_i][0];
+  }
+  re_olddeps = re_db.deps[re_i];
+  // The stack also protects the dependency check from cycles after a redefinition.
+  re_db.stack.push(re_i); re_db.reads.push(array{});
+  try {
+    for(re_d : re_olddeps) {
+      rx_eval(re_db,re_d[0]);
+      if(re_db.revs[re_d[0]] != re_d[1]) re_valid = false;
+    }
+    if(!re_valid) {
+      re_fn = re_db.funcs[re_i][0]; re_value = re_fn(re_db);
+      re_newdeps = re_db.reads[re_db.reads.size - 1];
+      for(re_d : re_olddeps) {
+        re_users = array{};
+        for(re_u : re_db.users[re_d[0]]) if(re_u != re_i) re_users.push(re_u);
+        re_db.users[re_d[0]] = re_users;
+      }
+      for(re_d : re_newdeps) if(!rx_has(re_db.users[re_d[0]],re_i)) re_db.users[re_d[0]].push(re_i);
+      re_db.deps[re_i] = re_newdeps;
+      re_eq = re_db.equal[0]; re_same = false;
+      if(re_db.vals[re_i].size > 0) re_same = re_eq(re_db.vals[re_i][0],re_value);
+      re_db.counts[0] = re_db.counts[0] + 1;
+      if(re_same) re_db.counts[2] = re_db.counts[2] + 1;
+      else { re_db.vals[re_i] = array{re_value}; re_db.revs[re_i] = re_db.revision; }
+    } else re_db.counts[1] = re_db.counts[1] + 1;
+    re_db.checked[re_i] = re_db.revision; re_db.dirty[re_i] = false;
+  } catch(re_error) {
+    re_db.stack = rx_drop(re_db.stack);
+    re_db.reads = rx_drop(re_db.reads); throw re_error;
+  }
+  re_db.stack = rx_drop(re_db.stack);
+  re_db.reads = rx_drop(re_db.reads);
+  return re_db.vals[re_i][0];
+}
+get(mut gt_db, str gt_key) {
+  gt_i = rx_find(gt_db,gt_key); if(gt_i < 0) throw "reactive: undefined " + gt_key;
+  gt_value = rx_eval(gt_db,gt_i);
+  if(gt_db.reads.size > 0) {
+    gt_at = gt_db.reads.size - 1; gt_found = false;
+    for(gt_d : gt_db.reads[gt_at]) if(gt_d[0] == gt_i) gt_found = true;
+    if(!gt_found) gt_db.reads[gt_at].push(array{gt_i,gt_db.revs[gt_i]});
+  }
+  return gt_value;
+}
+set_input(mut si_db, str si_key, si_value) {
+  si_i = rx_slot(si_db,si_key); si_eq = si_db.equal[0];
+  if(si_db.funcs[si_i].size > 0) throw "reactive: query is not input";
+  if(si_db.vals[si_i].size > 0) if(si_eq(si_db.vals[si_i][0],si_value)) return;
+  si_db.revision = si_db.revision + 1; si_db.vals[si_i] = array{si_value};
+  si_db.revs[si_i] = si_db.revision; if(si_db.push) rx_dirty(si_db,si_i);
+  if(si_db.depth == 0) rx_flush(si_db);
+}
+watch(mut wt_db, str wt_key, wt_handler) {
+  wt_value = get(wt_db,wt_key); wt_db.watchers.push(array{wt_key,wt_handler,wt_value});
+}
+rx_order(ro_db, ro_i, mut ro_seen, mut ro_out) {
+  if(rx_has(ro_seen,ro_i)) return;
+  ro_seen.push(ro_i);
+  for(ro_d : ro_db.deps[ro_i]) rx_order(ro_db,ro_d[0],ro_seen,ro_out);
+  ro_out.push(ro_i);
+}
+rx_flush(mut rf_db) {
+  rf_keys = array{};
+  for(rf_w : rf_db.watchers) { get(rf_db,rf_w[0]); rf_keys.push(rf_w[0]); }
+  // A stable key order before the topological walk.
+  for(rf_a : range(rf_keys.size)) for(rf_b : range(rf_keys.size)) if(rx_less(rf_keys[rf_a],rf_keys[rf_b])) {
+    rf_tmp = rf_keys[rf_a]; rf_keys[rf_a] = rf_keys[rf_b]; rf_keys[rf_b] = rf_tmp;
+  }
+  rf_seen = array{}; rf_order = array{};
+  for(rf_key : rf_keys) rx_order(rf_db,rx_find(rf_db,rf_key),rf_seen,rf_order);
+  rf_sorted = array{};
+  while(rf_sorted.size < rf_order.size) {
+    rf_best = -1;
+    for(rf_c : rf_order) if(!rx_has(rf_sorted,rf_c)) {
+      rf_ready = true;
+      for(rf_d : rf_db.deps[rf_c]) if(!rx_has(rf_sorted,rf_d[0])) rf_ready = false;
+      if(rf_ready) { if(rf_best < 0) rf_best = rf_c; else if(rx_less(rf_db.keys[rf_c],rf_db.keys[rf_best])) rf_best = rf_c; }
+    }
+    if(rf_best < 0) throw "reactive: subscription cycle";
+    rf_sorted.push(rf_best);
+  }
+  for(rf_i : rf_sorted) for(rf_j : range(rf_db.watchers.size)) if(rf_db.watchers[rf_j][0] == rf_db.keys[rf_i]) {
+    rf_w = rf_db.watchers[rf_j]; rf_v = rf_db.vals[rf_i][0]; rf_eq = rf_db.equal[0];
+    if(!rf_eq(rf_w[2],rf_v)) {
+      rf_db.watchers[rf_j][2] = rf_v; rf_fn = rf_w[1]; rf_fn(rf_w[0],rf_v);
+    }
+  }
+}
+batch(mut bt_db, expr bt_body) {
+  bt_db.depth = bt_db.depth + 1;
+  try { bt_body; } catch(bt_error) { bt_db.depth = bt_db.depth - 1; throw bt_error; }
+  bt_db.depth = bt_db.depth - 1; if(bt_db.depth == 0) rx_flush(bt_db);
+}
+stats(st_db) => st_db.counts;
+
+rx_drop(rd_xs) { rd_out = array{}; for(rd_i : range(rd_xs.size - 1)) rd_out.push(rd_xs[rd_i]); return rd_out; }
+// A deterministic DAG: sum/min/concat/a conditional read, an independent recursive reference.
+rx_rand(mut rr_state) { rr_state = ((rr_state * 1664525) + 1013904223) % 2147483647; return rr_state; }
+rx_naive(rn_specs, rn_inputs, rn_i, mut rn_count) {
+  if(rn_i < rn_inputs.size) return rn_inputs[rn_i];
+  rn_count = rn_count + 1; rn_s = rn_specs[rn_i - rn_inputs.size];
+  rn_a = rx_naive(rn_specs,rn_inputs,rn_s[1],rn_count);
+  if(rn_s[0] == 3) {
+    if((parse_int(rn_a).value % 2) == 0) return rx_naive(rn_specs,rn_inputs,rn_s[2],rn_count);
+    return rn_a;
+  }
+  rn_b = rx_naive(rn_specs,rn_inputs,rn_s[2],rn_count);
+  if(rn_s[0] == 2) return rn_a + rn_b;
+  rn_x = parse_int(rn_a).value; rn_y = parse_int(rn_b).value;
+  if(rn_s[0] == 1) return text(if(rn_x < rn_y) rn_x else rn_y);
+  return text((rn_x + rn_y) % 1000);
+}
+rx_formula(mut fm_db, fm_s) {
+  fm_a = get(fm_db,text(fm_s[1]));
+  if(fm_s[0] == 3) {
+    if((parse_int(fm_a).value % 2) == 0) return get(fm_db,text(fm_s[2]));
+    return fm_a;
+  }
+  fm_b = get(fm_db,text(fm_s[2]));
+  if(fm_s[0] == 2) return fm_a + fm_b;
+  fm_x = parse_int(fm_a).value; fm_y = parse_int(fm_b).value;
+  if(fm_s[0] == 1) return text(if(fm_x < fm_y) fm_x else fm_y);
+  return text((fm_x + fm_y) % 1000);
+}
+rx_define(mut df_db, df_key, df_spec) { df_copy = array{df_spec[0],df_spec[1],df_spec[2]}; query_define(df_db,df_key,(mut df_inner) => rx_formula(df_inner,df_copy)); }
+react_check_cli(rc_av) {
+  rc_seed = 1; rc_steps = 300;
+  if(rc_av.size > 0) rc_seed = parse_int(rc_av[0]).value;
+  if(rc_av.size > 1) rc_steps = parse_int(rc_av[1]).value;
+  rc_push = new_db(true,(a,b) => a == b); rc_pull = new_db(false,(a,b) => a == b);
+  rc_inputs = array{}; rc_specs = array{}; rc_bad = 0; rc_naive = 0;
+  for(rc_i : range(5)) {
+    rc_v = text(rx_rand(rc_seed) % 20); rc_inputs.push(rc_v);
+    set_input(rc_push,text(rc_i),rc_v); set_input(rc_pull,text(rc_i),rc_v);
+  }
+  for(rc_i : range(12)) {
+    rc_n = rc_i + 5; rc_s = array{rx_rand(rc_seed) % 4,rx_rand(rc_seed) % rc_n,rx_rand(rc_seed) % rc_n};
+    rc_specs.push(rc_s); rx_define(rc_push,text(rc_n),rc_s); rx_define(rc_pull,text(rc_n),rc_s);
+  }
+  for(rc_step : range(rc_steps)) {
+    batch(rc_push) { batch(rc_pull) {
+      for(rc_j : range(3)) {
+        rc_at = rx_rand(rc_seed) % 5; rc_v = text(rx_rand(rc_seed) % 20); rc_inputs[rc_at] = rc_v;
+        set_input(rc_push,text(rc_at),rc_v); set_input(rc_pull,text(rc_at),rc_v);
+      }
+    } }
+    for(rc_i : range(12)) {
+      rc_n = rc_i + 5; rc_expected = rx_naive(rc_specs,rc_inputs,rc_n,rc_naive);
+      if(get(rc_push,text(rc_n)) != rc_expected) rc_bad = rc_bad + 1;
+      if(get(rc_pull,text(rc_n)) != rc_expected) rc_bad = rc_bad + 1;
+    }
+  }
+  rc_bad = rc_bad + rx_cases();
+  print("reactcheck: шагов=" + text(rc_steps) + " запросов=12 push=" + text(stats(rc_push)[0]) + " pull=" + text(stats(rc_pull)[0]) + " наивно=" + text(rc_naive) + " доля%=" + text((stats(rc_push)[0] * 100) / rc_naive) + " нарушений=" + text(rc_bad));
+  return if(rc_bad == 0) 0 else 1;
+}
+rx_cases() {
+  cs_db = new_db(true,(a,b) => a == b); cs_bad = 0;
+  set_input(cs_db,"x",2); set_input(cs_db,"y",9);
+  query_define(cs_db,"q",(mut d) => get(d,"x") % 2);
+  query_define(cs_db,"r",(mut d) => get(d,"q") + 10);
+  get(cs_db,"r"); cs_before = stats(cs_db)[0]; set_input(cs_db,"x",4); get(cs_db,"r");
+  if(stats(cs_db)[0] != (cs_before + 1)) cs_bad = cs_bad + 1;
+  query_define(cs_db,"dyn",(mut d) => if(get(d,"q") == 0) get(d,"y") else get(d,"x"));
+  get(cs_db,"dyn"); set_input(cs_db,"x",3); get(cs_db,"dyn");
+  if(rx_has(cs_db.users[rx_find(cs_db,"y")],rx_find(cs_db,"dyn"))) cs_bad = cs_bad + 1;
+  cs_before = stats(cs_db)[0]; set_input(cs_db,"y",8); get(cs_db,"dyn");
+  if(stats(cs_db)[0] != cs_before) cs_bad = cs_bad + 1;
+  cs_events = array{};
+  watch(cs_db,"r",(k,v) => cs_events.push(k)); watch(cs_db,"q",(k,v) => cs_events.push(k));
+  batch(cs_db) { set_input(cs_db,"x",6); set_input(cs_db,"x",8); }
+  if(cs_events.size != 2) cs_bad = cs_bad + 1;
+  else if((cs_events[0] != "q") || (cs_events[1] != "r")) cs_bad = cs_bad + 1;
+  batch(cs_db) { set_input(cs_db,"y",1); set_input(cs_db,"x",10); }
+  if(cs_events.size != 2) cs_bad = cs_bad + 1;
+  query_define(cs_db,"a",(mut d) => get(d,"b")); query_define(cs_db,"b",(mut d) => get(d,"a"));
+  cs_caught = false;
+  try { get(cs_db,"a"); } catch(str cs_error) { cs_caught = cs_error == "reactive cycle: a -> b -> a"; }
+  if(!cs_caught) cs_bad = cs_bad + 1;
+  return cs_bad;
+}
+
+rx_less(rl_a,rl_b) { for(rl_i : range(if(rl_a.size < rl_b.size) rl_a.size else rl_b.size)) { if(rl_a[rl_i] < rl_b[rl_i]) return true; if(rl_a[rl_i] > rl_b[rl_i]) return false; } return rl_a.size < rl_b.size; }

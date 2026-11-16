@@ -1,0 +1,20 @@
+use reactive;
+use parser;
+use tools;
+// Five independent parses, the parser is a black box. Node values are compared by dump.
+demo_define(mut dd_db, dd_key) {
+  dd_input = "text:" + dd_key;
+  query_define(dd_db,dd_key,(mut dd_inner) => dump_code(module_items_of(get(dd_inner,dd_input))[0].node));
+}
+main() {
+  dm_db = new_db(true,(a,b) => a == b);
+  for(dm_i : range(5)) {
+    dm_key = "f" + text(dm_i);
+    set_input(dm_db,"text:" + dm_key,dm_key + "() => 1;"); demo_define(dm_db,dm_key);
+  }
+  for(dm_i : range(5)) get(dm_db,"f" + text(dm_i));
+  dm_before = stats(dm_db)[0]; set_input(dm_db,"text:f2","f2() => 2;");
+  for(dm_i : range(5)) get(dm_db,"f" + text(dm_i));
+  print("parser demo: initially=" + text(dm_before) + " edited=" + text(stats(dm_db)[0] - dm_before) + " cached=4");
+  if((stats(dm_db)[0] - dm_before) != 1) throw "parser demo failed";
+}

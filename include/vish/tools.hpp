@@ -52,6 +52,9 @@ constexpr unsigned char runlog_bytes[] = {
 constexpr unsigned char modules_bytes[] = {
 #embed "../../lib/modules.vish"
 };
+constexpr unsigned char reactive_bytes[] = {
+#embed "../../lib/reactive.vish"
+};
 constexpr unsigned char views_bytes[] = {
 #embed "../../lib/views.vish"
 };
@@ -81,6 +84,7 @@ std::string_view builtin_text(std::string_view key) {
   if(key == "printer") return view(printer_bytes);
   if(key == "runlog") return view(runlog_bytes);
   if(key == "modules") return view(modules_bytes);
+  if(key == "reactive") return view(reactive_bytes);
   if(key == "views") return view(views_bytes);
   if(key == "complete") return view(complete_bytes);
   if(key == "session") return view(session_bytes);
