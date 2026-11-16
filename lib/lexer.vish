@@ -134,11 +134,13 @@ lex(str src) {
 }
 // Line Dump of the result (general view from lex_reference - C++ stage0): reconciliation of two implementations.
 dump(lexed r) {
-  out = "";
-  for(t : r.tokens) out = out + ("t " + text(t.kind) + " " + text(t.from) + " " + text(t.to) + " " + (if(t.glued) "1" else "0") + " " + text(t.err) + "\n");
-  for(c : r.comments) out = out + ("c " + text(c.from) + " " + text(c.to) + "\n");
-  for(e : r.errors) out = out + ("e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
-  out
+  // "each task gets its own string... buffer + position" (the author, 2021-10-11): `out = out + ...` would copy the whole growing string
+  // a square on every token (421 KB of source: 33 s out of 50 are system time on copies); the buffer grows in place (*mine*: choice of technique).
+  out = text_buffer();
+  for(t : r.tokens) put(out, "t " + text(t.kind) + " " + text(t.from) + " " + text(t.to) + " " + (if(t.glued) "1" else "0") + " " + text(t.err) + "\n");
+  for(c : r.comments) put(out, "c " + text(c.from) + " " + text(c.to) + "\n");
+  for(e : r.errors) put(out, "e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
+  take(out)
 }
 // The C++ lexer (stage0) is the same dump; it exists until the computer is assembled from the image.
 lex_reference(str src) => native "cpp" {
