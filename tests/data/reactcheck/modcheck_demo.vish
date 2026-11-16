@@ -1,20 +1,57 @@
 use reactive;
 use parser;
 use tools;
-// Five independent parses, the parser is a black box. Node values are compared by dump.
-demo_define(mut dd_db, dd_key) {
-  dd_input = "text:" + dd_key;
-  query_define(dd_db,dd_key,(mut dd_inner) => dump_code(module_items_of(get(dd_inner,dd_input))[0].node));
+// RA-2 demo "incremental parsing of a module": the parser is a black box, values are compared by dump_code.
+// Layers: src (input) -> parse (the dumps of all module elements) -> item:k (the k-th element, empty past the end) -> analysis:k.
+// An edit of one function's body, a blank/a comment, adding/inserting at the start/deleting an element: after every edit
+// all the analysis values are compared with an independent full parse, and the number of recomputations with the number of really changed elements.
+same(a, b) {
+  if(a.size != b.size) return false;
+  for(sm_i : range(a.size)) if(a[sm_i] != b[sm_i]) return false;
+  return true;
 }
+dumps_of(str dd_src) { dd_out = array{}; for(dd_it : module_items_of(dd_src)) dd_out.push(dump_code(dd_it.node)); return dd_out; }
+analysis_of(str an_dump) => "size=" + text(an_dump.size);
 main() {
-  dm_db = new_db(true,(a,b) => a == b);
-  for(dm_i : range(5)) {
-    dm_key = "f" + text(dm_i);
-    set_input(dm_db,"text:" + dm_key,dm_key + "() => 1;"); demo_define(dm_db,dm_key);
+  slots = 8; runs = array{0,0,0}; dm_db = new_db(true,(dm_a1,dm_b1) => same(dm_a1,dm_b1));
+  set_input(dm_db,"src",array{"f0() => 1;\nf1() => 1;\nf2() => 1;\nf3() => 1;\nf4() => 1;\n"});
+  query_define(dm_db,"parse",(mut dm_d) => { runs[0] = runs[0] + 1; return dumps_of(get(dm_d,"src")[0]); });
+  for(dm_k : range(slots)) {
+    dm_kk = dm_k;
+    query_define(dm_db,"item:" + text(dm_k),(mut dm_d) => { runs[1] = runs[1] + 1; dm_p = get(dm_d,"parse"); return array{if(dm_kk < dm_p.size) dm_p[dm_kk] else ""}; });
+    query_define(dm_db,"analysis:" + text(dm_k),(mut dm_d) => { runs[2] = runs[2] + 1; return array{analysis_of(get(dm_d,"item:" + text(dm_kk))[0])}; });
   }
-  for(dm_i : range(5)) get(dm_db,"f" + text(dm_i));
-  dm_before = stats(dm_db)[0]; set_input(dm_db,"text:f2","f2() => 2;");
-  for(dm_i : range(5)) get(dm_db,"f" + text(dm_i));
-  print("parser demo: initially=" + text(dm_before) + " edited=" + text(stats(dm_db)[0] - dm_before) + " cached=4");
-  if((stats(dm_db)[0] - dm_before) != 1) throw "parser demo failed";
+  src_now = "f0() => 1;\nf1() => 1;\nf2() => 1;\nf3() => 1;\nf4() => 1;\n";
+  prev = dumps_of(src_now); bad = 0;
+  edits = array{
+    array{"тело f2", "f0() => 1;\nf1() => 1;\nf2() => 2;\nf3() => 1;\nf4() => 1;\n"},
+    array{"пробелы и комментарий", "f0() => 1;\n\n  f1()   =>   1 ;   // заметка\nf2() => 2;\nf3() => 1;\nf4() => 1;\n"},
+    array{"добавлен элемент в конец", "f0() => 1;\nf1() => 1;\nf2() => 2;\nf3() => 1;\nf4() => 1;\ng5() => 5;\n"},
+    array{"вставка в начало", "h() => 9;\nf0() => 1;\nf1() => 1;\nf2() => 2;\nf3() => 1;\nf4() => 1;\ng5() => 5;\n"},
+    array{"удалён элемент в середине", "h() => 9;\nf0() => 1;\nf2() => 2;\nf3() => 1;\nf4() => 1;\ng5() => 5;\n"},
+    array{"два элемента в одной строке", "h() => 9;\nf0() => 1;  f2() => 2;\nf3() => 1;\nf4() => 1;\ng5() => 5;\n"}
+  };
+  for(dm_k : range(slots)) get(dm_db,"analysis:" + text(dm_k));
+  print("parser demo: initially parse=" + text(runs[0]) + " item=" + text(runs[1]) + " analysis=" + text(runs[2]));
+  for(ed : edits) {
+    before = array{runs[0],runs[1],runs[2]};
+    set_input(dm_db,"src",array{ed[1]});
+    for(dm_k : range(slots)) {
+      dm_got = get(dm_db,"analysis:" + text(dm_k))[0];
+      dm_now = dumps_of(ed[1]);
+      dm_want = analysis_of(if(dm_k < dm_now.size) dm_now[dm_k] else "");
+      if(dm_got != dm_want) { bad = bad + 1; print("  РАСХОЖДЕНИЕ " + ed[0] + " slot " + text(dm_k) + ": " + dm_got + " != " + dm_want); }
+    }
+    now = dumps_of(ed[1]); changed = 0; parse_same = (prev.size == now.size);
+    for(dm_k : range(slots)) {
+      dm_a = if(dm_k < prev.size) prev[dm_k] else ""; dm_b = if(dm_k < now.size) now[dm_k] else "";
+      if(dm_a != dm_b) { changed = changed + 1; parse_same = false; }
+    }
+    pr = runs[0] - before[0]; ir = runs[1] - before[1]; ar = runs[2] - before[2];
+    expect_items = if(parse_same) 0 else slots;
+    print("parser demo: " + ed[0] + ": parse=" + text(pr) + " item=" + text(ir) + " analysis=" + text(ar) + " (изменилось элементов " + text(changed) + ")");
+    if((pr != 1) || (ir != expect_items) || (ar != changed)) { bad = bad + 1; print("  ОЖИДАЛОСЬ parse=1 item=" + text(expect_items) + " analysis=" + text(changed)); }
+    prev = now;
+  }
+  if(bad != 0) throw "parser demo failed";
 }

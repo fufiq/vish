@@ -1,0 +1,19 @@
+use reactive;
+// Scale (RA-2 M4): key lookup is a hash table, not linear; a deep chain gives a result or an explicit depth error.
+chain_def(mut cd_d, cd_i) { cd_k = text(cd_i - 1); query_define(cd_d,text(cd_i),(mut d) => get(d,cd_k) + 1); }
+main() {
+  sc_d = new_db(true,(a,b) => a == b);
+  for(sc_i : range(2000)) set_input(sc_d,"prefix:" + text(sc_i),sc_i);
+  sc_sum = 0; for(sc_i : range(2000)) sc_sum = sc_sum + get(sc_d,"prefix:" + text(sc_i));
+  if(sc_sum != 1999000) throw "scale: keys sum " + text(sc_sum);
+  sc_c = new_db(false,(a,b) => a == b); set_input(sc_c,"0",0);
+  for(sc_i : range(300)) chain_def(sc_c,sc_i + 1);
+  if(get(sc_c,"300") != 300) throw "scale: chain";
+  set_input(sc_c,"0",5); if(get(sc_c,"300") != 305) throw "scale: chain update";
+  sc_e = new_db(true,(a,b) => a == b); set_max_depth(sc_e,100); set_input(sc_e,"0",0);
+  for(sc_i : range(150)) chain_def(sc_e,sc_i + 1);
+  sc_ok = false;
+  try { get(sc_e,"150"); } catch(sc_x) { sc_ok = text(sc_x) == "reactive: глубина вычислений > 100"; }
+  if(!sc_ok) throw "scale: depth limit";
+  print("scale: keys=2000 chain=300 depth-limit ok");
+}
