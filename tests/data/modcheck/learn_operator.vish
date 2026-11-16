@@ -1,0 +1,7 @@
+operator (a) <=> (b) => a;
+operator (a)++ => a;
+operator ~~(a) => a;
+f(x, y) => x <=> y;
+g(x) => x++;
+h(x) => ~~x;
+k(x, y) => x + y <=> x;

@@ -186,7 +186,7 @@ check_cli(args) {
 // lambdas, `name"..."`, trailing call blocks, declarations in parentheses; the prelude's record words and `Name{...}`/`...x` - see record_use and postfix.
 // Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
 struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; }
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; }
 pn_new(str kind, str info, kids) => pn{kind, info, kids, array{}};
 two(pn a, pn b) {
   r = array{};
@@ -219,19 +219,23 @@ glued_as(ps s, str o, i64 k) {
   ok
 }
 core_ops() => array{"...", "=>", "+=", "-=", "*=", "/=", ".."};
-roles_infix() => array{"+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||", "&", "|", "^", "<<", ">>"};
-roles_prefix() => array{"-", "!"};
-roles_postfix() => array{"?"};
+roles_infix0() => array{"+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||", "&", "|", "^", "<<", ">>"};
+roles_prefix0() => array{"-", "!"};
+roles_postfix0() => array{"?"};
+// operator roles: the prelude + those declared by the program (learn_operator parser.hpp)
+roles_infix(ps s) => array{...roles_infix0(), ...s.ops[0]};
+roles_prefix(ps s) => array{...roles_prefix0(), ...s.ops[1]};
+roles_postfix(ps s) => array{...roles_postfix0(), ...s.ops[2]};
 longest_op(ps s, i64 k) {
   t0 = tk(s, k);
   if(t0.kind != kind_op()) return "";
   best = text_range(s.src, t0.from, t0.from + 1);
   for(o : core_ops()) if((o.size > best.size) && glued_as(s, o, k)) best = o;
-  for(o : roles_infix()) if((o.size > best.size) && glued_as(s, o, k)) best = o;
+  for(o : roles_infix(s)) if((o.size > best.size) && glued_as(s, o, k)) best = o;
   best
 }
 is_op_at(ps s, str o, i64 k) => longest_op(s, k) == o;
-is_role(str sym, i64 role) => has_text(if(role == 0) roles_prefix() else if(role == 1) roles_infix() else roles_postfix(), sym);
+is_role(ps s, str sym, i64 role) => has_text(if(role == 0) roles_prefix(s) else if(role == 1) roles_infix(s) else roles_postfix(s), sym);
 run_length(ps s, i64 k) {
   n = 0;
   while((tk(s, k + n).kind == kind_op()) && (op_char(tk(s, k + n).ch) && !is_op_at(s, "=>", k + n))) n += 1;
@@ -250,9 +254,9 @@ splits(ps s, i64 i, i64 n, i64 phase, bool want_infix, array post, array pre, st
   while((i + len) <= n) {
     if((len > 1) && !tk(s, (i + len) - 1).glued) break;
     sym = sym + text_range(s.src, tk(s, (i + len) - 1).from, tk(s, (i + len) - 1).from + 1);
-    if((phase == 0) && is_role(sym, 2)) splits(s, i + len, n, 0, want_infix, array{...post, sym}, pre, infix, out);
-    if((phase == 0) && (want_infix && is_role(sym, 1))) splits(s, i + len, n, 1, want_infix, post, pre, sym, out);
-    if((phase == 1) && is_role(sym, 0)) splits(s, i + len, n, 1, want_infix, post, array{...pre, sym}, infix, out);
+    if((phase == 0) && is_role(s, sym, 2)) splits(s, i + len, n, 0, want_infix, array{...post, sym}, pre, infix, out);
+    if((phase == 0) && (want_infix && is_role(s, sym, 1))) splits(s, i + len, n, 1, want_infix, post, pre, sym, out);
+    if((phase == 1) && is_role(s, sym, 0)) splits(s, i + len, n, 1, want_infix, post, array{...pre, sym}, infix, out);
     len += 1;
   }
   0
@@ -1248,7 +1252,7 @@ item_node(ps s) {
   if((tk_text(s, 0) == "operator") && (tk(s, 0).kind == kind_ident())) {
     io_r = operator_item(s, attrs);
     if(!io_r.ok) { why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
-    s.custom = true;
+    learn_op(s, node_field(io_r.node, "name"));
     return ires{true, io_r.node, from, s.pos, ""};
   }
   if((tk_text(s, 0) == "ct") && (tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) {
@@ -1519,6 +1523,22 @@ learn_fn(ps s, str name, array params) {
   } else s.cons.push(nrow);
   0
 }
+// an operator is declared by the program: the symbol's role extends the table (learn_operator parser.hpp; "already there - the context does not change")
+learn_op(ps s, str name) {
+  lo_role = -1;
+  lo_sym = "";
+  if(starts_with(name, "prefix")) { lo_role = 1; lo_sym = text_from(name, 6); }
+  else if(starts_with(name, "postfix")) { lo_role = 2; lo_sym = text_from(name, 7); }
+  else if(starts_with(name, "infix")) { lo_role = 0; lo_sym = text_from(name, 5); }
+  if((lo_role < 0) || (lo_sym == "") || (lo_sym == "[]")) return 0;
+  if(has_text(s.ops[lo_role], lo_sym)) return 0;
+  base = if(lo_role == 0) roles_infix0() else if(lo_role == 1) roles_prefix0() else roles_postfix0();
+  if(has_text(base, lo_sym)) return 0;
+  nops = array{};
+  for(i : range(3)) nops.push(if(i == lo_role) array{...s.ops[i], lo_sym} else s.ops[i]);
+  s.ops = nops;
+  0
+}
 // a function declaration closes the prelude record with the same name (shadow_records/learn parser.hpp), and a function with a `word(...)` clause or
 // an expr parameter is a construct: the rules change - the following elements are "not supported" (attributes [[...]] and outline before a declaration are skipped)
 declares_shadow(ps s, i64 from) {
@@ -1592,7 +1612,7 @@ module_items_of(str src) {
       tt = tk_at(s, it.from + ti);
       if(tt.kind == kind_ident()) {
         tw = text_range(s.src, tt.from, tt.to);
-        if(has_text(array{"syntax", "operator", "using", "use"}, tw)) s.custom = true;
+        if(has_text(array{"syntax", "using", "use"}, tw)) s.custom = true;
       }
     }
     if(s.pos <= p0) break;
