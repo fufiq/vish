@@ -1,0 +1,2 @@
+Thing { int n; get(x) => x; [[tag]] }
+main() { 0 }

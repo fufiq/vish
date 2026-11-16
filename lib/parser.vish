@@ -585,7 +585,7 @@ chain(ps s) {
         n = 0;
         more = false;
       } else if(v.size == 0) {
-        fail(s, "нет оператора");
+        if(s.line) fail(s, "нет оператора") else want(s, "нет оператора (правила контекста — программа, конструкции — могут его объявлять)");
         return pn_hole("");
       } else if(v.size > 1) {
         fail(s, "запись операторов неоднозначна");
@@ -1472,8 +1472,21 @@ block_node(ps s) {
   loop {
     if(is_close_ch(s, 125)) break;
     if((tk(s, 0).kind == kind_end()) || (s.error != "") || (s.unsupported != "")) { want(s, "блок не закрыт или внутри не поддержано"); return nres{false, code()}; }
+    bn_p0 = s.pos;
     bn_st = statement_node(s);
-    if(!bn_st.ok) return nres{false, code()};
+    if(!bn_st.ok) {
+      if((s.error == "") || (s.unsupported != "")) return nres{false, code()};
+      // a parse error is a hole (recover_statement parser.hpp): skipping to the end of the instruction; the skipped text and the reason
+      s.pos = bn_p0;
+      skip_stmt(s);
+      if((s.pos == bn_p0) && (tk(s, 0).kind != kind_end())) s.pos += 1;
+      bn_text = slice_text(s.src, tk_at(s, bn_p0).from, tk_at(s, s.pos - 1).to);
+      bn_items.push(ast.hole{bn_text, s.error});
+      s.error = "";
+      s.tail = false;
+      s.lwv = false;
+      continue;
+    }
     bn_items.push(bn_st.node);
     if(is_close_ch(s, 125) && s.lwv) bn_has = true;
   }
@@ -1529,6 +1542,13 @@ item_node(ps s) {
     ic_st = statement_node(s);
     if(!ic_st.ok) { why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     return ires{true, ic_st.node, from, s.pos, ""};
+  }
+  if((attrs.size == 0) && (tk(s, 0).kind == kind_ident()) && !is_keyword_word(tk_text(s, 0)) && is_open_ch(s, 123, 1)) {
+    // Name { ... } - an extension; the rules of its functions - constructs/operators - are taken by learn_item: conservative for now (ps.custom)
+    ie_r = extension_item(s, "");
+    if(!ie_r.ok) { s.custom = true; why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    s.custom = true;
+    return ires{true, ie_r.node, from, s.pos, ""};
   }
   if((tk_text(s, 0) == "syntax") && (tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident())) {
     isy = syntax_item(s, attrs);
@@ -2024,6 +2044,74 @@ parse_attrs(ps s) {
   }
   plres{true, pa_items}
 }
+// Name { ... } - an entity extension: functions, fields `T name [= v];`, attributes (extension parser.hpp)
+extension_item(ps s, str ex_from) {
+  ex_name = tk_text(s, 0);
+  s.pos += 2;
+  ex_items = array{};
+  ex_attrs = array{};
+  loop {
+    if(is_close_ch(s, 125)) break;
+    if((tk(s, 0).kind == kind_end()) || (s.error != "") || (s.unsupported != "")) { want(s, "расширение не закрыто"); return nres{false, code()}; }
+    ex_p0 = s.pos;
+    ex_at = parse_attrs(s);
+    if(!ex_at.ok) return nres{false, code()};
+    ex_fn = (tk(s, 0).kind == kind_ident()) && ((is_open_ch(s, 40, 1) && !core_word_text(tk_text(s, 0))) || ((tk(s, 1).kind == kind_ident()) && is_open_ch(s, 40, 2)));
+    if(ex_fn) {
+      s.pos = ex_p0;
+      ex_it = item_node(s);
+      if(!ex_it.ok) { if(s.unsupported == "") want(s, if(ex_it.why == "") "функция в расширении" else ex_it.why); return nres{false, code()}; }
+      ex_items.push(ex_it.node);
+      continue;
+    }
+    if((tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident())) { // a field: T name [= v];
+      ex_ty = ast.name{tk_text(s, 0)};
+      ex_nm = tk_text(s, 1);
+      s.pos += 2;
+      ex_init = code();
+      if(is_op_at(s, "=", 0)) {
+        s.pos += 1;
+        s.head = s.pos;
+        s.tail = false;
+        ex_e = value_expr(s);
+        if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
+        ex_r = node_of(ex_e);
+        if(!ex_r.ok) { want(s, "значение поля без узла"); return nres{false, code()}; }
+        ex_init = ex_r.node;
+      }
+      s.tail = false;
+      if(is_op_at(s, ";", 0)) s.pos += 1 else if(!is_close_ch(s, 125)) { want(s, "поле расширения без ;"); return nres{false, code()}; }
+      ex_items.push(ast.variable{ex_nm, ex_ty, ex_init, false, false, false, false, array{}});
+      for(a : ex_at.items) ex_attrs.push(a);
+      continue;
+    }
+    if(ex_at.items.size == 0) { want(s, "в расширении ожидались поле, функция или [[атрибут]]"); return nres{false, code()}; }
+    for(a : ex_at.items) ex_attrs.push(a);
+    if(is_op_at(s, ";", 0)) s.pos += 1;
+  }
+  s.pos += 1;
+  if(is_op_at(s, ";", 0)) s.pos += 1;
+  nres{true, ast.extension{ex_name, ex_items, ex_attrs, 0, "", ""}}
+}
+// skip_to_statement_end parser.hpp: skipping to the end of the instruction - `;` (eaten), `}` (the block ends it), the end of the enclosing group (not eaten)
+skip_stmt(ps s) {
+  loop {
+    t = tk(s, 0);
+    if(t.kind == kind_end()) return 0;
+    if(t.kind == kind_close()) return 0;
+    if(t.kind == kind_open()) {
+      m = s.match[s.pos];
+      if(m < 0) { s.pos += 1; continue; }
+      s.pos = m + 1;
+      if(tk_at(s, m).ch == 125) return 0;
+      continue;
+    }
+    semi = is_op_at(s, ";", 0);
+    s.pos += 1;
+    if(semi) return 0;
+  }
+  0
+}
 // a function declaration closes the prelude record with the same name (shadow_records/learn parser.hpp), and a function with a `word(...)` clause or
 // an expr parameter is a construct: the rules change - the following elements are "not supported" (attributes [[...]] and outline before a declaration are skipped)
 declares_shadow(ps s, i64 from) {
@@ -2092,6 +2180,10 @@ module_items_of(str src) {
     s.error = "";
     p0 = s.pos;
     it = item_node(s);
+    if(!it.ok && (s.error != "") && (s.unsupported == "") && (it.to > it.from)) { // a parse error is a hole (recover_statement parser.hpp): the skipped text and the reason
+      ht = slice_text(src, tk_at(s, it.from).from, tk_at(s, it.to - 1).to);
+      it = ires{true, ast.hole{ht, s.error}, it.from, it.to, ""};
+    }
     items.push(it);
     if(declares_shadow(s, it.from)) s.custom = true;
     for(ti : range(it.to - it.from)) {
