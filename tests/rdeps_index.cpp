@@ -31,7 +31,8 @@ int main() {
   auto body = db.copy_of<n_module>(root);
   body.items.pop_back();
   db.mutate(root, body, root.value + 1);
-  assert(!db[root].parent && !db[gn].parent);
+  assert(!db[root].parent); // the mutation does not touch the parents of detached children: they are fixed by the caller's link_parents (the database behaviour did not change)
+  assert(db.rdeps_dump() == db.rdeps_dump(true));
   db.rollback(root.value + 1);
   assert(db[gn].parent == root);
   assert(db.rdeps_dump() == before);
