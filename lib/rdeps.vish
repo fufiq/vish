@@ -231,6 +231,10 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
   // The comparison is by the function's layers (lang.layers: node types by instances) and the diagnostics; the edit's new nodes are accounted for,
   // changed diagnostics are counted and printed.
   if(i2cases > 0) {
+    // The synthetic replacements above exercise the index, not the program's semantics: before the independent check
+    // we restore the links of the written trees. This is a separate phase boundary, outside the I3 snapshots.
+    db.link_parents(db.prelude);
+    db.link_parents(root);
     struct instance { // the layer of a function instance: whether it is folded in ct, the types of the program's nodes, the types of derived nodes (by content)
       bool ct = false;
       std::map<uint32_t, std::string> fixed;
@@ -248,10 +252,10 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
     auto is_program = [&](uint32_t id) { return id < program_end || (id >= edit_lo && id < edit_hi); };
     auto run_check = [&]() {
       run_result r;
-      interpreter lang(db, root, {path}, mode::check);
-      try { lang.run_main(); } catch(diagnostic const & d) { r.failed = true; r.what = d.what(); r.chain.push_back(d.where); for(auto const & fr: d.trace) r.chain.push_back(fr.where); }
+      std::optional<interpreter> lang;
+      try { lang.emplace(db, root, std::vector<std::string>{path}, mode::check); lang->run_main(); } catch(diagnostic const & d) { r.failed = true; r.what = d.what(); r.chain.push_back(d.where); for(auto const & fr: d.trace) r.chain.push_back(fr.where); }
       catch(std::exception const & d) { r.failed = true; r.what = d.what(); }
-      for(auto const & [f, keys]: lang.layers)
+      if(lang) for(auto const & [f, keys]: lang->layers)
         for(auto const & [key, l]: keys) {
           auto & out = r.layers[f][key];
           for(auto const & [nid, ts]: l.types) {
@@ -433,6 +437,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       ast_db::unique_nodes(direct);
       auto explained = [&](node_id g) -> std::pair<bool, int> { // (explained, tier)
         if(std::ranges::contains(impact, g)) return {true, 0};
+        if(kind == 8) return {false, 0}; // signature: no forgiveness through a caller
         auto cs = callers(g);
         for(auto c: cs) if(std::ranges::contains(direct, c)) return {true, 1};
         if(!hook_case) for(auto c: cs) if(std::ranges::contains(impact, c)) return {true, 2};
@@ -510,7 +515,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       if(kind == 8) ++sig_cases;
       if(hook_case) ++hook_cases;
       if(includes) { ++supers; if(impact.size() > actual.size()) ++strict; }
-      else if(has_ct_block && !hook_case) { // ct code reads and changes the AST by reflection (functions_named, f.body...): the dependency is not by name - RA-1b
+      else if(has_ct_block && !hook_case && kind != 8) { // ct code reads and changes the AST by reflection (functions_named, f.body...): the dependency is not by name - RA-1b
         ++ct_gap;
         fprintf(stderr, "%s: И2 вид %d: расхождение в программе с ct-блоками — зависимость ct-кода от АСТ по рефлексии, RA-1b (вне строгой проверки)\n", path.c_str(), kind);
       } else { ++bad2; if(hook_case) ++hook_bad; }

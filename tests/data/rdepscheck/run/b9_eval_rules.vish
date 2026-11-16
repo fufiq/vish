@@ -1,0 +1,24 @@
+// no-jit
+// out: 8
+// out: eval true
+// out: fit_rule true
+// out: join_rule true
+// out: analysis_limit true
+// out: chain_resolve true
+// out: overload_pick true
+// out: ORACLE true
+use rdeps;
+struct ast.twice { code x; }
+syntax twice (x) => ast.twice{x};
+ast.twice { eval(expr x) => x + x; }
+doubled(a) => twice (a);
+main() {
+  print(doubled(4));
+  for(name : array{"eval", "fit_rule", "join_rule", "analysis_limit", "chain_resolve", "overload_pick"}) {
+    found = false;
+    fs = if(name == "eval") kind_functions(ast.twice{ast.int{4}}, "eval") else functions_named(name);
+    for(f : fs) for(x : impact_of(array{f})) if(code_name(x) == "doubled") found = true;
+    print(name, found);
+  }
+  print("ORACLE", rdeps_oracle_report() == "");
+}
