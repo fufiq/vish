@@ -1,0 +1,2 @@
+f(){syntax zap (x)=>ast.return{x};0}
+g(){zap(2)}

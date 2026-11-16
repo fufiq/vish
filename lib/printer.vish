@@ -1000,6 +1000,7 @@ fmt_check_modules(files) {
     }
     all_ok = cut < 0;
     texts = array{};
+    user_syn = false;
     shadow = false; // a function with the record's name is declared above - C++ prints differently (the closing of the record)
     for(k : range(n_mine)) {
       total += 1;
@@ -1010,6 +1011,12 @@ fmt_check_modules(files) {
         continue;
       }
       node = mine[k].node;
+      if(user_syn) { // a program syntax record is declared above: C++ prints the nodes by its projection, the printer in Vish has no program records
+        unsupported += 1;
+        all_ok = false;
+        fmt_count(reasons, counts, "не поддержано: выше объявлена запись syntax программы (печать по ней)");
+        continue;
+      }
       if(shadow) {
         unsupported += 1;
         all_ok = false;
@@ -1018,6 +1025,7 @@ fmt_check_modules(files) {
       }
       p = print_code(node);
       if((code_kind(node) == ast.function) && pr_record_word(node_field(node, "name"))) shadow = true;
+      if((code_kind(node) == ast.function) && (node_field(node, "form").size > 0)) user_syn = true;
       if(!p.ok) {
         unsupported += 1;
         all_ok = false;

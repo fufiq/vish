@@ -633,6 +633,7 @@ pattern_element(ps s) {
   pe_ty = code();
   if(tk(s, 1).kind == kind_ident()) {
     if(tk(s, 0).kind != kind_ident()) { want(s, "тип образца"); return nres{false, code()}; }
+    if(tk_text(s, 0) == "auto") { want(s, "auto не нужен"); return nres{false, code()}; }
     pe_ty = ast.name{tk_text(s, 0)};
     s.pos += 1;
   }
@@ -1361,6 +1362,7 @@ statement_node(ps s) {
 }
 block_node(ps s) {
   // at `{`
+  bn_rules = s.rules; // the program's syntax records are also block rules
   bn_cons = s.cons; // block rules (constructs, operators) apply to its end (context_scope parser.hpp)
   bn_ops = s.ops;
   s.pos += 1;
@@ -1377,6 +1379,7 @@ block_node(ps s) {
   s.pos += 1;
   s.cons = bn_cons;
   s.ops = bn_ops;
+  s.rules = bn_rules;
   nres{true, ast.block{bn_items, bn_has, array{}}}
 }
 // one module element from token s.pos: a function or "not supported" (the position is after the element in any case)
@@ -1675,6 +1678,11 @@ operator_item(ps s, attrs) {
 with_clause(pn, str cl) => ast.parameter{node_field(pn, "name"), node_field(pn, "type"), node_field(pn, "mode"), node_field(pn, "pack"), cl, node_field(pn, "strict"), node_field(pn, "source")};
 // learn parser.hpp: a function with a clause or a last expr parameter is a construct (tail/bare/clauses)
 learn_fn(ps s, str name, array params) {
+  if(rule_has(s, name)) { // a function named like a record head closes the records until the end of the context (shadow_records parser.hpp)
+    lf_keep = array{};
+    for(r : s.rules) if(r[0] != name) lf_keep.push(r);
+    s.rules = lf_keep;
+  }
   lf_any = false;
   lf_head = 0;
   lf_last = false;
@@ -1756,7 +1764,8 @@ var_decl(ps s) {
   if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
   vd_r = node_of(vd_e);
   if(!vd_r.ok) { want(s, "значение переменной без узла"); return nres{false, code()}; }
-  if(is_op_at(s, ";", 0)) s.pos += 1 else if(!is_close_ch(s, 125)) { if(s.tail) s.tail = false else { want(s, "объявление без ;"); return nres{false, code()}; } }
+  s.tail = false;
+  if(is_op_at(s, ";", 0)) s.pos += 1 else if(!is_close_ch(s, 125)) { want(s, "объявление без ;"); return nres{false, code()}; } // end_statement
   nres{true, ast.variable{vd_nm, vd_ty, vd_r.node, vd_const, false, vd_ref, vd_strict, array{}}}
 }
 // --- syntax: the declaration of a program record (syntax_decl parser.hpp). A core node record (`syntax word ... => ast.kind{...}`) goes into ps.rules -
@@ -1906,6 +1915,7 @@ declares_shadow(ps s, i64 from) {
     if(m < 0) return false;
     p = m + 1;
   }
+  if((tk_at(s, p).kind == kind_ident()) && has_text(array{"syntax", "operator", "use", "using"}, text_range(s.src, tk_at(s, p).from, tk_at(s, p).to))) return false; // a rule declaration, not a function
   if((tk_at(s, p).kind == kind_ident()) && (text_range(s.src, tk_at(s, p).from, tk_at(s, p).to) == "outline")) p += 1;
   // an extension `Name { ... }` / `&f(...) { ... }` declares functions inside - the rules may change (conservatively)
   if((tk_at(s, p).kind == kind_ident()) && (tk_at(s, p + 1).kind == kind_open()) && (tk_at(s, p + 1).ch == 123)) return true;

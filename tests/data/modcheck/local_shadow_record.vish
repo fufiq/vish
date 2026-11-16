@@ -1,0 +1,2 @@
+f(){loop(x)=>x;loop(1)}
+g(){loop {break;}}
