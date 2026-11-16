@@ -1305,6 +1305,12 @@ item_node(ps s) {
   close = s.match[s.pos + k + 1];
   if(close < 0) { want(s, "скобки"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
   after = (close + 1) - s.pos;
+  loop { // clauses: name(...) word(...) word(...) => ...
+    if(!((tk(s, after).kind == kind_ident()) && is_open_ch(s, 40, after + 1) && !core_word_text(tk_text(s, after)))) break;
+    c2 = s.match[s.pos + after + 1];
+    if(c2 < 0) break;
+    after = (c2 + 1) - s.pos;
+  }
   if(!(is_op_at(s, "=>", after) || is_open_ch(s, 123, after))) { want(s, "не объявление функции"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
   s.pos += k + 2;
   params = array{};
@@ -1316,6 +1322,19 @@ item_node(ps s) {
     if(is_op_at(s, ",", 0)) s.pos += 1 else if(!is_close_ch(s, 41)) { want(s, "список параметров"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
   }
   s.pos += 1;
+  loop {
+    if(!((tk(s, 0).kind == kind_ident()) && is_open_ch(s, 40, 1) && !core_word_text(tk_text(s, 0)))) break;
+    cl_w = tk_text(s, 0);
+    s.pos += 2;
+    loop {
+      if(is_close_ch(s, 41)) break;
+      cl_pr = param_node(s);
+      if(!cl_pr.ok) { s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+      params.push(with_clause(cl_pr.node, cl_w));
+      if(is_op_at(s, ",", 0)) s.pos += 1 else if(!is_close_ch(s, 41)) { want(s, "список параметров клаузы"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    }
+    s.pos += 1;
+  }
   if(is_op_at(s, "=>", 0)) {
     s.pos += 2; // `=>` is two one-character tokens
     s.tail = false;
@@ -1326,10 +1345,12 @@ item_node(ps s) {
     r = node_of(e);
     if(!r.ok) { want(s, "выражение без узла"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     if(s.tail) s.tail = false else if(is_op_at(s, ";", 0)) s.pos += 1;
+    learn_fn(s, fname, params);
     return ires{true, ast.function{fname, params, rtype, r.node, false, true, attrs, false, array{}}, from, s.pos, ""};
   }
   b = block_node(s);
   if(!b.ok) { s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  learn_fn(s, fname, params);
   ires{true, ast.function{fname, params, rtype, b.node, false, false, attrs, false, array{}}, from, s.pos, ""}
 }
 // T Name [: base] { [ct] T field [= value]; ... } [;] - an extension Name, an instance of T (instance_decl/struct_fields parser.hpp); `= {...}` and #name are not supported
@@ -1463,6 +1484,41 @@ operator_item(ps s, attrs) {
   if(!oi_b.ok) return nres{false, code()};
   nres{true, ast.function{oi_name, oi_params, code(), oi_b.node, false, false, attrs, false, array{}}}
 }
+// a copy of a parameter with a clause (ast.parameter: name, type, mode, pack, clause, strict, source)
+with_clause(pn, str cl) => ast.parameter{node_field(pn, "name"), node_field(pn, "type"), node_field(pn, "mode"), node_field(pn, "pack"), cl, node_field(pn, "strict"), node_field(pn, "source")};
+// learn parser.hpp: a function with a clause or a last expr parameter is a construct (tail/bare/clauses)
+learn_fn(ps s, str name, array params) {
+  lf_any = false;
+  lf_head = 0;
+  lf_last = false;
+  for(p : params) {
+    if(node_field(p, "clause") != "") lf_any = true
+    else {
+      lf_head += 1;
+      lf_last = node_field(p, "mode") == 4;
+    }
+  }
+  if(!lf_any && !lf_last) return 0;
+  ci = cons_of(s, name);
+  row = if(ci >= 0) s.cons[ci] else array{name, 0, 0, array{}, 0};
+  tail = if(lf_last) 1 else row[1];
+  bare = if((lf_head == 1) && lf_last) 1 else row[2];
+  cls = row[3];
+  for(p : params) {
+    cl = node_field(p, "clause");
+    if(cl == "") continue;
+    known = false;
+    for(c : cls) if(c[0] == cl) known = true;
+    if(!known) cls.push(array{cl, if(node_field(p, "pack")) 1 else 0});
+  }
+  nrow = array{name, tail, bare, cls, row[4]};
+  if(ci >= 0) {
+    ncons = array{};
+    for(i : range(s.cons.size)) ncons.push(if(i == ci) nrow else s.cons[i]);
+    s.cons = ncons;
+  } else s.cons.push(nrow);
+  0
+}
 // a function declaration closes the prelude record with the same name (shadow_records/learn parser.hpp), and a function with a `word(...)` clause or
 // an expr parameter is a construct: the rules change - the following elements are "not supported" (attributes [[...]] and outline before a declaration are skipped)
 declares_shadow(ps s, i64 from) {
@@ -1483,9 +1539,7 @@ declares_shadow(ps s, i64 from) {
   else return false;
   w = text_range(s.src, tk_at(s, name_at).from, tk_at(s, name_at).to);
   if(rule_has(s, w)) return true;
-  close = s.match[name_at + 1];
-  if(close < 0) return false;
-  (tk_at(s, close + 1).kind == kind_ident()) && (tk_at(s, close + 2).kind == kind_open()) && (tk_at(s, close + 2).ch == 40)
+  false
 }
 // module elements of the text: the ires array (in text order)
 // [[...]] before module: the attributes of the module, not of the first element (module_attrs_ahead parser.hpp)
@@ -1538,7 +1592,7 @@ module_items_of(str src) {
       tt = tk_at(s, it.from + ti);
       if(tt.kind == kind_ident()) {
         tw = text_range(s.src, tt.from, tt.to);
-        if(has_text(array{"syntax", "operator", "using", "use", "expr"}, tw)) s.custom = true;
+        if(has_text(array{"syntax", "operator", "using", "use"}, tw)) s.custom = true;
       }
     }
     if(s.pos <= p0) break;

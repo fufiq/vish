@@ -1,0 +1,9 @@
+twice(c, expr body) => body;
+guard(expr b) catch_all(expr... hs) => b;
+f(x) {
+  twice(x) { 1 }
+  guard { 2 } catch_all { 3 } catch_all { 4 }
+  twice(x) return 5;
+  0
+}
+g(x) => twice(x, 1);
