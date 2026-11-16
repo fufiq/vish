@@ -230,6 +230,8 @@ longest_op(ps s, i64 k) {
   t0 = tk(s, k);
   if(t0.kind != kind_op()) return "";
   best = text_range(s.src, t0.from, t0.from + 1);
+  t1 = tk(s, k + 1);
+  if(!((t1.kind == kind_op()) && t1.glued)) return best; // fast path (P0, mine): an operator longer than one character - only when the next one is glued
   for(o : core_ops()) if((o.size > best.size) && glued_as(s, o, k)) best = o;
   for(o : roles_infix(s)) if((o.size > best.size) && glued_as(s, o, k)) best = o;
   best
