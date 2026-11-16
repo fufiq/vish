@@ -1,0 +1,10 @@
+// The `=>` body / lambda assignment with a record ending in `;`: the `;` is not duplicated (E5 review, R3, 2026-11-16)
+f() => return 1;
+
+g() { h = (x) => return x; h(1) }
+
+k() => (x) => return x;
+
+m(c) => (x) => break;
+
+p(c, d, xs) => return 1;

@@ -1,0 +1,12 @@
+// a program's [[associative]] operator: the print removes the parentheses of the left chain, like printer::associative in C++ (E5 review, R4, 2026-11-16)
+[[associative]] operator (a) - (b) => a;
+
+f(a, b, c) => (a - b) - c;
+
+g(a, b, c) => a - (b - c);
+
+h(a, b, c) => (a + b) + c;
+
+[[associative]] operator (a) % (b) => a;
+
+k(a, b, c) => (a % b) % c;

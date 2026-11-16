@@ -1,0 +1,5 @@
+// Wrapper calls hide/try_compile over a record with `;` (E5 review, R3): the `;` is not duplicated. The Vish parser does not parse them yet (E4) - the comparison by C++ and the round trip
+// will appear with it; the file keeps a reproduction for the C++ fmt (tests/402).
+n() => hide return 1;
+
+q() => try_compile return 1;

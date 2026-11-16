@@ -8,7 +8,7 @@ module printer;
 // print_node(n_op/n_chain/n_call/n_block/n_fn/n_extend/n_var), operand, receiver, terminate, closed, ends_in_statement.
 // A construct is printed by the record found in the prelude data (the first suitable one in order, like record_for/fits in C++);
 // a record that cannot be applied (a layout mark [[line]]..., a non-standard form part) is an explicit "not supported: reason".
-// Not supported (explicitly, not silently wrong text): comments and layout (blank lines, [[line]]) - E4f; patterns and
+// Not supported (explicitly, not silently wrong text): the module header, comments and layout (blank lines, [[line]]) - E4f; patterns and
 // unpacking, quote/splice, references, holes, native, a function extension by reference, a syntax declaration, a call by a syntax record.
 // The author's earlier requirements: parsing logic and syntax are defined by logic in the language itself; all the logic
 // All the logic is to be written in the new language itself. The canonical projection: the author's earlier remark on formatters in general,
@@ -79,8 +79,31 @@ pr_str(c) {
   pres{true, take(r)}
 }
 
-// [[associative]] on the operator `infix<op>` declared in the prelude (like associative() in printer.hpp for associativity in place)
+// The set of the program's operators with [[associative]] (the node print context): C++ printer::associative looks at the whole database - module elements
+// and the prelude (declarations in blocks - through the node's ancestors; nodes in the language have no ancestors, such operators are the "attributes in a block" refusal of the parse).
+// The state is in C++ (static): Vish has no mutable module state, and print_code(c) is recursive without a context parameter (mine; temporary, until E5-context).
+// mode: 0 - clear, 1 - add op, 2 - is there op
+pr_assoc_state(str op, i64 mode) => native "cpp" {
+  static std::set<std::string> ops;
+  std::string o = a[0].known() ? std::string(a[0].as<str_v>().view()) : std::string();
+  int64_t m = a[1].as<int64_t>();
+  if(m == 0) ops.clear();
+  else if(m == 1) ops.insert(o);
+  else return value(int64_t(ops.contains(o) ? 1 : 0));
+  return value(int64_t(0));
+};
+// an operator `infix<op>` with [[associative]] among the function declarations items (module elements)
+pr_assoc_register(items) {
+  for(f : items) {
+    if(code_kind(f) != ast.function) continue;
+    fn_nm = node_field(f, "name");
+    if(!starts_with(fn_nm, "infix")) continue;
+    for(a : node_field(f, "attrs")) if((code_kind(a) == ast.name) && (node_field(a, "name") == "associative")) pr_assoc_state(text_from(fn_nm, 5), 1);
+  }
+}
+// [[associative]] on the operator `infix<op>`: declared in the prelude or (through pr_assoc_register) in the module
 pr_associative(str op) {
+  if(pr_assoc_state(op, 2) != 0) return true;
   for(f : functions_named("infix" + op)) {
     for(a : node_field(f, "attrs")) if((code_kind(a) == ast.name) && (node_field(a, "name") == "associative")) return true;
   }
@@ -100,6 +123,11 @@ pr_is_infix(c) {
 }
 // an operand in parentheses or without - by operand_parens (the prelude), like operand() in printer.hpp
 pr_operand(c, bool left, str parent_op) {
+  if(left && (code_kind(c) == ast.lambda)) { // ((x) => x) + 1: the lambda body would eat `+ 1` (like operand() in printer.hpp)
+    lo_r = print_code(c);
+    if(!lo_r.ok) return lo_r;
+    return pres{true, "(" + lo_r.text + ")"};
+  }
   kind = "";
   child_op = "";
   if(pr_is_infix(c)) {
@@ -115,8 +143,14 @@ pr_operand(c, bool left, str parent_op) {
   assoc = left && ((parent_op != "") && ((child_op == parent_op) && pr_associative(parent_op)));
   if(operand_parens(kind, child_op, left, parent_op, assoc)) pres{true, "(" + r.text + ")"} else r
 }
-// the receiver of a postfix, an index, a field and a call: a prefix is always in parentheses, #x (splice) is not supported and print_code refuses it
+// the receiver of a postfix, an index, a field and a call: a prefix is always in parentheses, #x (splice) is not supported and print_code refuses it;
+// a lambda and ct e - the body eats everything on the right: ((x) => x)(1) and (ct x)(1) without parentheses read as (x) => x(1) and ct x(1)
 pr_receiver(c) {
+  if((code_kind(c) == ast.lambda) || (code_kind(c) == ast.ct)) {
+    rc_r = print_code(c);
+    if(!rc_r.ok) return rc_r;
+    return pres{true, "(" + rc_r.text + ")"};
+  }
   if(code_kind(c) == ast.operation) {
     if((node_field(c, "args").size == 1) && !node_field(c, "postfix")) {
       r = print_code(c);
@@ -425,7 +459,7 @@ pr_closed(c) {
   cd_x = pr_place(c, cd_rec, cd_rec.slots.size - 1);
   cd_k = code_kind(cd_x);
   if((cd_k == ast.block) || (cd_k == ast.raw)) return true;
-  if(cd_k == ast.call) if(node_field(cd_x, "tail") || (node_field(cd_x, "words").size > 0)) return true;
+  if(cd_k == ast.call) if(!pr_find_rec(cd_x).ok && (node_field(cd_x, "tail") || (node_field(cd_x, "words").size > 0))) return true;
   pr_closed(cd_x)
 }
 pr_terminate(c) {
@@ -433,25 +467,41 @@ pr_terminate(c) {
   if((tm_k == ast.variable) || (tm_k == ast.function)) return "";
   if((tm_k == ast.block) || ((tm_k == ast.raw) || (tm_k == ast.extension))) return "";
   if((tm_k == ast.ct) && (code_kind(node_field(c, "body")) == ast.block)) return "";
-  if(pr_closed(c)) return "";
-  if(tm_k == ast.call) if((node_field(c, "words").size > 0) || node_field(c, "tail")) return "";
+  if(pr_closed(c) || pr_self_ended(c)) return "";
+  if(tm_k == ast.call) if(!pr_find_rec(c).ok && ((node_field(c, "words").size > 0) || node_field(c, "tail"))) return "";
   ";"
+}
+// a lambda without a block and an assignment whose value ends with a record with `;` (g = (x) => return x;): the `;` is already printed (self_ended in printer.hpp)
+pr_self_ended(c) {
+  se_k = code_kind(c);
+  if(se_k == ast.lambda) return (code_kind(node_field(c, "body")) != ast.block) && pr_ends_stmt(node_field(c, "body"));
+  if(se_k == ast.operation) {
+    se_args = node_field(c, "args");
+    se_op = node_field(c, "op");
+    if((se_args.size == 2) && (!node_field(c, "postfix") && ((se_op != "[]") && (se_op != ".[]")))) {
+      if((se_op == "=") || ((se_op == "+=") || ((se_op == "-=") || ((se_op == "*=") || (se_op == "/="))))) return pr_ends_stmt(se_args[1]);
+    }
+  }
+  false
 }
 // a body `=> e` ends with the tail instruction of a construct (g() => if(c) for(x : xs) s;): its `;` is also the end of the declaration
 pr_ends_stmt(c) {
   es_k = code_kind(c);
-  if(es_k == ast.call) {
+  if(pr_self_ended(c)) return true;
+  if((es_k == ast.call) && node_field(c, "tail") && !pr_find_rec(c).ok) {
     es_args = node_field(c, "args");
     es_words = node_field(c, "words");
-    if(!node_field(c, "tail") || (es_args.size == 0)) return false;
+    if(es_args.size == 0) return false;
     if((es_words.size > 0) && (es_words[es_words.size - 1] != "")) return false;
     es_b = es_args[es_args.size - 1];
     if(code_kind(es_b) == ast.lambda) es_b = node_field(es_b, "body");
     return (code_kind(es_b) != ast.block) && (code_kind(es_b) != ast.raw);
   }
+  if((es_k == ast.call) && !pr_find_rec(c).ok && (node_field(c, "words").size > 0)) return false;
   es_rec = pr_find_rec(c);
   if(!es_rec.ok) return false;
   es_last = es_rec.pieces[es_rec.pieces.size - 1];
+  if(es_last == ";") return true; // return x; - the record prints `;` itself: `f(x) => return 1;` without `;;`
   if(((es_last != "{") && (es_last != "{=")) || (es_rec.slots.size == 0)) return false;
   pr_ends_stmt(pr_place(c, es_rec, es_rec.slots.size - 1))
 }
@@ -521,9 +571,6 @@ pr_fn_body(c) {
   if(!fb_bt.ok) return fb_bt;
   if(!node_field(c, "expr_body")) return pres{true, " " + fb_bt.text};
   fb_ends = pr_ends_stmt(node_field(c, "body"));
-  // a defect of printer.hpp (ends_in_statement does not know records that end with `;`): `f(x) => return 1;` is printed `...;;` - it is not parsed
-  // by C++ or by the parser in the language. Such text cannot be repeated byte by byte (it is wrong) - an explicit refusal until the defect is fixed in C++
-  if(!fb_ends && ends_with(fb_bt.text, ";")) return pr_no("тело => кончается записью с `;`: C++ печатает двойную `;` (дефект printer.hpp)");
   fb_semi = if(fb_ends) "" else ";";
   pres{true, " => " + fb_bt.text + fb_semi}
 }
@@ -735,6 +782,56 @@ print_module(items) {
   pres{true, take(pm_r)}
 }
 
+// --- the canonical form of the tree for the print -> parse round trip -------------------------------------------------------------------
+// The print removes the extra parentheses of an associative operator ((a + b) + c -> a + b + c, as in C++): the parse gives a chain, not nested operations.
+// The pr_canon row is the tree up to this: left nesting and a chain of one [[associative]] operator are equal. Everything else (node kind,
+// order, fields, operator) differs - a lost tree (((x) => x)(1) -> (x) => x(1)) is a mismatch, not an "associative chain".
+pr_canon_item(x) {
+  if(!given(x)) return "_";
+  ci_t = text(typeof(x));
+  if(ci_t == "code") return pr_canon(x);
+  if(ci_t == "array") {
+    ci_r = "[";
+    for(ci_k : range(x.size)) ci_r = ci_r + ((if(ci_k > 0) "," else "") + pr_canon_item(x[ci_k]));
+    return ci_r + "]";
+  }
+  ci_t + ":" + text(x)
+}
+// left operands of the associative operator u: a nested operation/chain of the same operator is expanded into a run
+pr_canon_flat(c, str u, mut out) {
+  cf_k = code_kind(c);
+  if(pr_is_infix(c) && (node_field(c, "op") == u)) {
+    cf_a = node_field(c, "args");
+    pr_canon_flat(cf_a[0], u, out);
+    out.push(pr_canon(cf_a[1]));
+    return 0;
+  }
+  if((cf_k == ast.chain) && (pr_same_op(node_field(c, "ops")) == u)) {
+    cf_at = node_field(c, "atoms");
+    for(cf_i : range(cf_at.size)) if(cf_i == 0) pr_canon_flat(cf_at[0], u, out) else out.push(pr_canon(cf_at[cf_i]));
+    return 0;
+  }
+  out.push(pr_canon(c));
+  0
+}
+pr_canon(c) {
+  cn_k = code_kind(c);
+  cn_u = "";
+  if(pr_is_infix(c)) cn_u = node_field(c, "op");
+  if(cn_k == ast.chain) cn_u = pr_same_op(node_field(c, "ops"));
+  if((cn_u != "") && pr_associative(cn_u)) {
+    cn_xs = array{};
+    pr_canon_flat(c, cn_u, cn_xs);
+    cn_r = "chain" + cn_u + "[";
+    for(cn_i : range(cn_xs.size)) cn_r = cn_r + ((if(cn_i > 0) "," else "") + cn_xs[cn_i]);
+    return cn_r + "]";
+  }
+  cn_s = pr_kind_word(c) + "{";
+  cn_f = code_fields(c);
+  for(cn_j : range(cn_f.size)) cn_s = cn_s + ((if(cn_j > 0) ";" else "") + pr_canon_item(cn_f[cn_j]));
+  cn_s + "}"
+}
+
 // --- comparison with C++ (vish fmtcheck) ---------------------------------------------------------------------------------------
 // The C++ (stage0) print of an expression from text: `main() { x = expression }` parsed by the C++ parser with the prelude, the right side of the
 // assignment printed by the C++ printer (include/vish/printer.hpp). Empty - C++ did not parse it (a hole) or it is the wrong form.
@@ -861,6 +958,8 @@ fmt_check_modules(files) {
   counts = array{};
   tree_reasons = array{};
   tree_counts = array{};
+  whole_reasons = array{};
+  whole_counts = array{};
   for(f : files) {
     src = read_text(f);
     if(module_header_skip(src)) { // module header: C++ gives attributes in the dump as extra elements - comparison by number is impossible
@@ -868,6 +967,10 @@ fmt_check_modules(files) {
       continue;
     }
     mine = module_items_of(src);
+    pr_assoc_state("", 0); // like printer::associative in C++: the operators with [[associative]] of the whole file (both before and after the element) are visible to printing
+    reg = array{};
+    for(rk : range(mine.size)) if(mine[rk].ok) reg.push(mine[rk].node);
+    pr_assoc_register(reg);
     refs = module_print_reference(src);
     if(refs.size == 0) {
       skipped_files += 1;
@@ -932,6 +1035,11 @@ fmt_check_modules(files) {
       whole_skipped += 1;
       continue;
     }
+    if(starts_with(refs[0], "module ")) { // the `module M;` header is not printed by the language (the Vish parser has no header node) - an explicit refusal, not a mismatch
+      whole_skipped += 1;
+      fmt_count(whole_reasons, whole_counts, "не поддержано: заголовок module");
+      continue;
+    }
     nodes = array{};
     for(k : range(n_mine)) nodes.push(mine[k].node);
     w = print_module(nodes);
@@ -953,8 +1061,9 @@ fmt_check_modules(files) {
         circle = false;
         write_out(f + ": круг печать→разбор, элемент " + text(k) + " — " + again[k].why + "\n--- напечатано\n" + texts[k] + "\n");
       } else if(dump_code(again[k].node) != dump_code(mine[k].node)) {
+        // the dump differs: only a difference in the parentheses of an [[associative]] operator's chain is allowed (pr_canon), and the print is the same (a fixed point)
         again_p = print_code(again[k].node);
-        if(again_p.ok && (again_p.text == texts[k])) circle_fix += 1 else {
+        if(again_p.ok && ((again_p.text == texts[k]) && (pr_canon(again[k].node) == pr_canon(mine[k].node)))) circle_fix += 1 else {
           circle = false;
           write_out(f + ": круг печать→разбор, элемент " + text(k) + " — другое дерево\n--- напечатано\n" + texts[k] + "\n");
         }
@@ -967,7 +1076,8 @@ fmt_check_modules(files) {
   write_out("  без дерева у парсера на Vish (Э4, не принтер):\n");
   for(j : range(tree_reasons.size)) write_out("    " + tree_reasons[j] + " — " + text(tree_counts[j]) + "\n");
   write_out("принтер, модуль целиком: совпало " + text(whole_same) + ", расхождений " + text(whole_bad) + ", не напечатано целиком " + text(whole_skipped) + "\n");
-  write_out("принтер, круг печать→разбор: модулей совпало " + text(circle_same) + ", расхождений " + text(circle_bad) + " (элементов с другим деревом при той же печати — цепочка вместо скобок ассоциативного оператора: " + text(circle_fix) + ")\n");
+  for(j : range(whole_reasons.size)) write_out("    модуль целиком: " + whole_reasons[j] + " — " + text(whole_counts[j]) + "\n");
+  write_out("принтер, круг печать→разбор: модулей совпало " + text(circle_same) + ", расхождений " + text(circle_bad) + " (элементов с другим дампом при равной каноне и печати — цепочка вместо скобок [[associative]] оператора: " + text(circle_fix) + ")\n");
   if((bad == 0) && ((whole_bad == 0) && (circle_bad == 0))) 0 else 1
 }
 

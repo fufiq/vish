@@ -1,0 +1,30 @@
+// Parentheses for a lambda/ct as a receiver and a left operand (E5 review, R1/R2, 2026-11-16): print -> parse must not change the tree
+// (the round trip used to accept `(x) => x(1)` instead of `((x) => x)(1)` as a "chain"). One element per reproduction.
+
+f(y) => ((x) => x)(1);
+
+f(y) => ((x) => x)[0];
+
+f(y) => ((x) => x).z;
+
+f(y) => ((x) => x) + y;
+
+f(y) => ((x) => x)?;
+
+f(y) => (ct x)(1);
+
+f(y) => (ct x)[0];
+
+f(y) => (ct x).z;
+
+f(y) => -(ct x);
+
+f(y) => -((x) => x);
+
+f(y) => ((x) => x) * y;
+
+f(y) => a + ((x) => x);
+
+f(y) => ((x) => {x})(1);
+
+f(y) => ((x) => {a: x})(1);
