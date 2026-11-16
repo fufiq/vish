@@ -1,0 +1,47 @@
+1.5
+0.25
+1e3
+2.0
+0x1F
+0xff
+'a'
+'\n'
+'\t'
+'\''
+'\\'
+"abc"
+"a\"b"
+"a\\b"
+"line\nbreak"
+""
+10s
+a.b.c
+f(a, g(b))(c)
+-a.b
+(-a).b
+(-a)[0]
+(a + b)[1]
+(a + b).c
+(a + b)(c)
+a[i].b[j]
+a.[k].b
+x = y + 1
+x += a * b
+x = y = z
+a = (b = c)
+(a + b) + c + d
+a + (b + c)
+a * (b + c) * d
+a && b && c
+a || b && c
+(a || b) && c
+!(a && b)
+-(a + b)
+-(-a)
+a - (b - c)
+f(a + b, c * d)
+f(x = 1)
+a? + b
+(a + b)?
+a == b == c
+a < b < c

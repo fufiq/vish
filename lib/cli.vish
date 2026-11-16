@@ -222,6 +222,12 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("parser", "expr_check_cli", files);
   }
+  if(cmd == "fmtcheck") {
+    // vish fmtcheck <corpus>: the expression printer in the language (lib/printer.vish, E5) against the C++ print (stage0), byte by byte
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("printer", "fmt_check_cli", files);
+  }
   if((cmd == "lib") && (args.size > 3)) {
     // vish lib import <lib> <repo.vishrepo> | vish lib export <repo.vishrepo> <lib >>
     if(args[1] == "import") {

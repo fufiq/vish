@@ -38,6 +38,9 @@ constexpr unsigned char lexer_bytes[] = {
 constexpr unsigned char parser_bytes[] = {
 #embed "../../lib/parser.vish"
 };
+constexpr unsigned char printer_bytes[] = {
+#embed "../../lib/printer.vish"
+};
 constexpr unsigned char runlog_bytes[] = {
 #embed "../../lib/runlog.vish"
 };
@@ -49,6 +52,7 @@ std::string_view builtin_text(std::string_view key) {
   if(key == "cli") return view(cli_bytes);
   if(key == "lexer") return view(lexer_bytes);
   if(key == "parser") return view(parser_bytes);
+  if(key == "printer") return view(printer_bytes);
   if(key == "runlog") return view(runlog_bytes);
   return {};
 }
@@ -104,14 +108,15 @@ std::string missing_prelude_native(ast_db const & db) {
 node_id load_builtin(ast_db & db, std::string_view key) {
   if(key != "tools") load_builtin_module(db, "tools", builtin_text("tools"), "tools.vish");
   if(builtin_text(key).empty()) throw diagnostic(cat("нет встроенного модуля ", key), {});
-  if(key == "parser") load_builtin_module(db, "lexer", builtin_text("lexer"), "lexer.vish"); // parser — use lexer
+  if(key == "parser" || key == "printer") load_builtin_module(db, "lexer", builtin_text("lexer"), "lexer.vish"); // parser — use lexer
+  if(key == "printer") load_builtin_module(db, "parser", builtin_text("parser"), "parser.vish"); // printer — use parser
   return load_builtin_module(db, key, builtin_text(key), cat(key, ".vish"));
 }
 node_id load_tools(ast_db & db) { return load_builtin(db, "tools"); }
 
 // the file name of the embedded module, where the error text (import source); not built-in - "tools.vish"
 std::string builtin_file(ast_db const & db, uint32_t source) {
-  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer", "parser", "runlog"})
+  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer", "parser", "printer", "runlog"})
     for(uint32_t i = 0; i < db.size(); ++i)
       if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == key && db[node_id(i)].where.source == source)
         return cat(key, ".vish");

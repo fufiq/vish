@@ -85,6 +85,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # E3 (the porting plan): ast.* nodes from the parser tree in Vish - the structure and the print -> parse round trip against C++ stage0
     ( $b nodecheck tests/data/expr_corpus.txt tests/data/expr_random.txt tests/data/expr_splice.txt tests/data/expr_splice_invalid.txt tests/data/expr_construct.txt ) > $L/t_nodes.log 2>&1
     echo "nodes: код $?" > $L/r_nodes
+    # E5 (the porting plan): the expression printer in Vish (lib/printer.vish) against the C++ stage0 print, byte by byte
+    ( $b fmtcheck tests/data/expr_corpus.txt tests/data/expr_random.txt tests/data/expr_construct.txt tests/data/fmtcheck/*.txt ) > $L/t_fmt.log 2>&1
+    echo "fmt: код $?" > $L/r_fmt
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules
