@@ -1,0 +1,11 @@
+outer(x) {
+  helper(y) => y + 1;
+  i64 twice(z) { z * 2 }
+  scoped(expr b) => b;
+  scoped(x) { 1 }
+  helper(twice(x))
+}
+after(x) {
+  scoped(x) { 2 }
+  0
+}

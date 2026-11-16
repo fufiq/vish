@@ -1294,7 +1294,12 @@ local_fn_ahead(ps s) {
 // one instruction (statement_body parser.hpp): a node or "not supported"; the end of an instruction - a tail record/construct has eaten the `;` itself,
 // otherwise `;`, or `}` (the value of a block), or the instruction ends with a block (if/loop/a construct with a block) - `;` is not needed
 statement_node(ps s) {
-  if(local_fn_ahead(s)) { want(s, "локальная функция"); return nres{false, code()}; }
+  if(local_fn_ahead(s)) { // a local function: the same parse as a module element; its rules live only in the block (block_node restores the tables)
+    sn_it = item_node(s);
+    s.lwv = false;
+    if(!sn_it.ok) { if(s.unsupported == "") want(s, if(sn_it.why == "") "локальная функция" else sn_it.why); return nres{false, code()}; }
+    return nres{true, sn_it.node};
+  }
   if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0)) && (cons_of(s, tk_text(s, 0)) < 0) && !((tk_text(s, 0) == "ct") && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued))) {
     if(is_keyword_word(tk_text(s, 0)) || (tk(s, 1).kind == kind_ident())) {
       want(s, if(is_keyword_word(tk_text(s, 0))) "в блоке слово «" + tk_text(s, 0) + "»" else "в блоке объявление «тип имя» (" + tk_text(s, 1) + ")");
@@ -1336,6 +1341,8 @@ statement_node(ps s) {
 }
 block_node(ps s) {
   // at `{`
+  bn_cons = s.cons; // block rules (constructs, operators) apply to its end (context_scope parser.hpp)
+  bn_ops = s.ops;
   s.pos += 1;
   bn_items = array{};
   bn_has = false;
@@ -1348,6 +1355,8 @@ block_node(ps s) {
     if(is_close_ch(s, 125) && s.lwv) bn_has = true;
   }
   s.pos += 1;
+  s.cons = bn_cons;
+  s.ops = bn_ops;
   nres{true, ast.block{bn_items, bn_has, array{}}}
 }
 // one module element from token s.pos: a function or "not supported" (the position is after the element in any case)
