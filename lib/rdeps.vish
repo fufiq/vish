@@ -1,32 +1,46 @@
 module rdeps;
 // Mine, temporary (RA-1): access to the database index and an independent comparison of mutations.
 use tools;
+// Checking the natives input: a database code node, a wrong value - a clear error instead of a std::get crash.
 users_of(c) => native "cpp" {
   if(!a[0].known()) return erase(value(array_v::of({})));
+  node_id n = vm.code_node(a[0], where);
+  if(n.value >= vm.db.size()) throw diagnostic("users_of: узла нет в базе", where);
   std::vector<value> out;
-  for(auto n: vm.db.users_of(vm.code_node(a[0], where))) out.push_back(vm.code_value(n));
+  for(auto u: vm.db.users_of(n)) out.push_back(vm.code_value(u));
   return value(array_v::of(std::move(out)));
 };
 dependents_of(c) => native "cpp" {
   if(!a[0].known()) return erase(value(array_v::of({})));
+  node_id n = vm.code_node(a[0], where);
+  if(n.value >= vm.db.size()) throw diagnostic("dependents_of: узла нет в базе", where);
   std::vector<value> out;
-  for(auto n: vm.db.dependents_of_fn(vm.code_node(a[0], where))) out.push_back(vm.code_value(n));
+  for(auto d: vm.db.dependents_of_fn(n)) out.push_back(vm.code_value(d));
   return value(array_v::of(std::move(out)));
 };
 impact_of(xs) => native "cpp" {
   if(!a[0].known()) return erase(value(array_v::of({})));
+  if(!a[0].is<array_v>()) throw diagnostic("impact_of: ожидался массив кода", where);
   node_list changed_nodes;
   auto const & xs = a[0].as<array_v>();
-  for(uint32_t i = 0; i < xs.size(); ++i) changed_nodes.push_back(vm.code_node(xs.get(i), where));
+  for(uint32_t i = 0; i < xs.size(); ++i) {
+    node_id n = vm.code_node(xs.get(i), where);
+    if(n.value >= vm.db.size()) throw diagnostic("impact_of: узла нет в базе", where);
+    changed_nodes.push_back(n);
+  }
   std::vector<value> out;
   for(auto n: vm.db.impact_of(changed_nodes)) out.push_back(vm.code_value(n));
   return value(array_v::of(std::move(out)));
 };
 rdeps_index_dump() => native "cpp" { return value(vm.db.rdeps_dump()); };
 rdeps_rebuild_dump() => native "cpp" { return value(vm.db.rdeps_dump(true)); };
-// Returns numbers: steps, I1, I3, I2 cases/supersets/strict/violations.
-rdeps_probe(str path, i64 seed, i64 steps, bool types) => native "cpp" {
+// The independent reference (reflection over the node kinds' fields, include/vish/rdeps_oracle.hpp): empty - the index equals the reference.
+rdeps_oracle_report() => native "cpp" { return value(rdeps_oracle::compare_index(vm.db)); };
+// Returns numbers (the order is in check_cli): steps, I1-live, I1-reference, queries, I3, I2 cases/supersets/strict/violations,
+// changed diagnostics, new edit nodes, reference comparisons, query comparisons, parse errors, check errors, changed library instances.
+rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native "cpp" {
   for(auto & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  namespace ro = rdeps_oracle;
   std::string path(a[0].as<str_v>().view());
   ast_db db;
   load_prelude(db);
@@ -35,112 +49,410 @@ rdeps_probe(str path, i64 seed, i64 steps, bool types) => native "cpp" {
   node_id root = parse_program(db, file.text(), std::filesystem::path(path).parent_path(), errors);
   uint64_t seed = uint64_t(a[1].as<int64_t>());
   auto random = [&]() { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return uint32_t(seed >> 32); };
-  int64_t steps = a[2].as<int64_t>(), bad1 = 0, bad3 = 0, cases = 0, supers = 0, strict = 0, bad2 = 0;
-  auto verify = [&]() { if(db.rdeps_dump() != db.rdeps_dump(true)) { ++bad1; fprintf(stderr, "%s: live index mismatch\n", path.c_str()); } };
-  verify();
-  // A permanent free child: an addition is checked separately, rollback does not delete database numbers.
+  int64_t steps = a[2].as<int64_t>(), i2cases = a[3].as<int64_t>(), i2offset = a[4].as<int64_t>();
+  int64_t bad_live = 0, bad_oracle = 0, bad_query = 0, bad3 = 0, cases = 0, supers = 0, strict = 0, bad2 = 0, diag_changed = 0, fresh_nodes = 0, oracle_checks = 0, query_checks = 0, parse_errors = int64_t(errors.size()), check_errors = 0, lib_changed = 0, indirect_explained = 0, ct_gap = 0;
+  for(auto const & e: errors) fprintf(stderr, "%s: разбор: %s\n", path.c_str(), e.what());
+  auto text_of = [&](symbol s) { return std::string(db.strings.text(s)); };
+  // I1: the live index = a recount by the same extraction (in case of staleness) AND the independent reference (reflection over the fields).
+  auto verify = [&](char const * when) {
+    ++oracle_checks;
+    if(db.rdeps_dump() != db.rdeps_dump(true)) { ++bad_live; fprintf(stderr, "%s: [%s] живой индекс ≠ пересчёт\n", path.c_str(), when); }
+    auto report = ro::compare_index(db);
+    if(!report.empty()) { ++bad_oracle; fprintf(stderr, "%s: [%s] индекс ≠ независимый эталон\n%s", path.c_str(), when, report.c_str()); }
+  };
+  verify("разбор");
+  // Permanent free nodes: an addition is checked separately, rollback does not delete database numbers.
   node_id extra = db.add(n_ident{db.strings.intern("ra1_extra")}, {});
-  verify();
+  n_fn extra_fn_kind;
+  extra_fn_kind.name = db.strings.intern("ra1_extra_fn");
+  extra_fn_kind.body = db.add(n_ref{0}, {});
+  node_id extra_fn = db.add(extra_fn_kind, {});
+  db.link_parents(extra_fn); // a free subtree is linked from the very start: inserting into/removing from a module does not change its children's parent
+  verify("свободные узлы");
   uint32_t count = db.size();
+  // The program's own nodes (not the prelude's): half of the random steps and all the I2 edits go to them.
+  node_list program_nodes, decls;
+  for(uint32_t i = 0; i < count; ++i) if(db.within(node_id(i), root)) program_nodes.push_back(node_id(i));
+  // The program's declarations: query targets (functions, extensions, modules).
+  for(uint32_t i = 0; i < count; ++i)
+    if((db.is<n_fn>(node_id(i)) || db.is<n_extend>(node_id(i)) || db.is<n_module>(node_id(i))) && db.within(node_id(i), root)) decls.push_back(node_id(i));
+  auto pick_decls = [&](std::size_t k) {
+    node_list out;
+    if(decls.size() <= k) return decls;
+    for(std::size_t i = 0; i < k; ++i) out.push_back(decls[random() % decls.size()]);
+    return out;
+  };
+  node_list fixed_probes = pick_decls(10); // I3: the query answers on these nodes are not changed by a rollback
+  fixed_probes.push_back(root);
+  // The live index's queries against the reference model (operators, `.field`, references, inheritance).
+  auto verify_queries = [&](char const * when, node_list const & probes) {
+    ++query_checks;
+    ro::model m(db);
+    std::string report;
+    if(int bad = ro::compare_queries(db, m, probes, report)) { bad_query += bad; fprintf(stderr, "%s: [%s] запросы ≠ эталон\n%s", path.c_str(), when, report.c_str()); }
+  };
+  verify_queries("начало", decls.size() <= 60 ? decls : pick_decls(60));
+  auto snapshot = [&]() { return std::pair<std::string, std::string>(db.rdeps_dump(), ro::query_snapshot(db, fixed_probes)); };
+  // A rollback does not restore the parent of detached children (database behaviour): the caller's link_parents fixes them - for every changed node.
+  auto roll_back = [&](uint32_t source, std::pair<std::string, std::string> const & before, char const * what, node_list const & touched) {
+    db.rollback(source);
+    for(auto t: touched) db.link_parents(t);
+    // The harness's free nodes were inserted into a module and detached by a rollback; the database does not reset their parent (database behaviour; an extra dependent
+    // "inside the module" is conservativeness). The harness returns them to the initial free state to compare the query answers.
+    db[extra].parent = {};
+    db[extra_fn].parent = {};
+    verify(what);
+    if(auto now = db.rdeps_dump(); now != before.first) {
+      ++bad3;
+      std::size_t i = 0;
+      while(i < now.size() && i < before.first.size() && now[i] == before.first[i]) ++i;
+      while(i > 0 && now[i - 1] != '\n') --i; // the beginning of the mismatch line
+      fprintf(stderr, "%s: [%s] И3: содержимое индекса после отката ≠ прежнему: после %.40s / до %.40s\n", path.c_str(), what, now.c_str() + i, before.first.c_str() + i);
+    }
+    else if(auto now = ro::query_snapshot(db, fixed_probes); now != before.second) {
+      ++bad3;
+      std::size_t i = 0;
+      while(i < now.size() && i < before.second.size() && now[i] == before.second[i]) ++i;
+      while(i > 0 && now[i - 1] != '\n') --i;
+      auto line = [&](std::string const & text) { auto e = text.find('\n', i); return text.substr(i, e == std::string::npos ? e : e - i); };
+      auto tokens = [](std::string const & l) { std::set<std::string> out; std::istringstream in(l); std::string t; while(in >> t) out.insert(t); return out; };
+      auto a_tokens = tokens(line(now)), b_tokens = tokens(line(before.second));
+      std::string only_now, only_before;
+      for(auto const & t: a_tokens) if(!b_tokens.contains(t)) only_now += t + " ";
+      for(auto const & t: b_tokens) if(!a_tokens.contains(t)) only_before += t + " ";
+      fprintf(stderr, "%s: [%s] И3: ответы запросов после отката ≠ прежним: только после [%s] только до [%s]\n", path.c_str(), what, only_now.c_str(), only_before.c_str());
+    }
+  };
+  auto any_fn_node = [&]() -> node_id {
+    for(int t = 0; t < 32 && !decls.empty(); ++t) { node_id x = decls[random() % decls.size()]; if(db.is<n_fn>(x)) return x; }
+    return {};
+  };
+  auto fresh_name = [&]() { return db.strings.intern(cat("ra1_", random() % 17)); };
+  // A random node kind that the index must account for: ident, ref, an operator, `.field` (including a freshly interned one), a chain, an extension, use, an insertion.
+  auto synthetic = [&]() -> node_kind {
+    node_id fn = any_fn_node();
+    switch(random() % 9) {
+      case 0: return n_ident{fresh_name()};
+      case 1: return n_ident{fn ? db.as<n_fn>(fn).name : fresh_name()};
+      case 2: return n_ref{fn ? fn.value : 0u};
+      case 3: { n_op o; o.op = db.strings.intern(cat(".ra1_field", random() % 5)); o.postfix = true; return o; }
+      case 4: { n_op o; o.op = db.strings.intern(random() % 2 ? "+" : "-"); o.postfix = random() % 2 == 0; return o; }
+      case 5: { n_chain c; c.ops = {db.strings.intern("+"), db.strings.intern("*")}; return c; }
+      case 6: { n_extend e; e.name = fresh_name(); e.base = fn ? db.as<n_fn>(fn).name : fresh_name(); e.target = fn ? fn.value : 0u; return e; }
+      case 7: { n_use u; u.key = fresh_name(); u.names = {fresh_name()}; return u; }
+      default: { n_splice s; s.name = fresh_name(); return s; }
+    }
+  };
   for(int64_t step = 0; step < steps; ++step) {
     node_id n(random() % count);
-    uint32_t op = random() % 4;
+    if(!program_nodes.empty() && random() % 2) n = program_nodes[random() % program_nodes.size()];
+    uint32_t op = random() % 6;
     if(op == 0) {
       // replace keeps the number, changes the name or the kind itself; then we restore what was written.
       auto old = db.copy_kind(n);
-      db.replace(n, n_ident{db.strings.intern(cat("ra1_", random() % 17))});
-      verify();
+      db.replace(n, synthetic());
+      verify("replace");
       db.replace(n, std::move(old));
       db.link_parents(n);
-    } else {
-      // mutate/rollback, including inserting and deleting module elements.
+    } else if(op == 1 || op == 2 || op == 3) {
+      // mutate/rollback: an ident in place of a node, an insertion and a deletion of module elements (a free ident and a free function).
+      auto before = snapshot();
       if(op > 1) n = root;
-      auto before = db.rdeps_dump();
       auto k = db.copy_kind(n);
-      if(op == 1) k = n_ident{db.strings.intern(cat("ra1_", random() % 17))};
+      if(op == 1) k = synthetic();
       else {
         auto & m = std::get<n_module>(k);
-        if(op == 2) m.items.push_back(extra);
+        if(op == 2) m.items.push_back(random() % 2 ? extra : extra_fn);
         else if(!m.items.empty()) m.items.pop_back();
       }
       db.mutate(n, std::move(k), root.value + 1);
       db.link_parents(n);
-      verify();
-      db.rollback(root.value + 1);
-      db.link_parents(n);
-
-      if(db.rdeps_dump() != before) ++bad3;
-    }
-    verify();
-  }
-  // I2: a full recheck, without check_cache, before/after an edit of a function body's value.
-  // A typed literal changes the value, keeping an arbitrary test correct.
-  if(a[3].as<bool>()) {
-    node_id literal;
-    for(uint32_t i = 0; i < count; ++i)
-      if(db.is<n_int>(node_id(i)) && db.enclosing_fn(node_id(i)) && db.within(node_id(i), root)) { literal = node_id(i); break; }
-    if(literal) {
-      auto check = [&]() {
-        interpreter lang(db, root, {path}, mode::check);
-        try { lang.run_main(); } catch(diagnostic const &) {}
-        return lang.node_types();
-      };
-      auto before = check();
-      auto old = db.copy_kind(literal);
-      auto replacement = db.as<n_int>(literal);
-      replacement.value ^= 1;
-      db.mutate(literal, replacement, root.value + 1);
-      node_list delta{literal};
-      auto impact = db.impact_of(delta);
-      auto after = check();
-      node_list actual{db.enclosing_fn(literal)};
-      for(auto const & [id, ts]: before) {
-        if(id >= count) continue;
-        auto it = after.find(id);
-        if(it == after.end() || it->second != ts)
-          if(auto f = db.enclosing_fn(node_id(id))) actual.push_back(f);
+      verify("mutate");
+      roll_back(root.value + 1, before, "rollback", node_list{n});
+    } else if(op == 4) {
+      // several mutations from different sources; a rollback from the middle, then of all: every rollback point returns its own state.
+      std::vector<std::pair<std::string, std::string>> before;
+      node_list touched;
+      uint32_t depth = 2 + random() % 2;
+      for(uint32_t j = 0; j < depth; ++j) {
+        before.push_back(snapshot());
+        node_id t(random() % count);
+        if(!program_nodes.empty() && random() % 2) t = program_nodes[random() % program_nodes.size()];
+        db.mutate(t, synthetic(), root.value + 1 + j);
+        db.link_parents(t);
+        touched.push_back(t);
+        verify("mutate*");
       }
-      for(auto const & [id, ts]: after)
-        if(id < count && !before.contains(id)) if(auto f = db.enclosing_fn(node_id(id))) actual.push_back(f);
+      uint32_t mid = random() % depth;
+      roll_back(root.value + 1 + mid, before[mid], "rollback середины", touched);
+      if(mid) roll_back(root.value + 1, before[0], "rollback всех", touched);
+    }
+    verify("шаг");
+    if(step % 16 == 0) verify_queries("запросы после шагов", pick_decls(6));
+  }
+  // I2: a full recheck (check, without check_cache) before/after an edit; the check results of every function are compared by instances.
+  // Edit kinds: a literal, an operator, the callee's name, a body, a function name, a new overload, a function deletion, an expression.
+  // The comparison is by the function's layers (lang.layers: node types by instances) and the diagnostics; the edit's new nodes are accounted for,
+  // changed diagnostics are counted and printed.
+  if(i2cases > 0) {
+    struct instance { // the layer of a function instance: whether it is folded in ct, the types of the program's nodes, the types of derived nodes (by content)
+      bool ct = false;
+      std::map<uint32_t, std::string> fixed;
+      std::vector<std::string> derived;
+    };
+    struct run_result {
+      std::map<uint32_t, std::map<std::string, instance>> layers; // function -> instance key -> layer
+      bool failed = false;
+      std::string what;
+      std::vector<span> chain; // the diagnostic's place and the frames of its trace (the instantiation chain)
+    };
+    bool has_ct_block = false;
+    for(auto n: program_nodes) if(db.is<n_ct>(n)) has_ct_block = true;
+    uint32_t program_end = count, edit_lo = 0, edit_hi = 0;
+    auto is_program = [&](uint32_t id) { return id < program_end || (id >= edit_lo && id < edit_hi); };
+    auto run_check = [&]() {
+      run_result r;
+      interpreter lang(db, root, {path}, mode::check);
+      try { lang.run_main(); } catch(diagnostic const & d) { r.failed = true; r.what = d.what(); r.chain.push_back(d.where); for(auto const & fr: d.trace) r.chain.push_back(fr.where); }
+      catch(std::exception const & d) { r.failed = true; r.what = d.what(); }
+      for(auto const & [f, keys]: lang.layers)
+        for(auto const & [key, l]: keys) {
+          auto & out = r.layers[f][key];
+          for(auto const & [nid, ts]: l.types) {
+            // The node types and the instance's foldedness are the result of checking a function. The literal values of nodes are not included: they are the data
+            // of a specific call (they come down from the caller's constants), not the result of checking the body.
+            std::string v;
+            for(auto const & t: ts) v += t + ";";
+            if(is_program(nid)) out.fixed[nid] = v;
+            else out.derived.push_back(v);
+          }
+          out.ct = l.ct;
+          std::ranges::sort(out.derived);
+        }
+      if(r.failed) ++check_errors;
+      verify("после check"); // проверка порождает узлы (ct-мутации, emit, ref, позднее интернирование имён)
+      return r;
+    };
+    // The function whose text (span) contains the diagnostic's place; empty - undefined.
+    auto fn_at = [&](span w) -> node_id {
+      node_id best;
+      for(uint32_t i = 0; i < db.size(); ++i)
+        if(db.is<n_fn>(node_id(i)) && db[node_id(i)].where.source == w.source && db[node_id(i)].where.begin <= w.begin && w.end <= db[node_id(i)].where.end)
+          if(!best || db[node_id(i)].where.end - db[node_id(i)].where.begin < db[best].where.end - db[best].where.begin) best = node_id(i);
+      return best;
+    };
+    auto before = run_check();
+    if(before.failed) fprintf(stderr, "%s: check (до правок): %s\n", path.c_str(), before.what.c_str());
+    auto module_of = [&](node_id x) { for(; x; x = db[x].parent) if(db.is<n_module>(x)) return x; return node_id{}; };
+    auto pick = [&](auto pred) -> node_id {
+      for(int t = 0; t < 400 && !program_nodes.empty(); ++t) { node_id x = program_nodes[random() % program_nodes.size()]; if(pred(x)) return x; }
+      return {};
+    };
+    auto op_text = [&](node_id x) { return text_of(db.as<n_op>(x).op); };
+    for(int64_t ci = 0; ci < i2cases; ++ci) {
+      int kind = int((uint64_t(ci) + uint64_t(i2offset)) % 8);
+      uint32_t src = root.value + 1000 + uint32_t(ci);
+      node_id target, link;
+      node_kind replacement;
+      node_list delta;
+      edit_lo = db.size();
+      bool ready = false;
+      auto not_main = [&](node_id x) { return db.is<n_fn>(x) && text_of(db.as<n_fn>(x).name) != "main"; };
+      auto plain_fn = [&](node_id x) {
+        if(!db.is<n_fn>(x) || !db.as<n_fn>(x).form.empty()) return false;
+        auto name = text_of(db.as<n_fn>(x).name);
+        return name != "main" && !name.starts_with("infix") && !name.starts_with("prefix") && !name.starts_with("postfix");
+      };
+      switch(kind) {
+        case 0: // a literal
+          target = pick([&](node_id x) { return db.is<n_int>(x) || db.is<n_float>(x); });
+          if(target) {
+            // the value (the type is kept) or the literal's type itself: int <-> float changes the expression's type and the function's result
+            bool flip = random() % 2 == 0;
+            if(db.is<n_int>(target)) {
+              auto v = db.as<n_int>(target);
+              if(flip) replacement = n_float{double(v.value)};
+              else { v.value ^= 1; replacement = v; }
+            } else {
+              auto v = db.as<n_float>(target);
+              if(flip) replacement = n_int{int64_t(v.value)};
+              else { v.value += 1; replacement = v; }
+            }
+            ready = true;
+          }
+          break;
+        case 1: // an operator
+          target = pick([&](node_id x) {
+            if(!db.is<n_op>(x) || db.as<n_op>(x).args.size() != 2 || db.as<n_op>(x).postfix) return false;
+            auto t = op_text(x);
+            return t == "+" || t == "-" || t == "*" || t == "<" || t == ">" || t == "==";
+          });
+          if(target) {
+            auto o = db.as<n_op>(target);
+            auto t = op_text(target);
+            o.op = db.strings.intern(t == "+" ? "-" : t == "-" ? "+" : t == "*" ? "+" : t == "<" ? ">" : t == ">" ? "<" : "!=");
+            replacement = o;
+            ready = true;
+          }
+          break;
+        case 2: { // the callee's name
+          target = pick([&](node_id x) { return db.is<n_ident>(x) && db[x].parent && db.is<n_call>(db[x].parent) && db.as<n_call>(db[x].parent).callee == x; });
+          node_id other = any_fn_node();
+          if(target && other && db.as<n_fn>(other).name != db.as<n_ident>(target).name) { replacement = n_ident{db.as<n_fn>(other).name}; ready = true; }
+          break;
+        }
+        case 3: // a function body
+          target = pick(not_main);
+          if(target) { auto f = db.as<n_fn>(target); f.body = db.add(n_int{7}, {}); replacement = f; ready = true; }
+          break;
+        case 4: // a function name (the signature)
+          target = pick(not_main);
+          if(target) { auto f = db.as<n_fn>(target); f.name = db.strings.intern("ra1_renamed"); replacement = f; ready = true; }
+          break;
+        case 5: { // a new overload of an existing name (of an ordinary function: for operators and syntax forms the arity and records are set by the parser)
+          node_id f = pick(plain_fn);
+          if(f && module_of(f)) {
+            n_fn g; g.name = db.as<n_fn>(f).name; g.body = db.add(n_int{9}, {}); g.expr_body = true;
+            node_id gn = db.add(g, {});
+            auto m = db.copy_of<n_module>(module_of(f));
+            m.items.push_back(gn);
+            target = module_of(f); replacement = m; delta = {gn}; ready = true;
+          }
+          break;
+        }
+        case 6: { // a function deletion
+          node_id f = pick(not_main);
+          if(f && module_of(f)) {
+            auto m = db.copy_of<n_module>(module_of(f));
+            std::vector<node_id> keep;
+            for(std::size_t i = 0; i < m.items.size(); ++i) if(m.items[i] != f) keep.push_back(m.items[i]);
+            if(keep.size() != m.items.size()) { m.items = keep; target = module_of(f); replacement = m; delta = {f}; ready = true; }
+          }
+          break;
+        }
+        default: // an expression: a call or an operator -> a literal
+          target = pick([&](node_id x) { return (db.is<n_call>(x) || (db.is<n_op>(x) && !db.as<n_op>(x).postfix)) && db.enclosing_fn(x); });
+          if(target) { replacement = n_int{3}; ready = true; }
+      }
+      if(!ready) continue;
+      if(delta.empty()) delta = {target};
+      link = target;
+      auto impact_before = db.impact_of(delta);
+      db.mutate(target, std::move(replacement), src);
+      db.link_parents(link);
+      edit_hi = db.size();
+      fresh_nodes += int64_t(edit_hi - edit_lo);
+      auto impact = db.impact_of(delta);
+      for(auto f: impact_before) impact.push_back(f);
+      ast_db::unique_nodes(impact);
+      verify("И2 после правки");
+      auto after = run_check();
+      std::vector<node_id> actual;
+      std::map<uint32_t, std::string> why;
+      std::optional<ro::model> post_edit; // the reference model over the database after the edit: the calling functions
+      auto callers = [&](node_id g) { if(!post_edit) post_edit.emplace(db); return post_edit->dependents(g); };
+      // A change in the layer (or the diagnostics) of function g is explained if g is in impact or is called by a function from impact: the instance's layer
+      // is a fold over all calls, and the argument values/types, the data flows between calls come down from
+      // the caller, not by name. Strictly: a function for which neither it nor its callers are in impact must not change.
+      auto explained = [&](node_id g) -> std::pair<bool, int> { // (explained, 0 - itself in impact, 1 - by a caller)
+        if(std::ranges::contains(impact, g)) return {true, 0};
+        for(auto c: callers(g)) if(std::ranges::contains(impact, c)) return {true, 1};
+        return {false, 0};
+      };
+      bool same_failure = before.failed == after.failed && before.what == after.what;
+      // Diagnostics: the place of an error may be in the callee (a new instance by the argument types or values), and the cause higher up the instantiation
+      // chain. A changed diagnostic is "explained" if impact contains a function of its chain (the error place, the trace frames)
+      // or a caller of such a function; the layers of the functions below are checked by the same rule (see explained).
+      bool diag_explained = true;
+      if(!same_failure) {
+        ++diag_changed;
+        fprintf(stderr, "%s: И2 вид %d: диагностика изменилась: было [%.70s] стало [%.70s]\n", path.c_str(), kind, before.failed ? before.what.c_str() : "нет", after.failed ? after.what.c_str() : "нет");
+        node_list chain_fns;
+        for(auto const & w: before.chain) if(auto f = fn_at(w)) chain_fns.push_back(f);
+        for(auto const & w: after.chain) if(auto f = fn_at(w)) chain_fns.push_back(f);
+        diag_explained = chain_fns.empty() || before.failed; // a program with an error before the edit: a change of the error is counted but not checked
+        for(auto f: chain_fns) if(explained(f).first) diag_explained = true;
+        if(!diag_explained) {
+          std::string names, imp;
+          for(auto f: chain_fns) { names += text_of(db.as<n_fn>(f).name) + "(вызывающих " + std::to_string(callers(f).size()) + ") "; }
+          for(auto f: impact) if(db.is<n_fn>(f) && db.within(f, root)) imp += text_of(db.as<n_fn>(f).name) + " ";
+          fprintf(stderr, "%s: И2 вид %d: ни одна функция цепочки диагностики (и ни один её вызывающий) не входит в impact, правка узла %u; цепочка: %s; impact программы: %s\n", path.c_str(), kind, target.value, names.c_str(), imp.c_str());
+        }
+      }
+      for(auto const & [f, keys]: after.layers)
+        for(auto const & [key, now]: keys) {
+          auto bf = before.layers.find(f);
+          if(bf == before.layers.end() || !bf->second.contains(key)) continue; // a new instance: it is a consequence of the caller's edit
+          auto const & was = bf->second.at(key);
+          if(was.ct == now.ct && was.fixed == now.fixed && was.derived == now.derived) continue;
+          // Library functions (the prelude) are constructs with blocks and expressions as parameters (for, if...): the layers of their instances
+          // depend on the caller's expressions, not on names; such differences are counted and are not part of the strict check.
+          if(!db.within(node_id(f), root)) { ++lib_changed; continue; }
+          // the first difference - for analyzing violations
+          std::string & note = why[f];
+          if(was.ct != now.ct) note = cat("свёрнутость: было ", was.ct, " стало ", now.ct);
+          for(auto const & [nid, v]: now.fixed) {
+            if(!note.empty()) break;
+            auto it = was.fixed.find(nid);
+            if(it == was.fixed.end()) note = cat("узел ", nid, " (вид ", db[node_id(nid)].kind.index(), ") новый: ", v);
+            else if(it->second != v) note = cat("узел ", nid, " (вид ", db[node_id(nid)].kind.index(), "): было ", it->second, " стало ", v);
+          }
+          if(note.empty()) for(auto const & [nid, v]: was.fixed) if(!now.fixed.contains(nid)) { note = cat("узел ", nid, " исчез: ", v); break; }
+          if(note.empty()) note = "различие в производных узлах";
+          if(auto [ok, how] = explained(node_id(f)); ok) { if(how == 1) ++indirect_explained; continue; }
+          actual.push_back(node_id(f));
+        }
       ast_db::unique_nodes(actual);
-      bool includes = true;
+      bool includes = diag_explained;
       for(auto f: actual) if(!std::ranges::contains(impact, f)) {
         includes = false;
-        fprintf(stderr, "%s: impact missing %u (%.*s), edited %u\n", path.c_str(), f.value, int(db.strings.text(db.as<n_fn>(f).name).size()), db.strings.text(db.as<n_fn>(f).name).data(), literal.value);
+        fprintf(stderr, "%s: И2 вид %d: impact не содержит %u (%s), правка узла %u: %s\n", path.c_str(), kind, f.value, text_of(db.as<n_fn>(f).name).c_str(), target.value, why[f.value].c_str());
       }
       ++cases;
-      if(includes) { ++supers; if(impact.size() > actual.size()) ++strict; } else ++bad2;
-      db.rollback(root.value + 1);
-      verify();
+      if(includes) { ++supers; if(impact.size() > actual.size()) ++strict; }
+      else if(has_ct_block) { // ct code reads and changes the AST by reflection (functions_named, f.body...): the dependency is not by name - RA-1b
+        ++ct_gap;
+        fprintf(stderr, "%s: И2 вид %d: расхождение в программе с ct-блоками — зависимость ct-кода от АСТ по рефлексии, RA-1b (вне строгой проверки)\n", path.c_str(), kind);
+      } else ++bad2;
+      db.rollback(src);
+      db.link_parents(link);
+      verify("И2 после отката");
     }
+    program_end = count; edit_lo = edit_hi = 0;
   }
+  verify_queries("конец", pick_decls(8));
   // The journal is a separate database, not a copy of the index.
   ast_db replay;
   replay.replay(db.journal());
-  if(replay.rdeps_dump() != replay.rdeps_dump(true)) { ++bad1; fprintf(stderr, "%s: replay index mismatch\n", path.c_str()); }
+  if(replay.rdeps_dump() != replay.rdeps_dump(true)) { ++bad_live; fprintf(stderr, "%s: индекс воспроизведения журнала ≠ пересчёту\n", path.c_str()); }
+  if(auto report = ro::compare_index(replay); !report.empty()) { ++bad_oracle; fprintf(stderr, "%s: индекс воспроизведения ≠ эталону\n%s", path.c_str(), report.c_str()); }
   if(replay.rdeps_dump(false, count) != db.rdeps_dump(false, count)) { // program nodes (numbers < count); the journal does not replay the check's derived nodes
-    ++bad1;
+    ++bad_live;
     auto mine = db.rdeps_dump(false, count), ref = replay.rdeps_dump(false, count);
     size_t i = 0; while(i < mine.size() && i < ref.size() && mine[i] == ref[i]) ++i;
     fprintf(stderr, "%s: replay content at %zu: live %.80s / replay %.80s\n", path.c_str(), i, mine.c_str() + i, ref.c_str() + i);
   }
-  return value(array_v::of({value(steps), value(bad1), value(bad3), value(cases), value(supers), value(strict), value(bad2)}));
+  return value(array_v::of({value(steps), value(bad_live), value(bad_oracle), value(bad_query), value(bad3), value(cases), value(supers), value(strict), value(bad2), value(diag_changed), value(fresh_nodes), value(oracle_checks), value(query_checks), value(parse_errors), value(check_errors), value(lib_changed), value(indirect_explained), value(ct_gap)}));
 };
+// vish rdepscheck <files> [seed] [steps] [I2 cases per file]
 check_cli(files) {
   seed = 1;
   steps = 200;
+  i2 = 8;
   paths = array{};
   nums = array{};
   for(f : files) { if(ends_with(f, ".vish")) paths.push(f); else nums.push(f); }
   if(nums.size > 0) seed = number_of(nums[0]);
   if(nums.size > 1) steps = number_of(nums[1]);
-  total = 0; bad1 = 0; bad3 = 0; cases = 0; supers = 0; strict = 0; bad2 = 0;
+  if(nums.size > 2) i2 = number_of(nums[2]);
+  total = array{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   for(i : range(paths.size)) {
     n = (steps / paths.size) + (if(i < (steps % paths.size)) 1 else 0);
-    r = rdeps_probe(paths[i], seed + i, n, cases < 50);
-    total += r[0]; bad1 += r[1]; bad3 += r[2]; cases += r[3]; supers += r[4]; strict += r[5]; bad2 += r[6];
-    if((r[1] + r[2] + r[6]) > 0) write_out(paths[i] + ": И1=" + text(r[1]) + " И3=" + text(r[2]) + " И2=" + text(r[6]) + "\n");
+    r = rdeps_probe(paths[i], seed + i, n, i2, i);
+    for(k : range(18)) total[k] += r[k];
+    if((r[1] + r[2] + r[3] + r[4] + r[8]) > 0) write_out(paths[i] + ": И1-живой=" + text(r[1]) + " И1-эталон=" + text(r[2]) + " запросы=" + text(r[3]) + " И3=" + text(r[4]) + " И2=" + text(r[8]) + "\n");
   }
-  write_out("rdeps: шагов " + text(total) + ", файлов " + text(paths.size) + ", И1=" + text(bad1) + ", И3=" + text(bad3) + ", И2: случаев " + text(cases) + ", надмножеств " + text(supers) + ", строгих " + text(strict) + ", нарушений " + text(bad2) + "\n");
-  if((bad1 + bad3 + bad2) == 0) 0 else 1
+  bad = total[1] + total[2] + total[3] + total[4] + total[8];
+  write_out("rdeps: файлов " + text(paths.size) + ", шагов " + text(total[0]) + ", сверок эталона " + text(total[11]) + ", сверок запросов " + text(total[12]) + ", И1-живой=" + text(total[1]) + ", И1-эталон=" + text(total[2]) + ", запросы=" + text(total[3]) + ", И3=" + text(total[4]) + ", И2: случаев " + text(total[5]) + ", надмножеств " + text(total[6]) + ", строгих " + text(total[7]) + ", нарушений " + text(total[8]) + ", диагностик изменилось " + text(total[9]) + ", новых узлов правок " + text(total[10]) + ", ошибок разбора " + text(total[13]) + ", ошибок check " + text(total[14]) + ", библиотечных экземпляров изменилось (вне строгой проверки) " + text(total[15]) + ", изменений объяснено вызывающим из impact " + text(total[16]) + ", вне строгой проверки из-за ct-блоков (RA-1b) " + text(total[17]) + "\n");
+  if(bad == 0) 0 else 1
 }

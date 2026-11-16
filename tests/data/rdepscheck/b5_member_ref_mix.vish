@@ -1,0 +1,15 @@
+// A mix for random mutations and I2: fields, references, operators, inheritance, overloads.
+module mix;
+struct Pt { i64 x; i64 y; }
+struct Pt3 : Pt { i64 z; }
+helper(i64 x) => x + 1;
+twice(i64 x) => helper(helper(x));
+len2(Pt p) => (p.x * p.x) + (p.y * p.y);
+len3(Pt3 p) => len2(p) + (p.z * p.z);
+pick(i64 x) => x;
+pick(Pt p) => p.x;
+total(i64 n) => (twice(n) + pick(n)) - 1;
+main() {
+  p = Pt3{1, 2, 3};
+  (len3(p) + total(2)) + pick(p)
+}

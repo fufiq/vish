@@ -941,31 +941,39 @@ struct ast_db {
 
   // Mine (RA-1): sorted numbers by symbol, without allocating memory per node.
   // Detached nodes stay in the database and in the index; belonging is computed from parent.
-  std::vector<std::vector<uint32_t>> refs_by_name;
-  void ref_names(node_kind const & k, auto emit) const {
-    auto put = [&](symbol s) { if(s) emit(s); };
-    if(auto p = std::get_if<n_ident>(&k)) put(p->name);
-    if(auto p = std::get_if<n_op>(&k)) {
-      put(p->op);
-      auto text = strings.text(p->op);
-      if(p->postfix && text.size() > 1 && text[0] == '.') {
-        auto it = strings.index.find(std::string(text.substr(1)));
-        if(it != strings.index.end()) put(it->second);
-      }
+  // A node's keys depend ONLY on its kind and fields (nothing is interned or looked up in const methods):
+  // otherwise a later interning of a name would leave the live index shorter than the recount (I1).
+  //   refs_by_name[symbol]  - n_ident.name, n_op.op (including a postfix `.x` - under the symbol `.x`),
+  //                           n_chain.ops, n_use.key, n_splice.name, n_extend.name/of/base;
+  //   refs_by_target[node]  - n_ref.target, n_extend.target (a reference by number, not by name: renaming the target does not go stale).
+  // callee, parameter/variable types - child n_ident: the use node itself is indexed.
+  std::vector<std::vector<uint32_t>> refs_by_name, refs_by_target;
+  void ref_keys(node_kind const & k, auto emit) const { // emit(table: 0 name / 1 target, key)
+    auto name = [&](symbol s) { if(s) emit(0u, s.value); };
+    auto target = [&](uint32_t t) { if(t) emit(1u, t); };
+    if(auto p = std::get_if<n_ident>(&k)) name(p->name);
+    else if(auto p = std::get_if<n_op>(&k)) {
+#ifdef VISH_RA1_MUTANT_NO_MEMBER // an oracle check (rdepscheck must fail): `.field` is not indexed
+      if(!(p->postfix && strings.text(p->op).starts_with('.')))
+#endif
+        name(p->op);
     }
-    if(auto p = std::get_if<n_chain>(&k)) for(auto s: p->ops) put(s);
-    if(auto p = std::get_if<n_use>(&k)) put(p->key);
-    if(auto p = std::get_if<n_splice>(&k)) put(p->name);
-    if(auto p = std::get_if<n_extend>(&k)) { put(p->name); put(p->of); put(p->base); }
-    // callee, types, &f - child idents; we index exactly the use node.
+    else if(auto p = std::get_if<n_chain>(&k)) { for(auto s: p->ops) name(s); }
+    else if(auto p = std::get_if<n_use>(&k)) { name(p->key); for(auto s: p->names) name(s); }
+    else if(auto p = std::get_if<n_splice>(&k)) name(p->name);
+    else if(auto p = std::get_if<n_extend>(&k)) { name(p->name); name(p->of); name(p->base); target(p->target); }
+#ifndef VISH_RA1_MUTANT_NO_REF // an oracle check: n_ref is not indexed
+    else if(auto p = std::get_if<n_ref>(&k)) target(p->target);
+#endif
   }
   void index_refs(node_id n, bool insert) {
-    ref_names(nodes[n].kind, [&](symbol s) {
-      if(refs_by_name.size() <= s.value) {
+    ref_keys(nodes[n].kind, [&](uint32_t table, uint32_t key) {
+      auto & by = table ? refs_by_target : refs_by_name;
+      if(by.size() <= key) {
         if(!insert) return;
-        refs_by_name.resize(s.value + 1);
+        by.resize(key + 1);
       }
-      auto & xs = refs_by_name[s.value];
+      auto & xs = by[key];
       auto i = std::ranges::lower_bound(xs, n.value);
       if(insert) { if(i == xs.end() || *i != n.value) xs.insert(i, n.value); }
       else if(i != xs.end() && *i == n.value) xs.erase(i);
@@ -974,6 +982,7 @@ struct ast_db {
   void rebuild_refs() {
     use_pool();
     refs_by_name.clear();
+    refs_by_target.clear();
     for(uint32_t i = 0; i < size(); ++i) index_refs(node_id(i), true);
   }
   node_id enclosing_fn(node_id n) const {
@@ -988,16 +997,45 @@ struct ast_db {
     if(is<n_var>(n)) return as<n_var>(n).name;
     return {};
   }
-  node_list users_of(symbol s) const {
-    node_list out;
-    if(s && s.value < refs_by_name.size())
-      for(auto i: refs_by_name[s.value]) out.push_back(node_id(i));
-    return out;
-  }
-  node_list users_of(node_id n) const { return users_of(dependency_name(n)); }
+  // A symbol, if it is already interned (creates nothing).
+  symbol known_symbol(std::string_view text) const { return strings.lookup(text); }
   static void unique_nodes(node_list & xs) {
     std::ranges::sort(xs, {}, &node_id::value);
     xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+  }
+  void collect_users(symbol s, node_list & out) const {
+    if(s && s.value < refs_by_name.size())
+      for(auto i: refs_by_name[s.value]) out.push_back(node_id(i));
+  }
+  // Uses of a name: the nodes where it is named and the postfix `.name` (a field/method, indexed under the symbol `.name`).
+  node_list users_of(symbol s) const {
+    node_list out;
+    if(!s) return out;
+    collect_users(s, out);
+    auto text = strings.text(s);
+    if(!text.empty() && text[0] != '.') {
+      std::size_t before = out.size();
+      collect_users(known_symbol("." + std::string(text)), out);
+      if(out.size() != before) unique_nodes(out);
+    }
+    return out;
+  }
+  // Uses of a declaration: by its name; by a reference by number (ref(f), an extension of f by reference); for an operator function
+  // (infix+ / prefix- / postfix? ...) - by the operator symbol, conservatively for any role and arity (a superset).
+  node_list users_of(node_id n) const {
+    node_list out = users_of(dependency_name(n));
+    if(n.value < refs_by_target.size())
+      for(auto i: refs_by_target[n.value]) out.push_back(node_id(i));
+    if(is<n_fn>(n)) {
+      auto text = strings.text(as<n_fn>(n).name);
+      for(std::string_view role: {"infix", "prefix", "postfix"})
+        if(text.size() > role.size() && text.starts_with(role)) {
+          collect_users(known_symbol(text.substr(role.size())), out);
+          break;
+        }
+    }
+    unique_nodes(out);
+    return out;
   }
   node_list dependents_of_fn(node_id n) const {
     node_list out;
@@ -1010,9 +1048,18 @@ struct ast_db {
         for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) out.push_back(node_id(i));
       }
     }
+    // Called implicitly by the value's type, not by name, destroy/copy (the value's life) and implicit (a conversion on passing and assignment):
+    // any function of the program may be a dependent.
+    if(is<n_fn>(n)) {
+      auto text = strings.text(as<n_fn>(n).name);
+      if(text == "destroy" || text == "copy" || text == "implicit")
+        for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && !in_prelude(node_id(i))) out.push_back(node_id(i));
+    }
     unique_nodes(out);
     return out;
   }
+  // The transitive closure. A descendant (struct D : B) is a dependent of B itself: the composition of D (the base's fields first) changes
+  // together with B, so the walk continues from the descendant node - through its name to the consumers of D and to its descendants.
   node_list impact_of(node_span changed_nodes) const {
     node_list todo(changed_nodes.begin(), changed_nodes.end()), out;
     std::vector<uint8_t> seen(size(), 0);
@@ -1023,6 +1070,9 @@ struct ast_db {
       if(is<n_fn>(n) || is<n_module>(n)) out.push_back(n);
       if(auto p = nodes[n].parent) todo.push_back(p);
       for(auto d: dependents_of_fn(n)) todo.push_back(d);
+      if(auto name = dependency_name(n))
+        for(auto u: users_of(n))
+          if(is<n_extend>(u) && as<n_extend>(u).base == name) todo.push_back(u);
     }
     unique_nodes(out);
     return out;
@@ -1030,18 +1080,21 @@ struct ast_db {
   // limit - only nodes with a number below limit (comparison with the journal replay: nodes born by a check/elaboration are not in the program's journal)
   std::string rdeps_dump(bool rebuild = false, uint32_t limit = ~uint32_t{0}) const {
     use_pool();
-    std::vector<std::pair<uint32_t, uint32_t>> entries;
+    std::vector<std::array<uint32_t, 3>> entries;
     if(rebuild) {
       for(uint32_t i = 0; i < size() && i < limit; ++i)
-        ref_names(nodes[node_id(i)].kind, [&](symbol s) { entries.emplace_back(s.value, i); });
+        ref_keys(nodes[node_id(i)].kind, [&](uint32_t table, uint32_t key) { entries.push_back({table, key, i}); });
     } else {
-      for(uint32_t s = 0; s < refs_by_name.size(); ++s)
-        for(auto i: refs_by_name[s]) if(i < limit) entries.emplace_back(s, i);
+      for(uint32_t t = 0; t < 2; ++t) {
+        auto const & by = t ? refs_by_target : refs_by_name;
+        for(uint32_t s = 0; s < by.size(); ++s)
+          for(auto i: by[s]) if(i < limit) entries.push_back({t, s, i});
+      }
     }
     std::ranges::sort(entries);
     entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
     std::string out;
-    for(auto [s, i]: entries) out += cat("r ", s, " ", i, "\n");
+    for(auto [t, s, i]: entries) out += cat(t ? "t " : "r ", s, " ", i, "\n");
     for(uint32_t i = 0; i < size() && i < limit; ++i) {
       auto f = enclosing_fn(node_id(i));
       if(f) out += cat("f ", i, " ", f.value, "\n");

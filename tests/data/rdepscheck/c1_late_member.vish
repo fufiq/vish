@@ -1,0 +1,11 @@
+// B1 (the RA-1 review): ct inserts the operator `.ra1_fresh_field` BEFORE the name is interned (ast.name creates the symbol later).
+// The rdepscheck corpus: the index must match the reference also after elaboration; the answers are in run/b1_late_member.vish.
+ra1_target() => 0;
+ct {
+  f = functions_named("ra1_target")[0];
+  f.body = ast.operation{".ra1_fresh_field", array{ast.int{0}}, true};
+  fresh = ast.name{"ra1_fresh_field"};
+}
+main() {
+  ra1_target()
+}

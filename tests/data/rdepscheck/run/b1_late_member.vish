@@ -1,0 +1,16 @@
+// no-jit
+// out: true
+// out: found
+// B1 (the RA-1 review): the name of `.field` is interned LATER than the node `.ra1_fresh_field` (ct inserts the operator, then ast.name creates the symbol):
+// the live index must equal a recount from scratch, and users_of(the symbol) must find the node.
+use rdeps;
+ra1_target() => 0;
+ct {
+  f = functions_named("ra1_target")[0];
+  f.body = ast.operation{".ra1_fresh_field", array{ast.int{0}}, true};
+  fresh = ast.name{"ra1_fresh_field"};
+}
+main() {
+  print(rdeps_index_dump() == rdeps_rebuild_dump());
+  print(if(rdeps_oracle_report() == "") "found" else "missing");
+}

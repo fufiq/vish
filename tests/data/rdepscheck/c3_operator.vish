@@ -1,0 +1,10 @@
+// B3 (the RA-1 review): the operator + for f64 is declared as infix+, used under the symbol `+` (and the prefix -).
+operator (f64 a) + (f64 b) => a - b;
+operator - (f64 a) => 0.0 - a;
+plus_user(f64 a, f64 b) => a + b;
+neg_user(f64 a) => -a;
+main() {
+  plus_user(3.0, 1.0);
+  neg_user(2.0);
+  0
+}

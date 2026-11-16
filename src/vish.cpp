@@ -8,6 +8,7 @@
 #include "vish/os.hpp"
 #include "vish/lexer.hpp"
 #include "vish/ast.hpp"
+#include "vish/rdeps_oracle.hpp"
 #include "vish/parser.hpp"
 #include "vish/prelude.hpp"
 #include "vish/printer.hpp"

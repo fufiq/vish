@@ -1,0 +1,10 @@
+// B4 (the RA-1 review): the consumers of the descendants - Derived and Leaf - depend on Base transitively.
+struct Base { i64 x; }
+struct Derived : Base { i64 y; }
+struct Leaf : Derived { i64 z; }
+consume(Derived d) => d.y;
+eat_leaf(Leaf l) => l.z;
+unrelated(i64 v) => v;
+main() {
+  consume(Derived{1, 2}) + eat_leaf(Leaf{1, 2, 3})
+}

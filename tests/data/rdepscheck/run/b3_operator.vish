@@ -1,0 +1,27 @@
+// no-jit
+// out: PLUS true
+// out: NEG true
+// out: RESULT 2.0
+// out: ORACLE true
+// B3 (the RA-1 review): the declaration `operator (a) + (b)` is called infix+, a use is indexed under the symbol `+` -
+// dependents_of must find the uses (and the prefix/postfix: conservatively by the operator symbol).
+// The operators are f64, not i64: redefining the i64 operator + breaks the loop counters of the check itself.
+use rdeps;
+operator (f64 a) + (f64 b) => a - b;
+operator - (f64 a) => 0.0 - a;
+plus_user(f64 a, f64 b) => a + b;
+neg_user(f64 a) => -a;
+main() {
+  plus = false;
+  neg = false;
+  for(f : functions_named("infix+")) {
+    for(x : dependents_of(f)) if(code_name(x) == "plus_user") plus = true;
+  }
+  for(f : functions_named("prefix-")) {
+    for(x : dependents_of(f)) if(code_name(x) == "neg_user") neg = true;
+  }
+  print("PLUS", plus);
+  print("NEG", neg);
+  print("RESULT", plus_user(3.0, 1.0));
+  print("ORACLE", rdeps_oracle_report() == "");
+}

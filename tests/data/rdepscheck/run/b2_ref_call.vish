@@ -1,0 +1,21 @@
+// no-jit
+// out: VALUE 3
+// out: via
+// out: DUMPS true
+// out: ORACLE true
+// B2 (the RA-1 review): a call through ref(helper) is a real dependency of via on helper, an ordinary reference to a declaration.
+// via is born by ct code (emit) so that the reference is visible in the database before main.
+use rdeps;
+helper(i64 x) => x + 1;
+ct {
+  f = ast.function{"via", array{ast.parameter{"x"}}};
+  f.body = ast.call{ref(helper), array{ast.int{2}}};
+  f.expr_body = true;
+  emit(f);
+}
+main() {
+  print("VALUE", via(0));
+  for(x : dependents_of(code(helper))) if(code_name(x) == "via") print("via");
+  print("DUMPS", rdeps_index_dump() == rdeps_rebuild_dump());
+  print("ORACLE", rdeps_oracle_report() == "");
+}
