@@ -1284,7 +1284,8 @@ item_node(ps s) {
     }
     if(!is_op_at(s, ";", 0)) { want(s, "use без ;"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     s.pos += 1;
-    s.custom = true;
+    // the rules of module k are taken by learn_use from the module found in the database; the module is not loaded (as in the modcheck reference) - there are no rules.
+    // Loading modules by key is E6 (modules); until then `use` does not switch parsing to "rules above"
     return ires{true, ast.use{us_key, us_names}, from, s.pos, ""};
   }
   if((tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident()) && (!is_keyword_word(tk_text(s, 0)) || (tk_text(s, 0) == "struct"))
@@ -1612,7 +1613,7 @@ module_items_of(str src) {
       tt = tk_at(s, it.from + ti);
       if(tt.kind == kind_ident()) {
         tw = text_range(s.src, tt.from, tt.to);
-        if(has_text(array{"syntax", "using", "use"}, tw)) s.custom = true;
+        if(has_text(array{"syntax", "using"}, tw)) s.custom = true;
       }
     }
     if(s.pos <= p0) break;

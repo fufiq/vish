@@ -1,0 +1,3 @@
+use geo.words;
+use geo.vec.{norm};
+f(x) => x;
