@@ -1,0 +1,9 @@
+syntax tup (xs, ...) => ast.return{xs};
+syntax nm #x => ast.return{x};
+syntax sym @@ {x} => ast.loop{x};
+f(v) {
+  tup(1, 2, 3)
+  nm foo
+  sym @@ { 1 }
+  0
+}

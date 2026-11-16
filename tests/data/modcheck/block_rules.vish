@@ -1,0 +1,10 @@
+f(x) {
+  operator (a) <+> (b) => a;
+  [[associative]] operator (a) <-> (b) => a;
+  syntax blk {body} => ast.loop{body};
+  blk { 1 }
+  x <+> x
+}
+g(x) {
+  x <+> x
+}
