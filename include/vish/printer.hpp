@@ -1337,7 +1337,8 @@ struct printer {
 
   void print_node(node_id, n_ct const & c) {
     out += "ct ";
-    item(c.body);
+    if(db.is<n_block>(c.body)) item(c.body);
+    else receiver(c.body); // ct e - the body is parsed as unary_core: (1 + 2), (-x) without parentheses read differently
   }
 
   void print_node(node_id, n_lambda const & l) {

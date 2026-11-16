@@ -371,7 +371,7 @@ primary(ps s) {
       r = record_use(s);
       return if(r.ok) pn{"n_ready", "", array{}, array{}, array{}, "", r.node} else pn_hole("");
     }
-    if((w == "ct") && !((tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2))) {
+    if((w == "ct") && !((tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued)) { // ct"..." is a template string tagged ct, not a ct expression
       // ct e / ct { ... } - evaluation at compile time (parser.hpp primary); `ct x = e` is a variable, not supported
       s.pos += 1;
       ct_body = if(is_open_ch(s, 123, 0)) block_node(s) else node_of(unary_core(s));
@@ -1155,7 +1155,7 @@ local_fn_ahead(ps s) {
 // otherwise `;`, or `}` (the value of a block), or the instruction ends with a block (if/loop/a construct with a block) - `;` is not needed
 statement_node(ps s) {
   if(local_fn_ahead(s)) { want(s, "локальная функция"); return nres{false, code()}; }
-  if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0)) && (cons_of(s, tk_text(s, 0)) < 0) && !((tk_text(s, 0) == "ct") && !((tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)))) {
+  if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0)) && (cons_of(s, tk_text(s, 0)) < 0) && !((tk_text(s, 0) == "ct") && !((tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued))) {
     if(is_keyword_word(tk_text(s, 0)) || (tk(s, 1).kind == kind_ident())) {
       want(s, if(is_keyword_word(tk_text(s, 0))) "в блоке слово «" + tk_text(s, 0) + "»" else "в блоке объявление «тип имя» (" + tk_text(s, 1) + ")");
       return nres{false, code()};

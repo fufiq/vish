@@ -9,3 +9,9 @@ Point{1, 2}.x
 Point{a + b, c * d}
 Point{{x: 1}}
 x + Point{1}
+ct (1 + 2)
+ct (-x)
+ct (a + b + c)
+ct (a = 1)
+ct x
+ct { 1 }
