@@ -551,12 +551,18 @@ using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_
 
 // --- staff ---
 
+// A snapshot of frames for comparing the codec in the language (lib/proto.vish, `vish protocheck`; *mine, temporary*, E7): with tap_on every assembled
+// frame goes into tap_frames - "c" (a client message) or "s" (a VM message) and the body without the length.
+bool tap_on = false;
+std::vector<std::string> tap_frames;
+
 std::string frame(auto const & msg) {
   writer w;
   w.put(uint32_t(0));
   w.put(msg);
   uint32_t n = uint32_t(w.bytes.size() - 4);
   std::memcpy(w.bytes.data(), &n, 4);
+  if(tap_on) tap_frames.push_back((std::is_same_v<std::remove_cvref_t<decltype(msg)>, client_msg> ? "c" : "s") + w.bytes.substr(4));
   return std::move(w.bytes);
 }
 

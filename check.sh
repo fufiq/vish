@@ -104,6 +104,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # E6: the completion item (lib/complete.vish) and the session stats accounting (lib/session.vish) against C++ stage0
     ( $b completecheck lib/editor.vish && $b sessioncheck tests/*.vish tests/geo/*.vish ) > $L/t_sessioncheck.log 2>&1
     echo "sessioncheck: код $?" > $L/r_sessioncheck
+    # E7a: the protocol codec in Vish (lib/proto.vish) against C++ proto.hpp (stage0): scenario frames, boundary frames, frames generated with corruption
+    ( $b protocheck tests/*.wire tests/*.session tests/data/protocheck/*.txt ) > $L/t_protocheck.log 2>&1
+    echo "protocheck: код $?" > $L/r_protocheck
     # epic vsh-u4e: the environment object journal (lib/runlog.vish): write, blobs, truncation, corruption, cause chain; each run uses its own directory
     ( rm -rf $L/runlog && mkdir -p $L/runlog && $b runlogcheck $PWD/$L/runlog ) > $L/t_runlog.log 2>&1
     echo "runlog: код $?" > $L/r_runlog

@@ -246,6 +246,13 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("session", "check_cli", files);
   }
+  if(cmd == "protocheck") {
+    // vish protocheck <files>: the protocol codec in the language (lib/proto.vish, E7a) against C++ proto.hpp (stage0): the frames of *.wire/*.session scenarios,
+    // boundary frames *.txt, generated messages with corruption; parse, flat tree, re-encoding and error texts
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("proto", "check_cli", files);
+  }
   if(cmd == "fmtcheck") {
     // vish fmtcheck <files>: the printer in the language (lib/printer.vish, E5) against the C++ print (stage0), byte by byte: *.vish files are modules (elements,
     // the whole module, the print -> parse round trip), the others are by expression in a line
