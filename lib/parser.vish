@@ -1073,6 +1073,30 @@ item_node(ps s) {
   if(!b.ok) { s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
   ires{true, ast.function{fname, params, rtype, b.node, false, false, array{}, false, array{}}, from, s.pos, ""}
 }
+// a function declaration closes the prelude record with the same name (shadow_records/learn parser.hpp), and a function with a `word(...)` clause or
+// an expr parameter is a construct: the rules change - the following elements are "not supported" (attributes [[...]] and outline before a declaration are skipped)
+declares_shadow(ps s, i64 from) {
+  p = from;
+  loop {
+    if(!((tk_at(s, p).kind == kind_open()) && (tk_at(s, p).ch == 91) && (tk_at(s, p + 1).kind == kind_open()) && (tk_at(s, p + 1).ch == 91))) break;
+    m = s.match[p];
+    if(m < 0) return false;
+    p = m + 1;
+  }
+  if((tk_at(s, p).kind == kind_ident()) && (text_range(s.src, tk_at(s, p).from, tk_at(s, p).to) == "outline")) p += 1;
+  // an extension `Name { ... }` / `&f(...) { ... }` declares functions inside - the rules may change (conservatively)
+  if((tk_at(s, p).kind == kind_ident()) && (tk_at(s, p + 1).kind == kind_open()) && (tk_at(s, p + 1).ch == 123)) return true;
+  if((tk_at(s, p).kind == kind_op()) && (text_range(s.src, tk_at(s, p).from, tk_at(s, p).to) == "&")) return true;
+  name_at = -1;
+  if((tk_at(s, p).kind == kind_ident()) && (tk_at(s, p + 1).kind == kind_ident()) && (tk_at(s, p + 2).kind == kind_open()) && (tk_at(s, p + 2).ch == 40)) name_at = p + 1
+  else if((tk_at(s, p).kind == kind_ident()) && (tk_at(s, p + 1).kind == kind_open()) && (tk_at(s, p + 1).ch == 40)) name_at = p
+  else return false;
+  w = text_range(s.src, tk_at(s, name_at).from, tk_at(s, name_at).to);
+  if(rule_has(s, w)) return true;
+  close = s.match[name_at + 1];
+  if(close < 0) return false;
+  (tk_at(s, close + 1).kind == kind_ident()) && (tk_at(s, close + 2).kind == kind_open()) && (tk_at(s, close + 2).ch == 40)
+}
 // module elements of the text: the ires array (in text order)
 module_items_of(str src) {
   r = phase1_of(src);
@@ -1086,6 +1110,7 @@ module_items_of(str src) {
     p0 = s.pos;
     it = item_node(s);
     items.push(it);
+    if(declares_shadow(s, it.from)) s.custom = true;
     for(ti : range(it.to - it.from)) {
       tt = tk_at(s, it.from + ti);
       if(tt.kind == kind_ident()) {
@@ -1122,6 +1147,11 @@ ref_items(str dump) {
   if(started) items.push(cur);
   items
 }
+src_has_word(str src, str w) {
+  r = phase1_of(src);
+  for(t : r.tokens) if((t.kind == kind_ident()) && (text_range(src, t.from, t.to) == w)) return true;
+  false
+}
 // vish modcheck <files>: element by element - functions from the Vish parser nodes against the C++ dump; a mismatch in the number of elements - the file is skipped
 mod_check_cli(files) {
   total = 0;
@@ -1133,6 +1163,11 @@ mod_check_cli(files) {
   counts = array{};
   for(f : files) {
     src = read_text(f);
+    if(src_has_word(src, "module")) { // module header/attributes [[...]] module: C++ gives attributes in the dump as extra elements - comparison by number is impossible
+      skipped_files += 1;
+      write_out("  пропущен файл " + f + ": заголовок module\n");
+      continue;
+    }
     mine = module_items_of(src);
     ref = ref_items(module_reference(src));
     if(mine.size != ref.size) {

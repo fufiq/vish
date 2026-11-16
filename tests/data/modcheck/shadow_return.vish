@@ -1,0 +1,1 @@
+return(x) => x; f() => return(3);

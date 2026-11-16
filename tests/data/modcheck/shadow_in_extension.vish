@@ -1,0 +1,1 @@
+Thing { loop(x) => x; } f() => loop(6);
