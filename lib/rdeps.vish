@@ -1,0 +1,146 @@
+module rdeps;
+// Mine, temporary (RA-1): access to the database index and an independent comparison of mutations.
+use tools;
+users_of(c) => native "cpp" {
+  if(!a[0].known()) return erase(value(array_v::of({})));
+  std::vector<value> out;
+  for(auto n: vm.db.users_of(vm.code_node(a[0], where))) out.push_back(vm.code_value(n));
+  return value(array_v::of(std::move(out)));
+};
+dependents_of(c) => native "cpp" {
+  if(!a[0].known()) return erase(value(array_v::of({})));
+  std::vector<value> out;
+  for(auto n: vm.db.dependents_of_fn(vm.code_node(a[0], where))) out.push_back(vm.code_value(n));
+  return value(array_v::of(std::move(out)));
+};
+impact_of(xs) => native "cpp" {
+  if(!a[0].known()) return erase(value(array_v::of({})));
+  node_list changed_nodes;
+  auto const & xs = a[0].as<array_v>();
+  for(uint32_t i = 0; i < xs.size(); ++i) changed_nodes.push_back(vm.code_node(xs.get(i), where));
+  std::vector<value> out;
+  for(auto n: vm.db.impact_of(changed_nodes)) out.push_back(vm.code_value(n));
+  return value(array_v::of(std::move(out)));
+};
+rdeps_index_dump() => native "cpp" { return value(vm.db.rdeps_dump()); };
+rdeps_rebuild_dump() => native "cpp" { return value(vm.db.rdeps_dump(true)); };
+// Returns numbers: steps, I1, I3, I2 cases/supersets/strict/violations.
+rdeps_probe(str path, i64 seed, i64 steps, bool types) => native "cpp" {
+  for(auto & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  std::string path(a[0].as<str_v>().view());
+  ast_db db;
+  load_prelude(db);
+  std::vector<diagnostic> errors;
+  os::mapped_file file(path);
+  node_id root = parse_program(db, file.text(), std::filesystem::path(path).parent_path(), errors);
+  uint64_t seed = uint64_t(a[1].as<int64_t>());
+  auto random = [&]() { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return uint32_t(seed >> 32); };
+  int64_t steps = a[2].as<int64_t>(), bad1 = 0, bad3 = 0, cases = 0, supers = 0, strict = 0, bad2 = 0;
+  auto verify = [&]() { if(db.rdeps_dump() != db.rdeps_dump(true)) { ++bad1; fprintf(stderr, "%s: live index mismatch\n", path.c_str()); } };
+  verify();
+  // A permanent free child: an addition is checked separately, rollback does not delete database numbers.
+  node_id extra = db.add(n_ident{db.strings.intern("ra1_extra")}, {});
+  verify();
+  uint32_t count = db.size();
+  for(int64_t step = 0; step < steps; ++step) {
+    node_id n(random() % count);
+    uint32_t op = random() % 4;
+    if(op == 0) {
+      // replace keeps the number, changes the name or the kind itself; then we restore what was written.
+      auto old = db.copy_kind(n);
+      db.replace(n, n_ident{db.strings.intern(cat("ra1_", random() % 17))});
+      verify();
+      db.replace(n, std::move(old));
+      db.link_parents(n);
+    } else {
+      // mutate/rollback, including inserting and deleting module elements.
+      if(op > 1) n = root;
+      auto before = db.rdeps_dump();
+      auto k = db.copy_kind(n);
+      if(op == 1) k = n_ident{db.strings.intern(cat("ra1_", random() % 17))};
+      else {
+        auto & m = std::get<n_module>(k);
+        if(op == 2) m.items.push_back(extra);
+        else if(!m.items.empty()) m.items.pop_back();
+      }
+      db.mutate(n, std::move(k), root.value + 1);
+      db.link_parents(n);
+      verify();
+      db.rollback(root.value + 1);
+      db.link_parents(n);
+
+      if(db.rdeps_dump() != before) ++bad3;
+    }
+    verify();
+  }
+  // I2: a full recheck, without check_cache, before/after an edit of a function body's value.
+  // A typed literal changes the value, keeping an arbitrary test correct.
+  if(a[3].as<bool>()) {
+    node_id literal;
+    for(uint32_t i = 0; i < count; ++i)
+      if(db.is<n_int>(node_id(i)) && db.enclosing_fn(node_id(i)) && db.within(node_id(i), root)) { literal = node_id(i); break; }
+    if(literal) {
+      auto check = [&]() {
+        interpreter lang(db, root, {path}, mode::check);
+        try { lang.run_main(); } catch(diagnostic const &) {}
+        return lang.node_types();
+      };
+      auto before = check();
+      auto old = db.copy_kind(literal);
+      auto replacement = db.as<n_int>(literal);
+      replacement.value ^= 1;
+      db.mutate(literal, replacement, root.value + 1);
+      node_list delta{literal};
+      auto impact = db.impact_of(delta);
+      auto after = check();
+      node_list actual{db.enclosing_fn(literal)};
+      for(auto const & [id, ts]: before) {
+        if(id >= count) continue;
+        auto it = after.find(id);
+        if(it == after.end() || it->second != ts)
+          if(auto f = db.enclosing_fn(node_id(id))) actual.push_back(f);
+      }
+      for(auto const & [id, ts]: after)
+        if(id < count && !before.contains(id)) if(auto f = db.enclosing_fn(node_id(id))) actual.push_back(f);
+      ast_db::unique_nodes(actual);
+      bool includes = true;
+      for(auto f: actual) if(!std::ranges::contains(impact, f)) {
+        includes = false;
+        fprintf(stderr, "%s: impact missing %u (%.*s), edited %u\n", path.c_str(), f.value, int(db.strings.text(db.as<n_fn>(f).name).size()), db.strings.text(db.as<n_fn>(f).name).data(), literal.value);
+      }
+      ++cases;
+      if(includes) { ++supers; if(impact.size() > actual.size()) ++strict; } else ++bad2;
+      db.rollback(root.value + 1);
+      verify();
+    }
+  }
+  // The journal is a separate database, not a copy of the index.
+  ast_db replay;
+  replay.replay(db.journal());
+  if(replay.rdeps_dump() != replay.rdeps_dump(true)) { ++bad1; fprintf(stderr, "%s: replay index mismatch\n", path.c_str()); }
+  if(replay.rdeps_dump(false, count) != db.rdeps_dump(false, count)) { // program nodes (numbers < count); the journal does not replay the check's derived nodes
+    ++bad1;
+    auto mine = db.rdeps_dump(false, count), ref = replay.rdeps_dump(false, count);
+    size_t i = 0; while(i < mine.size() && i < ref.size() && mine[i] == ref[i]) ++i;
+    fprintf(stderr, "%s: replay content at %zu: live %.80s / replay %.80s\n", path.c_str(), i, mine.c_str() + i, ref.c_str() + i);
+  }
+  return value(array_v::of({value(steps), value(bad1), value(bad3), value(cases), value(supers), value(strict), value(bad2)}));
+};
+check_cli(files) {
+  seed = 1;
+  steps = 200;
+  paths = array{};
+  nums = array{};
+  for(f : files) { if(ends_with(f, ".vish")) paths.push(f); else nums.push(f); }
+  if(nums.size > 0) seed = number_of(nums[0]);
+  if(nums.size > 1) steps = number_of(nums[1]);
+  total = 0; bad1 = 0; bad3 = 0; cases = 0; supers = 0; strict = 0; bad2 = 0;
+  for(i : range(paths.size)) {
+    n = (steps / paths.size) + (if(i < (steps % paths.size)) 1 else 0);
+    r = rdeps_probe(paths[i], seed + i, n, cases < 50);
+    total += r[0]; bad1 += r[1]; bad3 += r[2]; cases += r[3]; supers += r[4]; strict += r[5]; bad2 += r[6];
+    if((r[1] + r[2] + r[6]) > 0) write_out(paths[i] + ": И1=" + text(r[1]) + " И3=" + text(r[2]) + " И2=" + text(r[6]) + "\n");
+  }
+  write_out("rdeps: шагов " + text(total) + ", файлов " + text(paths.size) + ", И1=" + text(bad1) + ", И3=" + text(bad3) + ", И2: случаев " + text(cases) + ", надмножеств " + text(supers) + ", строгих " + text(strict) + ", нарушений " + text(bad2) + "\n");
+  if((bad1 + bad3 + bad2) == 0) 0 else 1
+}

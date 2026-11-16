@@ -927,6 +927,7 @@ struct ast_db {
     uint32_t n = nodes.size();
     node_rev.resize(n, revision);
     birth.assign(n, 0);
+    rebuild_refs();
     for(uint32_t k = 0; k < n; ++k) note_fn(node_id(k));
   }
   std::string commit_area() {
@@ -938,6 +939,116 @@ struct ast_db {
     if(current_pool != &pool) current_pool = const_cast<node_pool *>(&pool);
   }
 
+  // Mine (RA-1): sorted numbers by symbol, without allocating memory per node.
+  // Detached nodes stay in the database and in the index; belonging is computed from parent.
+  std::vector<std::vector<uint32_t>> refs_by_name;
+  void ref_names(node_kind const & k, auto emit) const {
+    auto put = [&](symbol s) { if(s) emit(s); };
+    if(auto p = std::get_if<n_ident>(&k)) put(p->name);
+    if(auto p = std::get_if<n_op>(&k)) {
+      put(p->op);
+      auto text = strings.text(p->op);
+      if(p->postfix && text.size() > 1 && text[0] == '.') {
+        auto it = strings.index.find(std::string(text.substr(1)));
+        if(it != strings.index.end()) put(it->second);
+      }
+    }
+    if(auto p = std::get_if<n_chain>(&k)) for(auto s: p->ops) put(s);
+    if(auto p = std::get_if<n_use>(&k)) put(p->key);
+    if(auto p = std::get_if<n_splice>(&k)) put(p->name);
+    if(auto p = std::get_if<n_extend>(&k)) { put(p->name); put(p->of); put(p->base); }
+    // callee, types, &f - child idents; we index exactly the use node.
+  }
+  void index_refs(node_id n, bool insert) {
+    ref_names(nodes[n].kind, [&](symbol s) {
+      if(refs_by_name.size() <= s.value) {
+        if(!insert) return;
+        refs_by_name.resize(s.value + 1);
+      }
+      auto & xs = refs_by_name[s.value];
+      auto i = std::ranges::lower_bound(xs, n.value);
+      if(insert) { if(i == xs.end() || *i != n.value) xs.insert(i, n.value); }
+      else if(i != xs.end() && *i == n.value) xs.erase(i);
+    });
+  }
+  void rebuild_refs() {
+    use_pool();
+    refs_by_name.clear();
+    for(uint32_t i = 0; i < size(); ++i) index_refs(node_id(i), true);
+  }
+  node_id enclosing_fn(node_id n) const {
+    for(; n; n = nodes[n].parent) if(is<n_fn>(n)) return n;
+    return {};
+  }
+  symbol dependency_name(node_id n) const {
+    if(is<n_fn>(n)) return as<n_fn>(n).name;
+    if(is<n_module>(n)) return as<n_module>(n).name;
+    if(is<n_extend>(n)) return as<n_extend>(n).name;
+    if(is<n_ident>(n)) return as<n_ident>(n).name;
+    if(is<n_var>(n)) return as<n_var>(n).name;
+    return {};
+  }
+  node_list users_of(symbol s) const {
+    node_list out;
+    if(s && s.value < refs_by_name.size())
+      for(auto i: refs_by_name[s.value]) out.push_back(node_id(i));
+    return out;
+  }
+  node_list users_of(node_id n) const { return users_of(dependency_name(n)); }
+  static void unique_nodes(node_list & xs) {
+    std::ranges::sort(xs, {}, &node_id::value);
+    xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+  }
+  node_list dependents_of_fn(node_id n) const {
+    node_list out;
+    for(auto u: users_of(n)) {
+      if(auto f = enclosing_fn(u)) out.push_back(f);
+      // Extensions and use at module level can change any of its functions.
+      if(is<n_extend>(u) || is<n_use>(u)) {
+        node_id top = u;
+        if(is<n_use>(u)) while(nodes[top].parent && !is<n_module>(top)) top = nodes[top].parent;
+        for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) out.push_back(node_id(i));
+      }
+    }
+    unique_nodes(out);
+    return out;
+  }
+  node_list impact_of(node_span changed_nodes) const {
+    node_list todo(changed_nodes.begin(), changed_nodes.end()), out;
+    std::vector<uint8_t> seen(size(), 0);
+    for(size_t i = 0; i < todo.size(); ++i) {
+      auto n = todo[i];
+      if(!n || n.value >= size() || seen[n.value]) continue;
+      seen[n.value] = 1;
+      if(is<n_fn>(n) || is<n_module>(n)) out.push_back(n);
+      if(auto p = nodes[n].parent) todo.push_back(p);
+      for(auto d: dependents_of_fn(n)) todo.push_back(d);
+    }
+    unique_nodes(out);
+    return out;
+  }
+  // limit - only nodes with a number below limit (comparison with the journal replay: nodes born by a check/elaboration are not in the program's journal)
+  std::string rdeps_dump(bool rebuild = false, uint32_t limit = ~uint32_t{0}) const {
+    use_pool();
+    std::vector<std::pair<uint32_t, uint32_t>> entries;
+    if(rebuild) {
+      for(uint32_t i = 0; i < size() && i < limit; ++i)
+        ref_names(nodes[node_id(i)].kind, [&](symbol s) { entries.emplace_back(s.value, i); });
+    } else {
+      for(uint32_t s = 0; s < refs_by_name.size(); ++s)
+        for(auto i: refs_by_name[s]) if(i < limit) entries.emplace_back(s, i);
+    }
+    std::ranges::sort(entries);
+    entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
+    std::string out;
+    for(auto [s, i]: entries) out += cat("r ", s, " ", i, "\n");
+    for(uint32_t i = 0; i < size() && i < limit; ++i) {
+      auto f = enclosing_fn(node_id(i));
+      if(f) out += cat("f ", i, " ", f.value, "\n");
+    }
+    return out;
+  }
+
   node_id add(node_kind k, span where) {
     use_pool();
     lane_guard g(lock); // Stripes (step 12.3b): the base grows from the background
@@ -945,6 +1056,7 @@ struct ast_db {
     where.source = pinned_source != ~uint32_t{0} ? pinned_source : uint32_t(source_count() == 0 ? 0 : source_count() - 1);
     node_id id = nodes.add(node{std::move(k), where, {}});
     note_fn(id);
+    index_refs(id, true);
     node_rev.push_back(revision);
     birth.push_back(++births);
     log({j_add{id.value, kind_clone(nodes[id].kind), where, &pool}});
@@ -1154,7 +1266,9 @@ struct ast_db {
     }, nodes[n].kind);
     ++revision;
     ++edits;
+    index_refs(n, false);
     nodes[n].kind = std::move(k);
+    index_refs(n, true);
     note_fn(n);
     touch(n);
     use_pool();
@@ -1193,6 +1307,16 @@ struct ast_db {
   // source - node ct-code number + 1; 0 - without writing: the node created by the
   // same elaboration is completed, and does not mutate the program (no rollback)
   using mutation = mutation_rec;
+  void relink_kind(node_id n, node_kind const & next) {
+    std::visit([&](auto const & old) {
+      auto detach = [&](node_id c) { if(nodes[c].parent == n) nodes[c].parent = {}; };
+      for_each_child_of(old, detach);
+    }, nodes[n].kind);
+    std::visit([&](auto const & k) {
+      auto attach = [&](node_id c) { nodes[c].parent = n; };
+      for_each_child_of(k, attach);
+    }, next);
+  }
   void mutate(node_id n, node_kind k, uint32_t source) {
     use_pool();
     use_pool();
@@ -1204,9 +1328,12 @@ struct ast_db {
           inst_emits.insert(x.value);
           emit_owner[x.value] = n.value;
         }
+    relink_kind(n, k);
+    index_refs(n, false);
     if(source) mutations.push_back({n.value, source, revision, std::move(nodes[n].kind)});
     else retired.push_back(std::move(nodes[n].kind));
     nodes[n].kind = std::move(k);
+    index_refs(n, true);
     note_fn(n);
     if(!source && reopened(n)) return; // Derivative taken again: in journal - when reconciled
     touch(n);
@@ -1227,8 +1354,11 @@ struct ast_db {
       mutation & m = mutations[i];
       node_id n(m.target);
       if(m.target < edited_at.size() && edited_at[m.target] > m.at) continue;
+      relink_kind(n, m.old);
+      index_refs(n, false);
       retired.push_back(std::move(nodes[n].kind));
       nodes[n].kind = std::move(m.old);
+      index_refs(n, true);
       note_fn(n);
       touch(n);
       changed.push_back(m.target);
@@ -1547,8 +1677,10 @@ struct ast_db {
       R().reuse[slot].cursor = i + 1;
       if(reopen.size() <= x) reopen.resize(x + 1, 0);
       reopen[x] = 1;
+      index_refs(n, false);
       node_kind was = std::move(nodes[n].kind);
-      nodes[n].kind = std::move(k); // Type at Birth: Continue reading
+      nodes[n].kind = std::move(k);
+      index_refs(n, true); // the kind at birth: the completion will be repeated
       note_fn(n);
       reborn.push_back({x, std::move(was), nodes[n].parent, &holder});
       nodes[n].parent = {}; // The new owner (link_parents)

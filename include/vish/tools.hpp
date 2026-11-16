@@ -67,6 +67,9 @@ constexpr unsigned char proto_bytes[] = {
 constexpr unsigned char server_bytes[] = {
 #embed "../../lib/server.vish"
 };
+constexpr unsigned char rdeps_bytes[] = {
+#embed "../../lib/rdeps.vish"
+};
 std::string_view builtin_text(std::string_view key) {
   auto view = [](auto const & bytes) { return std::string_view(reinterpret_cast<char const *>(bytes), sizeof bytes); };
   if(key == "tools") return view(tools_bytes);
@@ -83,6 +86,7 @@ std::string_view builtin_text(std::string_view key) {
   if(key == "session") return view(session_bytes);
   if(key == "proto") return view(proto_bytes);
   if(key == "server") return view(server_bytes);
+  if(key == "rdeps") return view(rdeps_bytes);
   return {};
 }
 

@@ -1,0 +1,6 @@
+module graph;
+struct box { i64 x; }
+f(i64 x) => x + 1;
+g(i64 x) => f(x);
+h(i64 x) => g(x) + f(x);
+main() => h(1);

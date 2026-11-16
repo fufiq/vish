@@ -94,6 +94,8 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules
+    ( $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/rdeps_index.cpp -o $L/rdeps_index && $L/rdeps_index && $b rdepscheck tests/data/rdepscheck/*.vish tests/01*.vish 1 200 ) > $L/t_rdeps.log 2>&1
+    echo "rdeps: код $?" > $L/r_rdeps
     # E6: modules in Vish (lib/modules.vish) against C++ stage0 - use keys, module file paths, loading (errors + the dump of the database's modules)
     ( $b modulescheck tests/*.vish tests/geo/*.vish tests/svc/*.vish tests/data/modcheck/*.vish tests/data/modulescheck/*.vish tests/data/modulescheck/*/*.vish ) > $L/t_modulescheck.log 2>&1
     echo "modulescheck: код $?" > $L/r_modulescheck

@@ -222,6 +222,11 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("parser", "expr_check_cli", files);
   }
+  if(cmd == "rdepscheck") {
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("rdeps", "check_cli", files);
+  }
   if(cmd == "modulescheck") {
     // vish modulescheck <files>: modules in the language (lib/modules.vish, E6) against C++ stage0 - use keys, module file paths, loading
     files = array{};
