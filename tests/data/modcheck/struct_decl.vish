@@ -1,0 +1,6 @@
+struct point { int x; int y = 2; }
+struct warm : point { ct bool hot = true; };
+f(xs) {
+  a = ct 1;
+  ct { 2 }
+}
