@@ -1,0 +1,48 @@
+// 1. The language extends itself with itself: a new construct is an ordinary declaration in code, not a compiler plugin.
+syntax repeat {body} until(expr c) => loop {
+  body;
+  if(c) break;
+};
+
+syntax unless(bool c) {body} => if(!c) body;
+
+// 2. Your own operators are code too; parsing, printing and types take them from the database, not from a hard-coded table.
+operator (a) <+> (b) => (a + b) * 2;
+
+// 3. Data and functions; overloads extend an entity, "closing" nothing.
+struct point { i64 x; i64 y; }
+
+norm1(point p) => p.x + p.y;
+
+// 4. compile-time is the same interpreter: a value is computed once at build time.
+ct limit = 3;
+
+// 5. Exceptions are an expression, like if.
+safe_div(a, b) {
+  try {
+    if(b == 0) throw "деление на ноль";
+    a / b
+  } catch(e) {
+    -1
+  }
+}
+
+main() {
+  i = 0;
+  repeat {
+    i += 1;
+  } until(i >= limit);
+  unless(i > 5) {
+    print("мало", i);
+  }
+
+  p = point{3, 4};
+  print(norm1(p), 2 <+> 3, safe_div(10, 2), safe_div(1, 0));
+
+  total = 0;
+  for(x : array{1, 2, 3, 4}) {
+    if(x == 3) continue;
+    total += x;
+  }
+  print(total);
+}

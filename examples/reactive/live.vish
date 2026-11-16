@@ -1,0 +1,19 @@
+use reactive;
+
+main() {
+  // A "live" computation model: inputs, queries with automatically discovered dependencies, subscriptions.
+  db = new_db(true, (a, b) => a == b);
+  set_input(db, "price", 10);
+  set_input(db, "qty", 3);
+  query_define(db, "subtotal", (mut d) => get(d, "price") * get(d, "qty"));
+  query_define(db, "tax", (mut d) => get(d, "subtotal") / 5);
+  query_define(db, "label", (mut d) => if(get(d, "tax") > 50) "дорого" else "дёшево");
+  watch(db, "label", (k, v) => print("уведомление:", k, "->", v));
+
+  print(get(db, "label"));            // cheap
+  set_input(db, "qty", 30);           // tax 60 -> label changes -> the subscriber is called
+  print(get(db, "label"));
+  set_input(db, "qty", 31);           // tax 62 -> label is the same -> early cutoff, the subscriber stays silent
+  print(get(db, "label"));
+  print(stats(db));                   // [computations, cache hits, cutoffs]
+}
