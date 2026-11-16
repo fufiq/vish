@@ -1,0 +1,2 @@
+module deep.y;
+h(i64 a) => a * 2;

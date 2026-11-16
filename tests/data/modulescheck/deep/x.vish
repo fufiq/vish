@@ -1,0 +1,4 @@
+module deep.x;
+use deep.y;
+f(i64 a) => a + 1;
+g(i64 a) => deep.y.h(a);

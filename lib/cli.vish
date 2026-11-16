@@ -222,6 +222,30 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("parser", "expr_check_cli", files);
   }
+  if(cmd == "modulescheck") {
+    // vish modulescheck <files>: modules in the language (lib/modules.vish, E6) against C++ stage0 - use keys, module file paths, loading
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("modules", "check_cli", files);
+  }
+  if(cmd == "viewscheck") {
+    // vish viewscheck <files>: environment projections in the language (lib/views.vish, E6) against C++ stage0 - slice, residual program, elaboration
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("views", "check_cli", files);
+  }
+  if(cmd == "completecheck") {
+    // vish completecheck [files]: the completion item in the language (lib/complete.vish, E6) against C++ stage0; the description in editor.vish is the same
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("complete", "check_cli", files);
+  }
+  if(cmd == "sessioncheck") {
+    // vish sessioncheck <files>: session stats accounting in the language (lib/session.vish, E6) against C++ vm_session (stage0)
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("session", "check_cli", files);
+  }
   if(cmd == "fmtcheck") {
     // vish fmtcheck <files>: the printer in the language (lib/printer.vish, E5) against the C++ print (stage0), byte by byte: *.vish files are modules (elements,
     // the whole module, the print -> parse round trip), the others are by expression in a line

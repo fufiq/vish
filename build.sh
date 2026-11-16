@@ -39,7 +39,7 @@ build "$mode"
 rc=0
 tmp=out/native.hpp.$$ # замена переименованием — соседняя сборка не прочтёт половину
 cp out/native.hpp "$tmp"
-"$OUT" native "$tmp" lib/tools.vish lib/versions.vish lib/tests.vish lib/cli.vish lib/lexer.vish lib/parser.vish lib/printer.vish lib/runlog.vish lib/editor.vish || rc=$?
+"$OUT" native "$tmp" lib/tools.vish lib/versions.vish lib/tests.vish lib/cli.vish lib/lexer.vish lib/parser.vish lib/printer.vish lib/runlog.vish lib/modules.vish lib/views.vish lib/complete.vish lib/session.vish lib/editor.vish || rc=$?
 if [ $rc = 3 ]; then
     mv "$tmp" out/native.hpp
 else

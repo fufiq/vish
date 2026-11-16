@@ -1,0 +1,2 @@
+use cyc.a;
+main() { print(1); }

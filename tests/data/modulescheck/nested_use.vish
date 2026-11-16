@@ -1,0 +1,6 @@
+f() {
+  use inner_not_top;
+  1
+}
+main() { print(f()); }
+use after_top;

@@ -1,0 +1,271 @@
+module views;
+// Environment projections (spec §13.2) in the language - a port of include/vish/views.hpp (E6 of the porting plan, branch t3/cpp-to-vish-migration).
+// "so that we can take and extract a program for certain inputs"; "show me only what uses this
+// variable - and the result should be a readable program" (quotes from views.hpp, the originals are checked - HANDOFF E6).
+// The decisions are in the language since step 3 of the port (prelude: residual_plan, slice_hidden; "further all the logic will be written in the new language itself",
+// R1); here is the order: a slice - "plan -> empty if the function or the variable is not found, otherwise a print with a filter";
+// a residual program - "a parse error + a print with the filter and the plan's substitutions". A projection is the same AST database and the same print with a
+// filter, not a separate representation: edits in the projection land in the source nodes.
+// What stays in C++ (*mine, temporary*, until the evaluator is built from the image - E9): the plan analysis (the prelude interpreter over the program's database -
+// analyze_instance, code_node) and the print with a filter (printer.hpp on the database nodes; lib/printer.vish prints code values without
+// a node filter); the view_* primitives below. The C++ version (views.hpp) stays working (the switch is E8); equivalence is
+// `vish viewscheck <files>`: the slice and the residual program byte by byte as in C++ on the corpus.
+
+use tools;
+use lexer;
+use modules;
+// --- primitives (the VM's): database h is the "clean" database of lib/modules.vish (mod_db_new), root is the program's module -----------------------------
+// the slice plan: array{the function node, hidden nodes...}; empty - the function or the variable is not found
+view_slice_plan(i64 h, i64 root, str fn, str var) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  node_id module(uint32_t(a[1].as<int64_t>()));
+  node_id sh;
+  for(uint32_t i = db.size(); i-- > 0;)
+    if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "slice_hidden") {
+      sh = node_id(i);
+      break;
+    }
+  if(!sh) return value(array_v::of({}));
+  interpreter lang(db, db.prelude ? db.prelude : module, {"slice"}, mode::run);
+  value r = lang.analyze_instance(sh, {lang.code_value(module), value(std::string(a[2].as<str_v>().view())), value(std::string(a[3].as<str_v>().view()))});
+  if(!r.is<array_v>() || r.as<array_v>().size() == 0) return value(array_v::of({}));
+  auto const & xs = r.as<array_v>();
+  std::vector<value> out;
+  for(uint32_t k = 0; k < xs.size(); ++k) out.push_back(value(int64_t(lang.code_node(xs.get(k), db[module].where).value)));
+  return value(array_v::of(std::move(out)));
+};
+// printing a slice: the module without comments; only function fn stays in the module, the nodes hidden are hidden in it
+view_slice_print(i64 h, i64 root, i64 fn, hidden) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  node_id module(uint32_t(a[1].as<int64_t>())), keep(uint32_t(a[2].as<int64_t>()));
+  std::set<node_id> gone;
+  auto const & hs = a[3].as<array_v>();
+  for(uint32_t k = 0; k < hs.size(); ++k) gone.insert(node_id(uint32_t(hs.get(k).as<int64_t>())));
+  printer pr(db, [&](node_id n) {
+    if(db[n].parent && db.is<n_module>(db[n].parent)) return n == keep;
+    return !gone.contains(n);
+  });
+  pr.comments = false;
+  return value(pr.print(module));
+};
+// the residual program plan for inputs (arguments args, stdin lines input): array{the check error as text, hidden nodes,
+// fold nodes (what), replacement nodes, value nodes, value texts}
+view_residual_plan(i64 h, i64 root, str name, args, input) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  node_id module(uint32_t(a[1].as<int64_t>()));
+  std::vector<std::string> av{std::string(a[2].as<str_v>().view())};
+  for(auto & s: strings_of(a[3])) av.push_back(s);
+  interpreter::known_inputs known;
+  known.stdin_lines = strings_of(a[4]);
+  interpreter ev(db, module, av, mode::check, known);
+  std::string err;
+  try {
+    ev.run_main();
+  } catch(diagnostic const & d) {
+    err = render(d, std::string(a[2].as<str_v>().view()), db);
+  }
+  node_id rp;
+  for(uint32_t i = db.size(); i-- > 0;)
+    if(db.is<n_fn>(node_id(i)) && db.strings.text(db.as<n_fn>(node_id(i)).name) == "residual_plan") {
+      rp = node_id(i);
+      break;
+    }
+  std::vector<value> hidden, fold_at, fold_other, value_at, value_text;
+  if(rp) {
+    interpreter lang(db, db.prelude ? db.prelude : module, {"residual"}, mode::run);
+    lang.view_subject = &ev;
+    value r = lang.analyze_instance(rp, {lang.code_value(module)});
+    span where = db[module].where;
+    auto list = [&](std::string_view f) -> array_v const & {
+      for(auto const & [k, v]: r.as<agg_v>().fields)
+        if(db.strings.text(k) == f) return v.as<array_v>();
+      throw diagnostic(cat("residual_plan: нет поля ", f), where);
+    };
+    auto field = [&](value const & x, std::string_view f) -> value const & {
+      for(auto const & [k, v]: x.as<agg_v>().fields)
+        if(db.strings.text(k) == f) return v;
+      throw diagnostic(cat("residual_plan: нет поля ", f), where);
+    };
+    for(uint32_t k = 0; k < list("hidden").size(); ++k) hidden.push_back(value(int64_t(lang.code_node(list("hidden").get(k), where).value)));
+    for(uint32_t k = 0; k < list("folds").size(); ++k) {
+      value x = list("folds").get(k);
+      fold_at.push_back(value(int64_t(lang.code_node(field(x, "at"), where).value)));
+      fold_other.push_back(value(int64_t(lang.code_node(field(x, "other"), where).value)));
+    }
+    for(uint32_t k = 0; k < list("values").size(); ++k) {
+      value x = list("values").get(k);
+      value_at.push_back(value(int64_t(lang.code_node(field(x, "at"), where).value)));
+      value_text.push_back(value(std::string(field(x, "text").as<str_v>().view())));
+    }
+  }
+  return value(array_v::of({value(std::move(err)), value(array_v::of(std::move(hidden))), value(array_v::of(std::move(fold_at))), value(array_v::of(std::move(fold_other))), value(array_v::of(std::move(value_at))), value(array_v::of(std::move(value_text)))}));
+};
+// printing a residual program: the nodes hidden are hidden, fold_other[k] is printed at fold_at[k], node value_at[k] as the text value_text[k]; without comments
+view_residual_print(i64 h, i64 root, hidden, fold_at, fold_other, value_at, value_text) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  node_id module(uint32_t(a[1].as<int64_t>()));
+  std::set<node_id> gone;
+  std::map<node_id, node_id> folds;
+  std::map<node_id, std::string> values;
+  auto const & hs = a[2].as<array_v>();
+  for(uint32_t k = 0; k < hs.size(); ++k) gone.insert(node_id(uint32_t(hs.get(k).as<int64_t>())));
+  auto const & fa = a[3].as<array_v>();
+  auto const & fo = a[4].as<array_v>();
+  for(uint32_t k = 0; k < fa.size(); ++k) folds[node_id(uint32_t(fa.get(k).as<int64_t>()))] = node_id(uint32_t(fo.get(k).as<int64_t>()));
+  auto const & va = a[5].as<array_v>();
+  auto const & vt = a[6].as<array_v>();
+  for(uint32_t k = 0; k < va.size(); ++k) values[node_id(uint32_t(va.get(k).as<int64_t>()))] = std::string(vt.get(k).as<str_v>().view());
+  printer::substitution subst;
+  subst.node = [&](node_id n) {
+    auto it = folds.find(n);
+    return it == folds.end() ? node_id{} : it->second;
+  };
+  subst.text = [&](node_id n) -> std::optional<std::string> {
+    auto it = values.find(n);
+    if(it == values.end()) return std::nullopt;
+    return it->second;
+  };
+  printer pr(db, [&](node_id n) { return !gone.contains(n); }, subst);
+  pr.comments = false;
+  return value(pr.print(module));
+};
+// the projection after elaboration (vish fmt --ct): the module's ct is executed - the nodes changed by ct code are printed changed, the declarations generated by emit
+// come after the module; an error is text with a flag: array{succeeded, text}
+view_elaborated(i64 h, i64 root, str name) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  try {
+    return value(array_v::of({value(true), value(elaborated_text(db, node_id(uint32_t(a[1].as<int64_t>())), std::string(a[2].as<str_v>().view())))}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(false), value(render(d, std::string(a[2].as<str_v>().view()), db))}));
+  }
+};
+// --- the same - in the language ---------------------------------------------------------------------------------------------------------
+// Slice: only what is related to variable var of function fn; empty - the function or the variable is not found
+slice_of(i64 h, i64 root, str fn, str var) {
+  plan = view_slice_plan(h, root, fn, var);
+  if(plan.size == 0) return "";
+  hidden = array{};
+  for(k : range(plan.size)) if(k > 0) hidden.push(plan[k]);
+  view_slice_print(h, root, plan[0], hidden)
+}
+// A residual program for inputs: the check error (as text) and the program without what was computed in advance
+residual_of(i64 h, i64 root, str name, args, input) {
+  p = view_residual_plan(h, root, name, args, input);
+  p[0] + view_residual_print(h, root, p[1], p[2], p[3], p[4], p[5])
+}
+// --- comparison with C++ (vish viewscheck) -------------------------------------------------------------------------------------------
+// the C++ reference (stage0): slice_view / residual_view from views.hpp
+slice_reference(i64 h, i64 root, str fn, str var) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  return value(slice_view(db).print(node_id(uint32_t(a[1].as<int64_t>())), std::string(a[2].as<str_v>().view()), std::string(a[3].as<str_v>().view())));
+};
+residual_reference(i64 h, i64 root, str name, args, input) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  node_id module(uint32_t(a[1].as<int64_t>()));
+  std::vector<std::string> av{std::string(a[2].as<str_v>().view())};
+  for(auto & s: strings_of(a[3])) av.push_back(s);
+  interpreter::known_inputs known;
+  known.stdin_lines = strings_of(a[4]);
+  interpreter ev(db, module, av, mode::check, known);
+  std::string err;
+  try {
+    ev.run_main();
+  } catch(diagnostic const & d) {
+    err = render(d, std::string(a[2].as<str_v>().view()), db);
+  }
+  return value(err + residual_view(db, ev).print(module));
+};
+elaborated_reference(i64 h, i64 root, str name) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  try {
+    return value(array_v::of({value(true), value(elaborated_text(db, node_id(uint32_t(a[1].as<int64_t>())), std::string(a[2].as<str_v>().view())))}));
+  } catch(diagnostic const & d) {
+    return value(array_v::of({value(false), value(render(d, std::string(a[2].as<str_v>().view()), db))}));
+  }
+};
+// variables "name = ..." at the start of the text's lines (no more than two different ones) - what to cut
+assigned_vars(str src) {
+  vars = array{};
+  for(ln : lines_of(src)) {
+    s = trim_lead(ln);
+    k = 0;
+    while((k < s.size) && is_ident(s[k])) k += 1;
+    if((k > 0) && ((k + 3 <= s.size) && ((text_range(s, k, k + 3) == " = ") && (vars.size < 2) && !has_text(vars, text_range(s, 0, k))))) vars.push(text_range(s, 0, k));
+  }
+  vars
+}
+// vish viewscheck <files>: for every program without parse errors - a slice of main by its variables, a residual program without inputs,
+// a projection after elaboration: language = C++ byte by byte; code 0 - no mismatches
+check_cli(files) {
+  total = 0;
+  bad = 0;
+  skipped = 0;
+  slices = 0;
+  nonempty = 0;
+  for(f : files) {
+    src = read_text(f);
+    h = mod_db_new();
+    r = parse_program(h, src, dir_of(f));
+    mod_db_free(h);
+    if(r[1].size > 0) {
+      skipped += 1;
+      continue;
+    }
+    total += 1;
+    // the analysis (ct, instances) changes the database - every version and every projection has its own fresh database
+    h = mod_db_new();
+    mine = residual_of(h, parse_program(h, src, dir_of(f))[0], f, array{}, array{});
+    mod_db_free(h);
+    h = mod_db_new();
+    ref = residual_reference(h, parse_program(h, src, dir_of(f))[0], f, array{}, array{});
+    mod_db_free(h);
+    if(mine != ref) {
+      bad += 1;
+      show_diff(f, "остаточная программа", mine, ref);
+    }
+    if(mine != "") nonempty += 1;
+    vars = assigned_vars(src);
+    vars.push("нет_такой_переменной");
+    for(v : vars) {
+      slices += 1;
+      h = mod_db_new();
+      mine = slice_of(h, parse_program(h, src, dir_of(f))[0], "main", v);
+      mod_db_free(h);
+      h = mod_db_new();
+      ref = slice_reference(h, parse_program(h, src, dir_of(f))[0], "main", v);
+      mod_db_free(h);
+      if(mine != ref) {
+        bad += 1;
+        show_diff(f, "срез main " + v, mine, ref);
+      }
+    }
+    h = mod_db_new();
+    e1 = view_elaborated(h, parse_program(h, src, dir_of(f))[0], f);
+    mod_db_free(h);
+    h = mod_db_new();
+    e2 = elaborated_reference(h, parse_program(h, src, dir_of(f))[0], f);
+    mod_db_free(h);
+    if((e1[0] != e2[0]) || (e1[1] != e2[1])) {
+      bad += 1;
+      show_diff(f, "после элаборации", text(e1[0]) + "\n" + e1[1], text(e2[0]) + "\n" + e2[1]);
+    }
+  }
+  write_out("проекции: программ " + text(total) + " (пропущено с ошибками разбора " + text(skipped) + "), остаточных непустых " + text(nonempty) + ", срезов " + text(slices) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}

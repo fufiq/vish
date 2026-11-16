@@ -1,0 +1,2 @@
+use nohead;
+main() { print(nohead.fn0()); }

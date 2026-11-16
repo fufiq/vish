@@ -1,0 +1,67 @@
+module complete;
+// Completion: the list item (spec §13.1, M5) in the language - a port of include/vish/complete.hpp (E6 of the porting plan, branch
+// t3/cpp-to-vish-migration). Collecting and selecting items has long been in the language (the editor module's complete, lib/editor.vish: `struct completion`);
+// in C++ only the `completion_item` item (name, kind, details, depth) remained, with not a single call - that is what we port: the same fields
+// in the same order, and the comparison also checks that editor.vish stores the item in the same form.
+// "within completion all you need is contexts and identifiers... autocompletion is what gives you the identifiers for
+// a context"; "blocks can introduce identifiers, but in general they are just blocks regardless of the controlling construct.
+// The behaviour of if/for/fun does not differ... in essence all of this is filters at the level of these constructs" (the author's earlier notes). So the context is
+// the path from the cursor position up the AST: a block gives what is declared before the place, a function and a construct's block give parameters, a module and the prelude give
+// their own entities. The list is live: "the table was filtered automatically by the input field... the search was not only by prefix";
+// nothing is inserted by itself - the author did not want anything completed unless there is exactly one option.
+// (the quotes are as in complete.hpp; the originals were checked - HANDOFF, E6.)
+// Equivalence is `vish completecheck`: an item built in the language = the C++ item (stage0), field by field; the item description in editor.vish
+// matches the description here. The C++ version stays working (the switch is E8).
+
+use tools;
+// a list item: name, kind (variable, parameter, function, type), details; depth - the closer to the place, the smaller
+struct completion_item { str name; str kind; str detail; i64 depth; }
+// an item as one line "name|kind|details|depth"
+item_line(completion_item c) => c.name + "|" + c.kind + "|" + c.detail + "|" + text(c.depth);
+// an item built in the order of the C++ fields - as one line (stage0)
+item_reference(str name, str kind, str detail, i64 depth) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  completion_item c{std::string(a[0].as<str_v>().view()), std::string(a[1].as<str_v>().view()), std::string(a[2].as<str_v>().view()), uint32_t(a[3].as<int64_t>())};
+  return value(cat(c.name, "|", c.kind, "|", c.detail, "|", c.depth));
+};
+// the body `{ ... }` of the declaration of struct s in the text (after "struct s"); empty - there is no declaration
+struct_body(str src, str s) {
+  k = find_text(src, "struct " + s + " {");
+  if(k < 0) return "";
+  e = byte_from(src, 125, k);
+  text_range(src, k + s.size + 8, e)
+}
+// vish completecheck [lib/editor.vish]: items on different values (including Cyrillic, empty, 0) match C++; the editor.vish fields are the same
+check_cli(files) {
+  names = array{"x", "", "точка", "a b"};
+  kinds = array{"переменная", "параметр", "функция", "тип", ""};
+  total = 0;
+  bad = 0;
+  for(n : range(names.size)) {
+    for(k : range(kinds.size)) {
+      for(d : range(3)) {
+        c = completion_item{names[n], kinds[k], "подробности " + text(n), d * 7};
+        total += 1;
+        mine = item_line(c);
+        ref = item_reference(names[n], kinds[k], "подробности " + text(n), d * 7);
+        if(mine != ref) {
+          bad += 1;
+          write_out("вариант: расхождение\n  vish: " + mine + "\n  C++:  " + ref + "\n");
+        }
+      }
+    }
+  }
+  fields = 0;
+  mine_fields = struct_body(read_text("lib/complete.vish"), "completion_item");
+  for(f : files) {
+    theirs = struct_body(read_text(f), "completion");
+    fields += 1;
+    if(theirs != mine_fields) {
+      bad += 1;
+      write_out(f + ": описание варианта отличается: " + in_quotes(theirs) + " против " + in_quotes(mine_fields) + "\n");
+    }
+  }
+  write_out("дополнение: вариантов " + text(total) + ", описаний в других файлах " + text(fields) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}

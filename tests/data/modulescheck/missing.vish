@@ -1,0 +1,2 @@
+use nothere;
+main() { print(1); }

@@ -1,0 +1,2 @@
+use mism;
+main() { print(1); }

@@ -94,6 +94,16 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules
+    # E6: modules in Vish (lib/modules.vish) against C++ stage0 - use keys, module file paths, loading (errors + the dump of the database's modules)
+    ( $b modulescheck tests/*.vish tests/geo/*.vish tests/svc/*.vish tests/data/modcheck/*.vish tests/data/modulescheck/*.vish tests/data/modulescheck/*/*.vish ) > $L/t_modulescheck.log 2>&1
+    echo "modulescheck: код $?" > $L/r_modulescheck
+    # E6: environment projections in Vish (lib/views.vish): slice, residual program, elaboration against C++ stage0 byte by byte; in batches of 3 files
+    # (one process for the whole corpus fails - the growth of the number of databases in the process, not a mismatch); 377 - the C++ check does not finish in minutes
+    ( ls tests/*.vish | grep -v 377_text_kinds_index | xargs -P 4 -n 3 $b viewscheck ) > $L/t_viewscheck.log 2>&1
+    echo "viewscheck: код $?" > $L/r_viewscheck
+    # E6: the completion item (lib/complete.vish) and the session stats accounting (lib/session.vish) against C++ stage0
+    ( $b completecheck lib/editor.vish && $b sessioncheck tests/*.vish tests/geo/*.vish ) > $L/t_sessioncheck.log 2>&1
+    echo "sessioncheck: код $?" > $L/r_sessioncheck
     # epic vsh-u4e: the environment object journal (lib/runlog.vish): write, blobs, truncation, corruption, cause chain; each run uses its own directory
     ( rm -rf $L/runlog && mkdir -p $L/runlog && $b runlogcheck $PWD/$L/runlog ) > $L/t_runlog.log 2>&1
     echo "runlog: код $?" > $L/r_runlog

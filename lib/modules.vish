@@ -1,0 +1,334 @@
+module modules;
+// Modules (§9.1) in the language - a port of include/vish/modules.hpp (E6 of the porting plan, branch t3/cpp-to-vish-migration; the
+// user's goal: "C++ is only the link between the VM and the OS"). The same algorithm as C++ (stage0): the `use k;` keys of the text's top level, the keys
+// of qualified names geo.vec.norm(, the module file path geo.vec -> <directory>/geo/vec.vish, loading (before the text; recursive;
+// a use cycle is skipped), "no module" at the place of use. The C++ version stays working (the switch is E8); equivalence is
+// `vish modulescheck <files>`: the keys, the paths and the loading result (errors + the dump of every loaded module) match byte by byte.
+// The author's earlier notes: the concept of includes is fully valid... the only problem with includes in C++ is that they are not semantic;
+// "modules are includes. And yes, they are parsed into the AST"; "all the module system must depend on is key => ast".
+// "Parsing logic and syntax are defined by logic in the language itself" (R1). *Mine:* a module file next to
+// the program (geo.vec -> geo/vec.vish) - "you write a path and all the files there are modules. Like includes now" (the quote is in modules.hpp).
+// What stays in C++: parsing text into the database (the parser, until the parser in the language builds nodes in the database) and walking the database - the mod_* primitives below
+// (*mine, temporary*: each is an entry in HANDOFF).
+
+use tools;
+use lexer;
+// --- primitives over the database (the VM's): a "clean" database with the prelude - for comparison; nodes are numbers ----------------------------------------
+// a new database (the prelude), its number; free it
+mod_db_new() => native "cpp" {
+  auto & s = module_scratch.emplace_back();
+  load_prelude(s.emplace());
+  return value(int64_t(module_scratch.size() - 1));
+};
+mod_db_free(i64 h) => native "cpp" {
+  if(!a[0].known()) return erase(value(int64_t(0)));
+  module_scratch[std::size_t(a[0].as<int64_t>())].reset();
+  return value(int64_t(0));
+};
+// whether the database has a module with this key (find_module by an already entered name)
+mod_has(i64 h, str key) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(false));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  auto it = db.strings.index.find(std::string(a[1].as<str_v>().view()));
+  return value(it != db.strings.index.end() && bool(find_module(db, it->second)));
+};
+// a module from text with key key - into the database: array{node, module name (empty - without a header), start, end, source, parse errors (strings)}
+mod_parse(i64 h, str text, str key) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  parser p(db, a[1].as<str_v>().view(), std::string(a[2].as<str_v>().view()));
+  node_id got = p.parse_module();
+  std::vector<value> errs;
+  for(auto & e: p.errors()) errs.push_back(value(cat(e.where.source, "\t", e.where.begin, "\t", e.where.end, "\t", std::string_view(e.what()))));
+  n_module mod = db.as<n_module>(got);
+  span w = db[got].where;
+  return value(array_v::of({value(int64_t(got.value)), value(std::string(mod.name ? db.strings.text(mod.name) : std::string_view())), value(int64_t(w.begin)), value(int64_t(w.end)), value(int64_t(w.source)), value(array_v::of(std::move(errs)))}));
+};
+// to module got - the name key (a node replacement: the id and the references are kept)
+mod_set_name(i64 h, i64 node, str key) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(0)));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  node_id got(uint32_t(a[1].as<int64_t>()));
+  symbol k = db.strings.intern(std::string(a[2].as<str_v>().view()));
+  n_module mod = db.as<n_module>(got);
+  mod.name = k;
+  db.replace(got, std::move(mod));
+  return value(int64_t(0));
+};
+// the main module of the text (without a name): array{node, parse errors (strings)}
+mod_parse_main(i64 h, str text) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  parser p(db, a[1].as<str_v>().view());
+  node_id root = p.parse_module();
+  std::vector<value> errs;
+  for(auto & e: p.errors()) errs.push_back(value(cat(e.where.source, "\t", e.where.begin, "\t", e.where.end, "\t", std::string_view(e.what()))));
+  return value(array_v::of({value(int64_t(root.value)), value(array_v::of(std::move(errs)))}));
+};
+// the use of module m in element order: array{key, the node of the found module or -1, start, end, source}
+mod_uses(i64 h, i64 m) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(array_v::of({})));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  std::vector<value> xs;
+  for(node_id item: db.as<n_module>(node_id(uint32_t(a[1].as<int64_t>()))).items) {
+    if(!db.is<n_use>(item)) continue;
+    symbol key = db.as<n_use>(item).key;
+    node_id got = find_module(db, key);
+    span w = db[item].where;
+    xs.push_back(value(array_v::of({value(std::string(db.strings.text(key))), value(got ? int64_t(got.value) : int64_t(-1)), value(int64_t(w.begin)), value(int64_t(w.end)), value(int64_t(w.source))})));
+  }
+  return value(array_v::of(std::move(xs)));
+};
+// the loading result: the dump of every database module (except the prelude) that has no parent - in node number order
+mod_dump(i64 h) => native "cpp" {
+  if(!a[0].known()) return erase(value(std::string()));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  std::string out;
+  for(uint32_t i = 0; i < db.size(); ++i)
+    if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && node_id(i) != db.prelude) out += cat("== ", i, " ", (db.as<n_module>(node_id(i)).name ? db.strings.text(db.as<n_module>(node_id(i)).name) : std::string_view()), "\n", dumper(db).dump(node_id(i)));
+  return value(std::move(out));
+};
+// whether a path exists (a file or a directory)
+path_exists(str path) => native "cpp" {
+  if(!a[0].known()) return erase(value(false));
+  std::error_code e;
+  return value(std::filesystem::exists(std::filesystem::path(std::string(a[0].as<str_v>().view())), e));
+};
+// --- paths ---------------------------------------------------------------------------------------------------------------------
+// dir / rel: an empty directory - rel; otherwise through "/" (without a second one when there is a trailing "/")
+join_path(str dir, str rel) => if(dir.size == 0) rel else if(dir[dir.size - 1] == 47) dir + rel else dir + "/" + rel;
+// the module file path: key geo.vec -> <dir>/geo/vec.vish
+module_file(str dir, str key) => join_path(dir, replace_all(key, ".", "/") + ".vish");
+// the directory of file path (parent_path): up to the last "/"; no "/" - empty; a leading "/" - "/"
+dir_of(str path) {
+  k = path.size - 1;
+  while((k >= 0) && (path[k] != 47)) k -= 1;
+  if(k < 0) return "";
+  if(k == 0) return "/";
+  // several "/" in a row before the name - all of them go (std::filesystem)
+  while((k > 0) && (path[k - 1] == 47)) k -= 1;
+  if(k == 0) return "/";
+  text_range(path, 0, k)
+}
+// --- keys in the text -----------------------------------------------------------------------------------------------------------
+tok_text(str src, token t) => text_range(src, t.from, t.to);
+// the byte of an operator or a bracket (ch() of the C++ lexer); 0 for the rest
+ch_of(str src, token t) => if((t.kind == kind_op()) || ((t.kind == kind_open()) || (t.kind == kind_close()))) src[t.from] else 0;
+// The `use k;` keys of the top level (bracket depth 0): a key is a chain of names through "."
+use_keys_of(str src, toks) {
+  out = array{};
+  depth = 0;
+  i = 0;
+  n = toks.size;
+  while(i < n) {
+    t = toks[i];
+    if(t.kind == kind_open()) {
+      depth += 1;
+    } else if(t.kind == kind_close()) {
+      depth -= 1;
+    } else if((depth == 0) && ((t.kind == kind_ident()) && ((tok_text(src, t) == "use") && ((i + 1 < n) && (toks[i + 1].kind == kind_ident()))))) {
+      i += 1;
+      key = tok_text(src, toks[i]);
+      while((i + 2 < n) && ((ch_of(src, toks[i + 1]) == 46) && (toks[i + 2].kind == kind_ident()))) {
+        key = key + "." + tok_text(src, toks[i + 2]);
+        i += 2;
+      }
+      out.push(key);
+    }
+    i += 1;
+  }
+  out
+}
+use_keys(str src) => use_keys_of(src, lex(src).tokens);
+// The keys of qualified names geo.vec.norm( - the prefixes of the chain that have a module file (geo/vec.vish): the name is named in full
+qualified_keys_of(str src, toks, str dir) {
+  out = array{};
+  n = toks.size;
+  for(i : range(n)) {
+    t = toks[i];
+    if((t.kind != kind_ident()) || ((i > 0) && (ch_of(src, toks[i - 1]) == 46))) continue;
+    parts = array{};
+    parts.push(tok_text(src, t));
+    j = i;
+    while((j + 2 < n) && ((ch_of(src, toks[j + 1]) == 46) && (toks[j + 2].kind == kind_ident()))) {
+      parts.push(tok_text(src, toks[j + 2]));
+      j += 2;
+    }
+    if((parts.size < 2) || ((j + 1 >= n) || (ch_of(src, toks[j + 1]) != 40))) continue;
+    key = "";
+    rel = "";
+    for(k : range(parts.size - 1)) {
+      key = key + (if(k > 0) "." else "") + parts[k];
+      rel = rel + (if(k > 0) "/" else "") + parts[k];
+      if(path_exists(join_path(dir, rel + ".vish"))) out.push(key);
+    }
+  }
+  out
+}
+qualified_keys(str src, str dir) => qualified_keys_of(src, lex(src).tokens, dir);
+// --- loading -----------------------------------------------------------------------------------------------------------------
+err_line(str source, str begin, str end, str what) => source + "\t" + begin + "\t" + end + "\t" + what;
+// Modules from the text's use k; go into database h before the text itself: use brings the module's forms into the context at the point of use. Recursive; a use cycle is
+// skipped (loading is the chain of keys being loaded now, from the main one). Module parse errors are strings "source\tstart\tend\ttext".
+preload_uses(i64 h, str src, str dir, loading) {
+  errors = array{};
+  toks = lex(src).tokens;
+  keys = use_keys_of(src, toks);
+  for(k : qualified_keys_of(src, toks, dir)) keys.push(k);
+  for(key : keys) {
+    if(mod_has(h, key) || has_text(loading, key)) continue;
+    file = module_file(dir, key);
+    if(!path_exists(file)) continue;
+    body = read_text(file);
+    inner = array{};
+    for(x : loading) inner.push(x);
+    inner.push(key);
+    for(e : preload_uses(h, body, dir, inner)) errors.push(e);
+    r = mod_parse(h, body, key);
+    for(e : r[5]) errors.push(e);
+    if(r[1] == "") {
+      mod_set_name(h, r[0], key); // a module without a header - the name by key
+    } else if(r[1] != key) {
+      errors.push(err_line(text(r[4]), text(r[2]), text(r[3]), "модуль " + r[1] + " найден по ключу " + key));
+    }
+  }
+  errors
+}
+// the use of module root (recursively) after parsing: "no module" - at the place of use
+missing_uses(i64 h, i64 root, str dir) {
+  errors = array{};
+  seen = array{};
+  todo = array{};
+  todo.push(root);
+  top = 1;
+  while(top > 0) {
+    top -= 1;
+    m = todo[top];
+    if(has_number(seen, m)) continue;
+    seen.push(m);
+    for(u : mod_uses(h, m)) {
+      if(u[1] >= 0) {
+        if(top < todo.size) {
+          todo[top] = u[1];
+        } else {
+          todo.push(u[1]);
+        }
+        top += 1;
+        continue;
+      }
+      errors.push(err_line(text(u[4]), text(u[2]), text(u[3]), "нет модуля " + u[0] + " (" + module_file(dir, u[0]) + ")"));
+    }
+  }
+  errors
+}
+// A program with modules: the modules from use come before the text, then the text, then "no module". The result is array{root, errors: of the text, of the modules, of use}
+parse_program(i64 h, str src, str dir) {
+  modules = preload_uses(h, src, dir, array{});
+  r = mod_parse_main(h, src);
+  errors = array{};
+  for(e : r[1]) errors.push(e);
+  for(e : modules) errors.push(e);
+  for(e : missing_uses(h, r[0], dir)) errors.push(e);
+  array{r[0], errors}
+}
+// --- comparison with C++ (vish modulescheck) --------------------------------------------------------------------------------------------
+// the loading result of one text: errors by line and the dump of the database's modules
+report_of(i64 h, errors) {
+  out = text_buffer();
+  for(e : errors) put(out, "e " + e + "\n");
+  put(out, mod_dump(h));
+  take(out)
+}
+// the C++ reference (stage0): the same modules.hpp operations over a new database with the prelude
+modules_reference(str src, str dir) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  ast_db db;
+  load_prelude(db);
+  std::vector<diagnostic> errors;
+  parse_program(db, a[0].as<str_v>().view(), std::filesystem::path(std::string(a[1].as<str_v>().view())), errors);
+  std::string out;
+  for(auto & e: errors) out += cat("e ", e.where.source, "\t", e.where.begin, "\t", e.where.end, "\t", std::string_view(e.what()), "\n");
+  for(uint32_t i = 0; i < db.size(); ++i)
+    if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && node_id(i) != db.prelude) out += cat("== ", i, " ", (db.as<n_module>(node_id(i)).name ? db.strings.text(db.as<n_module>(node_id(i)).name) : std::string_view()), "\n", dumper(db).dump(node_id(i)));
+  return value(std::move(out));
+};
+// use keys, keys of qualified names, the file path of the first key and the directory of the path - line by line, as in C++ (stage0)
+keys_reference(str src, str dir, str path) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(std::string()));
+  std::string text(a[0].as<str_v>().view());
+  std::filesystem::path d{std::string(a[1].as<str_v>().view())};
+  std::string out;
+  auto uses = use_keys(text);
+  for(auto & k: uses) out += cat("u ", k, "\n");
+  for(auto & k: qualified_keys(text, d)) out += cat("q ", k, "\n");
+  for(auto & k: uses) {
+    std::string rel = k;
+    std::ranges::replace(rel, '.', '/');
+    out += cat("f ", (d / (rel + ".vish")).string(), "\n");
+  }
+  out += cat("d ", std::filesystem::path(std::string(a[2].as<str_v>().view())).parent_path().string(), "\n");
+  return value(std::move(out));
+};
+keys_dump(str src, str dir, str path) {
+  out = text_buffer();
+  toks = lex(src).tokens;
+  uses = use_keys_of(src, toks);
+  for(k : uses) put(out, "u " + k + "\n");
+  for(k : qualified_keys_of(src, toks, dir)) put(out, "q " + k + "\n");
+  for(k : uses) put(out, "f " + module_file(dir, k) + "\n");
+  put(out, "d " + dir_of(path) + "\n");
+  take(out)
+}
+show_diff(str f, str what, str mine, str ref) {
+  a = lines_of(mine);
+  b = lines_of(ref);
+  k = 0;
+  while((k < a.size) && ((k < b.size) && (a[k] == b[k]))) k += 1;
+  write_out(f + ": " + what + ": расхождение в строке " + text(k) + "\n  vish: " + (if(k < a.size) a[k] else "—") + "\n  C++:  " + (if(k < b.size) b[k] else "—") + "\n");
+}
+// vish modulescheck <files>: on each file (the directory is next to it): keys and paths; program loading (with modules next to it) - errors and
+// the dump of every database module; code 0 - no mismatches. Probe directories: next to it, empty and with a trailing "/" - the join_path paths.
+check_cli(files) {
+  total = 0;
+  bad = 0;
+  loaded = 0;
+  with_use = 0;
+  failed = 0;
+  for(f : files) {
+    src = read_text(f);
+    dir = dir_of(f);
+    total += 1;
+    mine = keys_dump(src, dir, f);
+    ref = keys_reference(src, dir, f);
+    if(mine != ref) {
+      bad += 1;
+      show_diff(f, "ключи", mine, ref);
+    }
+    if(contains(mine, "u ") && starts_with(mine, "u ")) with_use += 1;
+    dir2 = if(dir == "") "" else dir + "/";
+    mine2 = keys_dump(src, dir2, f);
+    ref2 = keys_reference(src, dir2, f);
+    if(mine2 != ref2) {
+      bad += 1;
+      show_diff(f, "ключи (каталог с «/»)", mine2, ref2);
+    }
+    h = mod_db_new();
+    r = parse_program(h, src, dir);
+    mine3 = report_of(h, r[1]);
+    mod_db_free(h);
+    ref3 = modules_reference(src, dir);
+    if(mine3 != ref3) {
+      bad += 1;
+      show_diff(f, "загрузка", mine3, ref3);
+    }
+    if(contains(mine3, "\n== ")) loaded += 1;
+    if(starts_with(mine3, "e ")) failed += 1;
+  }
+  write_out("модули: файлов " + text(total) + ", с use " + text(with_use) + ", с загруженными модулями " + text(loaded) + ", с ошибками загрузки " + text(failed) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}

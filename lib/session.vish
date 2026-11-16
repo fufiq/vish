@@ -1,0 +1,105 @@
+module session;
+// A long-lived VM session (spec §10.1, §9.3) in the language - a port of include/vish/session.hpp (E6 of the porting plan, branch
+// t3/cpp-to-vish-migration; the user's goal: "C++ is only the link between the VM and the OS"). The parsing of session commands (`vish vm`, .session scenarios,
+// `vish apply`), the decisions ("what to replace by an edit, struct and migrate in a live process, which edit function to apply") and the answer texts are
+// in the language since October (lib/tools.vish: vm_command, edit_command, proc_command; "a language cannot be written in the language - it can only
+// be extended" - the author's rule, R2). What stayed in C++ is `vm_session`, a frame over the evaluator: the database and the program root, the reactive
+// parse cache of check (check_cache), the interpreter run/trace/residual/apply (interpreter), machine code (jit_engine), the live process
+// (process_machine), the database journal (replay/writer) and the probe in a clone (fork, channel, waitpid - the link with the OS). Each of these methods is a call to
+// the evaluator, the machine, the JIT or the OS, not logic; their port is the "bootstrap image" stage (E9, "good if it works out", R3: the author's remark),
+// not this one.
+// Here is what in the session was state and arithmetic, not a call: stats accounting - the database size and the growth since the last stats ("edits grow
+// the database by the parsed text, while elaboration, a parse recount and new interpreters with the same result do not", test 217): the session
+// remembers the nodes and journal records at the last stats, the answer is five numbers. The sess_counts primitive gives the database numbers without accounting (*mine, temporary*,
+// an entry in HANDOFF); the accounting is in the language: `stats_step`.
+// Equivalence is `vish sessioncheck <files>`: on a program in a C++ session (stage0) - a series of stats with database growth between them - the answers of
+// stats_step and vm_session::stats() match as numbers. The C++ version stays working (the switch is E8).
+
+use tools;
+use modules;
+// --- primitives (the VM's): a C++ session over the "clean" database of lib/modules.vish (mod_db_new) - for comparison only -----------------------------
+// a session over the program root of database h: a number; close
+sess_open(i64 h, i64 root, str name) => native "cpp" {
+  for(auto & x: a)
+    if(!x.known()) return erase(value(int64_t(-1)));
+  ast_db & db = *module_scratch[std::size_t(a[0].as<int64_t>())];
+  auto & s = session_scratch.emplace_back();
+  s.emplace(db, node_id(uint32_t(a[1].as<int64_t>())), std::string(a[2].as<str_v>().view()));
+  return value(int64_t(session_scratch.size() - 1));
+};
+sess_close(i64 s) => native "cpp" {
+  if(!a[0].known()) return erase(value(int64_t(0)));
+  session_scratch[std::size_t(a[0].as<int64_t>())].reset();
+  return value(int64_t(0));
+};
+// the session database numbers without accounting for the last stats: nodes, journal records, .vishdb bytes
+sess_counts(i64 s) => native "cpp" {
+  if(!a[0].known()) return erase(value(array_v::of({})));
+  auto & x = *session_scratch[std::size_t(a[0].as<int64_t>())];
+  writer w;
+  auto entries = x.db.journal();
+  for(auto const & e: entries) w.put(e);
+  return value(array_v::of({value(int64_t(x.db.size())), value(int64_t(entries.size())), value(int64_t(w.bytes.size()))}));
+};
+// C++ stats (stage0): five numbers accounting for the session's last stats
+sess_stats_reference(i64 s) => native "cpp" {
+  if(!a[0].known()) return erase(value(array_v::of({})));
+  auto r = session_scratch[std::size_t(a[0].as<int64_t>())]->stats();
+  std::vector<value> out;
+  for(uint64_t k: r) out.push_back(value(int64_t(k)));
+  return value(array_v::of(std::move(out)));
+};
+// an edit grows the database: the text is parsed by the module's rules (parse_at in C++); parse errors as text
+sess_grow(i64 s, str body) => native "cpp" {
+  if(!a[0].known() || !a[1].known()) return erase(value(std::string()));
+  return value(session_scratch[std::size_t(a[0].as<int64_t>())]->parse_at(node_id{}, "рост", std::string(a[1].as<str_v>().view())).first);
+};
+// --- stats accounting in the language ------------------------------------------------------------------------------------------------
+// what the session remembers between stats: nodes and journal records at the last one (0 - there was none)
+struct stats_book { i64 seen_size; i64 seen_log; }
+// One stats: the database numbers counts (nodes, records, bytes) -> the answer (nodes, records, bytes, previous nodes, previous records) and the new memory
+stats_step(stats_book book, counts) {
+  facts = array{counts[0], counts[1], counts[2], book.seen_size, book.seen_log};
+  array{facts, stats_book{counts[0], counts[1]}}
+}
+numbers_line(xs) {
+  out = "";
+  for(x : xs) out = out + text(x) + " ";
+  out
+}
+// vish sessioncheck <files>: for every program without parse errors - three stats in a row with database growth between them (an edit with a new function);
+// language = C++; code 0 - no mismatches
+check_cli(files) {
+  total = 0;
+  bad = 0;
+  skipped = 0;
+  steps = 0;
+  for(f : files) {
+    h = mod_db_new();
+    r = parse_program(h, read_text(f), dir_of(f));
+    if(r[1].size > 0) {
+      skipped += 1;
+      mod_db_free(h);
+      continue;
+    }
+    s = sess_open(h, r[0], f);
+    total += 1;
+    book = stats_book{0, 0};
+    for(k : range(4)) {
+      if(k > 0) sess_grow(s, "рост_" + text(k) + "() => " + text(k) + ";\n");
+      counts = sess_counts(s);
+      step = stats_step(book, counts);
+      book = step[1];
+      ref = sess_stats_reference(s);
+      steps += 1;
+      if(numbers_line(step[0]) != numbers_line(ref)) {
+        bad += 1;
+        write_out(f + ": stats, шаг " + text(k) + ": расхождение\n  vish: " + numbers_line(step[0]) + "\n  C++:  " + numbers_line(ref) + "\n");
+      }
+    }
+    sess_close(s);
+    mod_db_free(h);
+  }
+  write_out("сессия: программ " + text(total) + " (пропущено с ошибками разбора " + text(skipped) + "), stats " + text(steps) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}

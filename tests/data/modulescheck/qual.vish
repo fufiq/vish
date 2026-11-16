@@ -1,0 +1,1 @@
+main() { print(deep.x.f(1), deep.x.g(2)); }

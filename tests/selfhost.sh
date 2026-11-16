@@ -9,7 +9,7 @@ $b lib import "$lib" r1.vishrepo > /dev/null
 $b lib export r1.vishrepo p1 > /dev/null
 $b lib import p1 r2.vishrepo > /dev/null
 $b lib export r2.vishrepo p2 > /dev/null
-for f in prelude tools versions tests cli editor lexer parser runlog; do
+for f in prelude tools versions tests cli editor lexer parser runlog modules views complete session; do
   cmp -s "p1/$f.vish" "p2/$f.vish" || { echo "второй круг изменил $f.vish"; diff "p1/$f.vish" "p2/$f.vish" | head -5; exit 1; }
   $b fmt "p1/$f.vish" > /dev/null 2> err.txt || { echo "$f.vish не разбирается"; head -3 err.txt; exit 1; }
 done

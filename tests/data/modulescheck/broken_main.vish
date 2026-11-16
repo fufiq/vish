@@ -1,0 +1,2 @@
+use broken;
+main() { print(1); }

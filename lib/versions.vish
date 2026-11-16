@@ -238,7 +238,7 @@ merge_command(args) => if(args.size >= 2) merge_files(args[0], args[1], if(args.
 // the choice of the common base and the merge decisions are here. This is our development of the author's ideas of
 // key=>ast (2022-11-04) and stable semantic references (2023-05-29).
 // Names, the directory, snapshot numbers/parents and applying a state are in Vish.
-repo_builtin(str name) => has_text(array{"prelude", "tools", "versions", "tests", "cli", "editor", "lexer", "parser", "printer", "runlog"}, name);
+repo_builtin(str name) => has_text(array{"prelude", "tools", "versions", "tests", "cli", "editor", "lexer", "parser", "printer", "runlog", "modules", "views", "complete", "session"}, name);
 repo_ident_start(i64 c) => ((c >= 'a') && (c <= 'z')) || (((c >= 'A') && (c <= 'Z')) || ((c == '_') || (c >= 128)));
 repo_name_ok(str name) {
   if((name.size == 0) || ((name.size > 256) || repo_builtin(name))) return false;
@@ -1161,7 +1161,7 @@ repository_import_cli(args) {
 // by the built-in copies), so in the repository they live under the keys src.<name>: on import "module X;" -> "module src.X;",
 // "use X" -> "use src.X", on export the reverse. The text of lib/ after export is the canonical projection of the database (the source
 // of truth is the AST, the text is a projection; the author, 2022-09-21: "a normal editor should edit the AST, not the text").
-lib_names() => array{"prelude", "tools", "versions", "tests", "cli", "editor", "lexer", "parser", "printer", "runlog"};
+lib_names() => array{"prelude", "tools", "versions", "tests", "cli", "editor", "lexer", "parser", "printer", "runlog", "modules", "views", "complete", "session"};
 lib_rename(str line, bool into) {
   from = if(into) "" else "src.";
   to = if(into) "src." else "";
