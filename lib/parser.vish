@@ -1321,11 +1321,11 @@ item_node(ps s) {
     s.tail = false;
     s.head = s.pos;
     e = expression(s);
-    ended = s.tail || is_op_at(s, ";", 0); // a tail record (g() => if(c) return x;) has eaten the `;` itself (end_expr_body parser.hpp)
-    if((s.error != "") || (s.unsupported != "") || !ended) { if(s.unsupported == "") want(s, "тело-выражение"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    // `;` is optional (end_expr_body parser.hpp); a tail record (g() => if(c) return x;) has eaten it itself
+    if((s.error != "") || (s.unsupported != "")) { if(s.unsupported == "") want(s, "тело-выражение"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     r = node_of(e);
     if(!r.ok) { want(s, "выражение без узла"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
-    if(s.tail) s.tail = false else s.pos += 1;
+    if(s.tail) s.tail = false else if(is_op_at(s, ";", 0)) s.pos += 1;
     return ires{true, ast.function{fname, params, rtype, r.node, false, true, attrs, false, array{}}, from, s.pos, ""};
   }
   b = block_node(s);
@@ -1488,11 +1488,44 @@ declares_shadow(ps s, i64 from) {
   (tk_at(s, close + 1).kind == kind_ident()) && (tk_at(s, close + 2).kind == kind_open()) && (tk_at(s, close + 2).ch == 40)
 }
 // module elements of the text: the ires array (in text order)
+// [[...]] before module: the attributes of the module, not of the first element (module_attrs_ahead parser.hpp)
+module_attrs_ahead(ps s) {
+  k = 0;
+  loop {
+    if(!(is_open_ch(s, 91, k) && is_open_ch(s, 91, k + 1))) break;
+    m = s.match[s.pos + k];
+    if(m < 0) return false;
+    k = (m + 1) - s.pos;
+  }
+  (k > 0) && (tk(s, k).kind == kind_ident()) && (tk_text(s, k) == "module")
+}
+// `module a.b;` is the module header: skipped up to the elements; with attributes/sealed the file is not compared
+module_header_ok(ps s) {
+  if(tk_text(s, 0) == "sealed") return false;
+  if(module_attrs_ahead(s)) return false;
+  if(!((tk(s, 0).kind == kind_ident()) && (tk_text(s, 0) == "module"))) return true;
+  if(tk(s, 1).kind != kind_ident()) return false;
+  s.pos += 2;
+  loop {
+    if(!(is_op_at(s, ".", 0) && (tk(s, 1).kind == kind_ident()))) break;
+    s.pos += 2;
+  }
+  if(!is_op_at(s, ";", 0)) return false;
+  s.pos += 1;
+  true
+}
+module_header_skip(str src) {
+  r = phase1_of(src);
+  if(r.bracket_error || (r.errors.size > 0)) return false;
+  s = ps{src, r.tokens, r.match, 0, "", "", array{}, false, -1, false, false, array{}};
+  !module_header_ok(s)
+}
 module_items_of(str src) {
   r = phase1_of(src);
   items = array{};
   if(r.bracket_error || (r.errors.size > 0)) return items;
   s = ps{src, r.tokens, r.match, 0, "", "", syntax_records(), false, -1, false, false, syntax_constructs()};
+  if(!module_header_ok(s)) return items;
   loop {
     if(tk(s, 0).kind == kind_end()) break;
     s.unsupported = "";
@@ -1554,14 +1587,23 @@ mod_check_cli(files) {
   samples = 0;
   for(f : files) {
     src = read_text(f);
-    if(src_has_word(src, "module")) { // module header/attributes [[...]] module: C++ gives attributes in the dump as extra elements - comparison by number is impossible
+    if(module_header_skip(src)) { // attributes [[...]] module/sealed: C++ gives attributes in the dump as extra elements - comparison by number is impossible
       skipped_files += 1;
       write_out("  пропущен файл " + f + ": заголовок module\n");
       continue;
     }
     mine = module_items_of(src);
     ref = ref_items(module_reference(src));
-    if(mine.size != ref.size) {
+    // after program rules (syntax/operator/use/...) Vish's element boundaries are approximate (skip_item): we compare only the prefix before them
+    cut = -1;
+    for(k : range(mine.size)) if((cut < 0) && starts_with(mine[k].why, "правила программы выше")) cut = k;
+    if((cut >= 0) && (ref.size >= cut)) {
+      for(k : range(mine.size - cut)) { total += 1; w0 = mine[cut + k].why; at0 = -1; for(j : range(reasons.size)) if(reasons[j] == w0) at0 = j; if(at0 < 0) { reasons.push(w0); counts.push(1); } else counts[at0] += 1; }
+      head = array{};
+      for(k : range(cut)) head.push(mine[k]);
+      mine = head;
+    }
+    if(((cut < 0) && (mine.size != ref.size)) || ((cut >= 0) && (ref.size < cut))) {
       skipped_files += 1;
       write_out("  пропущен файл " + f + ": элементов у Vish " + text(mine.size) + ", у C++ " + text(ref.size) + "\n");
       continue;
