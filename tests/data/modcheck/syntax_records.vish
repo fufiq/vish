@@ -1,0 +1,8 @@
+syntax forever {body} => ast.loop{body};
+syntax leave {[[value]] v}; => ast.return{v};
+syntax stop; => ast.break{};
+syntax pair2 (a, b) => ast.pair{a, b};
+f(x) {
+  forever { stop; }
+  leave x;
+}

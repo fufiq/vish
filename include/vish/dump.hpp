@@ -40,7 +40,7 @@ struct dumper {
         out += cat(" ", name, "=", in_quotes(std::string(std::string_view(k.[:m:]))));
       } else if constexpr(std::is_enum_v<field_t>) {
         out += cat(" ", name, "=", uint32_t(k.[:m:]));
-      } else if constexpr(std::is_same_v<field_t, list<symbol>> && (std::meta::identifier_of(m) == "words" || std::meta::identifier_of(m) == "ops")) { // clause labels of n_call.words: without them the dumps of different clauses are equal
+      } else if constexpr(std::is_same_v<field_t, list<symbol>> && (std::meta::identifier_of(m) == "words" || std::meta::identifier_of(m) == "ops" || std::meta::identifier_of(m) == "form")) { // clause labels of n_call.words: without them the dumps of different clauses are equal
         if(!k.[:m:].empty()) {
           out += cat(" ", name, "=[");
           bool first = true;
