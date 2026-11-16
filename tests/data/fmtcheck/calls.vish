@@ -1,0 +1,35 @@
+// E5-2: calls with a tail block, clauses, for/while/try/catch, hide, template strings, literals with a suffix
+a(xs, n) {
+  for(x : xs) { print(x); }
+  for(x : xs) print(x);
+  for(xs) print(1);
+  while(n > 0) { n -= 1; }
+  while(n) { if(n) break; }
+  try { throw 1; } catch(e) { print(e); }
+  try { throw 1; } catch(e) { print(e); } catch(f) { print(f); }
+  try { work(); }
+  print("a", 2);
+  for(x : xs) { for(y : xs) { print(x + y); } }
+  while(true) {
+    for(x : xs) {
+      if(x) { return x; }
+    }
+  }
+}
+b(x) => while(x) x -= 1;
+c(x) => for(y : x) print(y);
+d(s) {
+  u = 10s;
+  v = (-x).y;
+  w = (a + b)[0];
+  0
+}
+twice(c, expr body) => body;
+guard(expr b) catch_all(expr... hs) => b;
+e(x) {
+  twice(x) { 1 }
+  guard { 2 } catch_all { 3 } catch_all { 4 }
+  twice(x) return 5;
+  0
+}
+f(x) => twice(x, 1);

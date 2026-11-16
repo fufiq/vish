@@ -1,0 +1,29 @@
+// E5-2: blocks, if/else, a loop, exits - printing by the prelude's syntax records
+a(c) {
+  if(c) { return 1; }
+  if(c) { x = 1; } else { x = 2; }
+  if(c) { x = 1; } else if(!c) { x = 2; } else { x = 3; }
+  if(c) x = 1; else x = 2;
+  if(c) return 3;
+  loop { break; }
+  loop {
+    if(c) continue;
+    if(c) break;
+    return;
+  }
+  if(c) {} else {}
+  y = if(c) { 1 } else { 2 };
+  z = (if(c) 1 else 2) + 3;
+  throw 7;
+  0
+}
+b() {}
+c(x) { x }
+e(x) => if(x) 1 else 2;
+f(x) => if(x) return 1;
+g(x) => return(f) 4;
+h(x) {
+  return(g) x;
+  return(g);
+  return;
+}

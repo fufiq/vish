@@ -1,14 +1,23 @@
 module printer;
 // The printer in the language (E5, the porting plan; a port from C++, branch t3/cpp-to-vish-migration; the user's goal: "C++ is only the link
-// between the VM and the OS"). THE FIRST STEP is expressions only: int/float/str/name, a call without a tail and clauses, operations (prefix, infix, postfix,
-// `.name`, `a[i]`, `.[k]`), chains of infixes. The rules for parentheses and spaces are as in include/vish/printer.hpp (stage0): print_node(n_op),
-// print_node(n_chain), operand, receiver. Parentheses around an operand are chosen by the same prelude function `operand_parens` as in C++.
-// Everything else is an explicit refusal "not supported: <node kind>", not silently wrong text.
+// between the VM and the OS"). STEP 1 - expressions: int/float/str/name, a call, operations (prefix, infix, postfix, `.name`, `a[i]`, `.[k]`), chains.
+// STEP 2 (E5-2) - instructions, blocks and declarations: ast.block, if/loop/return/throw/break/continue (by the prelude's syntax records -
+// the DATA syntax_records(), not hard-coded), a call with a tail block and clauses (for/while/try/catch), functions (including
+// operators and clauses), struct, variables, use, ct, lambdas, constructors, `...x`, template strings; the whole module - the elements
+// separated by a blank line, like printer::module in include/vish/printer.hpp (stage0). The rules for parentheses and spaces are as there:
+// print_node(n_op/n_chain/n_call/n_block/n_fn/n_extend/n_var), operand, receiver, terminate, closed, ends_in_statement.
+// A construct is printed by the record found in the prelude data (the first suitable one in order, like record_for/fits in C++);
+// a record that cannot be applied (a layout mark [[line]]..., a non-standard form part) is an explicit "not supported: reason".
+// Not supported (explicitly, not silently wrong text): comments and layout (blank lines, [[line]]) - E4f; patterns and
+// unpacking, quote/splice, references, holes, native, a function extension by reference, a syntax declaration, a call by a syntax record.
 // The author's earlier requirements: parsing logic and syntax are defined by logic in the language itself; all the logic
-// is to be written in the new language itself. There is no separate quote from the author about the printer
-// (a search for "printer" found only other people's or irrelevant remarks); the printer.hpp comment "a printer can be created without
-// changing the type" has not been checked by me. What is *mine* here: the port of printing to the language as a continuation of R1, the order of steps
-// (expressions first) and the byte-by-byte comparison `vish fmtcheck` with the C++ print.
+// All the logic is to be written in the new language itself. The canonical projection: the author's earlier remark on formatters in general,
+// not about vish: "a normal formatter... brings the code to a specific
+// style. All of the code" - printing is deterministic and does not keep the source layout. There is no separate quote from the author about the vish printer
+// (searches for "printer", "printing code from ast", "syntax record printing" found nothing relevant); the printer.hpp comment "a printer
+// can be created without changing the type" has not been checked by me. What is *mine* here: the port of printing to the language as a continuation of
+// R1, the order of steps (expressions -> instructions/declarations -> module), the byte-by-byte comparison `vish fmtcheck` with the C++ print without
+// the layout (blank lines and C++ comments are not taken into the comparison: the Vish parser's nodes have none) and the print -> parse round trip.
 // Equivalence is `vish fmtcheck <corpus>`: the print of a node in the language = the C++ (stage0) print of the same node.
 
 use tools;
@@ -99,14 +108,14 @@ pr_operand(c, bool left, str parent_op) {
   } else if(code_kind(c) == ast.chain) {
     kind = "chain";
     child_op = pr_same_op(node_field(c, "ops"));
-  }
+  } else if(code_kind(c) == ast.if) kind = "if";
   r = print_code(c);
   if(!r.ok) return r;
   if(kind == "") return r;
   assoc = left && ((parent_op != "") && ((child_op == parent_op) && pr_associative(parent_op)));
   if(operand_parens(kind, child_op, left, parent_op, assoc)) pres{true, "(" + r.text + ")"} else r
 }
-// the receiver of a postfix, an index, a field and a call: a prefix is always in parentheses, #x too (splice is not supported here)
+// the receiver of a postfix, an index, a field and a call: a prefix is always in parentheses, #x (splice) is not supported and print_code refuses it
 pr_receiver(c) {
   if(code_kind(c) == ast.operation) {
     if((node_field(c, "args").size == 1) && !node_field(c, "postfix")) {
@@ -174,12 +183,112 @@ pr_chain(c) {
   }
   pres{true, r}
 }
+// --- a call: a syntax record (hide x), a template string, a literal with a suffix, a head and clauses (printer::print_node(n_call)) -------
+// tag"text {x} text": the text is with `"` and `\` escaped, a line feed is \n, { } are doubled
+pr_tagged(c) {
+  tg_f = print_code(node_field(c, "callee"));
+  if(!tg_f.ok) return tg_f;
+  tg_r = text_buffer();
+  put(tg_r, tg_f.text + "\"");
+  for(tg_p : node_field(c, "args")) {
+    if(code_kind(tg_p) != ast.string) {
+      tg_e = print_code(tg_p);
+      if(!tg_e.ok) return tg_e;
+      put(tg_r, "{" + tg_e.text + "}");
+      continue;
+    }
+    tg_s = node_field(tg_p, "value");
+    for(tg_k : range(tg_s.size)) {
+      tg_b = tg_s[tg_k];
+      tg_c = slice_text(tg_s, tg_k, tg_k + 1);
+      if((tg_b == 34) || (tg_b == 92)) put(tg_r, "\\")
+      else if(tg_b == 10) { put(tg_r, "\\n"); continue; }
+      else if((tg_b == 123) || (tg_b == 125)) put(tg_r, tg_c);
+      put(tg_r, tg_c);
+    }
+  }
+  put(tg_r, "\"");
+  pres{true, take(tg_r)}
+}
+// a repeated clause catch(A a) {...} catch(B b) {...} - one array{...} argument of blocks only: the elements, otherwise empty (clause_pack ast.hpp)
+pr_clause_pack(x) {
+  if(code_kind(x) != ast.construct) return array{};
+  cp_ty = node_field(x, "type");
+  cp_items = node_field(x, "items");
+  if((cp_items.size == 0) || !given(cp_ty)) return array{};
+  if((code_kind(cp_ty) != ast.name) || (node_field(cp_ty, "name") != "array")) return array{};
+  for(cp_i : cp_items) {
+    if(code_kind(cp_i) == ast.block) continue;
+    if((code_kind(cp_i) == ast.lambda) && node_field(cp_i, "block")) continue;
+    return array{};
+  }
+  cp_items
+}
+// (arguments and block parameters) body; hargs - the arguments of the clause head without a body
+pr_clause(body, hargs, bool bare_ok) {
+  cl_lam = (code_kind(body) == ast.lambda) && node_field(body, "block");
+  cl_ps = array{};
+  if(cl_lam) cl_ps = node_field(body, "params");
+  cl_count = hargs.size;
+  for(cl_p : cl_ps) if(node_field(cl_p, "source") < 0) cl_count += 1;
+  cl_r = text_buffer();
+  if((cl_count > 0) || !bare_ok) {
+    put(cl_r, "(");
+    cl_first = true;
+    for(cl_k : range(hargs.size)) {
+      if(!cl_first) put(cl_r, ", ");
+      cl_first = false;
+      for(cl_q : cl_ps) if(node_field(cl_q, "source") == cl_k) {
+        cl_pt = print_code(cl_q);
+        if(!cl_pt.ok) return cl_pt;
+        put(cl_r, cl_pt.text + " : ");
+      }
+      cl_at = print_code(hargs[cl_k]);
+      if(!cl_at.ok) return cl_at;
+      put(cl_r, cl_at.text);
+    }
+    for(cl_q2 : cl_ps) if(node_field(cl_q2, "source") < 0) {
+      if(!cl_first) put(cl_r, ", ");
+      cl_first = false;
+      cl_pt2 = print_code(cl_q2);
+      if(!cl_pt2.ok) return cl_pt2;
+      put(cl_r, cl_pt2.text);
+    }
+    put(cl_r, ")");
+  }
+  cl_b = body;
+  if(cl_lam) cl_b = node_field(body, "body");
+  cl_bt = print_code(cl_b);
+  if(!cl_bt.ok) return cl_bt;
+  put(cl_r, " " + cl_bt.text);
+  if((code_kind(cl_b) != ast.block) && (code_kind(cl_b) != ast.raw)) put(cl_r, pr_terminate(cl_b));
+  pres{true, take(cl_r)}
+}
+// an argument group [from, to): without a tail - `(a, b)`, with a tail - clause (the last argument is the body)
+pr_group(c, i64 from, i64 to, bool tail, bool bare_ok) {
+  gr_args = node_field(c, "args");
+  if(!tail) {
+    gr_r = "(";
+    for(gr_k : range(to - from)) {
+      gr_a = print_code(gr_args[from + gr_k]);
+      if(!gr_a.ok) return gr_a;
+      if(gr_k > 0) gr_r = gr_r + ", ";
+      gr_r = gr_r + gr_a.text;
+    }
+    return pres{true, gr_r + ")"};
+  }
+  if(to <= from) return pr_no("call: хвост без тела");
+  gr_head = array{};
+  for(gr_j : range((to - from) - 1)) gr_head.push(gr_args[from + gr_j]);
+  pr_clause(gr_args[to - 1], gr_head, bare_ok)
+}
 pr_call(c) {
   pc_args = node_field(c, "args");
-  if(node_field(c, "tagged")) return pr_no("call: tagged (шаблонная строка)");
-  if(node_field(c, "tail")) return pr_no("call: хвостовой блок");
-  if(node_field(c, "words").size > 0) return pr_no("call: клаузы со словами");
+  pc_words = node_field(c, "words");
   if(node_field(c, "form") != 0) return pr_no("call: запись syntax");
+  pc_rec = pr_find_rec(c); // a core call with a record (hide x, try_compile { ... })
+  if(pc_rec.ok) return pr_record_text(c, pc_rec);
+  if(node_field(c, "tagged")) return pr_tagged(c);
   if(node_field(c, "literal_suffix") && (pc_args.size == 1)) { // 10s is a literal with a suffix
     a = print_code(pc_args[0]);
     if(!a.ok) return a;
@@ -189,17 +298,406 @@ pr_call(c) {
   }
   f = pr_receiver(node_field(c, "callee"));
   if(!f.ok) return f;
-  r = f.text + "(";
-  for(k : range(pc_args.size)) {
-    if(k > 0) r = r + ", ";
-    a = print_code(pc_args[k]);
-    if(!a.ok) return a;
-    r = r + a.text;
+  pc_tail = node_field(c, "tail");
+  pc_n = pc_args.size;
+  pc_head_end = 0;
+  loop {
+    if(!(pc_head_end < pc_n)) break;
+    if((pc_words.size > 0) && (pc_words[pc_head_end] != "")) break;
+    pc_head_end += 1;
   }
-  pres{true, r + ")"}
+  pc_h = pr_group(c, 0, pc_head_end, pc_tail, pc_words.size > 0);
+  if(!pc_h.ok) return pc_h;
+  r = f.text + pc_h.text;
+  pc_i = pc_head_end;
+  loop {
+    if(!(pc_i < pc_n)) break;
+    pc_pack = pr_clause_pack(pc_args[pc_i]);
+    if(pc_pack.size > 0) {
+      for(pc_x : pc_pack) {
+        pc_pt = pr_clause(pc_x, array{}, true);
+        if(!pc_pt.ok) return pc_pt;
+        r = r + (" " + pc_words[pc_i] + pc_pt.text);
+      }
+      pc_i += 1;
+      continue;
+    }
+    pc_from = pc_i;
+    loop {
+      if(!(pc_i + 1 < pc_n)) break;
+      if(pc_words[pc_i + 1] != pc_words[pc_from]) break;
+      if(pr_clause_pack(pc_args[pc_i + 1]).size > 0) break;
+      pc_i += 1;
+    }
+    pc_g = pr_group(c, pc_from, pc_i + 1, true, true);
+    if(!pc_g.ok) return pc_g;
+    r = r + (" " + pc_words[pc_from] + pc_g.text);
+    pc_i += 1;
+  }
+  pres{true, r}
 }
 
-// The text of an expression node. What is not supported is pres{false, "not supported: kind"}.
+// --- syntax records (printer::record_for/fits/print_record/form): the prelude data syntax_records() --------------------------------
+// a record row: array{word, form parts, kind (an index into code_kinds(); -1 - a core call), slots (the body place per parameter), number of places}
+struct rrec { bool ok; array pieces; array slots; i64 places; }
+pr_no_rec() => rrec{false, array{}, array{}, 0};
+pr_has_int(xs, i64 x) {
+  for(v : xs) if(v == x) return true;
+  false
+}
+// the record that fits a node: the first in declaration order (in the prelude); the kind and the occupied places (node fields or call arguments)
+pr_find_rec(c) {
+  fr_k = code_kind(c);
+  fr_rows = syntax_records();
+  if(fr_k == ast.call) {
+    fr_callee = node_field(c, "callee");
+    if(code_kind(fr_callee) != ast.name) return pr_no_rec();
+    if((node_field(c, "words").size > 0) || (node_field(c, "tagged") || (node_field(c, "form") != 0))) return pr_no_rec();
+    fr_name = node_field(fr_callee, "name");
+    fr_n = node_field(c, "args").size;
+    for(fr_r : fr_rows) if((fr_r[2] < 0) && ((fr_r[0] == fr_name) && (fr_r[4] == fr_n))) return rrec{true, fr_r[1], fr_r[3], fr_r[4]};
+    return pr_no_rec();
+  }
+  fr_kinds = code_kinds();
+  fr_fields = array{};
+  fr_have = false;
+  for(fr_r2 : fr_rows) {
+    if(!((fr_r2[2] >= 0) && (fr_kinds[fr_r2[2]] == fr_k))) continue;
+    if(!fr_have) {
+      fr_fields = code_fields(c);
+      fr_have = true;
+    }
+    fr_fits = true;
+    for(fr_p : range(fr_r2[4])) {
+      fr_filled = given(fr_fields[fr_p]);
+      fr_slot = pr_has_int(fr_r2[3], fr_p);
+      if(fr_filled != fr_slot) fr_fits = false;
+    }
+    if(fr_fits) return rrec{true, fr_r2[1], fr_r2[3], fr_r2[4]};
+  }
+  pr_no_rec()
+}
+// the k-th place of a record: a node field or a call argument
+pr_place(c, rrec rec, i64 k) {
+  if(code_kind(c) == ast.call) return node_field(c, "args")[rec.slots[k]];
+  code_fields(c)[rec.slots[k]]
+}
+pr_ident_start(i64 b) => ((b >= 97) && (b <= 122)) || (((b >= 65) && (b <= 90)) || ((b == 95) || (b >= 128)));
+pr_ident_char(i64 b) => pr_ident_start(b) || ((b >= 48) && (b <= 57));
+// printing by a record: a word - with a space, (...) directly after the word, {...} - with a space, `;` directly (form in printer.hpp)
+pr_record_text(c, rrec rec) {
+  rt_r = text_buffer();
+  rt_prev = "";
+  rt_k = 0;
+  for(rt_p : rec.pieces) {
+    if((rt_p.size > 2) && (rt_p[0] == 91)) return pr_no("запись syntax: пометка раскладки " + rt_p);
+    rt_place = (rt_p == "(") || ((rt_p == "()") || ((rt_p == "{") || (rt_p == "{=")));
+    if(!rt_place && (starts_with(rt_p, "(") || (starts_with(rt_p, ",") || (rt_p == "#")))) return pr_no("запись syntax: часть " + rt_p);
+    rt_after_word = (rt_prev != "") && pr_ident_start(rt_prev[0]);
+    rt_glued = starts_with(rt_p, "()") || (starts_with(rt_p, "(") && rt_after_word);
+    if((rt_prev != "") && (!rt_glued && (rt_p != ";"))) put(rt_r, " ");
+    rt_prev = rt_p;
+    if(!rt_place) {
+      put(rt_r, rt_p);
+      continue;
+    }
+    rt_x = print_code(pr_place(c, rec, rt_k));
+    if(!rt_x.ok) return rt_x;
+    rt_k += 1;
+    if(starts_with(rt_p, "(")) put(rt_r, "(" + rt_x.text + ")") else put(rt_r, rt_x.text);
+  }
+  pres{true, take(rt_r)}
+}
+pr_by_record(c) {
+  br_rec = pr_find_rec(c);
+  if(!br_rec.ok) return pr_no("нет записи syntax для вида " + pr_kind_word(c));
+  pr_record_text(c, br_rec)
+}
+
+// --- `;` after an instruction (terminate, closed, ends_in_statement) -------------------------------------------------------------
+// a node's record ends with `;` (return x;) or with a block body (loop { }, if(c) { } else { }) - no `;` is needed after it
+pr_closed(c) {
+  cd_rec = pr_find_rec(c);
+  if(!cd_rec.ok) return false;
+  cd_last = cd_rec.pieces[cd_rec.pieces.size - 1];
+  if(cd_last == ";") return true;
+  if(((cd_last != "{") && (cd_last != "{=")) || (cd_rec.slots.size == 0)) return false;
+  cd_x = pr_place(c, cd_rec, cd_rec.slots.size - 1);
+  cd_k = code_kind(cd_x);
+  if((cd_k == ast.block) || (cd_k == ast.raw)) return true;
+  if(cd_k == ast.call) if(node_field(cd_x, "tail") || (node_field(cd_x, "words").size > 0)) return true;
+  pr_closed(cd_x)
+}
+pr_terminate(c) {
+  tm_k = code_kind(c);
+  if((tm_k == ast.variable) || (tm_k == ast.function)) return "";
+  if((tm_k == ast.block) || ((tm_k == ast.raw) || (tm_k == ast.extension))) return "";
+  if((tm_k == ast.ct) && (code_kind(node_field(c, "body")) == ast.block)) return "";
+  if(pr_closed(c)) return "";
+  if(tm_k == ast.call) if((node_field(c, "words").size > 0) || node_field(c, "tail")) return "";
+  ";"
+}
+// a body `=> e` ends with the tail instruction of a construct (g() => if(c) for(x : xs) s;): its `;` is also the end of the declaration
+pr_ends_stmt(c) {
+  es_k = code_kind(c);
+  if(es_k == ast.call) {
+    es_args = node_field(c, "args");
+    es_words = node_field(c, "words");
+    if(!node_field(c, "tail") || (es_args.size == 0)) return false;
+    if((es_words.size > 0) && (es_words[es_words.size - 1] != "")) return false;
+    es_b = es_args[es_args.size - 1];
+    if(code_kind(es_b) == ast.lambda) es_b = node_field(es_b, "body");
+    return (code_kind(es_b) != ast.block) && (code_kind(es_b) != ast.raw);
+  }
+  es_rec = pr_find_rec(c);
+  if(!es_rec.ok) return false;
+  es_last = es_rec.pieces[es_rec.pieces.size - 1];
+  if(((es_last != "{") && (es_last != "{=")) || (es_rec.slots.size == 0)) return false;
+  pr_ends_stmt(pr_place(c, es_rec, es_rec.slots.size - 1))
+}
+
+// --- block, parameters, declarations ------------------------------------------------------------------------------------------------
+// a node or empty (a field without a value) - like item(): an empty one prints as nothing
+pr_opt(c) {
+  if(!given(c)) return pres{true, ""};
+  print_code(c)
+}
+pr_block(c) {
+  bk_items = node_field(c, "items");
+  if(bk_items.size == 0) return pres{true, "{}"};
+  bk_has = node_field(c, "has_value");
+  bk_r = text_buffer();
+  put(bk_r, "{");
+  for(bk_k : range(bk_items.size)) {
+    bk_t = print_code(bk_items[bk_k]);
+    if(!bk_t.ok) return bk_t;
+    put(bk_r, "\n  " + replace_all(bk_t.text, "\n", "\n  "));
+    if(!(bk_has && (bk_k + 1 == bk_items.size))) put(bk_r, pr_terminate(bk_items[bk_k]));
+  }
+  put(bk_r, "\n}");
+  pres{true, take(bk_r)}
+}
+// (a, b, c) - parameters or arguments separated by commas
+pr_list(xs) {
+  pl_r = "(";
+  for(pl_k : range(xs.size)) {
+    pl_t = print_code(xs[pl_k]);
+    if(!pl_t.ok) return pl_t;
+    if(pl_k > 0) pl_r = pl_r + ", ";
+    pl_r = pl_r + pl_t.text;
+  }
+  pres{true, pl_r + ")"}
+}
+pr_param(c) {
+  pp_ty = node_field(c, "type");
+  if(given(pp_ty) && (code_kind(pp_ty) == ast.pattern)) return pr_no("параметр-образец");
+  pp_mode = node_field(c, "mode");
+  pp_r = array{"", "mut ", "own ", "out ", "expr ", "ct ", "implicit "}[pp_mode];
+  if(node_field(c, "strict")) pp_r = pp_r + "explicit ";
+  pp_pack = node_field(c, "pack");
+  if(given(pp_ty)) {
+    pp_t = print_code(pp_ty);
+    if(!pp_t.ok) return pp_t;
+    pp_r = pp_r + (pp_t.text + (if(pp_pack) "... " else " "));
+  } else if(pp_pack && (pp_mode == 0)) pp_r = pp_r + "..."
+  else if(pp_pack) pp_r = text_range(pp_r, 0, pp_r.size - 1) + "... ";
+  pres{true, pp_r + node_field(c, "name")}
+}
+// [[a, b]] - attributes before a declaration (with a space after); without attributes - empty
+pr_attrs(xs) {
+  if(xs.size == 0) return pres{true, ""};
+  at_r = "[[";
+  for(at_k : range(xs.size)) {
+    at_t = print_code(xs[at_k]);
+    if(!at_t.ok) return at_t;
+    if(at_k > 0) at_r = at_r + ", ";
+    at_r = at_r + at_t.text;
+  }
+  pres{true, at_r + "]] "}
+}
+// a function body: `=> e;` (without `;` if e ends with a tail instruction) or a block
+pr_fn_body(c) {
+  fb_bt = print_code(node_field(c, "body"));
+  if(!fb_bt.ok) return fb_bt;
+  if(!node_field(c, "expr_body")) return pres{true, " " + fb_bt.text};
+  fb_ends = pr_ends_stmt(node_field(c, "body"));
+  // a defect of printer.hpp (ends_in_statement does not know records that end with `;`): `f(x) => return 1;` is printed `...;;` - it is not parsed
+  // by C++ or by the parser in the language. Such text cannot be repeated byte by byte (it is wrong) - an explicit refusal until the defect is fixed in C++
+  if(!fb_ends && ends_with(fb_bt.text, ";")) return pr_no("тело => кончается записью с `;`: C++ печатает двойную `;` (дефект printer.hpp)");
+  fb_semi = if(fb_ends) "" else ";";
+  pres{true, " => " + fb_bt.text + fb_semi}
+}
+// the operator role by entity name: "infix"/"prefix"/"postfix" and the symbol; empty - an ordinary function
+pr_operator_role(str name) {
+  for(or_role : array{"infix", "prefix", "postfix"}) {
+    if((name.size > or_role.size) && (starts_with(name, or_role) && !pr_ident_char(name[or_role.size]))) return array{or_role, text_from(name, or_role.size)};
+  }
+  array{}
+}
+pr_function(c) {
+  if(node_field(c, "form").size > 0) return pr_no("объявление syntax");
+  fn_name = node_field(c, "name");
+  fn_params = node_field(c, "params");
+  fn_at = pr_attrs(node_field(c, "attrs"));
+  if(!fn_at.ok) return fn_at;
+  fn_r = fn_at.text;
+  if(node_field(c, "outline")) fn_r = fn_r + "outline ";
+  fn_rt = node_field(c, "result_type");
+  if(given(fn_rt)) {
+    fn_rtt = print_code(fn_rt);
+    if(!fn_rtt.ok) return fn_rtt;
+    fn_r = fn_r + (fn_rtt.text + " ");
+  }
+  fn_role = pr_operator_role(fn_name);
+  if(fn_role.size > 0) {
+    fn_sym = fn_role[1];
+    if((fn_params.size < 1) || ((fn_role[0] == "infix") && (fn_params.size < 2))) return pr_no("оператор с недостаточным числом параметров");
+    fn_r = fn_r + (if(node_field(c, "scoped")) "using operator " else "operator ");
+    if(fn_role[0] == "prefix") fn_r = fn_r + fn_sym;
+    fn_p0 = pr_list(array{fn_params[0]});
+    if(!fn_p0.ok) return fn_p0;
+    fn_r = fn_r + fn_p0.text;
+    if(fn_role[0] == "postfix") fn_r = fn_r + fn_sym;
+    if(fn_sym == "[]") {
+      fn_ix = print_code(fn_params[1]);
+      if(!fn_ix.ok) return fn_ix;
+      fn_r = fn_r + ("[" + fn_ix.text + "]");
+    } else if(fn_role[0] == "infix") {
+      fn_p1 = pr_list(array{fn_params[1]});
+      if(!fn_p1.ok) return fn_p1;
+      fn_r = fn_r + (" " + fn_sym + " " + fn_p1.text);
+    }
+    fn_ob = pr_fn_body(c);
+    if(!fn_ob.ok) return fn_ob;
+    return pres{true, fn_r + fn_ob.text};
+  }
+  fn_r = fn_r + fn_name;
+  // head and clauses: try(expr body) catch(expr... handlers)
+  fn_i = 0;
+  loop {
+    fn_word = "";
+    if(fn_params.size > 0) fn_word = node_field(fn_params[fn_i], "clause");
+    if(fn_word != "") fn_r = fn_r + (" " + fn_word);
+    fn_group = array{};
+    loop {
+      if(!(fn_i < fn_params.size)) break;
+      if(node_field(fn_params[fn_i], "clause") != fn_word) break;
+      fn_group.push(fn_params[fn_i]);
+      fn_i += 1;
+    }
+    fn_gt = pr_list(fn_group);
+    if(!fn_gt.ok) return fn_gt;
+    fn_r = fn_r + fn_gt.text;
+    if(fn_params.size == 0) break;
+    if(!(fn_i < fn_params.size)) break;
+  }
+  fn_b = pr_fn_body(c);
+  if(!fn_b.ok) return fn_b;
+  pres{true, fn_r + fn_b.text}
+}
+// { [ct] T field [= value]; ... } - struct fields
+pr_struct_fields(items) {
+  sf_r = "{";
+  for(sf_v : items) {
+    if(code_kind(sf_v) != ast.variable) return pr_no("struct: не поле");
+    sf_t = pr_opt(node_field(sf_v, "type"));
+    if(!sf_t.ok) return sf_t;
+    sf_r = sf_r + ((if(node_field(sf_v, "ct")) " ct " else " ") + sf_t.text + " " + node_field(sf_v, "name"));
+    if(given(node_field(sf_v, "init"))) {
+      sf_i = print_code(node_field(sf_v, "init"));
+      if(!sf_i.ok) return sf_i;
+      sf_r = sf_r + (" = " + sf_i.text);
+    }
+    sf_r = sf_r + ";";
+  }
+  pres{true, sf_r + " }"}
+}
+pr_extension(c) {
+  if(node_field(c, "target") != 0) return pr_no("extension: перегрузки функции по ссылке");
+  ex_of = node_field(c, "of");
+  if(ex_of == "") return pr_no("extension: расширение не struct");
+  ex_at = pr_attrs(node_field(c, "attrs"));
+  if(!ex_at.ok) return ex_at;
+  ex_fields = pr_struct_fields(node_field(c, "items"));
+  if(!ex_fields.ok) return ex_fields;
+  ex_base = node_field(c, "base");
+  pres{true, ex_at.text + ex_of + " " + node_field(c, "name") + (if(ex_base != "") " : " + ex_base else "") + " " + ex_fields.text}
+}
+pr_variable(c) {
+  va_at = pr_attrs(node_field(c, "attrs"));
+  if(!va_at.ok) return va_at;
+  va_r = va_at.text;
+  if(node_field(c, "is_const")) va_r = va_r + "const ";
+  if(node_field(c, "ct")) va_r = va_r + "ct ";
+  if(node_field(c, "ref")) va_r = va_r + "&";
+  if(node_field(c, "strict")) va_r = va_r + "explicit ";
+  va_ty = node_field(c, "type");
+  if(given(va_ty)) {
+    va_t = print_code(va_ty);
+    if(!va_t.ok) return va_t;
+    va_r = va_r + (va_t.text + " ");
+  }
+  va_i = pr_opt(node_field(c, "init"));
+  if(!va_i.ok) return va_i;
+  pres{true, va_r + node_field(c, "name") + " = " + va_i.text + ";"}
+}
+pr_use(c) {
+  us_names = node_field(c, "names");
+  us_r = "use " + node_field(c, "key");
+  if(us_names.size > 0) {
+    us_r = us_r + ".{";
+    for(us_k : range(us_names.size)) us_r = us_r + ((if(us_k > 0) ", " else "") + us_names[us_k]);
+    us_r = us_r + "}";
+  }
+  pres{true, us_r}
+}
+pr_ct(c) {
+  ct_body = node_field(c, "body");
+  if(code_kind(ct_body) == ast.block) {
+    ct_b = print_code(ct_body);
+    if(!ct_b.ok) return ct_b;
+    return pres{true, "ct " + ct_b.text};
+  }
+  ct_e = pr_receiver(ct_body); // ct e - the body is parsed as unary_core: (1 + 2), (-x) without parentheses read differently
+  if(!ct_e.ok) return ct_e;
+  pres{true, "ct " + ct_e.text}
+}
+pr_lambda(c) {
+  lm_ps = pr_list(node_field(c, "params"));
+  if(!lm_ps.ok) return lm_ps;
+  lm_b = print_code(node_field(c, "body"));
+  if(!lm_b.ok) return lm_b;
+  pres{true, lm_ps.text + " => " + lm_b.text}
+}
+// array{1, 2, 3}, Name{...}, {x: 1} - a constructor
+pr_construct(c) {
+  cs_r = "";
+  cs_ty = node_field(c, "type");
+  if(given(cs_ty)) {
+    cs_t = print_code(cs_ty);
+    if(!cs_t.ok) return cs_t;
+    cs_r = cs_t.text;
+  }
+  cs_items = node_field(c, "items");
+  cs_names = node_field(c, "names");
+  cs_r = cs_r + "{";
+  for(cs_k : range(cs_items.size)) {
+    if(cs_k > 0) cs_r = cs_r + ", ";
+    if(cs_k < cs_names.size) cs_r = cs_r + (cs_names[cs_k] + ": ");
+    cs_i = print_code(cs_items[cs_k]);
+    if(!cs_i.ok) return cs_i;
+    cs_r = cs_r + cs_i.text;
+  }
+  pres{true, cs_r + "}"}
+}
+pr_spread(c) {
+  sp_v = print_code(node_field(c, "value"));
+  if(!sp_v.ok) return sp_v;
+  pres{true, "..." + sp_v.text}
+}
+
+// The text of a node (an expression, an instruction, a declaration) without the instruction's `;` (the block/module adds it: pr_terminate). What is not supported is
+// pres{false, "not supported: reason"}.
 print_code(c) {
   k = code_kind(c);
   if(k == ast.int) return pr_int(c);
@@ -209,7 +707,32 @@ print_code(c) {
   if(k == ast.operation) return pr_op(c);
   if(k == ast.chain) return pr_chain(c);
   if(k == ast.call) return pr_call(c);
+  if(k == ast.block) return pr_block(c);
+  if((k == ast.if) || ((k == ast.loop) || ((k == ast.break) || ((k == ast.continue) || ((k == ast.return) || (k == ast.throw)))))) return pr_by_record(c);
+  if(k == ast.function) return pr_function(c);
+  if(k == ast.parameter) return pr_param(c);
+  if(k == ast.variable) return pr_variable(c);
+  if(k == ast.extension) return pr_extension(c);
+  if(k == ast.use) return pr_use(c);
+  if(k == ast.ct) return pr_ct(c);
+  if(k == ast.lambda) return pr_lambda(c);
+  if(k == ast.construct) return pr_construct(c);
+  if(k == ast.spread) return pr_spread(c);
+  if(k == ast.raw) return pres{true, node_field(c, "text")};
+  if(k == ast.symbol) return pres{true, node_field(c, "text")};
   pr_no(pr_kind_word(c))
+}
+
+// A module without a header: the elements separated by a blank line, each with `;` by pr_terminate and a line feed (printer::print_node(n_module))
+print_module(items) {
+  pm_r = text_buffer();
+  for(pm_k : range(items.size)) {
+    pm_t = print_code(items[pm_k]);
+    if(!pm_t.ok) return pm_t;
+    if(pm_k > 0) put(pm_r, "\n");
+    put(pm_r, pm_t.text + (if(code_kind(items[pm_k]) == ast.function) "" else pr_terminate(items[pm_k])) + "\n");
+  }
+  pres{true, take(pm_r)}
 }
 
 // --- comparison with C++ (vish fmtcheck) ---------------------------------------------------------------------------------------
@@ -240,7 +763,7 @@ expr_print_reference(str src) => native "cpp" {
 
 // vish fmtcheck <corpus files>: for an expression in a line - the print in the language (print_code of a node from the Vish parser tree) byte by byte
 // against the C++ print of the same expression; what is not supported goes into the histogram of reasons
-fmt_check_cli(es) {
+fmt_check_lines(es) {
   same = 0;
   bad = 0;
   unsupported = 0;
@@ -283,4 +806,181 @@ fmt_check_cli(es) {
   write_out("принтер, выражения: совпало " + text(same) + ", не поддержано " + text(unsupported) + ", расхождений " + text(bad) + " (без дерева у парсера на Vish: " + text(skipped) + ")\n");
   for(j : range(reasons.size)) write_out("  " + reasons[j] + " — " + text(counts[j]) + "\n");
   if(bad == 0) 0 else 1
+}
+
+// The C++ (stage0) print of a module from text: array{the whole module, element 0, element 1, ...}; empty - C++ did not parse it. The layout (blank lines) and
+// comments are not in the print: the Vish parser has no nodes for them (E4d/E4f), the comparison goes by the canon
+module_print_reference(str src) => native "cpp" {
+  std::vector<value> out;
+  if(!a[0].known()) return value(array_v::of(std::move(out)));
+  ast_db db;
+  load_prelude(db);
+  parser p(db, std::string(a[0].as<str_v>().view()), "<fmtcheck>");
+  node_id m = p.parse_module();
+  if(!p.errors().empty()) return value(array_v::of(std::move(out)));
+  for(uint32_t i = 0; i < db.size(); ++i) {
+    node_id x(i);
+    if(db.is<n_block>(x)) db.as<n_block>(x).blank.clear();
+    else if(db.is<n_module>(x)) db.as<n_module>(x).blank.clear();
+  }
+  printer pr(db);
+  pr.comments = false;
+  out.push_back(value(pr.print(m)));
+  for(node_id x: db.as<n_module>(m).items) out.push_back(value(pr.print(x)));
+  return value(array_v::of(std::move(out)));
+};
+
+// syntax record words and the parenthesis choice function: a function declaration with such a name above closes the record/choice in C++ (shadowed, visible_fn)
+pr_record_word(str w) {
+  if(w == "operand_parens") return true;
+  for(rw_r : syntax_records()) if(rw_r[0] == w) return true;
+  false
+}
+fmt_count(reasons, counts, str why) {
+  at = -1;
+  for(j : range(reasons.size)) if(reasons[j] == why) at = j;
+  if(at < 0) { reasons.push(why); counts.push(1); } else counts[at] += 1;
+}
+
+// vish fmtcheck <files.vish>: element by element, the print_code of a node from the Vish parser's module against the C++ print of the same element; then the module
+// as a whole (print_module) and the print -> parse round trip (the text is parsed by the Vish parser into the same nodes). What is not supported goes into the histogram of reasons
+fmt_check_modules(files) {
+  total = 0;
+  same = 0;
+  bad = 0;
+  unsupported = 0;
+  no_tree = 0;
+  skipped_files = 0;
+  whole_same = 0;
+  whole_bad = 0;
+  whole_skipped = 0;
+  circle_same = 0;
+  circle_bad = 0;
+  circle_fix = 0;
+  reasons = array{};
+  counts = array{};
+  tree_reasons = array{};
+  tree_counts = array{};
+  for(f : files) {
+    src = read_text(f);
+    if(module_header_skip(src)) { // module header: C++ gives attributes in the dump as extra elements - comparison by number is impossible
+      skipped_files += 1;
+      continue;
+    }
+    mine = module_items_of(src);
+    refs = module_print_reference(src);
+    if(refs.size == 0) {
+      skipped_files += 1;
+      write_out("  пропущен файл " + f + ": C++ не разобрал\n");
+      continue;
+    }
+    ref = array{};
+    for(k : range(refs.size - 1)) ref.push(refs[k + 1]);
+    // program rules (syntax/operator/use/...) change the parsing of the following elements - as in modcheck: we compare the prefix before them
+    cut = -1;
+    for(k : range(mine.size)) if((cut < 0) && starts_with(mine[k].why, "правила программы выше")) cut = k;
+    prefix_ok = cut >= 0;
+    for(k : range(mine.size)) if((k < cut) && !mine[k].ok) prefix_ok = false;
+    if(!prefix_ok) cut = -1;
+    n_mine = mine.size;
+    if((cut >= 0) && (ref.size >= cut)) {
+      for(k : range(mine.size - cut)) {
+        total += 1;
+        no_tree += 1;
+        fmt_count(tree_reasons, tree_counts, mine[cut + k].why);
+      }
+      n_mine = cut;
+    }
+    if(((cut < 0) && (mine.size != ref.size)) || ((cut >= 0) && (ref.size < cut))) {
+      skipped_files += 1;
+      continue;
+    }
+    all_ok = cut < 0;
+    texts = array{};
+    shadow = false; // a function with the record's name is declared above - C++ prints differently (the closing of the record)
+    for(k : range(n_mine)) {
+      total += 1;
+      if(!mine[k].ok) {
+        no_tree += 1;
+        all_ok = false;
+        fmt_count(tree_reasons, tree_counts, if(mine[k].why == "") "(без причины)" else mine[k].why);
+        continue;
+      }
+      node = mine[k].node;
+      if(shadow) {
+        unsupported += 1;
+        all_ok = false;
+        fmt_count(reasons, counts, "не поддержано: выше объявлена функция с именем записи syntax");
+        continue;
+      }
+      p = print_code(node);
+      if((code_kind(node) == ast.function) && pr_record_word(node_field(node, "name"))) shadow = true;
+      if(!p.ok) {
+        unsupported += 1;
+        all_ok = false;
+        fmt_count(reasons, counts, p.text);
+        continue;
+      }
+      if(p.text == ref[k]) same += 1 else {
+        bad += 1;
+        all_ok = false;
+        write_out(f + ": элемент " + text(k) + " расхождение\n--- vish\n" + p.text + "\n--- C++\n" + ref[k] + "\n");
+      }
+      texts.push(p.text);
+    }
+    if(!all_ok || (n_mine == 0)) {
+      whole_skipped += 1;
+      continue;
+    }
+    nodes = array{};
+    for(k : range(n_mine)) nodes.push(mine[k].node);
+    w = print_module(nodes);
+    if(!w.ok) {
+      whole_skipped += 1;
+      continue;
+    }
+    if(w.text == refs[0]) whole_same += 1 else {
+      whole_bad += 1;
+      write_out(f + ": модуль целиком, расхождение\n--- vish\n" + w.text + "--- C++\n" + refs[0]);
+    }
+    // round trip: the printed module is parsed by the same parser into the same nodes. The print removes the extra parentheses of an associative operator
+    // ((a + b) + c -> a + b + c, as in C++): the parse gives a chain, not nested operations - the tree is different, the print is the same (a fixed point)
+    again = module_items_of(w.text);
+    circle = again.size == n_mine;
+    if(!circle) write_out(f + ": круг печать→разбор: элементов " + text(again.size) + ", было " + text(n_mine) + "\n");
+    if(circle) for(k : range(n_mine)) {
+      if(!again[k].ok) {
+        circle = false;
+        write_out(f + ": круг печать→разбор, элемент " + text(k) + " — " + again[k].why + "\n--- напечатано\n" + texts[k] + "\n");
+      } else if(dump_code(again[k].node) != dump_code(mine[k].node)) {
+        again_p = print_code(again[k].node);
+        if(again_p.ok && (again_p.text == texts[k])) circle_fix += 1 else {
+          circle = false;
+          write_out(f + ": круг печать→разбор, элемент " + text(k) + " — другое дерево\n--- напечатано\n" + texts[k] + "\n");
+        }
+      }
+    }
+    if(circle) circle_same += 1 else circle_bad += 1;
+  }
+  write_out("принтер, модули: элементов " + text(total) + ", совпало " + text(same) + ", не поддержано " + text(unsupported) + ", расхождений " + text(bad) + " (без дерева у парсера на Vish: " + text(no_tree) + ", файлов пропущено: " + text(skipped_files) + ")\n");
+  for(j : range(reasons.size)) write_out("  " + reasons[j] + " — " + text(counts[j]) + "\n");
+  write_out("  без дерева у парсера на Vish (Э4, не принтер):\n");
+  for(j : range(tree_reasons.size)) write_out("    " + tree_reasons[j] + " — " + text(tree_counts[j]) + "\n");
+  write_out("принтер, модуль целиком: совпало " + text(whole_same) + ", расхождений " + text(whole_bad) + ", не напечатано целиком " + text(whole_skipped) + "\n");
+  write_out("принтер, круг печать→разбор: модулей совпало " + text(circle_same) + ", расхождений " + text(circle_bad) + " (элементов с другим деревом при той же печати — цепочка вместо скобок ассоциативного оператора: " + text(circle_fix) + ")\n");
+  if((bad == 0) && ((whole_bad == 0) && (circle_bad == 0))) 0 else 1
+}
+
+// vish fmtcheck <files>: *.vish are modules (element by element, whole, round trip); the others are by expression in a line
+fmt_check_cli(es) {
+  lines_files = array{};
+  module_files = array{};
+  for(f : es) if(ends_with(f, ".vish")) module_files.push(f) else lines_files.push(f);
+  rc = 0;
+  if(lines_files.size > 0) rc = fmt_check_lines(lines_files);
+  if(module_files.size > 0) {
+    rc2 = fmt_check_modules(module_files);
+    if(rc2 != 0) rc = rc2;
+  }
+  rc
 }

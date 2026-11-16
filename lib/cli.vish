@@ -223,7 +223,8 @@ cli(args) {
     return run_module("parser", "expr_check_cli", files);
   }
   if(cmd == "fmtcheck") {
-    // vish fmtcheck <corpus>: the expression printer in the language (lib/printer.vish, E5) against the C++ print (stage0), byte by byte
+    // vish fmtcheck <files>: the printer in the language (lib/printer.vish, E5) against the C++ print (stage0), byte by byte: *.vish files are modules (elements,
+    // the whole module, the print -> parse round trip), the others are by expression in a line
     files = array{};
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("printer", "fmt_check_cli", files);

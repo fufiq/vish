@@ -88,6 +88,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # E5 (the porting plan): the expression printer in Vish (lib/printer.vish) against the C++ stage0 print, byte by byte
     ( $b fmtcheck tests/data/expr_corpus.txt tests/data/expr_random.txt tests/data/expr_construct.txt tests/data/fmtcheck/*.txt ) > $L/t_fmt.log 2>&1
     echo "fmt: код $?" > $L/r_fmt
+    # E5-2: instructions, blocks and declarations in Vish - every module element, the whole module and the print -> parse round trip against C++ stage0
+    ( $b fmtcheck tests/*.vish tests/data/modcheck/*.vish tests/data/fmtcheck/*.vish ) > $L/t_fmtmod.log 2>&1
+    echo "fmtmod: код $?" > $L/r_fmtmod
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules

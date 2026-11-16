@@ -1,0 +1,29 @@
+// E5-2: declarations - functions (modes, types, clauses, operators), struct, variables, use, ct
+use geo.vec;
+use geo.vec.{norm, dot};
+[[state]] counter = 0;
+ct limit = 3;
+int plain(int a, str b) { a }
+str named(mut a, own b, out c, expr d, ct e) => a;
+packed(...xs) => xs;
+typed(int... xs, explicit int y) => y;
+[[inline]] [[hot]] attrs(x) => x;
+[[tag]] struct point { int x; ct int y = 5; }
+struct pair { int a; int b = 1; }
+struct child : point { int z; }
+operator -(a) => a;
+operator (a) + (b) { a }
+operator (a)++ => a;
+operator (a)[i] => a;
+operator (i64 a) - (i64 b) => sub(a, b);
+[[associative]] operator (str a) * (str b) { mul(a, b) }
+f() {
+  ct n = 1;
+  ct 2;
+  s = array{1, 2, 3};
+  t = array{};
+  u = pair{1, 2};
+  const_like = 0;
+  n
+}
+empty() => 0;
