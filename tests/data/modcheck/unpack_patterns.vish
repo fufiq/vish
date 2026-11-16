@@ -1,0 +1,7 @@
+f(p, q) {
+  point{x, y} = p;
+  {a: u, b: w} = q;
+  pair{int n, ...rest} = p;
+  outer{inner{c}, (1)} = q;
+  0
+}
