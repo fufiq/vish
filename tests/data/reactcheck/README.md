@@ -1,7 +1,10 @@
-RA-2 (mine, 2026-11-16; fixes after the review - the same day, two cycles)
+RA-2 (mine, 2026-11-16; fixes after the review - the same day, three cycles)
 
 The API is documented in lib/reactive.vish (the header). Values may have different types;
-the comparator passed to new_db must support all the types in use.
+the comparator passed to new_db must support all the types in use. The recommended comparator is
+`(a,b) => deep_equal(a,b)` (STRUCTURAL equality: the type at each level and the content of arrays/tuples/struct, not text();
+the Vish `==` on values of different types is a program error, not false). It also compares query exceptions
+(early cutoff of errors): `array{1}` and `array{"1"}`, `array{"a, b"}` and `array{"a","b"}`, `1` and `1.0`, `true` and `"true"` are different.
 For code, compare parser.dump_code, as in modcheck_demo.vish.
 Queries are pure; set_input/query_define/watch/batch during the computation of a query or
 notifications are an explicit refusal "reactive: change during ...". A query exception clears the stack; an error is
@@ -17,17 +20,25 @@ of the dependencies in order, stopping at the first one that changed; a failed r
 of the stored error (a change of the exception - including the type with the same text - and the appearance/fix of a key
 recompute the parent). Subscription delivery: the order is by read-set; an edge cycle does not interrupt delivery.
 
-Run: out/vish reactcheck [seed] [steps]. The oracle: 12 queries (7 kinds: sum, minimum, concatenation,
-a conditional read, a guard with an exception, catching a read error, an optional key), inputs, optional
-keys, repeated query definitions, subscriptions; push and pull against a naive recursive recomputation,
-a structural audit of the edges, subscription delivery. Kinds 7 and 8 are exceptions of DIFFERENT types with the same text
-and a typed catch (`catch(str e)`); the oracle's output includes the exception type. The statistics check:
-accesses == computations + hits + refusals, computations == the independent count of query function executions
-(a counter in the lambdas themselves), cutoffs <= computations. Then the fixed cases (regressions of both review cycles:
-B1/B2, M1, M2, depth; a typed catch, a caught cycle + an independent subscriber, a failed diamond of depth 20,
-a depth error and set_max_depth).
-Examples with modules next to the program and a mutation check of the oracle (8 mutations, all must be caught):
-sh tests/data/reactcheck/run.sh out/vish.
+Run: out/vish reactcheck [seed] [steps]. The oracle: 12 queries (11 kinds: sum, minimum, concatenation,
+a conditional read, a guard with an exception, catching a read error, an optional key, a "thrower", a typed
+catch, a catch with a report, an array result), inputs, optional keys, repeated query definitions,
+subscriptions; push and pull against a naive recursive recomputation, a structural audit of the edges, subscription delivery.
+Kind 7 throws an exception of one of 22 kinds (numbers, strings, arrays, nested arrays, a struct, tuples, bool, f64,
+an empty array/string; many pairs have the SAME text for different types/structure); kind 8 is a typed catch
+(`catch(str e)`); kind 9 is a catch with a report (a hash of the exception's full structural record), kind 10 is an array result
+(early cutoff of arrays). The oracle's output is the structural record `rx_ser` (independent of `deep_equal`).
+Batches are flat and NESTED (steps modulo 3). The statistics check: accesses == computations + hits + refusals;
+computations == the independent count of query function executions (a counter in the lambdas themselves); cutoffs == the independent exact
+count of "the execution result matched the previous one by rx_ser" (before - only <= computations). Notifications: per batch
+(including a nested one) a subscriber gets exactly one notification when its query does not fail and the value differs from
+the last delivered one (an exact count at every step and for every database). Then the fixed cases (regressions of the three review
+cycles: B1/B2, M1, M2, depth; a typed catch, a caught cycle + an independent subscriber, a failed diamond of depth 20,
+a depth error and set_max_depth; H1 - the truth table of `deep_equal` over 22x22 kinds, all pairs of exceptions with one text
+and neighbouring kinds through a query/catch/consumer in push and pull, the reviewer's regressions `array{1}`->`array{"1"}` and
+`array{"a, b"}`->`array{"a","b"}`, early cutoff of arrays with exact numbers, nested batches).
+Examples with modules next to the program and a mutation check of the oracle (14 mutations, all must be caught;
+a-h are the earlier ones, i-l are the third-cycle reviewer's mutations 9-12, m-n are our own for `deep_equal`): sh tests/data/reactcheck/run.sh out/vish.
 
 Basis: the author's earlier remark, confirmed:
 "then only what is inside the brackets is parsed". The original is checked.

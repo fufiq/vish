@@ -16,7 +16,7 @@ module reactive;
 // Redefining a query resets its read-set; the value stays for early cutoff.
 // A query's RESULT is a value OR an exception (RA-2, the second review cycle): an error is cached the same way as a value,
 // with its own read-set and revision, and takes part in early cutoff: the revision does not change if the new exception
-// has the same type (typeof) and the same value. A reader of a failed query depends on its revision as on a value:
+// structurally equal to the previous one (deep_equal: the type and the content at each level). A reader of a failed query depends on its revision as on a value:
 // a change of the exception (including the type with the same text - `throw 1` -> `throw "1"`) recomputes the catcher;
 // a diamond with an error is counted linearly, not 2^n. A later definition/fix of a key (including an undefined one;
 // a stub key is created on a read from a query) recomputes the parent.
@@ -128,8 +128,29 @@ rx_changed(mut ch_db, ch_d) {
   try { rx_eval(ch_db, ch_d[0]); } catch(ch_e) { }
   return ch_db.revs[ch_d[0]] != ch_d[1];
 }
-// An exception is the same if the type and the value (text) match: `throw 1` and `throw "1"` are different exceptions.
-rx_same_exc(se_a, se_b) { return (typeof(se_a) == typeof(se_b)) && (text(se_a) == text(se_b)); }
+// STRUCTURAL equality of values (RA-2, the third review cycle, B1): the type at each level and recursively the content -
+// the elements of arrays/tuples (the number and the order), the fields of a struct. It does not rely on text(): `array{1}` and `array{"1"}`,
+// `array{"a, b"}` and `array{"a","b"}`, `1` and `"1"`, `1` and `1.0`, `true` and `"true"` are DIFFERENT values. The Vish `==` for values
+// of different types is not a result but a program error, so the types are compared before the values. Conservatively "not equal"
+// (the cutoff does not fire - safe): functions and value types, f64 NaN (NaN != NaN). Values are trees, there are no cycles.
+// The recommended comparator for new_db: (a,b) => deep_equal(a,b).
+deep_equal(de_a, de_b) {
+  de_t = typeof(de_a);
+  if(de_t != typeof(de_b)) return false;
+  if((de_t == array) || (de_t == tuple)) {
+    if(de_a.size != de_b.size) return false;
+    for(de_i : range(de_a.size)) if(!deep_equal(de_a[de_i],de_b[de_i])) return false;
+    return true;
+  }
+  if((de_t == i64) || (de_t == str) || (de_t == f64) || (de_t == bool)) return de_a == de_b;
+  de_n = text(de_t);
+  if(de_n == "unit") return true;
+  if((de_n == "fn") || (de_n == "type") || (text(type_family(de_t)) != de_n)) return false;
+  for(de_f : ct fields(de_t)) if(!deep_equal(de_a.[de_f],de_b.[de_f])) return false;
+  return true;
+}
+// An exception is the same if structurally equal (the type and the content at each level).
+rx_same_exc(se_a, se_b) => deep_equal(se_a,se_b);
 // A stored query result: a value or an exception.
 rx_result(mut rs_db, rs_i) {
   if(rs_db.errs[rs_i].size > 0) throw rs_db.errs[rs_i][0];
@@ -292,11 +313,65 @@ rx_less(rl_a,rl_b) { for(rl_i : range(if(rl_a.size < rl_b.size) rl_a.size else r
 // The specification of query n: [kind, a, b, n], references a,b < n (the graph is acyclic). Kinds: 0 sum%1000, 1 minimum, 2 concatenation,
 // 3 conditional read (a even -> b, otherwise a), 4 "guard" (throws at a%5==0), 5 catching a read error of a (-> "0"),
 // 6 an optional key "opt"+(a%3) (absent -> "0"; catching an undefined key),
-// 7 a "mixed-type throw" (at a%4==1 it returns a; otherwise it throws a number or a string with the same text a%2 - the type
-// is chosen by (a/4)%2), 8 a typed catch of a read of a (a string -> "2", another exception -> "3").
+// 7 a "mixed-type throw" (at a%4==1 it returns a; otherwise it throws a value of one of 22 rx_payload kinds - numbers,
+// strings, arrays, nested arrays, a struct, tuples, bool, f64 - with the same text for different types/structure;
+// the kind is chosen by (a/2)%22, the parameter a%2), 8 a typed catch of a read of a (a string -> "2", another exception -> "3"),
+// 9 a catch with a report (a read exception of a -> the hash of the exception's full structural record %1000, otherwise the value of a),
+// 10 an ARRAY result array{text(a%3), text(a%2)} (early cutoff by arrays). An array value is read as its element 0 (rx_norm).
 rx_rand(mut rr_state) { rr_state = ((rr_state * 1664525) + 1013904223) % 2147483647; return rr_state; }
-rx_spec(mut sp_seed, sp_n) {
-  sp_k = rx_rand(sp_seed) % 9; sp_a = rx_rand(sp_seed) % sp_n; sp_b = rx_rand(sp_seed) % sp_n;
+struct rx_box { array v; }
+// A structural record of a value (the ORACLE, independent of deep_equal): the type, the content; nested parts with a length - without ambiguity.
+rx_ser(sr_v) {
+  sr_t = typeof(sr_v);
+  if((sr_t == array) || (sr_t == tuple)) {
+    sr_s = text(sr_t) + "[";
+    for(sr_i : range(sr_v.size)) { sr_e = rx_ser(sr_v[sr_i]); sr_s = sr_s + text(sr_e.size) + "~" + sr_e; }
+    return sr_s + "]";
+  }
+  if((sr_t == i64) || (sr_t == str) || (sr_t == f64) || (sr_t == bool)) return text(sr_t) + ":" + text(sr_v);
+  sr_n = text(sr_t);
+  if(sr_n == "unit") return "unit:";
+  if((sr_n == "fn") || (sr_n == "type") || (text(type_family(sr_t)) != sr_n)) return "?" + sr_n;
+  sr_s = sr_n + "{";
+  for(sr_f : ct fields(sr_t)) { sr_e = rx_ser(sr_v.[sr_f]); sr_s = sr_s + sr_f.name + "=" + text(sr_e.size) + "~" + sr_e + ";"; }
+  return sr_s + "}";
+}
+// A value in the oracle's output: a scalar - text (as before), a compound - a structural record.
+rx_vtext(vt_v) => if((typeof(vt_v) == array) || (typeof(vt_v) == tuple)) rx_ser(vt_v) else text(vt_v);
+// An array value is read as a string, its element 0.
+rx_norm(nm_v) => if(typeof(nm_v) == array) nm_v[0] else nm_v;
+// 22 exception kinds: at n=0/1 many pairs give the SAME text() for different types or structure.
+rx_payload(pv_k, pv_n) {
+  if(pv_k == 0) return pv_n;
+  if(pv_k == 1) return text(pv_n);
+  if(pv_k == 2) return array{pv_n};
+  if(pv_k == 3) return array{text(pv_n)};
+  if(pv_k == 4) return array{array{pv_n}};
+  if(pv_k == 5) return array{array{text(pv_n)}};
+  if(pv_k == 6) return rx_box{array{pv_n}};
+  if(pv_k == 7) return rx_box{array{text(pv_n)}};
+  if(pv_k == 8) return f64(pv_n);
+  if(pv_k == 9) return pv_n == 1;
+  if(pv_k == 10) return text(pv_n == 1);
+  if(pv_k == 11) return array{};
+  if(pv_k == 12) return "";
+  if(pv_k == 13) return array{"a, b"};
+  if(pv_k == 14) return array{"a","b"};
+  if(pv_k == 15) return array{pv_n,"a"};
+  if(pv_k == 16) return array{text(pv_n),"a"};
+  if(pv_k == 17) return array{pv_n,text(pv_n)};
+  if(pv_k == 18) return array{text(pv_n),pv_n};
+  if(pv_k == 19) return array{f64(pv_n)};
+  if(pv_k == 20) return array{pv_n == 1};
+  return array{text(pv_n == 1)};
+}
+rx_spec(mut sp_seed, sp_n, sp_specs) {
+  sp_k = rx_rand(sp_seed) % 11; sp_a = rx_rand(sp_seed) % sp_n; sp_b = rx_rand(sp_seed) % sp_n;
+  // a "catch with a report" (kind 9) reads the "thrower" query (kind 7) where possible: so a change of the exception structure is visible to the consumer
+  if(sp_k == 9) {
+    sp_c = array{}; for(sp_i : range(sp_specs.size)) if((sp_i + 5) < sp_n) if(sp_specs[sp_i][0] == 7) sp_c.push(sp_i + 5);
+    if(sp_c.size > 0) sp_a = sp_c[sp_b % sp_c.size];
+  }
   return array{sp_k,sp_a,sp_b,sp_n};
 }
 rx_naive(rn_specs, rn_inputs, rn_opts, rn_i, mut rn_count) {
@@ -308,12 +383,15 @@ rx_naive(rn_specs, rn_inputs, rn_opts, rn_i, mut rn_count) {
   if(rn_s[0] == 8) {
     try { return rx_naive(rn_specs,rn_inputs,rn_opts,rn_s[1],rn_count); } catch(str rn_e) { return "2"; } catch(rn_e) { return "3"; }
   }
-  rn_a = rx_naive(rn_specs,rn_inputs,rn_opts,rn_s[1],rn_count);
+  if(rn_s[0] == 9) {
+    try { return rx_norm(rx_naive(rn_specs,rn_inputs,rn_opts,rn_s[1],rn_count)); } catch(rn_e) { return text(rx_hash(rx_ser(rn_e)) % 1000); }
+  }
+  rn_a = rx_norm(rx_naive(rn_specs,rn_inputs,rn_opts,rn_s[1],rn_count));
+  if(rn_s[0] == 10) return array{text(parse_int(rn_a).value % 3),text(parse_int(rn_a).value % 2)};
   if(rn_s[0] == 7) {
     rn_x = parse_int(rn_a).value;
     if((rn_x % 4) == 1) return rn_a;
-    if(((rn_x / 4) % 2) == 0) throw rn_x % 2;
-    throw text(rn_x % 2);
+    throw rx_payload((rn_x / 2) % 22,rn_x % 2);
   }
   if(rn_s[0] == 6) {
     rn_j = parse_int(rn_a).value % 3;
@@ -329,7 +407,7 @@ rx_naive(rn_specs, rn_inputs, rn_opts, rn_i, mut rn_count) {
     if((rn_x % 5) == 0) throw "boom" + text(rn_s[3]);
     return text((rn_x + 1) % 1000);
   }
-  rn_b = rx_naive(rn_specs,rn_inputs,rn_opts,rn_s[2],rn_count);
+  rn_b = rx_norm(rx_naive(rn_specs,rn_inputs,rn_opts,rn_s[2],rn_count));
   if(rn_s[0] == 2) return rn_a + rn_b;
   rn_x = parse_int(rn_a).value; rn_y = parse_int(rn_b).value;
   if(rn_s[0] == 1) return text(if(rn_x < rn_y) rn_x else rn_y);
@@ -342,12 +420,15 @@ rx_formula(mut fm_db, fm_s) {
   if(fm_s[0] == 8) {
     try { return get(fm_db,text(fm_s[1])); } catch(str fm_e) { return "2"; } catch(fm_e) { return "3"; }
   }
-  fm_a = get(fm_db,text(fm_s[1]));
+  if(fm_s[0] == 9) {
+    try { return rx_norm(get(fm_db,text(fm_s[1]))); } catch(fm_e) { return text(rx_hash(rx_ser(fm_e)) % 1000); }
+  }
+  fm_a = rx_norm(get(fm_db,text(fm_s[1])));
+  if(fm_s[0] == 10) return array{text(parse_int(fm_a).value % 3),text(parse_int(fm_a).value % 2)};
   if(fm_s[0] == 7) {
     fm_x = parse_int(fm_a).value;
     if((fm_x % 4) == 1) return fm_a;
-    if(((fm_x / 4) % 2) == 0) throw fm_x % 2;
-    throw text(fm_x % 2);
+    throw rx_payload((fm_x / 2) % 22,fm_x % 2);
   }
   if(fm_s[0] == 6) {
     fm_j = parse_int(fm_a).value % 3;
@@ -362,24 +443,33 @@ rx_formula(mut fm_db, fm_s) {
     if((fm_x % 5) == 0) throw "boom" + text(fm_s[3]);
     return text((fm_x + 1) % 1000);
   }
-  fm_b = get(fm_db,text(fm_s[2]));
+  fm_b = rx_norm(get(fm_db,text(fm_s[2])));
   if(fm_s[0] == 2) return fm_a + fm_b;
   fm_x = parse_int(fm_a).value; fm_y = parse_int(fm_b).value;
   if(fm_s[0] == 1) return text(if(fm_x < fm_y) fm_x else fm_y);
   return text((fm_x + fm_y) % 1000);
 }
-// df_ex is an independent counter of query function executions (the oracle compares it with stats()[0]).
-rx_define(mut df_db, df_key, df_spec, df_ex) {
-  df_copy = array{df_spec[0],df_spec[1],df_spec[2],df_spec[3]};
-  query_define(df_db,df_key,(mut df_inner) => { df_ex[0] = df_ex[0] + 1; return rx_formula(df_inner,df_copy); });
+// df_ex are INDEPENDENT counters (the oracle compares them with stats()): df_ex[0] - query function executions (== stats[0]),
+// df_ex[1] - the expected cutoffs: the execution result (a value or an exception, the structural record rx_ser) matched
+// the previous result of the same key (== stats[2]; the previous result survives a redefinition). df_last[key-5] is the previous result.
+rx_define(mut df_db, df_key, df_spec, df_ex, df_last) {
+  df_copy = array{df_spec[0],df_spec[1],df_spec[2],df_spec[3]}; df_slot = parse_int(df_key).value - 5;
+  query_define(df_db,df_key,(mut df_inner) => {
+    df_ex[0] = df_ex[0] + 1; df_fail = false; df_exc = 0; df_val = 0; df_res = "";
+    try { df_val = rx_formula(df_inner,df_copy); df_res = "V" + rx_ser(df_val); } catch(df_e) { df_fail = true; df_exc = df_e; df_res = "E" + rx_ser(df_e); }
+    if(df_last[df_slot] == df_res) df_ex[1] = df_ex[1] + 1;
+    df_last[df_slot] = df_res;
+    if(df_fail) throw df_exc;
+    return df_val;
+  });
 }
-// An exception in the oracle's output has a type: `throw 1` and `throw "1"` are distinguished.
-rx_exc_text(xt_e) => text(typeof(xt_e)) + ":" + text(xt_e);
+// An exception in the oracle's output - structurally: the type and the content at each level.
+rx_exc_text(xt_e) => rx_ser(xt_e);
 rx_out_naive(rn_specs, rn_inputs, rn_opts, rn_i, mut rn_count) {
-  try { return "V" + rx_naive(rn_specs,rn_inputs,rn_opts,rn_i,rn_count); } catch(rn_e) { return "E" + rx_exc_text(rn_e); }
+  try { return "V" + rx_vtext(rx_naive(rn_specs,rn_inputs,rn_opts,rn_i,rn_count)); } catch(rn_e) { return "E" + rx_exc_text(rn_e); }
 }
 rx_out_get(mut og_db, og_key) {
-  try { return "V" + text(get(og_db,og_key)); } catch(og_e) { return "E" + rx_exc_text(og_e); }
+  try { return "V" + rx_vtext(get(og_db,og_key)); } catch(og_e) { return "E" + rx_exc_text(og_e); }
 }
 // The structural invariant: users[d] contains i <=> d in deps[i]; the computation stacks are empty.
 rx_audit(au_db) {
@@ -393,39 +483,52 @@ rx_audit(au_db) {
   return au_bad;
 }
 // Counter consistency: accesses == computations + hits + refusals; computations == the independent count of executions
-// of query functions; cutoffs are no more than computations. Returns the number of violations.
+// of query functions; cutoffs == independently counted ones (the result matched the previous one by rx_ser). Returns the number of violations.
 rx_audit_stats(as_db, as_ex) {
   as_c = stats_all(as_db); as_bad = 0;
   if(as_c[3] != (as_c[0] + as_c[1] + as_c[4])) as_bad = as_bad + 1;
   if(as_c[0] != as_ex[0]) as_bad = as_bad + 1;
   if(as_c[2] > as_c[0]) as_bad = as_bad + 1;
+  if(as_c[2] != as_ex[1]) as_bad = as_bad + 1;
   return as_bad;
 }
-rx_apply(mut ap_db, ap_ops, ap_ex) {
+rx_apply(mut ap_db, ap_ops, ap_ex, ap_last) {
   for(ap_o : ap_ops) {
     if(ap_o[0] == 0) set_input(ap_db,text(ap_o[1]),ap_o[2]);
-    else if(ap_o[0] == 1) rx_define(ap_db,text(ap_o[1]),ap_o[3],ap_ex);
+    else if(ap_o[0] == 1) rx_define(ap_db,text(ap_o[1]),ap_o[3],ap_ex,ap_last);
     else set_input(ap_db,"opt" + text(ap_o[1]),ap_o[2]);
   }
 }
 rx_watch(mut rw_db, rw_key, rw_handler) { rw_v = get(rw_db,rw_key); watch(rw_db,rw_key,rw_handler); return rw_v; }
-rx_try_batch(mut tb_db, tb_ops, tb_ex) { try { batch(tb_db) { rx_apply(tb_db,tb_ops,tb_ex); } } catch(tb_e) { return 1; } return 0; }
+rx_sub(sb_ops, sb_from, sb_to) { sb_r = array{}; for(sb_i : range(sb_to - sb_from)) sb_r.push(sb_ops[sb_from + sb_i]); return sb_r; }
+// A batch of three operations: tb_mode 0 - flat, 1 - batch{ batch{o0}; o1; o2 }, 2 - batch{ batch{ o0; batch{o1} }; o2 } (nested: operations AFTER
+// the inner batch, delivery ONCE on leaving the outer one: the intermediate state is not delivered).
+rx_try_batch(mut tb_db, tb_ops, tb_ex, tb_last, tb_mode) {
+  try {
+    if(tb_mode == 0) { batch(tb_db) { rx_apply(tb_db,tb_ops,tb_ex,tb_last); } return 0; }
+    if(tb_mode == 1) { batch(tb_db) { batch(tb_db) { rx_apply(tb_db,rx_sub(tb_ops,0,1),tb_ex,tb_last); } rx_apply(tb_db,rx_sub(tb_ops,1,3),tb_ex,tb_last); } return 0; }
+    batch(tb_db) { batch(tb_db) { rx_apply(tb_db,rx_sub(tb_ops,0,1),tb_ex,tb_last); batch(tb_db) { rx_apply(tb_db,rx_sub(tb_ops,1,2),tb_ex,tb_last); } } rx_apply(tb_db,rx_sub(tb_ops,2,3),tb_ex,tb_last); }
+  } catch(tb_e) { return 1; }
+  return 0;
+}
 react_check_cli(rc_av) {
   rc_seed = 1; rc_steps = 300;
   if(rc_av.size > 0) rc_seed = parse_int(rc_av[0]).value;
   if(rc_av.size > 1) rc_steps = parse_int(rc_av[1]).value;
-  rc_push = new_db(true,(a,b) => a == b); rc_pull = new_db(false,(a,b) => a == b);
+  rc_push = new_db(true,(a,b) => deep_equal(a,b)); rc_pull = new_db(false,(a,b) => deep_equal(a,b));
   rc_inputs = array{}; rc_opts = array{"","",""}; rc_specs = array{}; rc_bad = 0; rc_naive = 0;
   rc_redef = 0; rc_errs = 0; rc_events = array{0}; rc_flusherr = 0;
   rc_last = array{array{"","",""},array{"","",""}}; rc_reg = array{array{false,false,false},array{false,false,false}};
-  rc_dups = array{0}; rc_wkeys = array{"9","12","16"}; rc_expush = array{0}; rc_expull = array{0}; rc_statbad = 0;
+  rc_dups = array{0}; rc_wkeys = array{"9","12","16"}; rc_expush = array{0,0}; rc_expull = array{0,0}; rc_statbad = 0;
+  rc_lpush = array{}; rc_lpull = array{}; for(rc_i : range(12)) { rc_lpush.push(""); rc_lpull.push(""); }
+  rc_evd = array{0,0}; rc_evbad = 0; rc_nested = 0;
   for(rc_i : range(5)) {
     rc_v = text(rx_rand(rc_seed) % 20); rc_inputs.push(rc_v);
     set_input(rc_push,text(rc_i),rc_v); set_input(rc_pull,text(rc_i),rc_v);
   }
   for(rc_i : range(12)) {
-    rc_s = rx_spec(rc_seed,rc_i + 5); rc_specs.push(rc_s);
-    rx_define(rc_push,text(rc_i + 5),rc_s,rc_expush); rx_define(rc_pull,text(rc_i + 5),rc_s,rc_expull);
+    rc_s = rx_spec(rc_seed,rc_i + 5,rc_specs); rc_specs.push(rc_s);
+    rx_define(rc_push,text(rc_i + 5),rc_s,rc_expush,rc_lpush); rx_define(rc_pull,text(rc_i + 5),rc_s,rc_expull,rc_lpull);
   }
   for(rc_step : range(rc_steps)) {
     rc_ops = array{};
@@ -435,21 +538,35 @@ react_check_cli(rc_av) {
         rc_at = rx_rand(rc_seed) % 5; rc_v = text(rx_rand(rc_seed) % 20); rc_inputs[rc_at] = rc_v;
         rc_ops.push(array{0,rc_at,rc_v,array{}});
       } else if(rc_r < 8) {
-        rc_q = rx_rand(rc_seed) % 12; rc_s = rx_spec(rc_seed,rc_q + 5); rc_specs[rc_q] = rc_s;
+        rc_q = rx_rand(rc_seed) % 12; rc_s = rx_spec(rc_seed,rc_q + 5,rc_specs); rc_specs[rc_q] = rc_s;
         rc_ops.push(array{1,rc_q + 5,"",rc_s}); rc_redef = rc_redef + 1;
       } else {
         rc_at = rx_rand(rc_seed) % 3; rc_v = text(rx_rand(rc_seed) % 20); rc_opts[rc_at] = rc_v;
         rc_ops.push(array{2,rc_at,rc_v,array{}});
       }
     }
-    rc_flusherr = rc_flusherr + rx_try_batch(rc_push,rc_ops,rc_expush) + rx_try_batch(rc_pull,rc_ops,rc_expull);
+    // A snapshot before the batch: who is subscribed, the last value, the number of notifications (the exact notification count is checked afterwards).
+    rc_regb = array{array{false,false,false},array{false,false,false}}; rc_lastb = array{array{"","",""},array{"","",""}}; rc_evb = array{rc_evd[0],rc_evd[1]};
+    for(rc_d : range(2)) for(rc_w : range(3)) { rc_regb[rc_d][rc_w] = rc_reg[rc_d][rc_w]; rc_lastb[rc_d][rc_w] = rc_last[rc_d][rc_w]; }
+    rc_mode = rc_step % 3; if(rc_mode > 0) rc_nested = rc_nested + 1;
+    rc_flusherr = rc_flusherr + rx_try_batch(rc_push,rc_ops,rc_expush,rc_lpush,rc_mode) + rx_try_batch(rc_pull,rc_ops,rc_expull,rc_lpull,rc_mode);
+    // The exact count: per batch (including a nested one) a subscriber gets no more than one notification: exactly when its query now does not fail
+    // and its value differs from the last delivered one. The intermediate states of nested batches are not delivered.
+    for(rc_d : range(2)) {
+      rc_want = 0;
+      for(rc_w : range(3)) if(rc_regb[rc_d][rc_w]) {
+        rc_expected = rx_out_naive(rc_specs,rc_inputs,rc_opts,parse_int(rc_wkeys[rc_w]).value,rc_naive);
+        if(rc_expected[0] == 86) if("V" + rc_lastb[rc_d][rc_w] != rc_expected) rc_want = rc_want + 1;
+      }
+      if((rc_evd[rc_d] - rc_evb[rc_d]) != rc_want) rc_evbad = rc_evbad + 1;
+    }
     // Subscriptions on keys 9/12/16: registered when the query does not fail (watch throws on a query error).
     for(rc_w : range(3)) for(rc_d : range(2)) if(!rc_reg[rc_d][rc_w]) {
       rc_wi = rc_w; rc_di = rc_d;
       try {
-        if(rc_d == 0) rc_init = rx_watch(rc_push,rc_wkeys[rc_w],(k,v) => { if(rc_last[rc_di][rc_wi] == v) rc_dups[0] = rc_dups[0] + 1; rc_last[rc_di][rc_wi] = v; rc_events[0] = rc_events[0] + 1; });
-        else rc_init = rx_watch(rc_pull,rc_wkeys[rc_w],(k,v) => { if(rc_last[rc_di][rc_wi] == v) rc_dups[0] = rc_dups[0] + 1; rc_last[rc_di][rc_wi] = v; rc_events[0] = rc_events[0] + 1; });
-        rc_last[rc_d][rc_w] = rc_init; rc_reg[rc_d][rc_w] = true;
+        if(rc_d == 0) rc_init = rx_watch(rc_push,rc_wkeys[rc_w],(k,v) => { rc_sv = rx_vtext(v); if(rc_last[rc_di][rc_wi] == rc_sv) rc_dups[0] = rc_dups[0] + 1; rc_last[rc_di][rc_wi] = rc_sv; rc_events[0] = rc_events[0] + 1; rc_evd[rc_di] = rc_evd[rc_di] + 1; });
+        else rc_init = rx_watch(rc_pull,rc_wkeys[rc_w],(k,v) => { rc_sv = rx_vtext(v); if(rc_last[rc_di][rc_wi] == rc_sv) rc_dups[0] = rc_dups[0] + 1; rc_last[rc_di][rc_wi] = rc_sv; rc_events[0] = rc_events[0] + 1; rc_evd[rc_di] = rc_evd[rc_di] + 1; });
+        rc_last[rc_d][rc_w] = rx_vtext(rc_init); rc_reg[rc_d][rc_w] = true;
       } catch(rc_e) { }
     }
     rc_all = rx_rand(rc_seed) % 2;
@@ -470,8 +587,8 @@ react_check_cli(rc_av) {
     rc_bad = rc_bad + rx_audit(rc_push) + rx_audit(rc_pull);
     rc_statbad = rc_statbad + rx_audit_stats(rc_push,rc_expush) + rx_audit_stats(rc_pull,rc_expull);
   }
-  rc_bad = rc_bad + rc_dups[0] + rc_statbad; rc_rand = rc_bad; rc_fixed = rx_cases(); rc_bad = rc_bad + rc_fixed;
-  print("reactcheck: шагов=" + text(rc_steps) + " запросов=12 push=" + text(stats(rc_push)[0]) + " pull=" + text(stats(rc_pull)[0]) + " наивно=" + text(rc_naive) + " доля%=" + text((stats(rc_push)[0] * 100) / rc_naive) + " переопределений=" + text(rc_redef) + " ошибок=" + text(rc_errs) + " уведомлений=" + text(rc_events[0]) + " повторных=" + text(rc_dups[0]) + " статистика_нарушений=" + text(rc_statbad) + " попаданий=" + text(stats(rc_push)[1]) + "/" + text(stats(rc_pull)[1]) + " отсечений=" + text(stats(rc_push)[2]) + "/" + text(stats(rc_pull)[2]) + " случайных_нарушений=" + text(rc_rand) + " фиксированных_нарушений=" + text(rc_fixed) + " нарушений=" + text(rc_bad));
+  rc_bad = rc_bad + rc_dups[0] + rc_statbad + rc_evbad; rc_rand = rc_bad; rc_fixed = rx_cases(); rc_bad = rc_bad + rc_fixed;
+  print("reactcheck: шагов=" + text(rc_steps) + " запросов=12 push=" + text(stats(rc_push)[0]) + " pull=" + text(stats(rc_pull)[0]) + " наивно=" + text(rc_naive) + " доля%=" + text((stats(rc_push)[0] * 100) / rc_naive) + " переопределений=" + text(rc_redef) + " ошибок=" + text(rc_errs) + " уведомлений=" + text(rc_events[0]) + " повторных=" + text(rc_dups[0]) + " вложенных_пакетов=" + text(rc_nested) + " уведомлений_нарушений=" + text(rc_evbad) + " статистика_нарушений=" + text(rc_statbad) + " попаданий=" + text(stats(rc_push)[1]) + "/" + text(stats(rc_pull)[1]) + " отсечений=" + text(stats(rc_push)[2]) + "/" + text(stats(rc_pull)[2]) + " ожидаемых_отсечений=" + text(rc_expush[1]) + "/" + text(rc_expull[1]) + " случайных_нарушений=" + text(rc_rand) + " фиксированных_нарушений=" + text(rc_fixed) + " нарушений=" + text(rc_bad));
   return if(rc_bad == 0) 0 else 1;
 }
 
@@ -578,6 +695,7 @@ rx_cases() {
   query_define(cs_db,"r",(mut d) => get(d,"q") + 10);
   get(cs_db,"r"); cs_before = stats(cs_db)[0]; set_input(cs_db,"x",4); get(cs_db,"r");
   rx_expect(cs_bad,"cutoff evals",stats(cs_db)[0] - cs_before,1);
+  rx_expect(cs_bad,"cutoff count",stats(cs_db)[2],1);
   query_define(cs_db,"dyn",(mut d) => if(get(d,"q") == 0) get(d,"y") else get(d,"x"));
   get(cs_db,"dyn"); set_input(cs_db,"x",3); get(cs_db,"dyn");
   rx_expect(cs_bad,"dyn detached",rx_has(cs_db.users[rx_find(cs_db,"y")],rx_find(cs_db,"dyn")),false);
@@ -589,7 +707,7 @@ rx_cases() {
   rx_expect(cs_bad,"watch order",text(cs_events),"[q, r]");
   batch(cs_db) { set_input(cs_db,"y",1); set_input(cs_db,"x",10); }
   rx_expect(cs_bad,"watch once",cs_events.size,2);
-  return cs_bad + rx_cases_err();
+  return cs_bad + rx_cases_err() + rx_cases_val();
 }
 
 // ---- Fixed cases of the second review cycle: the exception type, a cycle and delivery, the error cache, depth ----
@@ -659,4 +777,87 @@ rx_cases_err() {
     rx_expect(ce_bad,ce_m + "depth caught audit",rx_audit(ce_db),0);
   }
   return ce_bad;
+}
+
+// ---- Fixed cases of the third review cycle: STRUCTURAL equality of values and exceptions, array cutoff, nested batches ----
+rx_pair_case(cv_push, cv_i, cv_j, mut cv_bad) {
+  cv_m = if(cv_push) "push " else "pull "; cv_name = cv_m + "payload " + text(cv_i) + "->" + text(cv_j) + ": ";
+  cv_db = new_db(cv_push,(a,b) => deep_equal(a,b)); set_input(cv_db,"v",0);
+  query_define(cv_db,"child",(mut d) => { if(get(d,"v") == 0) throw rx_payload(cv_i,1); throw rx_payload(cv_j,1); });
+  query_define(cv_db,"parent",(mut d) => { try { get(d,"child"); } catch(e) { return rx_ser(e); } return "none"; });
+  query_define(cv_db,"grand",(mut d) => get(d,"parent") + "!");
+  rx_expect(cv_bad,cv_name + "before",get(cv_db,"grand"),rx_ser(rx_payload(cv_i,1)) + "!");
+  set_input(cv_db,"v",1);
+  rx_expect(cv_bad,cv_name + "after",get(cv_db,"grand"),rx_ser(rx_payload(cv_j,1)) + "!");
+  rx_expect(cv_bad,cv_name + "uncaught",rx_out_get(cv_db,"child"),"E" + rx_ser(rx_payload(cv_j,1)));
+  set_input(cv_db,"v",0);
+  rx_expect(cv_bad,cv_name + "back",get(cv_db,"grand"),rx_ser(rx_payload(cv_i,1)) + "!");
+  rx_expect(cv_bad,cv_name + "audit",rx_audit(cv_db),0);
+}
+rx_cases_val() {
+  cv_bad = 0;
+  // the truth table of deep_equal against an independent structural record: 22 kinds x parameter 0/1, all pairs
+  cv_eq = 0; cv_ne = 0;
+  for(cv_i : range(22)) for(cv_n : range(2)) for(cv_j : range(22)) for(cv_m : range(2)) {
+    cv_a = rx_payload(cv_i,cv_n); cv_b = rx_payload(cv_j,cv_m);
+    cv_want = rx_ser(cv_a) == rx_ser(cv_b);
+    if(cv_want) cv_eq = cv_eq + 1 else cv_ne = cv_ne + 1;
+    if(deep_equal(cv_a,cv_b) != cv_want) { cv_bad = cv_bad + 1; print("reactcheck: случай deep_equal " + text(cv_i) + "/" + text(cv_n) + " vs " + text(cv_j) + "/" + text(cv_m) + ": получено " + text(!cv_want)); }
+  }
+  rx_expect(cv_bad,"deep_equal truth table sizes",text(cv_eq) + "/" + text(cv_ne),"52/1884");
+  rx_expect(cv_bad,"1 vs 1.0",deep_equal(1,1.0),false); rx_expect(cv_bad,"1 vs \"1\"",deep_equal(1,"1"),false);
+  rx_expect(cv_bad,"true vs \"true\"",deep_equal(true,"true"),false); rx_expect(cv_bad,"empty array vs empty str",deep_equal(array{},""),false);
+  rx_expect(cv_bad,"empty arrays",deep_equal(array{},array{}),true); rx_expect(cv_bad,"empty strs",deep_equal("",""),true);
+  rx_expect(cv_bad,"array 1 vs \"1\"",deep_equal(array{1},array{"1"}),false); rx_expect(cv_bad,"nested",deep_equal(array{array{1}},array{array{"1"}}),false);
+  rx_expect(cv_bad,"nested same",deep_equal(array{array{1,2},array{}},array{array{1,2},array{}}),true);
+  rx_expect(cv_bad,"cardinality",deep_equal(array{"a, b"},array{"a","b"}),false);
+  rx_expect(cv_bad,"struct field types",deep_equal(rx_box{array{1}},rx_box{array{"1"}}),false); rx_expect(cv_bad,"struct same",deep_equal(rx_box{array{1}},rx_box{array{1}}),true);
+  rx_expect(cv_bad,"tuple order",deep_equal(array{1,"1"},array{"1",1}),false);
+  // exceptions of a DIFFERENT type/structure with one text: the consumer catches and reports the full structure
+  for(cv_push : array{false,true}) {
+    for(cv_i : range(22)) for(cv_j : range(22)) if(cv_i != cv_j) {
+      if((text(rx_payload(cv_i,1)) == text(rx_payload(cv_j,1))) || (cv_j == cv_i + 1) || (text(rx_payload(cv_i,0)) == text(rx_payload(cv_j,0)))) rx_pair_case(cv_push,cv_i,cv_j,cv_bad);
+    }
+  }
+  for(cv_push : array{false,true}) {
+    cv_m = if(cv_push) "push " else "pull ";
+    // the regression of the H1 review: array{1} -> array{"1"} (the element type is observed inside the catch) and array{"a, b"} -> array{"a","b"} (the number of elements)
+    cv_db = new_db(cv_push,(a,b) => deep_equal(a,b)); set_input(cv_db,"x",0);
+    query_define(cv_db,"child",(mut d) => { if(get(d,"x") == 0) throw array{1}; throw array{"1"}; });
+    query_define(cv_db,"parent",(mut d) => { try { get(d,"child"); return 0; } catch(e) { return if(typeof(e[0]) == typeof(1)) 110 else 120; } });
+    rx_expect(cv_bad,cv_m + "H1 array types before",get(cv_db,"parent"),110); set_input(cv_db,"x",1);
+    rx_expect(cv_bad,cv_m + "H1 array types after",get(cv_db,"parent"),120);
+    cv_db = new_db(cv_push,(a,b) => deep_equal(a,b)); set_input(cv_db,"x",0);
+    query_define(cv_db,"child",(mut d) => { if(get(d,"x") == 0) throw array{"a, b"}; throw array{"a","b"}; });
+    query_define(cv_db,"parent",(mut d) => { try { get(d,"child"); return 0; } catch(e) { return e.size; } });
+    rx_expect(cv_bad,cv_m + "H1 array length before",get(cv_db,"parent"),1); set_input(cv_db,"x",1);
+    rx_expect(cv_bad,cv_m + "H1 array length after",get(cv_db,"parent"),2);
+    // early cutoff by arrays: the result array{x%2} is structurally the same - the consumer is not recomputed, the cutoff is counted
+    cv_db = new_db(cv_push,(a,b) => deep_equal(a,b)); set_input(cv_db,"x",0);
+    query_define(cv_db,"q",(mut d) => array{get(d,"x") % 2}); query_define(cv_db,"p",(mut d) => get(d,"q")[0] + 100);
+    rx_expect(cv_bad,cv_m + "array cutoff before",get(cv_db,"p"),100);
+    cv_e0 = stats(cv_db)[0]; cv_c0 = stats(cv_db)[2]; set_input(cv_db,"x",2);
+    rx_expect(cv_bad,cv_m + "array cutoff value",get(cv_db,"p"),100);
+    rx_expect(cv_bad,cv_m + "array cutoff evals",stats(cv_db)[0] - cv_e0,1);
+    rx_expect(cv_bad,cv_m + "array cutoff count",stats(cv_db)[2] - cv_c0,1);
+    set_input(cv_db,"x",3); rx_expect(cv_bad,cv_m + "array changed",get(cv_db,"p"),101);
+    rx_expect(cv_bad,cv_m + "array changed count",stats(cv_db)[2] - cv_c0,1);
+    // the value changes the element type with the same text: array{1} -> array{"1"} - the consumer is recomputed
+    cv_db = new_db(cv_push,(a,b) => deep_equal(a,b)); set_input(cv_db,"x",0);
+    query_define(cv_db,"q",(mut d) => if(get(d,"x") == 0) array{1} else array{"1"});
+    query_define(cv_db,"p",(mut d) => if(typeof(get(d,"q")[0]) == typeof(1)) 10 else 20);
+    rx_expect(cv_bad,cv_m + "array value types before",get(cv_db,"p"),10); set_input(cv_db,"x",1);
+    rx_expect(cv_bad,cv_m + "array value types after",get(cv_db,"p"),20);
+    // nested batches: a subscriber gets one notification with the final value, the intermediate state is not delivered
+    cv_db = new_db(cv_push,(a,b) => deep_equal(a,b)); set_input(cv_db,"x",0); cv_ev = array{};
+    watch(cv_db,"x",(k,v) => cv_ev.push(v));
+    batch(cv_db) { batch(cv_db) { set_input(cv_db,"x",1); set_input(cv_db,"x",2); } set_input(cv_db,"x",3); }
+    rx_expect(cv_bad,cv_m + "nested batch once",text(cv_ev),"[3]");
+    batch(cv_db) { batch(cv_db) { set_input(cv_db,"x",7); } set_input(cv_db,"x",3); }
+    rx_expect(cv_bad,cv_m + "nested batch back to start",text(cv_ev),"[3]");
+    batch(cv_db) { batch(cv_db) { batch(cv_db) { set_input(cv_db,"x",4); } set_input(cv_db,"x",5); } set_input(cv_db,"x",6); }
+    rx_expect(cv_bad,cv_m + "nested batch three levels",text(cv_ev),"[3, 6]");
+    rx_expect(cv_bad,cv_m + "nested batch state",cv_db.depth + cv_db.busy,0);
+  }
+  return cv_bad;
 }
