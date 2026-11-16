@@ -553,14 +553,24 @@ postfix(ps s, pn e0) {
   }
   e
 }
+// run_text parser.hpp: the characters of a run of n tokens, separated by a space where they are not glued
+run_text(ps s, i64 n) {
+  rt = "";
+  for(i : range(n)) rt = rt + (if((i > 0) && !tk(s, i).glued) " " else "") + tk_text(s, i);
+  rt
+}
 chain(ps s) {
   pre = array{};
   n = run_length(s, 0);
   if((n > 0) && !is_op_at(s, "=>", 0)) {
     v = array{};
     splits(s, 0, n, 1, false, array{}, array{}, "", v);
-    if(v.size != 1) {
-      fail(s, "нет префиксного оператора или неоднозначно");
+    if(v.size == 0) {
+      if(s.line) fail(s, "нет префиксного оператора «" + run_text(s, n) + "»") else want(s, "нет префиксного оператора (правила контекста могут его объявлять)");
+      return pn_hole("");
+    }
+    if(v.size > 1) {
+      fail(s, "запись операторов «" + run_text(s, n) + "» неоднозначна — разделите пробелом");
       return pn_hole("");
     }
     pre = v[0].pre;
@@ -587,10 +597,13 @@ chain(ps s) {
         n = 0;
         more = false;
       } else if(v.size == 0) {
-        if(s.line) fail(s, "нет оператора") else want(s, "нет оператора (правила контекста — программа, конструкции — могут его объявлять)");
+        ch_w = array{};
+        if(!more) splits(s, 0, n, 0, true, array{}, array{}, "", ch_w);
+        if(ch_w.size > 0) { fail(s, "ожидалось выражение"); return pn_hole(""); } // a + ;
+        if(s.line) fail(s, "нет оператора «" + run_text(s, n) + "»") else want(s, "нет оператора (правила контекста — программа, конструкции — могут его объявлять)");
         return pn_hole("");
       } else if(v.size > 1) {
-        fail(s, "запись операторов неоднозначна");
+        fail(s, "запись операторов «" + run_text(s, n) + "» неоднозначна — разделите пробелом");
         return pn_hole("");
       } else {
         sp = v[0];
@@ -1463,7 +1476,7 @@ statement_node(ps s) {
   else if(!ends_with_block_pn(sn_e)) { want(s, "инструкция без ; перед «" + tk_text(s, 0) + "»"); return nres{false, code()}; }
   sn_r
 }
-block_node(ps s) {
+block_body(ps s) {
   // at `{`
   bn_rules = s.rules; // the program's syntax records are also block rules
   bn_cons = s.cons; // block rules (constructs, operators) apply to its end (context_scope parser.hpp)
@@ -2095,6 +2108,17 @@ extension_item(ps s, str ex_from) {
   if(is_op_at(s, ";", 0)) s.pos += 1;
   nres{true, ast.extension{ex_name, ex_items, ex_attrs, 0, "", ""}}
 }
+// a block with rules: constructs, operators and program records apply to its end - also on a refusal/parse error (context_scope parser.hpp)
+block_node(ps s) {
+  bw_cons = s.cons;
+  bw_ops = s.ops;
+  bw_rules = s.rules;
+  bw = block_body(s);
+  s.cons = bw_cons;
+  s.ops = bw_ops;
+  s.rules = bw_rules;
+  bw
+}
 // skip_to_statement_end parser.hpp: skipping to the end of the instruction - `;` (eaten), `}` (the block ends it), the end of the enclosing group (not eaten)
 skip_stmt(ps s) {
   loop {
@@ -2192,8 +2216,12 @@ module_items_of(str src) {
     p0 = s.pos;
     it = item_node(s);
     if(!it.ok && (s.error != "") && (s.unsupported == "") && (it.to > it.from)) { // a parse error is a hole (recover_statement parser.hpp): the skipped text and the reason
-      ht = slice_text(src, tk_at(s, it.from).from, tk_at(s, it.to - 1).to);
-      it = ires{true, ast.hole{ht, hole_reason(s, it.from, it.to, s.error)}, it.from, it.to, ""};
+      he = s.error;
+      s.pos = it.from; // the boundary of a hole is skip_to_statement_end (not the skip_item approximation)
+      skip_stmt(s);
+      if((s.pos == it.from) && (tk(s, 0).kind != kind_end())) s.pos += 1;
+      ht = slice_text(src, tk_at(s, it.from).from, tk_at(s, s.pos - 1).to);
+      it = ires{true, ast.hole{ht, hole_reason(s, it.from, s.pos, he)}, it.from, s.pos, ""};
     }
     items.push(it);
     if(declares_shadow(s, it.from)) s.custom = true;
