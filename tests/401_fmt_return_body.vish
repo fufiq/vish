@@ -1,0 +1,12 @@
+// A `=> return x;` body - the record prints `;` itself: without `;;`, the result of fmt parses (a defect found by the review of the printer in Vish, 2026-11-16)
+// fmt-stable
+// fmt-has: f(x) => return 1;
+// fmt-has: g(x) => if(x) return 2;
+// out: 1 2
+f(x) => return 1;
+
+g(x) => if(x) return 2;
+
+main() {
+  print(f(1), g(true));
+}

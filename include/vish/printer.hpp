@@ -947,6 +947,7 @@ struct printer {
     if(!rec) return false;
     auto const & [f, r] = *rec;
     auto last = str(db.as<n_fn>(f).form.back());
+    if(last == ";") return true; // return x; - the record prints `;` itself: `f(x) => return 1;` without `;;`
     if((last != "{" && last != "{=") || r.slot.empty()) return false;
     return ends_in_statement(place_at(x, *rec, r.slot.size() - 1));
   }
