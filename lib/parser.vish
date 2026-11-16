@@ -186,7 +186,7 @@ check_cli(args) {
 // lambdas, `name"..."`, trailing call blocks, declarations in parentheses; the prelude's record words and `Name{...}`/`...x` - see record_use and postfix.
 // Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
 struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; }
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; }
 pn_new(str kind, str info, kids) => pn{kind, info, kids, array{}};
 two(pn a, pn b) {
   r = array{};
@@ -1481,7 +1481,7 @@ block_node(ps s) {
       skip_stmt(s);
       if((s.pos == bn_p0) && (tk(s, 0).kind != kind_end())) s.pos += 1;
       bn_text = slice_text(s.src, tk_at(s, bn_p0).from, tk_at(s, s.pos - 1).to);
-      bn_items.push(ast.hole{bn_text, s.error});
+      bn_items.push(ast.hole{bn_text, hole_reason(s, bn_p0, s.pos, s.error)});
       s.error = "";
       s.tail = false;
       s.lwv = false;
@@ -2104,13 +2104,23 @@ skip_stmt(ps s) {
       if(m < 0) { s.pos += 1; continue; }
       s.pos = m + 1;
       if(tk_at(s, m).ch == 125) return 0;
+      if(tk_at(s, m).err >= 0) return 0; // closed by the repair: next comes the next line
       continue;
     }
-    semi = is_op_at(s, ";", 0);
+    // an unclosed string ate the end of the text line (and its `;`) - the instruction ends on it
+    semi = is_op_at(s, ";", 0) || ((t.kind == kind_bad()) && ((text_range(s.src, t.from, t.from + 1) == "\"") || (text_range(s.src, t.from, t.from + 1) == "'")));
     s.pos += 1;
     if(semi) return 0;
   }
   0
+}
+// the reason for a hole: a lexer/bracket repair error in the skipped lexemes is its own (recover_statement parser.hpp), otherwise it is a parse diagnostic
+hole_reason(ps s, i64 p0, i64 p1, str dflt) {
+  for(k : range(p1 - p0)) {
+    t = tk_at(s, p0 + k);
+    if((t.err >= 0) && (t.err < s.lerrs.size)) return s.lerrs[t.err].what;
+  }
+  dflt
 }
 // a function declaration closes the prelude record with the same name (shadow_records/learn parser.hpp), and a function with a `word(...)` clause or
 // an expr parameter is a construct: the rules change - the following elements are "not supported" (attributes [[...]] and outline before a declaration are skipped)
@@ -2171,8 +2181,7 @@ module_header_skip(str src) {
 module_items_of(str src) {
   r = phase1_of(src);
   items = array{};
-  if(r.bracket_error || (r.errors.size > 0)) return items;
-  s = ps{src, r.tokens, r.match, 0, "", "", syntax_records(), false, -1, false, false, syntax_constructs()};
+  s = ps{src, r.tokens, r.match, 0, "", "", syntax_records(), false, -1, false, false, syntax_constructs(), array{array{}, array{}, array{}}, false, r.errors};
   if(!module_header_ok(s)) return items;
   loop {
     if(tk(s, 0).kind == kind_end()) break;
@@ -2182,7 +2191,7 @@ module_items_of(str src) {
     it = item_node(s);
     if(!it.ok && (s.error != "") && (s.unsupported == "") && (it.to > it.from)) { // a parse error is a hole (recover_statement parser.hpp): the skipped text and the reason
       ht = slice_text(src, tk_at(s, it.from).from, tk_at(s, it.to - 1).to);
-      it = ires{true, ast.hole{ht, s.error}, it.from, it.to, ""};
+      it = ires{true, ast.hole{ht, hole_reason(s, it.from, it.to, s.error)}, it.from, it.to, ""};
     }
     items.push(it);
     if(declares_shadow(s, it.from)) s.custom = true;
