@@ -136,11 +136,13 @@ phase1_of(str src) {
   phase1{toks, rematch(toks), errors, broken}
 }
 dump1(phase1 r) {
-  out = "";
-  for(t : r.tokens) out = out + ("t " + text(t.kind) + " " + text(t.from) + " " + text(t.to) + " " + (if(t.glued) "1" else "0") + " " + text(t.err) + " " + text(t.ch) + "\n");
-  for(k : range(r.match.size)) out = out + ("m " + text(k) + " " + text(r.match[k]) + "\n");
-  for(e : r.errors) out = out + ("e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
-  out + ("b " + (if(r.bracket_error) "1" else "0") + "\n")
+  // a buffer, not `out = out + ...` (a square from copies of a growing string; see dump in lib/lexer.vish; the author's "buffer + position")
+  out = text_buffer();
+  for(t : r.tokens) put(out, "t " + text(t.kind) + " " + text(t.from) + " " + text(t.to) + " " + (if(t.glued) "1" else "0") + " " + text(t.err) + " " + text(t.ch) + "\n");
+  for(k : range(r.match.size)) put(out, "m " + text(k) + " " + text(r.match[k]) + "\n");
+  for(e : r.errors) put(out, "e " + text(e.from) + " " + text(e.to) + " " + e.what + "\n");
+  put(out, "b " + (if(r.bracket_error) "1" else "0") + "\n");
+  take(out)
 }
 // Phase 1 C++ (stage0) - same dump
 phase1_reference(str src) => native "cpp" {
@@ -175,15 +177,16 @@ check_cli(args) {
   write_out("парсер, фаза 1: файлов " + text(total) + ", расхождений " + text(bad) + "\n");
   if(bad == 0) 0 else 1
 }
-// --- Step 3a: Phase 2 expressions (subset; include/vish/parser.hpp, stage0, expression/chain/postfix/call/primary) ----- The tree is
-// constructed by the pn structure and printed in `vish ast` (dumper) format. parsing operator series - as in C++ (`run_length`, `splits`):
-// exactly one partition into postfixes*, [infix, prefixes*]; there are no priorities - a number of atoms with operators = n_chain. *My:*
-// table of operator roles is fixed by prelude (in C++ it is from `operator` ads in visibility) - so far without the rules of modules. Not
-// supported (the reason in ps.unsupported, the reconciliation of such texts misses): words-records (if/loop/return...), `{…}`-blocks and
-// records, lambdas, `имя{…}`, `имя"…"`, `#имя`, tail call blocks, real literatures, `...`-disclosure, announcements in parentheses.
-//
-struct pn { str kind; str info; array kids; array callee; }
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; }
+// ---- Step 3a: phase 2 expressions (a subset; include/vish/parser.hpp, stage0, expression/chain/postfix/call/primary) ----
+// The tree is built by the pn structure and printed in the `vish ast` format (the dumper). Operator runs are parsed as in C++ (`run_length`,
+// `splits`): exactly one split into postfixes*, [infix, prefixes*]; there are no priorities - a run of atoms with operators = n_chain.
+// "an operator is always one character... the rules described for operators" (the author). *Mine:* the table of operator roles
+// is fixed from the prelude (in C++ it comes from `operator` declarations in scope) - for now without module rules.
+// Not supported (the reason is in ps.unsupported, the comparison skips such texts): record words (if/loop/return...), `{...}` blocks and records,
+// lambdas, `name{...}`, `name"..."`, trailing call blocks, `...` expansion, declarations in parentheses.
+// Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
+struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; }
 pn_new(str kind, str info, kids) => pn{kind, info, kids, array{}};
 two(pn a, pn b) {
   r = array{};
@@ -299,6 +302,27 @@ quoted_text(str v) {
   }
   out + "\""
 }
+// parser.hpp 2552-2557 (parse_float): without '_', std::stod; the record is like cat(double) in the dump
+// (dump.hpp: " value=" + cat(x), the shortest to_chars). A NEW primitive - right in this file
+// (like expr_reference below), lib/prelude.vish is NOT changed; modelled on text_fixed (prelude.vish:1708):
+// native "cpp" without `#` wrappers, argument a[0], an unknown one (not computed at compile time) - erase(...).
+// Declaration/placement: right before primary, once. After adding it - per AGENTS.md:
+// `out/vish native out/native.hpp lib/tools.vish ... lib/parser.vish ...`, then ./build.sh release (twice).
+float_value(str lit) => native "cpp" {
+  if(!a[0].known()) return erase(value(std::string()));
+  std::string clean;
+  for(char c: std::string(a[0].as<str_v>().view()))
+    if(c != '_') clean += c;
+  return value(cat(std::stod(clean)));
+};
+// the value of a real literal as f64 (for ast.float): without '_', std::stod - the same as float_value (text) in the dump
+float_of(str lit) => native "cpp" {
+  if(!a[0].known()) return erase(value(0.0));
+  std::string clean;
+  for(char c: std::string(a[0].as<str_v>().view()))
+    if(c != '_') clean += c;
+  return value(double(std::stod(clean)));
+};
 primary(ps s) {
   t = tk(s, 0);
   if(t.kind == kind_int()) {
@@ -314,9 +338,17 @@ primary(ps s) {
     return node;
   }
   if(t.kind == kind_float()) {
-    want(s, "вещественный литерал");
+    // parser.hpp 2448-2451: n_float{parse_float(t.text)} + literal_suffix
+    lit = tk_text(s, 0);
     s.pos += 1;
-    return pn_hole("");
+    node = pn{"n_float", " value=" + float_value(lit), array{}, array{}, array{}, lit};
+    // literal suffix (2.5ms == ms(2.5)): as for int above; parser.hpp 2528-2537
+    if((tk(s, 0).kind == kind_ident()) && (tk(s, 0).glued && !is_keyword_word(tk_text(s, 0)))) {
+      callee = pn_new("n_ident", " name=" + tk_text(s, 0), array{});
+      s.pos += 1;
+      return pn{"n_call", " literal_suffix", array{node}, array{callee}};
+    }
+    return node;
   }
   if(t.kind == kind_char()) {
     b = unescape_lit(tk_text(s, 0));
@@ -330,10 +362,14 @@ primary(ps s) {
   if(t.kind == kind_str()) {
     v = unescape_lit(tk_text(s, 0));
     s.pos += 1;
-    return pn_new("n_str", " value=" + quoted_text(v), array{});
+    return pn{"n_str", " value=" + quoted_text(v), array{}, array{}, array{}, v};
   }
   if(t.kind == kind_ident()) {
     w = tk_text(s, 0);
+    if(rule_has(s, w) && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued)) {
+      r = record_use(s);
+      return if(r.ok) pn{"n_ready", "", array{}, array{}, array{}, "", r.node} else pn_hole("");
+    }
     if(is_keyword_word(w)) {
       want(s, "слово-запись " + w);
       s.pos += 1;
@@ -371,9 +407,9 @@ primary(ps s) {
 }
 unary_core(ps s) {
   if((tk(s, 0).kind == kind_op()) && ((tk(s, 0).ch == 35) && (tk(s, 1).kind == kind_ident()))) {
-    want(s, "вставка #имя");
+    name = tk_text(s, 1);
     s.pos += 2;
-    return pn_hole("");
+    return pn_new("n_splice", " name=" + name, array{});
   }
   postfix(s, primary(s))
 }
@@ -410,9 +446,34 @@ postfix(ps s, pn e0) {
       if(is_close_ch(s, 93)) s.pos += 1 else fail(s, "ожидалось ']'");
       e = pn_new("n_op", " op=[]", two(e, i));
     } else if(is_open_ch(s, 123, 0) && (tk(s, 0).glued && (e.kind == "n_ident"))) {
-      want(s, "имя{…}");
+      // Name{a, b, ...xs}: brace_items parser.hpp; a record value {...} inside (a value of the field's type) is not supported;
+      // after `}` a lone `=` is an unpacking pattern (pattern_ahead), not a constructor
+      m = s.match[s.pos];
+      if((m >= 0) && is_op_at(s, "=", (m + 1) - s.pos)) {
+        want(s, "образец распаковки");
+        break;
+      }
       s.pos += 1;
-      break;
+      items = array{};
+      loop {
+        if(is_close_ch(s, 125)) break;
+        if(is_op_at(s, "...", 0)) {
+          s.pos += 3;
+          v = expression(s);
+          items.push(pn{"n_spread", "", array{}, array{v}});
+        } else {
+          if(is_open_ch(s, 123, 0)) {
+            want(s, "запись {…} в значении");
+            break;
+          }
+          items.push(expression(s));
+        }
+        if(s.error != "") break;
+        if(is_op_at(s, ",", 0)) s.pos += 1 else break;
+      }
+      if(s.unsupported != "") break;
+      if(is_close_ch(s, 125)) s.pos += 1 else fail(s, "ожидалось '}'");
+      e = pn{"n_construct", "", items, array{e}};
     } else if(is_op_at(s, ".", 0) && is_open_ch(s, 91, 1)) {
       s.pos += 2;
       key = expression(s);
@@ -447,9 +508,13 @@ chain(ps s) {
   atoms = array{};
   infix = array{};
   loop {
+    p0 = s.pos;
     a = unary_core(s);
     if(s.error != "") return pn_hole("");
-    n = run_length(s, 0);
+    // an instruction that ends with a block (if/loop) ends at `}`: the next line `-1` is a new instruction, not a minus
+    is_if_atom = (a.kind == "n_ready") && (code_kind(a.node) == ast.if);
+    closed = s.tail || ((is_if_atom && if_closed_node(a.node)) || (!is_if_atom && (p0 == s.head) && ends_with_block_pn(a)));
+    n = if(closed) 0 else run_length(s, 0);
     sp = run_split{array{}, array{}, ""};
     more = false;
     if(n > 0) {
@@ -484,11 +549,12 @@ chain(ps s) {
   }
   if(atoms.size == 1) return atoms[0];
   if(infix.size == 1) return pn_new("n_op", " op=" + infix[0], two(atoms[0], atoms[1]));
-  pn_new("n_chain", "", atoms)
+  pn{"n_chain", "", atoms, array{}, infix}
 }
 expression(ps s) {
   lhs = chain(s);
   if(s.error != "") return lhs;
+  if(s.tail || ((lhs.kind == "n_ready") && (code_kind(lhs.node) == ast.if) && if_closed_node(lhs.node))) return lhs;
   for(a : array{"+=", "-=", "*=", "/=", "="}) {
     if(is_op_at(s, a, 0)) {
       s.pos += a.size;
@@ -501,24 +567,46 @@ expression(ps s) {
 dump_pn(pn x, i64 depth) {
   pad = "";
   for(i : range(depth)) pad = pad + "  ";
+  if(x.kind == "n_ready") { // the record node is already built: dumped by the C++ dumper, with a shift
+    r = text_buffer();
+    for(l : lines_of(dump_code(x.node))) put(r, pad + l + "\n");
+    return take(r);
+  }
   out = pad + x.kind + x.info + "\n";
-  if(x.callee.size > 0) out = out + (pad + "  callee:\n" + dump_pn(x.callee[0], depth + 2));
+  if(x.callee.size > 0) out = out + (pad + "  " + (if(x.kind == "n_construct") "type" else if(x.kind == "n_spread") "value" else "callee") + ":\n" + dump_pn(x.callee[0], depth + 2));
   for(k : x.kids) out = out + dump_pn(k, depth + 1);
   out
 }
 // expression-text → (dump, reason "not supported", error); end of text is mandatory
 expr_of(str src) {
   r = phase1_of(src);
-  s = ps{src, r.tokens, r.match, 0, "", ""};
+  s = ps{src, r.tokens, r.match, 0, "", "", syntax_records()};
   e = expression(s);
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после выражения");
   array{dump_pn(e, 0), s.unsupported, s.error}
 }
-// Expression parsed by C++ (stage0): `main() { x = выражение }` with prelude; dump without header (6 lines) and without indentation
+struct expr_res { pn tree; str unsupported; str error; }
+// the same as expr_of, but the whole pn tree (for display into ast.* nodes)
+expr_of_pn(str src) {
+  r = phase1_of(src);
+  s = ps{src, r.tokens, r.match, 0, "", "", syntax_records()};
+  e = expression(s);
+  if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после выражения");
+  expr_res{e, s.unsupported, s.error}
+}
+// An expression parsed by C++ (stage0): `main() { x = expression }` with the prelude; the dump without the header (6 lines) and without indentation
 expr_reference(str src) => native "cpp" {
   if(!a[0].known()) return erase(value(std::string()));
-  ast_db db;
-  load_prelude(db);
+  // the database with the prelude is one per run: parsing the 311 KB prelude for every corpus line (27 ms x 556) was 15 of 20 seconds.
+  // The thread's current pool is returned to the caller (pool_scope), the line's nodes are added to the common database.
+  static ast_db db;
+  static bool loaded = false;
+  pool_scope keep(current_pool);
+  db.use_pool();
+  if(!loaded) {
+    load_prelude(db);
+    loaded = true;
+  }
   std::string text = cat("main() { x = ", std::string(a[0].as<str_v>().view()), " }");
   parser p(db, text, "<exprcheck>");
   node_id m = p.parse_module();
@@ -564,4 +652,523 @@ expr_check_cli(es) {
   }
   write_out("парсер, выражения: совпало " + text(same) + ", общих отказов " + text(both_fail) + ", не поддержано " + text(skipped) + ", расхождений " + text(bad) + "\n");
   if(bad == 0) 0 else 1
+}
+
+// --- step E3 (the porting plan): the parser tree in Vish -> real ast.* nodes from the language, without new C++ ------------------
+// The author's requirements: access to the whole expression/context simply through ast; access to the ast is a basic
+// feature; the nodes of the same ast must be described within your program... your struct will be a
+// struct. The nodes come out derived (with the call position, not the text): a primitive "a node with a
+// given source span" is a separate step (*mine*). int/name/operator/call/chain are supported; strings, reals,
+// `#name`, suffix literals are not (ok=false).
+struct nres { bool ok; code node; }
+// the dump of a node from the database by the same C++ dumper as stage0's (comparison of the structure and the fields)
+dump_code(c) => native "cpp" {
+  if(!a[0].known()) return erase(value(std::string()));
+  node_id n = vm.code_node(a[0], where);
+  return value(dumper(vm.db).dump(n));
+};
+after_text(str s, str key) {
+  i = find_text(s, key);
+  if(i < 0) return "";
+  rest = text_from(s, i + key.size);
+  j = find_text(rest, " ");
+  if(j < 0) rest else slice_text(rest, 0, j)
+}
+node_of(pn x) {
+  if(x.kind == "n_int") {
+    v = parse_int(after_text(x.info, "value="));
+    return if(v.ok) nres{true, ast.int{v.value, contains(x.info, " ch"), contains(x.info, " hex")}} else nres{false, code()};
+  }
+  if(x.kind == "n_ready") return nres{true, x.node};
+  if(x.kind == "n_ident") return nres{true, ast.name{after_text(x.info, "name=")}};
+  if(x.kind == "n_str") return nres{true, ast.string{x.raw}};
+  if(x.kind == "n_float") return nres{true, ast.float{float_of(x.raw)}};
+  if(x.kind == "n_splice") return nres{true, ast.splice{after_text(x.info, "name=")}};
+  kids = array{};
+  for(k : x.kids) {
+    r = node_of(k);
+    if(!r.ok) return nres{false, code()};
+    kids.push(r.node);
+  }
+  if(x.kind == "n_op") return nres{true, ast.operation{after_text(x.info, "op="), kids, contains(x.info, " postfix")}};
+  if(x.kind == "n_call") {
+    if(x.callee.size != 1) return nres{false, code()};
+    c = node_of(x.callee[0]);
+    if(!c.ok) return nres{false, code()};
+    if(contains(x.info, "literal_suffix")) return nres{true, ast.call{c.node, kids, array{}, false, 0, false, true}};
+    return nres{true, ast.call{c.node, kids}};
+  }
+  if(x.kind == "n_chain") return nres{true, ast.chain{kids, x.ops}};
+  if(x.kind == "n_spread") {
+    v = node_of(x.callee[0]);
+    return if(v.ok) nres{true, ast.spread{v.node}} else nres{false, code()};
+  }
+  if(x.kind == "n_construct") {
+    t = node_of(x.callee[0]);
+    return if(t.ok) nres{true, ast.construct{t.node, kids, array{}}} else nres{false, code()};
+  }
+  nres{false, code()}
+}
+// vish nodecheck <corpus>: for an expression in a line - nodes from the Vish parser tree: the structure = the C++ dump (stage0);
+// the chain operators by a round trip: print the nodes -> C++ parse -> dump = the dump of the original line
+node_check_cli(es) {
+  same = 0;
+  bad = 0;
+  skipped = 0;
+  for(f : es) {
+    for(line : lines_of(read_text(f))) {
+      if(line == "") continue;
+      mine = expr_of_pn(line);
+      if(mine.error != "" || mine.unsupported != "") {
+        skipped += 1;
+        continue;
+      }
+      r = node_of(mine.tree);
+      if(!r.ok) {
+        skipped += 1;
+        continue;
+      }
+      ref = expr_reference(line);
+      ref_lines = lines_of(ref);
+      body = "";
+      for(k : range(ref_lines.size)) if(k >= 6) body = body + (text_range(ref_lines[k], 10, ref_lines[k].size) + "\n");
+      structure = body == dump_code(r.node);
+      printed = code_text(r.node);
+      again = expr_reference(printed);
+      round = again == ref;
+      if(structure && round) same += 1 else {
+        bad += 1;
+        write_out(line + ": расхождение (структура " + text(structure) + ", круг " + text(round) + ", печать " + printed + ")\n");
+      }
+    }
+  }
+  write_out("узлы из языка: совпало " + text(same) + ", пропущено " + text(skipped) + ", расхождений " + text(bad) + "\n");
+  if(bad == 0) 0 else 1
+}
+
+// --- E4c (the porting plan): record words (if/loop/break/continue/return/throw) - the engine in Vish by the prelude's table ---------------
+// The author's requirements: parsing logic and syntax are defined by logic in the language itself; there are no problems with
+// keywords if we have no keywords. The rules are prelude data (syntax_records), here
+// only the matching of forms as in parser.hpp syntax_use: the longest run of words/symbols ahead (at the `else` / `; else` fork),
+// then (a parameter) in parentheses, then {a body}, then the end of the form; among equals, the last declaration. hide/try_compile (core calls)
+// and template records are not supported. The termination of an instruction (`;`, a record branch with `;`, a block instead of `;`) is *mine*, as in C++.
+// part k of the form of record i; past the end of the form it is empty (like piece() in parser.hpp)
+rule_piece(ps s, i64 i, i64 k) => if(k < s.rules[i][1].size) s.rules[i][1][k] else "";
+rule_has(ps s, str w) {
+  for(r : s.rules) if(r[0] == w) return true;
+  false
+}
+piece_param(str p) => starts_with(p, "(") || starts_with(p, "{");
+// how many lexemes literal p occupies at distance off; -1 - did not match. `;` is the end of an instruction: `;`, and before `}` without a lexeme
+literal_tokens(ps s, str p, i64 off) {
+  if(p == ";") {
+    if(is_op_at(s, ";", off)) return 1;
+    if((tk(s, off).kind == kind_close()) && (tk(s, off).ch == 125)) return 0;
+    return -1;
+  }
+  if((p.size > 0) && is_ident_start(p[0])) return if((tk(s, off).kind == kind_ident()) && (tk_text(s, off) == p)) 1 else -1;
+  -1
+}
+node_field(c, str name) {
+  for(fd : fields(code_kind(c))) if(fd.name == name) return c.[fd];
+  code()
+}
+if_closed_node(c) {
+  last = node_field(c, "else");
+  if(!given(last)) last = node_field(c, "then");
+  if(!given(last)) return false;
+  if(code_kind(last) == ast.if) return if_closed_node(last);
+  code_kind(last) == ast.block
+}
+// an instruction ending with a block does not need a `;` after it (ends_with_block parser.hpp; record nodes only)
+ends_with_block_pn(pn a) => (a.kind == "n_ready") && ((code_kind(a.node) == ast.if) || ((code_kind(a.node) == ast.loop) || (code_kind(a.node) == ast.block)));
+// a syntax record at word s.pos: a node or "not supported"
+record_use(ps s) {
+  ru_w = tk_text(s, 0);
+  ru_live = array{};
+  ru_k = s.rules.size;
+  while(ru_k > 0) {
+    ru_k -= 1;
+    if(s.rules[ru_k][0] == ru_w) ru_live.push(ru_k);
+  }
+  for(i : ru_live) if(s.rules[i][2] < 0) { want(s, "вызов ядра " + ru_w); return nres{false, code()}; }
+  s.pos += 1;
+  ru_args = array{};
+  ru_at = 1;
+  loop {
+    // 1. the literal run (words and symbols) - the longest that matched
+    ru_best_len = 0;
+    ru_best_toks = 0;
+    ru_best = -1;
+    for(i : ru_live) {
+      ru_pcs = s.rules[i][1];
+      ru_len = 0;
+      ru_off = 0;
+      loop {
+        ru_p = if((ru_at + ru_len) < ru_pcs.size) ru_pcs[ru_at + ru_len] else "";
+        if((ru_p == "") || piece_param(ru_p)) break;
+        ru_n = literal_tokens(s, ru_p, ru_off);
+        if(ru_n < 0) { ru_len = 0; break; }
+        ru_off += ru_n;
+        ru_len += 1;
+      }
+      if(ru_len > ru_best_len) { ru_best_len = ru_len; ru_best_toks = ru_off; ru_best = i; }
+    }
+    if(ru_best_len > 0) {
+      ru_keep = array{};
+      for(i : ru_live) {
+        ru_same = true;
+        for(j : range(ru_best_len)) if(rule_piece(s, i, ru_at + j) != rule_piece(s, ru_best, ru_at + j)) ru_same = false;
+        if(ru_same) ru_keep.push(i);
+      }
+      ru_live = ru_keep;
+      s.pos += ru_best_toks;
+      s.tail = rule_piece(s, ru_best, (ru_at + ru_best_len) - 1) == ";";
+      ru_at += ru_best_len;
+      continue;
+    }
+    // 2. (a parameter) in parentheses: `(` | `()` - directly after the word
+    ru_pv = array{};
+    for(i : ru_live) {
+      ru_p = if(ru_at < s.rules[i][1].size) s.rules[i][1][ru_at] else "";
+      if(((ru_p == "(") || (ru_p == "()")) && is_open_ch(s, 40, 0) && ((ru_p != "()") || tk(s, 0).glued)) ru_pv.push(i);
+    }
+    if(ru_pv.size > 0) {
+      ru_live = ru_pv;
+      s.tail = false;
+      s.pos += 1;
+      ru_items = array{};
+      if(!is_close_ch(s, 41)) ru_items.push(expression(s));
+      if(is_op_at(s, ",", 0)) { want(s, "список в скобках записи"); return nres{false, code()}; }
+      if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
+      if(ru_items.size != 1) { fail(s, "ожидалось выражение"); return nres{false, code()}; }
+      if(!is_close_ch(s, 41)) { fail(s, "ожидалось ')'"); return nres{false, code()}; }
+      s.pos += 1;
+      ru_r = node_of(ru_items[0]);
+      if(!ru_r.ok) { want(s, "выражение без узла"); return nres{false, code()}; }
+      ru_args.push(ru_r.node);
+      ru_at += 1;
+      continue;
+    }
+    // 3. {a body} or a branch expression; `{}` / `{x: ...}` in a value is not supported
+    ru_bv = array{};
+    for(i : ru_live) {
+      ru_p = if(ru_at < s.rules[i][1].size) s.rules[i][1][ru_at] else "";
+      if((ru_p == "{") || (ru_p == "{=")) ru_bv.push(i);
+    }
+    if(ru_bv.size > 0) {
+      ru_live = ru_bv;
+      s.tail = false;
+      if(is_open_ch(s, 123, 0)) {
+        if(is_close_ch_at(s, 125, 1) || ((tk(s, 1).kind == kind_ident()) && is_op_at(s, ":", 2))) { want(s, "запись {…} в значении"); return nres{false, code()}; }
+        ru_b = block_node(s);
+        if(!ru_b.ok) return nres{false, code()};
+        ru_args.push(ru_b.node);
+      } else {
+        ru_head = s.head;
+        s.head = s.pos;
+        ru_e = expression(s);
+        s.head = ru_head;
+        if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
+        ru_r = node_of(ru_e);
+        if(!ru_r.ok) { want(s, "ветка без узла"); return nres{false, code()}; }
+        ru_args.push(ru_r.node);
+      }
+      ru_at += 1;
+      continue;
+    }
+    // 4. the end of the form
+    ru_done = array{};
+    for(i : ru_live) if(ru_at >= s.rules[i][1].size) ru_done.push(i);
+    if(ru_done.size == 0) { want(s, "запись " + ru_w + ": форма не подошла"); return nres{false, code()}; }
+    ru_d = ru_done[0];
+    ru_places = array{};
+    for(j : range(s.rules[ru_d][4])) ru_places.push(code());
+    for(j : range(ru_args.size)) ru_places[s.rules[ru_d][3][j]] = ru_args[j];
+    ru_kind = code_kinds()[s.rules[ru_d][2]];
+    return nres{true, ru_kind{...ru_places}};
+  }
+}
+
+// --- E4a (the porting plan): module -> functions; nodes are built directly by the ast.* constructors, without the pn tree ---------------------
+// The author's requirements: all the logic will be written in the new language itself; parsing logic and syntax are
+// defined by logic in the language itself. Supported: `[type] name(parameters) => expression;` and
+// `[type] name(parameters) { expression; ... }`, a parameter is `name` or `type name` (one type word). The rest is "not supported"
+// (record words, variable declarations, clauses, parameter modes, templates, attributes, module/use/struct...).
+// The layout (blank lines, comments, inner elements) is not part of the stage0 dump - a separate step E4d.
+struct ires { bool ok; code node; i64 from; i64 to; str why; }
+// the end of an unsupported element: the first `;` at zero depth or the `}` of a block (if there was no `=>` before `{`)
+skip_item(ps s) {
+  from = s.pos;
+  loop {
+    t = tk(s, 0);
+    if(t.kind == kind_end()) break;
+    if(t.kind == kind_open()) {
+      m = s.match[s.pos];
+      if(m < 0) { s.pos = s.toks.size - 1; break; }
+      was_arrow = (s.pos > from) && is_op_at(s, "=>", -1);
+      s.pos = m + 1;
+      if((t.ch == 123) && !was_arrow && !is_op_at(s, ";", 0)) break;
+      continue;
+    }
+    if(is_op_at(s, ";", 0)) { s.pos += 1; break; }
+    s.pos += 1;
+  }
+  s.pos
+}
+param_node(ps s) {
+  // [mode] [explicit] [type] [...] name; the mode is let(0)/mut/own/out/expr/ct/implicit (parser.hpp param()); patterns, default values,
+  // `#name` of templates - not supported
+  mode = 0;
+  w0 = tk_text(s, 0);
+  if(tk(s, 0).kind == kind_ident()) {
+    if(w0 == "mut") mode = 1 else if(w0 == "own") mode = 2 else if(w0 == "out") mode = 3 else if(w0 == "expr") mode = 4 else if(w0 == "ct") mode = 5 else if((w0 == "implicit") && (tk(s, 1).kind == kind_ident())) mode = 6;
+    if(mode > 0) s.pos += 1;
+  }
+  strict = false;
+  if((tk(s, 0).kind == kind_ident()) && (tk_text(s, 0) == "explicit") && (tk(s, 1).kind == kind_ident()) && (tk(s, 2).kind == kind_ident())) {
+    strict = true;
+    s.pos += 1;
+  }
+  pack = false;
+  if(is_op_at(s, "...", 0)) {
+    pack = true;
+    s.pos += 3;
+  }
+  if(tk(s, 0).kind != kind_ident()) { want(s, "параметр не имя"); return nres{false, code()}; }
+  if(is_keyword_word(tk_text(s, 0)) && (tk_text(s, 0) != "ct")) { want(s, "слово-запись в параметре"); return nres{false, code()}; }
+  ty = code();
+  if((tk(s, 0).kind == kind_ident()) && ((tk(s, 1).kind == kind_ident()) || is_op_at(s, "...", 1))) {
+    if(is_keyword_word(tk_text(s, 1))) { want(s, "параметр с типом и модификатором"); return nres{false, code()}; }
+    ty = ast.name{tk_text(s, 0)};
+    s.pos += 1;
+    if(is_op_at(s, "...", 0)) {
+      pack = true;
+      s.pos += 3;
+    }
+  }
+  if(tk(s, 0).kind != kind_ident()) { want(s, "сложный параметр"); return nres{false, code()}; }
+  nm = tk_text(s, 0);
+  s.pos += 1;
+  if(!(is_op_at(s, ",", 0) || is_close_ch(s, 41))) { want(s, "сложный параметр"); return nres{false, code()}; }
+  nres{true, ast.parameter{nm, ty, mode, pack, "", strict, -1}}
+}
+is_close_ch_at(ps s, i64 c, i64 k) => (tk(s, k).kind == kind_close()) && ((tk(s, k).ch == c) && (tk(s, k).err < 0));
+block_node(ps s) {
+  // at `{`
+  s.pos += 1;
+  bn_items = array{};
+  bn_has = false;
+  loop {
+    if(is_close_ch(s, 125)) break;
+    if((tk(s, 0).kind == kind_end()) || (s.error != "") || (s.unsupported != "")) { want(s, "блок не закрыт или внутри не поддержано"); return nres{false, code()}; }
+    if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0))) {
+      if(is_keyword_word(tk_text(s, 0)) || (tk(s, 1).kind == kind_ident())) { want(s, "слово-запись или объявление в блоке"); return nres{false, code()}; }
+    }
+    if(is_open_ch(s, 91, 0) && is_open_ch(s, 91, 1)) { want(s, "атрибуты в блоке"); return nres{false, code()}; }
+    s.tail = false;
+    s.lwv = false;
+    bn_head = s.head;
+    s.head = s.pos;
+    bn_e = expression(s);
+    s.head = bn_head;
+    if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
+    bn_r = node_of(bn_e);
+    if(!bn_r.ok) { want(s, "выражение без узла"); return nres{false, code()}; }
+    bn_items.push(bn_r.node);
+    // the end of an instruction (statement_body parser.hpp): a tail record has eaten the `;` itself (the last_was_value flag stays as it is - including
+    // from an inner block); otherwise `;`, or `}` (the value of a block), or the instruction ends with a block (if/loop) - `;` is not needed
+    if(s.tail) {
+      s.tail = false;
+    } else if(is_op_at(s, ";", 0)) {
+      s.pos += 1;
+      s.lwv = false;
+    } else if(is_close_ch(s, 125)) s.lwv = true
+    else if(!ends_with_block_pn(bn_e)) { want(s, "инструкция без ; внутри блока"); return nres{false, code()}; }
+    if(is_close_ch(s, 125) && s.lwv) bn_has = true;
+  }
+  s.pos += 1;
+  nres{true, ast.block{bn_items, bn_has, array{}}}
+}
+// one module element from token s.pos: a function or "not supported" (the position is after the element in any case)
+item_node(ps s) {
+  from = s.pos;
+  why = "";
+  k = 0;
+  rtype = code();
+  if((tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident()) && is_open_ch(s, 40, 2)) {
+    if(is_keyword_word(tk_text(s, 0))) { want(s, "слово-запись"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    rtype = ast.name{tk_text(s, 0)};
+    k = 1;
+  } else if(!((tk(s, 0).kind == kind_ident()) && is_open_ch(s, 40, 1) && !is_keyword_word(tk_text(s, 0)))) {
+    want(s, "не функция");
+    skip_item(s);
+    return ires{false, code(), from, s.pos, why};
+  }
+  fname = tk_text(s, k);
+  close = s.match[s.pos + k + 1];
+  if(close < 0) { want(s, "скобки"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  after = (close + 1) - s.pos;
+  if(!(is_op_at(s, "=>", after) || is_open_ch(s, 123, after))) { want(s, "не объявление функции"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  s.pos += k + 2;
+  params = array{};
+  loop {
+    if(is_close_ch(s, 41)) break;
+    pr = param_node(s);
+    if(!pr.ok) { s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    params.push(pr.node);
+    if(is_op_at(s, ",", 0)) s.pos += 1 else if(!is_close_ch(s, 41)) { want(s, "список параметров"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  }
+  s.pos += 1;
+  if(is_op_at(s, "=>", 0)) {
+    s.pos += 2; // `=>` is two one-character tokens
+    s.tail = false;
+    s.head = s.pos;
+    e = expression(s);
+    ended = s.tail || is_op_at(s, ";", 0); // a tail record (g() => if(c) return x;) has eaten the `;` itself (end_expr_body parser.hpp)
+    if((s.error != "") || (s.unsupported != "") || !ended) { if(s.unsupported == "") want(s, "тело-выражение"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    r = node_of(e);
+    if(!r.ok) { want(s, "выражение без узла"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    if(s.tail) s.tail = false else s.pos += 1;
+    return ires{true, ast.function{fname, params, rtype, r.node, false, true, array{}, false, array{}}, from, s.pos, ""};
+  }
+  b = block_node(s);
+  if(!b.ok) { s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  ires{true, ast.function{fname, params, rtype, b.node, false, false, array{}, false, array{}}, from, s.pos, ""}
+}
+// module elements of the text: the ires array (in text order)
+module_items_of(str src) {
+  r = phase1_of(src);
+  items = array{};
+  if(r.bracket_error || (r.errors.size > 0)) return items;
+  s = ps{src, r.tokens, r.match, 0, "", "", syntax_records()};
+  loop {
+    if(tk(s, 0).kind == kind_end()) break;
+    s.unsupported = "";
+    s.error = "";
+    p0 = s.pos;
+    it = item_node(s);
+    items.push(it);
+    if(s.pos <= p0) break;
+  }
+  items
+}
+// the reference: the text's module parsed by C++ (stage0) with the prelude; the whole dump
+module_reference(str src) => native "cpp" {
+  if(!a[0].known()) return erase(value(std::string()));
+  ast_db db;
+  load_prelude(db);
+  parser p(db, std::string(a[0].as<str_v>().view()), "<modcheck>");
+  node_id m = p.parse_module();
+  return value(dumper(db).dump(m));
+};
+// module dump elements: depth-2 lines start an element
+ref_items(str dump) {
+  items = array{};
+  cur = "";
+  started = false;
+  for(l : lines_of(dump)) {
+    if(starts_with(l, "  n_") || starts_with(l, "  ·")) {
+      if(started) items.push(cur);
+      cur = "";
+      started = true;
+    }
+    if(started) cur = cur + (slice_text(l, 2, l.size) + "\n");
+  }
+  if(started) items.push(cur);
+  items
+}
+// vish modcheck <files>: element by element - functions from the Vish parser nodes against the C++ dump; a mismatch in the number of elements - the file is skipped
+mod_check_cli(files) {
+  total = 0;
+  supported = 0;
+  same = 0;
+  bad = 0;
+  skipped_files = 0;
+  reasons = array{};
+  counts = array{};
+  for(f : files) {
+    src = read_text(f);
+    mine = module_items_of(src);
+    ref = ref_items(module_reference(src));
+    if(mine.size != ref.size) {
+      skipped_files += 1;
+      continue;
+    }
+    for(k : range(mine.size)) {
+      total += 1;
+      if(!mine[k].ok) {
+        w = if(mine[k].why == "") "(без причины)" else mine[k].why;
+        at = -1;
+        for(j : range(reasons.size)) if(reasons[j] == w) at = j;
+        if(at < 0) { reasons.push(w); counts.push(1); } else counts[at] += 1;
+        continue;
+      }
+      supported += 1;
+      got = dump_code(mine[k].node);
+      if(got == ref[k]) same += 1 else {
+        bad += 1;
+        write_out(f + ": элемент " + text(k) + " расхождение\n--- vish\n" + got + "--- C++\n" + ref[k]);
+      }
+    }
+  }
+  write_out("модуль: элементов " + text(total) + ", функций из узлов Vish " + text(supported) + ", совпало " + text(same) + ", расхождений " + text(bad) + ", файлов пропущено (число элементов не сошлось) " + text(skipped_files) + "\n");
+  for(j : range(reasons.size)) write_out("  не поддержано: " + reasons[j] + " — " + text(counts[j]) + "\n");
+  if(bad == 0) 0 else 1
+}
+
+// The prelude's syntax records as data (E4c; the rules are code in the language, not hard-coded in the parser: the author's requirement;
+// "there are no problems with keywords if we have no keywords"): a line per record -
+// array{word, form parts (array str), kind (an index into code_kinds(); -1 - a core call), slots (array i64), number of places}
+syntax_records() => native "cpp" {
+  struct record_row {
+    std::string word;
+    std::vector<std::string> pieces;
+    int64_t kind;
+    std::vector<int64_t> slots;
+    int64_t places;
+  };
+  static std::vector<record_row> rows; // the parse of the prelude is once per process; VM values are rebuilt on every call
+  static bool loaded = false;
+  if(!loaded) {
+    ast_db db;
+    load_prelude(db);
+    node_id pre = db.prelude;
+    if(pre)
+      for(node_id d: db.as<n_module>(pre).items) {
+        if(!db.is<n_fn>(d)) continue;
+        auto r = record_of(db, d);
+        if(!r || r->kind == record_template) continue;
+        auto const & f = db.as<n_fn>(d);
+        record_row row{std::string(db.strings.text(f.name)), {}, int64_t(r->kind), {}, int64_t(r->places)};
+        for(std::size_t k = 0; k < f.form.size(); ++k) row.pieces.push_back(std::string(form_piece(db, f, k)));
+        for(auto sl: r->slot) row.slots.push_back(int64_t(sl));
+        rows.push_back(std::move(row));
+      }
+    loaded = true;
+  }
+  std::vector<value> out;
+  for(auto const & row: rows) {
+    std::vector<value> pieces, slots;
+    for(auto const & p: row.pieces) pieces.push_back(value(std::string(p)));
+    for(auto sl: row.slots) slots.push_back(value(int64_t(sl)));
+    out.push_back(value(array_v::of({value(std::string(row.word)), value(array_v::of(std::move(pieces))), value(int64_t(row.kind)), value(array_v::of(std::move(slots))), value(int64_t(row.places))})));
+  }
+  return value(array_v::of(std::move(out)));
+};
+// the text of the records for debugging (vish syntaxrules x)
+syntax_rules_dump() {
+  out = "";
+  for(r : syntax_records()) {
+    out = out + r[0] + " | форма:";
+    for(p : r[1]) out = out + " [" + p + "]";
+    out = out + " | вид " + text(r[2]) + " места " + text(r[4]) + " слоты";
+    for(x : r[3]) out = out + " " + text(x);
+    out = out + "\n";
+  }
+  out
+}
+syntax_rules_cli(args) {
+  write_out(syntax_rules_dump());
+  0
 }

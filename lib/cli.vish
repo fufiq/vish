@@ -200,6 +200,22 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("parser", "check_cli", files);
   }
+  if(cmd == "syntaxrules") {
+    // vish syntaxrules x: the prelude's syntax records (E4c debugging)
+    return run_module("parser", "syntax_rules_cli", array{});
+  }
+  if(cmd == "modcheck") {
+    // vish modcheck <files>: module functions from the Vish parser nodes against C++ stage0 (step E4a)
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("parser", "mod_check_cli", files);
+  }
+  if(cmd == "nodecheck") {
+    // vish nodecheck <corpus>: ast.* nodes from the parser tree in Vish (step E3): the structure and the chain operators against C++ stage0
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("parser", "node_check_cli", files);
+  }
   if(cmd == "exprcheck") {
     // vish exprcheck <body>: Phase 2 parser expressions in language (lib/parser.vish) vs. C++ stage0
     files = array{};

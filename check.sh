@@ -79,9 +79,15 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # transfer to vish, step 2: phase 1 parser (brackets, indentation repairs, names ast.*) in language vs. C++ stage0
     ( $b parsecheck tests/data/*.txt lib/lexer.vish lib/parser.vish $(ls tests/*.vish | head -30) ) > $L/t_parser.log 2>&1
     echo "parser: код $?" > $L/r_parser
-    # Transfer to vish, step 3a: Phase 2 expressions (literals, names, calls, postfixes, operator series) in language vs. C++ stage0
-    ( $b exprcheck tests/data/expr_corpus.txt tests/data/expr_random.txt ) > $L/t_expr.log 2>&1
+    # port to vish, step 3a: phase 2 expressions (literals, names, calls, postfixes, operator runs) in the language against C++ stage0
+    ( $b exprcheck tests/data/expr_corpus.txt tests/data/expr_random.txt tests/data/expr_construct.txt ) > $L/t_expr.log 2>&1
     echo "expr: код $?" > $L/r_expr
+    # E3 (the porting plan): ast.* nodes from the parser tree in Vish - the structure and the print -> parse round trip against C++ stage0
+    ( $b nodecheck tests/data/expr_corpus.txt tests/data/expr_random.txt tests/data/expr_splice.txt tests/data/expr_splice_invalid.txt tests/data/expr_construct.txt ) > $L/t_nodes.log 2>&1
+    echo "nodes: код $?" > $L/r_nodes
+    # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
+    ( $b modcheck tests/*.vish ) > $L/t_modules.log 2>&1
+    echo "modules: код $?" > $L/r_modules
     # epic vsh-u4e: the environment object journal (lib/runlog.vish): write, blobs, truncation, corruption, cause chain; each run uses its own directory
     ( rm -rf $L/runlog && mkdir -p $L/runlog && $b runlogcheck $PWD/$L/runlog ) > $L/t_runlog.log 2>&1
     echo "runlog: код $?" > $L/r_runlog

@@ -1,0 +1,11 @@
+Point{1, 2}
+Point{}
+array{1, 2, 3}
+array{...xs}
+array{...xs, 4}
+f(Point{x, y})
+A{B{1}, 2}
+Point{1, 2}.x
+Point{a + b, c * d}
+Point{{x: 1}}
+x + Point{1}

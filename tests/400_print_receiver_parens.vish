@@ -1,0 +1,24 @@
+// out: 1
+// fmt-has: a = (-x)[0];
+// fmt-has: b = (-x).y;
+// fmt-has: c = (-x)(1);
+// fmt-has: d = (!x).y;
+// fmt-has: g = (x + 1)[0];
+// fmt-has: h = (x + 1)(2);
+// fmt-has: f = -x.y;
+// fmt-has: i = (#x)(1);
+// The receiver of a postfix, an index, a field and a call goes in parentheses if it is an infix or a prefix: printing must not change the tree
+// ((x + 1)[0] used to print as x + 1[0]). Parse: postfixes* [infix, prefixes*], so -x.y is -(x.y), without parentheses.
+// Found while comparing with `vish nodecheck` (E3, the porting plan): the defect was in printer.hpp, not in the node constructors.
+unused() {
+  x = 1;
+  a = (-x)[0];
+  b = (-x).y;
+  c = (-x)(1);
+  d = (!x).y;
+  f = -(x.y);
+  g = (x + 1)[0];
+  h = (x + 1)(2);
+  i = (#x)(1);
+}
+main() => print(1);

@@ -1091,7 +1091,7 @@ struct printer {
     auto op = str(o.op);
     if(o.args.size() == 1) {
       if(o.postfix) {
-        operand(o.args[0], false, {});
+        receiver(o.args[0]);
         out += op;
         return;
       }
@@ -1230,7 +1230,7 @@ struct printer {
       item(c.args[0]);
       return item(c.callee);
     }
-    item(c.callee);
+    receiver(c.callee);
     auto word = [&](uint32_t i) { return c.words.empty() ? symbol{} : c.words[i]; };
     uint32_t n = uint32_t(c.args.size());
     uint32_t i = 0;
@@ -1307,15 +1307,29 @@ struct printer {
     if(!db.is<n_block>(b) && !db.is<n_raw>(b)) terminate(b);
   }
 
+  // The receiver of a postfix, an index, a field and a call: it binds to the atom, so an infix, a chain, an if and a prefix operator
+  // must be in parentheses, otherwise printing changes the tree: (x + 1)[0] != x + 1[0], (-x).y != -x.y (parse: postfixes* [infix, prefixes*]).
+  // An infix, a chain and an if are chosen by operand (code in the language); a prefix operator always (this is not style but meaning).
+  void receiver(node_id child) {
+    bool prefix_op = db.is<n_op>(child) && db.as<n_op>(child).args.size() == 1 && !db.as<n_op>(child).postfix;
+    if(prefix_op || db.is<n_splice>(child)) { // #x is also a prefix: the parser rejects #x(1), #x.y, #x[0]; (#x)(1) is needed
+      out += '(';
+      item(child);
+      out += ')';
+      return;
+    }
+    operand(child, false, {});
+  }
+
   void field(n_op const & f) { // v.[f]
-    operand(f.args[0], false, {});
+    receiver(f.args[0]);
     out += ".[";
     item(f.args[1]);
     out += ']';
   }
 
-  void index(n_op const & o) { // (a)[i] The pair operator
-    item(o.args[0]);
+  void index(n_op const & o) { // a[i] is a paired operator
+    receiver(o.args[0]);
     out += '[';
     item(o.args[1]);
     out += ']';
