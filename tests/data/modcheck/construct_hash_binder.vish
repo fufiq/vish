@@ -1,0 +1,6 @@
+f(xs) {
+  for(#x : xs) { 1; }
+  try { 1; } catch(#e) { 2; }
+  try { 1; } catch(e) { 2; } catch(g) { 3; }
+  0
+}

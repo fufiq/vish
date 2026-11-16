@@ -446,7 +446,12 @@ postfix(ps s, pn e0) {
   loop {
     if(s.error != "") break;
     if(s.tail) break; // a record with `;` (return x;) ended the instruction (parser.hpp postfix: tail_statement)
-    if(is_open_ch(s, 40, 0) && tk(s, 0).glued) {
+    pf_ci = if(e.kind == "n_ident") cons_of(s, after_text(e.info, "name=")) else -1;
+    if((pf_ci >= 0) && ((is_open_ch(s, 40, 0) && tk(s, 0).glued) || ((s.cons[pf_ci][2] == 1) && is_open_ch(s, 123, 0) && !tk(s, 0).glued))) {
+      // a construct with the name in parentheses: (for)(x : xs) {} - callee is determined by the node (construct_of parser.hpp); the head of the instruction is not a name
+      e = cons_call(s, e, pf_ci, false);
+      if(s.tail) break;
+    } else if(is_open_ch(s, 40, 0) && tk(s, 0).glued) {
       e = call_of(s, e);
       if(s.tail) break;
     } else if(is_open_ch(s, 91, 0) && tk(s, 0).glued) {
@@ -931,6 +936,24 @@ cons_group(ps s, i64 ci, str word, bool head_stmt, cgroup cg) {
       if((tk(s, 0).kind == kind_end()) || (s.error != "") || (s.unsupported != "")) break;
       cg_closes1 = is_op_at(s, ",", 1) || is_close_ch_at(s, 41, 1);
       cg_closes2 = is_op_at(s, ",", 2) || is_close_ch_at(s, 41, 2);
+      if(is_op_at(s, "#", 0) && (tk(s, 1).kind == kind_ident()) && (is_op_at(s, ":", 2) || (cg_packed && cg_closes2))) { // #x is a template place name (parser.hpp binder)
+        cg_nm = "#" + tk_text(s, 1);
+        s.pos += 2;
+        cg_src = -1;
+        if(is_op_at(s, ":", 0)) {
+          s.pos += 1;
+          cg_src = cg.args.size - cg_first;
+          cg_x = expression(s);
+          if((s.error != "") || (s.unsupported != "")) return false;
+          cg_xr = node_of(cg_x);
+          if(!cg_xr.ok) { want(s, "источник привязки без узла"); return false; }
+          cg.args.push(cg_xr.node);
+          cg.words.push(word);
+        }
+        cg_binders.push(ast.parameter{cg_nm, code(), 0, false, "", false, cg_src});
+        if(is_op_at(s, ",", 0)) { s.pos += 1; continue; }
+        break;
+      }
       cg_typed = (tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident()) && (is_op_at(s, ":", 2) || cg_closes2);
       cg_bare = (tk(s, 0).kind == kind_ident()) && (is_op_at(s, ":", 1) || (cg_packed && cg_closes1));
       if(cg_typed || cg_bare) {
