@@ -1,0 +1,24 @@
+// Parentheses for a lambda and ct as a receiver/left operand, and `;` of a lambda with a record without `;;` (review of the E5 printer, 2026-11-16)
+// fmt-stable
+// fmt-has: f(y) => ((x) => x)(1);
+// fmt-has: g(y) => (ct y)(1);
+// fmt-has: g = (x) => return x;
+// fmt-has: n(a) => ((x) => x) + a;
+// machine
+// out: 1
+f(y) => ((x) => x)(1);
+
+g(y) => (ct y)(1);
+
+h() {
+  g = (x) => return x;
+  g(1)
+}
+
+k() => (x) => return x;
+
+n(a) => ((x) => x) + a;
+
+main() {
+  print(1);
+}

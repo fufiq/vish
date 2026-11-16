@@ -733,7 +733,13 @@ dump_pn(pn x, i64 depth) {
     for(l : lines_of(dump_code(x.node))) put(r, pad + l + "\n");
     return take(r);
   }
-  out = pad + x.kind + x.info + "\n";
+  chain_ops = "";
+  if((x.kind == "n_chain") && (x.ops.size > 0)) { // like the C++ dumper: ops=[+,*] - without them the dumps of a+b+c and a-b-c are equal
+    chain_ops = " ops=[";
+    for(i : range(x.ops.size)) chain_ops = chain_ops + (if(i > 0) "," else "") + x.ops[i];
+    chain_ops = chain_ops + "]";
+  }
+  out = pad + x.kind + x.info + chain_ops + "\n";
   if(x.callee.size > 0) out = out + (pad + "  " + (if(x.kind == "n_construct") "type" else if(x.kind == "n_spread") "value" else "callee") + ":\n" + dump_pn(x.callee[0], depth + 2));
   for(k : x.kids) out = out + dump_pn(k, depth + 1);
   out

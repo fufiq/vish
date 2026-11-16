@@ -923,7 +923,7 @@ struct printer {
     }
     if(db.is<n_block>(s) || db.is<n_raw>(s) || db.is<n_extend>(s)) return;
     if(db.is<n_ct>(s) && db.is<n_block>(db.as<n_ct>(s).body)) return;
-    if(closed(s)) return;
+    if(closed(s) || self_ended(s)) return;
     if(db.is<n_call>(s) && !templated(s)) {
       auto const & c = db.as<n_call>(s);
       if(!c.words.empty() || c.tail) return; // Block or tail instruction sets `;` itself
@@ -931,18 +931,30 @@ struct printer {
     out += ';';
   }
 
-  // Node recording ends `;` (return x;) or body-block (loop { }), if(c) { } else { }) - `;` You
-  // don't have to. Body. `=> e` ends with the tail design instruction (g() => if(c) for(x : xs)
-  // s;): её `;` - and the end of the announcement.
-  //
+  // A lambda without a block and an assignment whose value ends with a record with `;` (g = (x) => return x;): the `;` is already printed.
+  bool self_ended(node_id x) {
+    if(db.is<n_lambda>(x)) return !db.is<n_block>(db.as<n_lambda>(x).body) && ends_in_statement(db.as<n_lambda>(x).body);
+    if(db.is<n_op>(x) && db.as<n_op>(x).args.size() == 2 && !db.is_index(x) && !db.is_field(x)) {
+      auto op = str(db.as<n_op>(x).op);
+      if(op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") return ends_in_statement(db.as<n_op>(x).args[1]);
+    }
+    return false;
+  }
+
+  // A node's record ends with `;` (return x;) or with a block body (loop { }, if(c) { }
+  // else { }) - no `;` is needed after it.
+  // A body `=> e` ends with the tail instruction of a construct (g() => if(c) for(x : xs) s;):
+  // its `;` is also the end of the declaration.
   bool ends_in_statement(node_id x) {
-    if(db.is<n_call>(x) && !templated(x)) { // Printed in the form (below)
+    if(self_ended(x)) return true;
+    if(db.is<n_call>(x) && !templated(x) && db.as<n_call>(x).tail) { // printed by a template - by the record (below)
       auto const & c = db.as<n_call>(x);
-      if(!c.tail || c.args.empty() || (!c.words.empty() && c.words.back())) return false;
+      if(c.args.empty() || (!c.words.empty() && c.words.back())) return false;
       node_id b = c.args.back();
       if(db.is<n_lambda>(b)) b = db.as<n_lambda>(b).body;
       return !db.is<n_block>(b) && !db.is<n_raw>(b);
     }
+    if(db.is<n_call>(x) && !templated(x) && !db.as<n_call>(x).words.empty()) return false;
     auto rec = record_for(x);
     if(!rec) return false;
     auto const & [f, r] = *rec;
@@ -1135,6 +1147,12 @@ struct printer {
     bool infix_op = db.is<n_op>(child) && db.as<n_op>(child).args.size() == 2 && !db.is_index(child) && !db.is_field(child);
     std::string_view kind = infix_op ? "infix" : db.is<n_chain>(child) ? "chain" : db.is<n_if>(child) ? "if" : "";
     bool paren = !kind.empty();
+    if(left && db.is<n_lambda>(child)) { // ((x) => x) + 1: the lambda body would eat `+ 1`
+      out += '(';
+      item(child);
+      out += ')';
+      return;
+    }
     if(paren) {
       symbol child_op = infix_op ? db.as<n_op>(child).op : db.is<n_chain>(child) ? same_op(db.as<n_chain>(child)) : symbol{};
       bool assoc = left && parent_op && child_op == parent_op && kind != "if" && associative(parent_op, child);
@@ -1313,7 +1331,8 @@ struct printer {
   // An infix, a chain and an if are chosen by operand (code in the language); a prefix operator always (this is not style but meaning).
   void receiver(node_id child) {
     bool prefix_op = db.is<n_op>(child) && db.as<n_op>(child).args.size() == 1 && !db.as<n_op>(child).postfix;
-    if(prefix_op || db.is<n_splice>(child)) { // #x is also a prefix: the parser rejects #x(1), #x.y, #x[0]; (#x)(1) is needed
+    // a lambda and ct e - the body eats everything on the right: ((x) => x)(1) and (ct x)(1) without parentheses read as (x) => x(1) and ct x(1)
+    if(prefix_op || db.is<n_splice>(child) || db.is<n_lambda>(child) || db.is<n_ct>(child)) { // #x is also a prefix: the parser rejects #x(1), #x.y, #x[0]; (#x)(1) is needed
       out += '(';
       item(child);
       out += ')';
