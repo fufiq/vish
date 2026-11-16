@@ -86,7 +86,7 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     ( $b nodecheck tests/data/expr_corpus.txt tests/data/expr_random.txt tests/data/expr_splice.txt tests/data/expr_splice_invalid.txt tests/data/expr_construct.txt ) > $L/t_nodes.log 2>&1
     echo "nodes: код $?" > $L/r_nodes
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
-    ( $b modcheck tests/*.vish ) > $L/t_modules.log 2>&1
+    ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules
     # epic vsh-u4e: the environment object journal (lib/runlog.vish): write, blobs, truncation, corruption, cause chain; each run uses its own directory
     ( rm -rf $L/runlog && mkdir -p $L/runlog && $b runlogcheck $PWD/$L/runlog ) > $L/t_runlog.log 2>&1

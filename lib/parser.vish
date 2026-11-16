@@ -183,10 +183,10 @@ check_cli(args) {
 // "an operator is always one character... the rules described for operators" (the author). *Mine:* the table of operator roles
 // is fixed from the prelude (in C++ it comes from `operator` declarations in scope) - for now without module rules.
 // Not supported (the reason is in ps.unsupported, the comparison skips such texts): record words (if/loop/return...), `{...}` blocks and records,
-// lambdas, `name{...}`, `name"..."`, trailing call blocks, `...` expansion, declarations in parentheses.
+// lambdas, `name"..."`, trailing call blocks, declarations in parentheses; the prelude's record words and `Name{...}`/`...x` - see record_use and postfix.
 // Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
 struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; }
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; }
 pn_new(str kind, str info, kids) => pn{kind, info, kids, array{}};
 two(pn a, pn b) {
   r = array{};
@@ -195,6 +195,7 @@ two(pn a, pn b) {
   r
 }
 pn_hole(str why) => pn{"n_hole", "", array{}, array{}};
+tk_at(ps s, i64 i) => if(i < s.toks.size) s.toks[i] else s.toks[s.toks.size - 1];
 tk(ps s, i64 k) => if((s.pos + k) < s.toks.size) s.toks[s.pos + k] else s.toks[s.toks.size - 1];
 tk_text(ps s, i64 k) => text_range(s.src, tk(s, k).from, tk(s, k).to);
 want(ps s, str why) {
@@ -438,8 +439,10 @@ postfix(ps s, pn e0) {
   e = e0;
   loop {
     if(s.error != "") break;
+    if(s.tail) break; // a record with `;` (return x;) ended the instruction (parser.hpp postfix: tail_statement)
     if(is_open_ch(s, 40, 0) && tk(s, 0).glued) {
       e = call_of(s, e);
+      if(s.tail) break;
     } else if(is_open_ch(s, 91, 0) && tk(s, 0).glued) {
       s.pos += 1;
       i = expression(s);
@@ -860,7 +863,11 @@ record_use(ps s) {
       ru_live = ru_bv;
       s.tail = false;
       if(is_open_ch(s, 123, 0)) {
-        if(is_close_ch_at(s, 125, 1) || ((tk(s, 1).kind == kind_ident()) && is_op_at(s, ":", 2))) { want(s, "запись {…} в значении"); return nres{false, code()}; }
+        // `{}` is a value of the place's type only in the value slot `{=` (empty_value_ahead); a record `{x: ...}` is not a block (record_ahead)
+        ru_value_slot = false;
+        for(i : ru_bv) if(rule_piece(s, i, ru_at) == "{=") ru_value_slot = true;
+        ru_empty = is_close_ch_at(s, 125, 1) && (is_close_ch_at(s, 41, 2) || (is_close_ch_at(s, 125, 2) || (is_op_at(s, ",", 2) || is_op_at(s, ";", 2))));
+        if((ru_value_slot && ru_empty) || ((tk(s, 1).kind == kind_ident()) && is_op_at(s, ":", 2))) { want(s, "запись {…} в значении"); return nres{false, code()}; }
         ru_b = block_node(s);
         if(!ru_b.ok) return nres{false, code()};
         ru_args.push(ru_b.node);
@@ -954,6 +961,27 @@ param_node(ps s) {
   nres{true, ast.parameter{nm, ty, mode, pack, "", strict, -1}}
 }
 is_close_ch_at(ps s, i64 c, i64 k) => (tk(s, k).kind == kind_close()) && ((tk(s, k).ch == c) && (tk(s, k).err < 0));
+// ahead is the header of a local function (try_fn_decl(true) parser.hpp): [type] name(...) [clauses] => | {; `f(x) { ... }` without `=>` in a block is a call with a tail
+core_word_text(str w) => has_text(array{"ct", "const", "outline", "module", "operator"}, w);
+local_fn_ahead(ps s) {
+  name_at = -1;
+  if((tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident()) && is_open_ch(s, 40, 2)) name_at = 1
+  else if((tk(s, 0).kind == kind_ident()) && is_open_ch(s, 40, 1) && !core_word_text(tk_text(s, 0))) name_at = 0
+  else return false;
+  close = s.match[s.pos + name_at + 1];
+  if(close < 0) return false;
+  after = (close + 1) - s.pos;
+  loop {
+    if(!((tk(s, after).kind == kind_ident()) && is_open_ch(s, 40, after + 1) && !core_word_text(tk_text(s, after)))) break;
+    c2 = s.match[s.pos + after + 1];
+    if(c2 < 0) return false;
+    after = (c2 + 1) - s.pos;
+  }
+  arrow = is_op_at(s, "=>", after);
+  if(!(arrow || is_open_ch(s, 123, after))) return false;
+  if((name_at == 0) && !arrow) return false;
+  true
+}
 block_node(ps s) {
   // at `{`
   s.pos += 1;
@@ -962,6 +990,7 @@ block_node(ps s) {
   loop {
     if(is_close_ch(s, 125)) break;
     if((tk(s, 0).kind == kind_end()) || (s.error != "") || (s.unsupported != "")) { want(s, "блок не закрыт или внутри не поддержано"); return nres{false, code()}; }
+    if(local_fn_ahead(s)) { want(s, "локальная функция"); return nres{false, code()}; }
     if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0))) {
       if(is_keyword_word(tk_text(s, 0)) || (tk(s, 1).kind == kind_ident())) { want(s, "слово-запись или объявление в блоке"); return nres{false, code()}; }
     }
@@ -994,6 +1023,14 @@ block_node(ps s) {
 item_node(ps s) {
   from = s.pos;
   why = "";
+  // program rules (syntax/operator/using/use, functions with expr parameters - "constructs") change the parsing of the following elements
+  // (parser.hpp learn/rules): while they are not supported, the elements after such a declaration are "not supported", not a call
+  if(s.custom) {
+    want(s, "правила программы выше (syntax/operator/use/expr)");
+    why = s.unsupported;
+    skip_item(s);
+    return ires{false, code(), from, s.pos, why};
+  }
   k = 0;
   rtype = code();
   if((tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident()) && is_open_ch(s, 40, 2)) {
@@ -1049,6 +1086,13 @@ module_items_of(str src) {
     p0 = s.pos;
     it = item_node(s);
     items.push(it);
+    for(ti : range(it.to - it.from)) {
+      tt = tk_at(s, it.from + ti);
+      if(tt.kind == kind_ident()) {
+        tw = text_range(s.src, tt.from, tt.to);
+        if(has_text(array{"syntax", "operator", "using", "use", "expr"}, tw)) s.custom = true;
+      }
+    }
     if(s.pos <= p0) break;
   }
   items
@@ -1093,6 +1137,7 @@ mod_check_cli(files) {
     ref = ref_items(module_reference(src));
     if(mine.size != ref.size) {
       skipped_files += 1;
+      write_out("  пропущен файл " + f + ": элементов у Vish " + text(mine.size) + ", у C++ " + text(ref.size) + "\n");
       continue;
     }
     for(k : range(mine.size)) {

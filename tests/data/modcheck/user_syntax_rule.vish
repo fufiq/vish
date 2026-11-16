@@ -1,0 +1,2 @@
+syntax test (x) => ast.throw{x};
+f() => test(1);
