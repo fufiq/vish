@@ -102,50 +102,20 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
     if(int bad = ro::compare_queries(db, m, all_probes, report)) { bad_query += bad; fprintf(stderr, "%s: [%s] запросы ≠ эталон\n%s", path.c_str(), when, report.c_str()); }
   };
   verify_queries("начало", decls.size() <= 60 ? decls : pick_decls(60));
-  // Forward reachability (by the children lists from the prelude's and the program's modules), not by parent: a rollback does not reset the parent of detached nodes
-  // (database behaviour), so the answers for detached nodes depend on a stale parent and are not compared in I3. The index tables
-  // (the r/t lines of the dump) do not depend on parent at all and are compared in full, including detached nodes.
-  auto reachable = [&]() {
-    std::vector<uint8_t> seen(db.size(), 0);
-    node_list todo{db.prelude, root};
-    while(!todo.empty()) {
-      node_id x = todo.back();
-      todo.pop_back();
-      if(!x || x.value >= seen.size() || seen[x.value]) continue;
-      seen[x.value] = 1;
-      db.for_each_child(x, [&](node_id c) { todo.push_back(c); });
-    }
-    return seen;
-  };
-  auto attached_dump = [&](std::vector<uint8_t> const & seen) {
-    std::string out, dump = db.rdeps_dump();
-    std::istringstream in(dump);
-    std::string line;
-    while(std::getline(in, line)) {
-      if(line.starts_with("f ")) {
-        uint32_t i = uint32_t(std::strtoul(line.c_str() + 2, nullptr, 10));
-        if(i >= seen.size() || !seen[i]) continue;
-      }
-      out += line + "\n";
-    }
-    return out;
-  };
-  auto snapshot = [&]() { auto seen = reachable(); return std::pair<std::string, std::string>(attached_dump(seen), ro::query_snapshot(db, fixed_probes, &seen)); };
-  // A rollback does not restore the parent of children that a mutation re-attached: the caller's link_parents fixes them - for every changed
-  // node (as the editor does). The harness does NOT touch the free nodes (extra, extra_fn): their stale parent is the database state after a rollback.
+  fixed_probes.push_back(extra);
+  fixed_probes.push_back(extra_fn);
+  auto snapshot = [&]() { return std::pair<std::string, std::string>(db.rdeps_dump(), ro::query_snapshot(db, fixed_probes)); };
   auto roll_back = [&](uint32_t source, std::pair<std::string, std::string> const & before, char const * what, node_list const & touched) {
     db.rollback(source);
-    for(auto t: touched) db.link_parents(t);
     verify(what);
-    auto seen_now = reachable();
-    if(auto now = attached_dump(seen_now); now != before.first) {
+    if(auto now = db.rdeps_dump(); now != before.first) {
       ++bad3;
       std::size_t i = 0;
       while(i < now.size() && i < before.first.size() && now[i] == before.first[i]) ++i;
       while(i > 0 && now[i - 1] != '\n') --i; // the beginning of the mismatch line
       fprintf(stderr, "%s: [%s] И3: содержимое индекса после отката ≠ прежнему: после %.40s / до %.40s\n", path.c_str(), what, now.c_str() + i, before.first.c_str() + i);
     }
-    else if(auto now = ro::query_snapshot(db, fixed_probes, &seen_now); now != before.second) {
+    else if(auto now = ro::query_snapshot(db, fixed_probes); now != before.second) {
       ++bad3;
       std::size_t i = 0;
       while(i < now.size() && i < before.second.size() && now[i] == before.second[i]) ++i;
@@ -343,11 +313,11 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
         }
         case 3: // a function body
           target = pick(not_main);
-          if(target) { auto f = db.as<n_fn>(target); f.body = db.add(n_int{7}, {}); replacement = f; ready = true; }
+          if(target) { auto f = db.copy_of<n_fn>(target); f.body = db.add(n_int{7}, {}); replacement = f; ready = true; }
           break;
         case 4: // a function name (the signature)
           target = pick(not_main);
-          if(target) { auto f = db.as<n_fn>(target); f.name = db.strings.intern("ra1_renamed"); replacement = f; ready = true; }
+          if(target) { auto f = db.copy_of<n_fn>(target); f.name = db.strings.intern("ra1_renamed"); replacement = f; ready = true; }
           break;
         case 5: { // a new overload of an existing name (of an ordinary function: for operators and syntax forms the arity and records are set by the parser)
           node_id f = pick(plain_fn);
@@ -377,7 +347,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
         case 8: { // signature: an extra parameter or without the last one (callers by name lose the overload)
           target = pick([&](node_id x) { return plain_fn(x) && (!db.as<n_fn>(x).params.empty() || random() % 2 == 0); });
           if(target) {
-            auto f = db.as<n_fn>(target);
+            auto f = db.copy_of<n_fn>(target);
             if(!f.params.empty() && random() % 2 == 0) { std::vector<node_id> keep; for(std::size_t i = 0; i + 1 < f.params.size(); ++i) keep.push_back(f.params[i]); f.params = keep; }
             else { n_param p; p.name = db.strings.intern("ra1_extra_param"); f.params.push_back(db.add(p, {})); }
             replacement = f; ready = true;
@@ -393,7 +363,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
           }
           if(!hooks.empty()) {
             target = hooks[random() % hooks.size()];
-            auto f = db.as<n_fn>(target);
+            auto f = db.copy_of<n_fn>(target);
             f.body = db.add(n_int{99}, {});
             f.expr_body = true;
             replacement = f; ready = true;
@@ -520,7 +490,6 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
         fprintf(stderr, "%s: И2 вид %d: расхождение в программе с ct-блоками — зависимость ct-кода от АСТ по рефлексии, RA-1b (вне строгой проверки)\n", path.c_str(), kind);
       } else { ++bad2; if(hook_case) ++hook_bad; }
       db.rollback(src);
-      db.link_parents(link);
       verify("И2 после отката");
     }
     program_end = count; edit_lo = edit_hi = 0;

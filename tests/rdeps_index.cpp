@@ -303,24 +303,20 @@ int main() {
     assert(found.contains("transform") && found.contains("main"));
   }
 
-  // A detached node: after a rollback the parent of the detached node is stale (database behaviour, a rollback does not reset it), but the index tables do not
-  // depend on parent - they equal the earlier ones and the recount, and a mutation and a rollback of a DETACHED node do not spoil the index either (I1/I3 without a manual reset).
+  // The full I3 for a free node without the harness restoring the links.
   {
-    auto tables = [&](ast_db const & d) { // the r/t lines of the dump (the tables), without the f lines of enclosing_fn
-      std::string out, dump = d.rdeps_dump(), line;
-      for(std::size_t i = 0; i < dump.size();) { auto e = dump.find('\n', i); line = dump.substr(i, e - i); if(line.starts_with("r ") || line.starts_with("t ")) out += line + "\n"; i = e + 1; }
-      return out;
-    };
     auto free_node = db.add(n_ident{sym("ra1_free")}, {});
-    auto before_tables = tables(db);
+    auto before_tables = db.rdeps_dump();
+    auto before_queries = ro::query_snapshot(db, {root4, free_node, consume_fn});
     auto module_body = db.copy_of<n_module>(root4);
     module_body.items.push_back(free_node);
     db.mutate(root4, module_body, root.value + 2000);
     db.link_parents(root4);
     assert(db[free_node].parent == root4 && !db.users_of(sym("ra1_free")).empty());
     db.rollback(root.value + 2000);
-    assert(db[free_node].parent == root4); // the detached node keeps a stale parent - the harness does not reset it
-    assert(tables(db) == before_tables); // and the index equals the earlier one
+    assert(!db[free_node].parent); // the former free node is free again
+    assert(db.rdeps_dump() == before_tables);
+    assert(ro::query_snapshot(db, {root4, free_node, consume_fn}) == before_queries);
     assert(db.rdeps_dump() == db.rdeps_dump(true) && ro::compare_index(db).empty());
     // a mutation and a rollback of the detached node itself (after detaching it stays in the database): the index follows the node's kind
     db.mutate(free_node, n_ident{sym("ra1_free_other")}, root.value + 2001);
@@ -328,7 +324,34 @@ int main() {
     assert(ro::compare_index(db).empty());
     db.rollback(root.value + 2001);
     assert(!db.users_of(sym("ra1_free")).empty() && db.users_of(sym("ra1_free_other")).empty());
-    assert(tables(db) == before_tables && ro::compare_index(db).empty());
+    assert(db.rdeps_dump() == before_tables && ro::compare_index(db).empty());
+  }
+
+  // Moving an already attached subtree: a rollback from the middle and a replay must restore the parents exactly.
+  {
+    ast_db d;
+    auto leaf = d.add(n_ident{d.strings.intern("leaf")}, {});
+    n_fn a; a.name = d.strings.intern("a"); a.body = leaf;
+    auto left = d.add(a, {});
+    n_fn b; b.name = d.strings.intern("b");
+    auto right = d.add(b, {});
+    d.link_parents(left);
+    auto before = d.rdeps_dump();
+    b.body = leaf;
+    d.mutate(right, b, 100);
+    d.link_parents(right);
+    assert(d[leaf].parent == right);
+    auto middle = d.rdeps_dump();
+    d.mutate(leaf, n_ident{d.strings.intern("other")}, 101);
+    d.rollback(101);
+    assert(d.rdeps_dump() == middle);
+    d.rollback(100);
+    assert(d[leaf].parent == left && d.rdeps_dump() == before);
+    ast_db replay;
+    replay.replay(d.journal());
+    assert(replay.rdeps_dump() == d.rdeps_dump());
+    assert(replay[leaf].parent == left);
+    db.use_pool();
   }
 
   // A derived node (derive): a node taken anew gets its kind at birth - the index follows it, not the completed kind.

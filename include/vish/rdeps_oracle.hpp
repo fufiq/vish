@@ -276,17 +276,15 @@ inline int compare_queries(ast_db const & db, model const & m, node_list const &
   return bad;
 }
 
-// A snapshot of query answers over a set of nodes - for I3: after a rollback the answers must match the earlier ones. attached - forward-reachable
-// nodes: answers with detached nodes (a stale parent after a rollback is database behaviour) are not included.
-inline std::string query_snapshot(ast_db const & db, node_list const & probes, std::vector<uint8_t> const * attached = nullptr) {
+// The full I3 answers, including detached nodes.
+std::string query_snapshot(ast_db const & db, node_list const & probes) {
   std::string out;
-  auto keep = [&](node_id x) { return !attached || (x.value < attached->size() && (*attached)[x.value]); };
   for(auto d: probes) {
     node_list ch{d};
     out += cat("q ", d.value, ":");
-    for(auto x: db.users_of(d)) if(keep(x)) out += cat(" u", x.value);
-    for(auto x: db.dependents_of_fn(d)) if(keep(x)) out += cat(" d", x.value);
-    for(auto x: db.impact_of(ch)) if(keep(x)) out += cat(" i", x.value);
+    for(auto x: db.users_of(d)) out += cat(" u", x.value);
+    for(auto x: db.dependents_of_fn(d)) out += cat(" d", x.value);
+    for(auto x: db.impact_of(ch)) out += cat(" i", x.value);
     out += "\n";
   }
   return out;

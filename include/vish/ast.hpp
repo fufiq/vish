@@ -504,13 +504,17 @@ struct reuse_snap {
   list<uint32_t> ids;
 };
 
-// Base Roots (S5.2): Pool list descriptors and counters that are not derived from node. Live in an area (just behind the
-// header, rule in place) or in a heap of process (ordinary memory).
+// The database roots (S5.2): the descriptors of the pool lists and the counters that are not derived from nodes. They live in the area (right
+// after the header, edited in place) or in the process heap (ordinary memory).
+struct parent_undo {
+  node_id child, old, next;
+};
 struct mutation_rec {
   uint32_t target;
   uint32_t source;
   uint64_t at; // Mutation revision: the right node does not roll back after it
   node_kind old;
+  list<parent_undo> parents;
 };
 struct db_roots {
   interner_roots strings;
@@ -555,7 +559,7 @@ struct db_header {
 };
 
 struct db_area {
-  static constexpr uint32_t format_version = 3; // 3 - Sh5.3: born and reusable live in the roots; 2 - Sh5.2: base roots and row pool (1 - Sh5.1: only node and pool)
+  static constexpr uint32_t format_version = 4; // 4 - the parents of mutations; 3 - S5.3: born and reusable live in the roots; 2 - S5.2: the database roots and the string pool (1 - S5.1: only nodes and the pool)
   static constexpr uint32_t default_node_cap = 1u << 21;
   static constexpr uint32_t default_strings_cap = 1u << 24; // words (64 MiB addresses)
   static constexpr uint64_t header_gap = uint64_t(1) << 16; // subtitle
@@ -774,7 +778,7 @@ struct ast_db {
         else if(auto * w = std::get_if<s_note>(&e.op)) note(w->note);
       }
     });
-    own(r.mutations, [&] { for(mutation_rec & m: r.mutations) kind(m.old); });
+    own(r.mutations, [&] { for(mutation_rec & m: r.mutations) { kind(m.old); own(m.parents, [] {}); } });
     own(r.node_rev, [] {});
     own(r.edited_at, [] {});
     own(r.born, [&] { for(born_snap & b: r.born) kind(b.kind); });
@@ -1439,8 +1443,21 @@ struct ast_db {
           inst_emits.insert(x.value);
           emit_owner[x.value] = n.value;
         }
+    list<parent_undo> parents;
+    if(source) {
+      auto remember = [&](auto && self, node_id owner, node_kind const & kind) -> void {
+        std::visit([&](auto const & x) {
+          auto child_parent = [&](node_id child) {
+            if(nodes[child].parent != owner) parents.push_back({child, nodes[child].parent, owner});
+            self(self, child, nodes[child].kind);
+          };
+          for_each_child_of(x, child_parent);
+        }, kind);
+      };
+      remember(remember, n, k);
+    }
     index_refs(n, false);
-    if(source) mutations.push_back({n.value, source, revision, std::move(nodes[n].kind)});
+    if(source) mutations.push_back({n.value, source, revision, std::move(nodes[n].kind), std::move(parents)});
     else retired.push_back(std::move(nodes[n].kind));
     nodes[n].kind = std::move(k);
     index_refs(n, true);
@@ -1464,6 +1481,10 @@ struct ast_db {
       mutation & m = mutations[i];
       node_id n(m.target);
       if(m.target < edited_at.size() && edited_at[m.target] > m.at) continue;
+      for(std::size_t j = m.parents.size(); j-- > 0;) {
+        auto const & p = m.parents[j];
+        if(nodes[p.child].parent == p.next) nodes[p.child].parent = p.old;
+      }
       index_refs(n, false);
       retired.push_back(std::move(nodes[n].kind));
       nodes[n].kind = std::move(m.old);
@@ -1509,6 +1530,7 @@ struct ast_db {
     ++elab_depth;
     return {{}, 0, 0, true};
   }
+  std::unordered_map<uint32_t, node_id> elab_parents; // the baseline before a rollback for comparing nodes taken anew
   elab_mark begin_elaboration() {
     use_pool();
     if(elab_depth++ || elab_current()) return {{}, 0, 0, true};
@@ -1519,6 +1541,9 @@ struct ast_db {
     elab_mark m{{}, R().oplog.size(), changed.size(), false, reborn.size()};
     for(auto const & x: mutations)
       if(std::ranges::none_of(m.was, [&](auto const & w) { return w.first == x.target; })) m.was.push_back({x.target, nodes[node_id(x.target)].kind});
+    elab_parents.clear();
+    for(auto const & mutation: mutations)
+      for(auto const & p: mutation.parents) elab_parents.try_emplace(p.child.value, nodes[p.child].parent);
     touch_undo.clear();
     touch_logging = true;
     rollback(0);
@@ -1548,6 +1573,7 @@ struct ast_db {
       lg.resize(w);
     }
     touch_undo.clear();
+    elab_parents.clear();
   }
   // Subtrees of the same structure (node numbers may vary)
   bool same_tree(node_id a, node_id b) const {
@@ -1791,8 +1817,9 @@ struct ast_db {
       nodes[n].kind = std::move(k);
       index_refs(n, true); // the kind at birth: the completion will be repeated
       note_fn(n);
-      reborn.push_back({x, std::move(was), nodes[n].parent, &holder});
-      nodes[n].parent = {}; // The new owner (link_parents)
+      auto prior = elab_parents.find(x);
+      reborn.push_back({x, std::move(was), prior == elab_parents.end() ? nodes[n].parent : prior->second, &holder});
+      nodes[n].parent = {}; // the place belongs to the new owner (link_parents)
       birth[x] = ++births;
       hold(x, holder);
       return n;

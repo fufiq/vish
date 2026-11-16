@@ -38,6 +38,7 @@ static node_id build(ast_db & db, int n) {
 
 // node text: children, lines, names - one line to reconcile two bases
 static std::string dump(ast_db & db) {
+  db.use_pool();
   std::string out;
   for(uint32_t k = 0; k < db.size(); ++k) {
     node_id n(k);
@@ -353,6 +354,34 @@ int main(int argc, char ** argv) {
       ast_db z;
       assert(load_db(z, old) == root && dump(z) == want);
     }
+  }
+  { // RA-1: a snapshot of a mutation's parents survives compaction and opening an mmap database.
+    node_id leaf, left, right;
+    {
+      db_area area;
+      assert(area.open(dir, "parent-undo").empty());
+      ast_db db(&area);
+      leaf = db.add(n_int{1}, {});
+      n_fn a; a.name = db.strings.intern("a"); a.body = leaf;
+      left = db.add(a, {});
+      n_fn b; b.name = db.strings.intern("b");
+      right = db.add(b, {});
+      db.link_parents(left);
+      b.body = leaf;
+      db.mutate(right, b, 100);
+      db.link_parents(right);
+      db.compact_pool();
+      assert(db.commit_area().empty());
+    }
+    db_area area;
+    assert(area.open(dir, "parent-undo", false).empty());
+    ast_db db(&area);
+    assert(db[leaf].parent == right);
+    db.rollback(100);
+    assert(db[leaf].parent == left);
+    ast_db replay;
+    replay.replay(db.journal());
+    assert(dump(replay) == dump(db));
   }
   std::puts("area ok");
 }
