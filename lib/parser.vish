@@ -1126,7 +1126,7 @@ param_node(ps s) {
   if(tk(s, 0).kind != kind_ident()) { want(s, "сложный параметр"); return nres{false, code()}; }
   nm = tk_text(s, 0);
   s.pos += 1;
-  if(!(is_op_at(s, ",", 0) || is_close_ch(s, 41))) { want(s, "сложный параметр"); return nres{false, code()}; }
+  if(!(is_op_at(s, ",", 0) || is_close_ch(s, 41) || is_close_ch(s, 93))) { want(s, "сложный параметр"); return nres{false, code()}; }
   nres{true, ast.parameter{nm, ty, mode, pack, "", strict, -1}}
 }
 is_close_ch_at(ps s, i64 c, i64 k) => (tk(s, k).kind == kind_close()) && ((tk(s, k).ch == c) && (tk(s, k).err < 0));
@@ -1155,13 +1155,20 @@ local_fn_ahead(ps s) {
 // otherwise `;`, or `}` (the value of a block), or the instruction ends with a block (if/loop/a construct with a block) - `;` is not needed
 statement_node(ps s) {
   if(local_fn_ahead(s)) { want(s, "локальная функция"); return nres{false, code()}; }
-  if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0)) && (cons_of(s, tk_text(s, 0)) < 0) && !((tk_text(s, 0) == "ct") && !((tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued))) {
+  if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0)) && (cons_of(s, tk_text(s, 0)) < 0) && !((tk_text(s, 0) == "ct") && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued))) {
     if(is_keyword_word(tk_text(s, 0)) || (tk(s, 1).kind == kind_ident())) {
       want(s, if(is_keyword_word(tk_text(s, 0))) "в блоке слово «" + tk_text(s, 0) + "»" else "в блоке объявление «тип имя» (" + tk_text(s, 1) + ")");
       return nres{false, code()};
     }
   }
   if(is_open_ch(s, 91, 0) && is_open_ch(s, 91, 1)) { want(s, "атрибуты в блоке"); return nres{false, code()}; }
+  if((tk_text(s, 0) == "ct") && (tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) {
+    sn_head0 = s.head;
+    sn_cv = ct_var(s);
+    s.head = sn_head0;
+    s.lwv = false;
+    return sn_cv;
+  }
   s.tail = false;
   s.lwv = false;
   sn_head = s.head;
@@ -1208,9 +1215,77 @@ item_node(ps s) {
     skip_item(s);
     return ires{false, code(), from, s.pos, why};
   }
+  attrs = array{};
+  loop {
+    if(!(is_open_ch(s, 91, 0) && is_open_ch(s, 91, 1))) break;
+    s.pos += 2;
+    loop {
+      if(is_close_ch(s, 93)) break;
+      at_e = expression(s);
+      at_r = node_of(at_e);
+      if((s.error != "") || (s.unsupported != "") || !at_r.ok) { if(s.unsupported == "") want(s, "атрибут без узла"); why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+      attrs.push(at_r.node);
+      if(is_op_at(s, ",", 0)) s.pos += 1 else break;
+    }
+    if(is_close_ch(s, 93) && is_close_ch_at(s, 93, 1)) s.pos += 2 else { want(s, "атрибуты: ]]"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  }
+  if((attrs.size > 0) && (tk(s, 0).kind == kind_ident()) && is_op_at(s, "=", 1)) {
+    // [[state]] x = e; - program state (§12.2): a module variable
+    sv_ok = true;
+    for(a : attrs) if(!((code_kind(a) == ast.name) && (node_field(a, "name") == "state"))) sv_ok = false;
+    if(!sv_ok) { want(s, "у переменной модуля — только [[state]]"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    sv_name = tk_text(s, 0);
+    s.pos += 2;
+    s.head = s.pos;
+    s.tail = false;
+    sv_e = expression(s);
+    sv_r = node_of(sv_e);
+    if((s.error != "") || (s.unsupported != "") || !sv_r.ok || !is_op_at(s, ";", 0)) { if(s.unsupported == "") want(s, "[[state]] без значения или ;"); why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    s.pos += 1;
+    return ires{true, ast.variable{sv_name, code(), sv_r.node, false, false, false, false, attrs}, from, s.pos, ""};
+  }
+  if((attrs.size > 0) && ((tk_text(s, 0) == "ct") || (tk_text(s, 0) == "use") || (tk_text(s, 0) == "module"))) { want(s, "атрибуты перед ct/use/module"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  if((tk_text(s, 0) == "operator") && (tk(s, 0).kind == kind_ident())) {
+    io_r = operator_item(s, attrs);
+    if(!io_r.ok) { why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    s.custom = true;
+    return ires{true, io_r.node, from, s.pos, ""};
+  }
+  if((tk_text(s, 0) == "ct") && (tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) {
+    ci_cv = ct_var(s);
+    if(!ci_cv.ok) { why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    return ires{true, ci_cv.node, from, s.pos, ""};
+  }
+  if((tk_text(s, 0) == "use") && (tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident())) {
+    // use geo.vec; / use geo.vec.{norm, dot}; - an include module (§9.1); module forms change the parsing further on (learn_use) - like program rules
+    s.pos += 1;
+    us_key = tk_text(s, 0);
+    s.pos += 1;
+    us_names = array{};
+    loop {
+      if(!(is_op_at(s, ".", 0) && (tk(s, 1).kind == kind_ident()))) break;
+      us_key = us_key + "." + tk_text(s, 1);
+      s.pos += 2;
+    }
+    if(is_op_at(s, ".", 0) && is_open_ch(s, 123, 1)) {
+      s.pos += 2;
+      loop {
+        if(is_close_ch(s, 125)) break;
+        if(tk(s, 0).kind != kind_ident()) { want(s, "use: имя"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+        us_names.push(tk_text(s, 0));
+        s.pos += 1;
+        if(is_op_at(s, ",", 0)) s.pos += 1 else break;
+      }
+      if(is_close_ch(s, 125)) s.pos += 1 else { want(s, "use: }"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    }
+    if(!is_op_at(s, ";", 0)) { want(s, "use без ;"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    s.pos += 1;
+    s.custom = true;
+    return ires{true, ast.use{us_key, us_names}, from, s.pos, ""};
+  }
   if((tk(s, 0).kind == kind_ident()) && (tk(s, 1).kind == kind_ident()) && (!is_keyword_word(tk_text(s, 0)) || (tk_text(s, 0) == "struct"))
      && (is_open_ch(s, 123, 2) || (is_op_at(s, ":", 2) && (tk(s, 3).kind == kind_ident()) && is_open_ch(s, 123, 4)))) {
-    sd = struct_decl(s);
+    sd = struct_decl(s, attrs);
     if(!sd.ok) { why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     return ires{true, sd.node, from, s.pos, ""};
   }
@@ -1251,14 +1326,14 @@ item_node(ps s) {
     r = node_of(e);
     if(!r.ok) { want(s, "выражение без узла"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     if(s.tail) s.tail = false else s.pos += 1;
-    return ires{true, ast.function{fname, params, rtype, r.node, false, true, array{}, false, array{}}, from, s.pos, ""};
+    return ires{true, ast.function{fname, params, rtype, r.node, false, true, attrs, false, array{}}, from, s.pos, ""};
   }
   b = block_node(s);
   if(!b.ok) { s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
-  ires{true, ast.function{fname, params, rtype, b.node, false, false, array{}, false, array{}}, from, s.pos, ""}
+  ires{true, ast.function{fname, params, rtype, b.node, false, false, attrs, false, array{}}, from, s.pos, ""}
 }
 // T Name [: base] { [ct] T field [= value]; ... } [;] - an extension Name, an instance of T (instance_decl/struct_fields parser.hpp); `= {...}` and #name are not supported
-struct_decl(ps s) {
+struct_decl(ps s, attrs) {
   sd_of = tk_text(s, 0);
   sd_name = tk_text(s, 1);
   s.pos += 2;
@@ -1292,7 +1367,103 @@ struct_decl(ps s) {
   }
   s.pos += 1;
   if(is_op_at(s, ";", 0)) s.pos += 1;
-  nres{true, ast.extension{sd_name, sd_items, array{}, 0, sd_of, sd_base}}
+  nres{true, ast.extension{sd_name, sd_items, attrs, 0, sd_of, sd_base}}
+}
+// ct x = e; - a variable at compile time (§7.3, parser.hpp statement): variable{ct}
+ct_var(ps s) {
+  cv_name = tk_text(s, 1);
+  s.pos += 3;
+  s.head = s.pos;
+  s.tail = false;
+  cv_e = expression(s);
+  if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
+  cv_r = node_of(cv_e);
+  if(!cv_r.ok) { want(s, "значение ct-переменной без узла"); return nres{false, code()}; }
+  if(!is_op_at(s, ";", 0)) { want(s, "ct-переменная без ;"); return nres{false, code()}; }
+  s.pos += 1;
+  nres{true, ast.variable{cv_name, code(), cv_r.node, false, true, false, false, array{}}}
+}
+struct plres { bool ok; array items; }
+// (parameters) - param_list parser.hpp
+plist(ps s) {
+  pl_items = array{};
+  s.pos += 1;
+  loop {
+    if(is_close_ch(s, 41)) break;
+    pl_p = param_node(s);
+    if(!pl_p.ok) return plres{false, array{}};
+    pl_items.push(pl_p.node);
+    if(is_op_at(s, ",", 0)) s.pos += 1 else break;
+  }
+  if(is_close_ch(s, 41)) s.pos += 1 else { want(s, "список параметров оператора"); return plres{false, array{}}; }
+  plres{true, pl_items}
+}
+// glued operator symbols (symbol_run parser.hpp)
+symbol_run(ps s) {
+  sr = "";
+  loop {
+    if(!((tk(s, 0).kind == kind_op()) && op_char(tk(s, 0).ch) && ((sr == "") || tk(s, 0).glued) && !((sr == "") && is_op_at(s, "=>", 0)))) break;
+    sr = sr + tk_text(s, 0);
+    s.pos += 1;
+  }
+  sr
+}
+// operator -(a) ... | operator (a) + (b) ... | operator (a)++ ... | operator (a)[i] ... (operator_decl parser.hpp); `using operator` is not supported
+operator_item(ps s, attrs) {
+  s.pos += 1;
+  oi_params = array{};
+  oi_role = "";
+  oi_sym = "";
+  if(is_open_ch(s, 40, 0)) {
+    oi_pl = plist(s);
+    if(!oi_pl.ok) return nres{false, code()};
+    oi_params = oi_pl.items;
+    if(is_open_ch(s, 91, 0)) {
+      s.pos += 1;
+      oi_ix = param_node(s);
+      if(!oi_ix.ok) return nres{false, code()};
+      oi_params.push(oi_ix.node);
+      if(is_close_ch(s, 93)) s.pos += 1 else { want(s, "оператор []: ]"); return nres{false, code()}; }
+      oi_sym = "[]";
+      oi_role = "infix";
+    } else {
+      oi_sym = symbol_run(s);
+      if(oi_sym == "") { want(s, "ожидались символы оператора"); return nres{false, code()}; }
+      if(is_open_ch(s, 40, 0)) {
+        oi_role = "infix";
+        oi_pl2 = plist(s);
+        if(!oi_pl2.ok) return nres{false, code()};
+        for(q : oi_pl2.items) oi_params.push(q);
+      } else oi_role = "postfix";
+    }
+  } else {
+    oi_role = "prefix";
+    oi_sym = symbol_run(s);
+    if(oi_sym == "") { want(s, "ожидались символы оператора"); return nres{false, code()}; }
+    if(!is_open_ch(s, 40, 0)) { want(s, "оператор: параметры"); return nres{false, code()}; }
+    oi_pl3 = plist(s);
+    if(!oi_pl3.ok) return nres{false, code()};
+    oi_params = oi_pl3.items;
+  }
+  if(has_text(array{"=", "+=", "-=", "*=", "/="}, oi_sym)) { want(s, "присваивание — форма ядра, не оператор"); return nres{false, code()}; }
+  if(oi_params.size != (if(oi_role == "infix") 2 else 1)) { want(s, "у оператора неверное число параметров"); return nres{false, code()}; }
+  oi_name = oi_role + oi_sym;
+  if(is_op_at(s, "=>", 0)) {
+    s.pos += 2;
+    s.tail = false;
+    s.head = s.pos;
+    oi_e = expression(s);
+    oi_ended = s.tail || is_op_at(s, ";", 0);
+    if((s.error != "") || (s.unsupported != "") || !oi_ended) { if(s.unsupported == "") want(s, "тело-выражение оператора"); return nres{false, code()}; }
+    oi_r = node_of(oi_e);
+    if(!oi_r.ok) { want(s, "выражение без узла"); return nres{false, code()}; }
+    if(s.tail) s.tail = false else s.pos += 1;
+    return nres{true, ast.function{oi_name, oi_params, code(), oi_r.node, false, true, attrs, false, array{}}};
+  }
+  if(!is_open_ch(s, 123, 0)) { want(s, "оператор: тело"); return nres{false, code()}; }
+  oi_b = block_node(s);
+  if(!oi_b.ok) return nres{false, code()};
+  nres{true, ast.function{oi_name, oi_params, code(), oi_b.node, false, false, attrs, false, array{}}}
 }
 // a function declaration closes the prelude record with the same name (shadow_records/learn parser.hpp), and a function with a `word(...)` clause or
 // an expr parameter is a construct: the rules change - the following elements are "not supported" (attributes [[...]] and outline before a declaration are skipped)

@@ -1,0 +1,2 @@
+ct limit = 3;
+f() { ct n = 1; n }

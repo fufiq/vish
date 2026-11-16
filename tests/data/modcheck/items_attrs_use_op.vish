@@ -1,0 +1,8 @@
+[[state]] counter = 0;
+[[inline]] [[hot]] f(x) => x;
+[[tag]] struct point { int x; }
+ct limit = 3;
+operator -(a) => a;
+operator (a) + (b) { a }
+operator (a)++ => a;
+operator (a)[i] => a;
