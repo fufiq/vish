@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "client": ["variant", "c_hello", "c_open_view", "c_open_module", "c_close_view", "c_key", "c_pointer", "c_goto", "c_layer", "c_run", "c_save", "c_trace", "c_merge", "c_take", "c_projection", "c_input", "c_select", "c_hover", "c_open", "c_inspect", "c_apply", "c_stop", "c_trace_step", "c_name", "c_items", "c_extensions", "c_task", "c_command", "c_propose", "c_decide", "c_context", "c_check", "c_workspace", "c_repository"],
+  "client": ["variant", "c_hello", "c_open_view", "c_open_module", "c_close_view", "c_key", "c_pointer", "c_goto", "c_layer", "c_run", "c_save", "c_trace", "c_merge", "c_take", "c_projection", "c_input", "c_select", "c_hover", "c_open", "c_inspect", "c_apply", "c_stop", "c_trace_step", "c_name", "c_items", "c_extensions", "c_task", "c_command", "c_propose", "c_decide", "c_context", "c_check", "c_workspace", "c_repository", "c_record"],
   "server": ["variant", "s_hello", "s_view", "s_cursor", "s_error", "s_update", "s_complete", "s_decor", "s_layers", "s_output", "s_saved", "s_trace", "s_merge", "s_select", "s_clipboard", "s_hover", "s_hint", "s_inspect", "s_status", "s_stops", "s_peers", "s_items", "s_extensions", "s_proposals", "s_agent", "s_repository"],
   "node_kinds": ["n_module", "n_fn", "n_param", "n_var", "n_block", "n_ident", "n_int", "n_float", "n_str", "n_call", "n_op", "n_if", "n_loop", "n_break", "n_continue", "n_return", "n_ct", "n_lambda", "n_construct", "n_hole", "n_throw", "n_chain", "n_extend", "n_quote", "n_splice", "n_pat", "n_unpack", "n_pat_field", "n_subject", "n_spread", "n_use", "n_native", "n_ref", "n_raw", "n_sym", "n_node"],
   "types": {
@@ -37,6 +37,7 @@
     "c_check": [["request", "u32"], ["revision", "u64"]],
     "c_workspace": [["request", "u32"], ["workspace", "u32"], ["action", "string"], ["revision", "u64"], ["key", "string"], ["text", "string"], ["args", "string"], ["input", "string"], ["expected", "string"]],
     "c_repository": [["request", "u32"], ["action", "string"], ["key", "string"], ["text", "string"], ["revision", "u64"]],
+    "c_record": [["kind", "string"], ["session", "string"], ["model", "string"], ["usage_in", "u64"], ["usage_out", "u64"], ["usage_cached", "u64"], ["usage_cache_write", "u64"], ["usage_thinking", "u64"], ["ms", "u64"], ["error", "string"], ["request", "string"], ["response", "string"]],
     "s_hello": [["version", "u32"], ["program", "string"], ["revision", "u64"]],
     "s_node": [["id", "node"], ["kind", "string"], ["pieces", ["vector", ["variant", "string", "node"]]], ["note", "string"]],
     "s_view": [["view", "u32"], ["root", "node"], ["revision", "u64"], ["nodes", ["vector", "s_node"]], ["kind", "string"], ["projection", "string"]],

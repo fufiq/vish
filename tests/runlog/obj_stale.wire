@@ -1,0 +1,21 @@
+// Эпик vsh-u4e: устаревшее предложение не принимается, и это видно в цепочке (decision done accept=false); повтор записанного ответа — режим replay.
+// program: ../editor_proposals.vish
+open_view module
+[2] open_view module
+[2] name ИИ
+[2] workspace 1 0 create
+[2] workspace 2 1 edit 0 f(_) f(x)\s=>\sx\s+\s3;
+[2] workspace 3 1 check
+[2] workspace 4 1 offer 0 - пакет
+pointer 1 @1 0 0
+key 1 Delete
+input 1 9
+decide 1 1
+// expect: результаты проверки устарели
+[2] record replay 2 claude-test 0 0 0 0 0 5 e - -
+[2] workspace 5 0 provenance 6
+// expect: #6 decision <- 5 [phase=done accept=false]
+// expect: #5 decision <- 3 [phase=intent accept=true]
+// expect: #3 proposal <- 1
+[2] workspace 6 0 provenance 7
+// expect: #7 model_call <- 1 [mode=replay replay_of=2

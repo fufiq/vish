@@ -162,6 +162,22 @@ export interface ProposeAsk {
   text: string;
   why: string;
 }
+// Model call: the result of an external agent (usage, time) goes to the VM object journal.
+export interface RecordAsk {
+  type: 'c_record';
+  kind: string;
+  session: string;
+  model: string;
+  usage_in: number;
+  usage_out: number;
+  usage_cached: number;
+  usage_cache_write: number;
+  usage_thinking: number;
+  ms: number;
+  error: string;
+  request: string;
+  response: string;
+}
 export interface DecideAsk {
   type: 'c_decide';
   id: number;
@@ -244,7 +260,8 @@ export type ClientMsg =
   | ContextAsk
   | CheckAsk
   | WorkspaceAsk
-  | RepositoryAsk;
+  | RepositoryAsk
+  | RecordAsk;
 
 export interface ServerHello {
   type: 's_hello';

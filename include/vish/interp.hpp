@@ -7083,14 +7083,14 @@ struct interpreter {
     return host_reply(value(status), value(num), value(std::move(text)));
   }
   value storage_status(int64_t status, int64_t num = 0, std::string text = {}) { return host_status(status, num, std::move(text)); }
-  // execution - shared with the process machine (it has its own table and its own rights)
-  value storage_call(std::deque<os::storage_area> & table, bool given, bool /*proc*/, std::string_view n, std::vector<value> const & a, span where) {
+  // execution is shared with the process machine (which has its own table and its own rights)
+  value storage_call(std::deque<os::storage_area> & table, bool given, bool /*proc*/, std::string_view n, std::vector<value> const & a, span where, std::string const * dir = nullptr) {
     auto bad_args = [&](std::string_view sig) { fail(cat(n.substr(8), sig), where); };
     if(n == "storage_raw_open") {
       if(a.size() != 1 || !a[0].is<str_v>()) bad_args("(имя)");
       if(!given) return storage_status(1); // Not given: as there is no file in fs
       os::storage_area & s = table.emplace_back();
-      if(std::string why = s.open(storage_dir(), a[0].as<str_v>().str()); !why.empty()) {
+      if(std::string why = s.open(dir ? *dir : storage_dir(), a[0].as<str_v>().str()); !why.empty()) {
         table.pop_back();
         return storage_status(4, 0, why);
       }

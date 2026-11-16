@@ -1,0 +1,9 @@
+// Эпик vsh-u4e: после перезапуска VM (другой процесс, тот же VISH_RUNLOG_DIR) цепочка причин восстанавливается из журнала.
+// program: ../editor_proposals.vish
+open_view module
+[2] open_view module
+[2] workspace 1 0 observe 8
+// expect: #8 [предложение] proposal <- 2
+// expect: #11 [решение] decision <- 10
+// expect: #6 [запрос] attempt <- 5
+// expect: #1 [намерение] task <- 

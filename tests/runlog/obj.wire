@@ -1,0 +1,46 @@
+// Эпик vsh-u4e: журнал объектов среды — контекст → предложение → проверка → решение, цепочка причин по запросу.
+// Нужен VISH_RUNLOG_DIR (check.sh задаёт): без него журнал выключен.
+// program: ../editor_proposals.vish
+open_view module
+[2] open_view module
+[2] name ИИ
+check 1 0
+pointer 1 @2 0 0
+[2] context 2 1 4294967295 0
+// expect: узел #
+[2] workspace 1 0 create
+[2] workspace 2 1 edit 0 f(_) f(x)\s=>\sx\s+\s3;
+[2] workspace 3 1 edit 0 main() main()\s=>\sprint(f(4));
+[2] workspace 4 1 check
+// expect: проверка копии: ошибок нет
+[2] workspace 5 1 test 0 - - \s \s 7\n
+// expect: тест 1: прошёл
+[2] record attempt sess-1 claude-test 60 10 200 5 0 0 - - -
+[2] record attempt sess-1 claude-test 60 20 200 0 1 0 - - -
+[2] record model_call sess-1 claude-test 120 30 400 5 1 2500 - как\sисправить\sf ответ\sагента
+[2] workspace 6 1 offer 0 - исправление
+// expect: исходная ревизия
+decide 1 1
+// expect: status kind="done" text="принято: f(_), main()"
+[2] workspace 7 0 provenance 9
+// expect: #9 check <- 8
+// expect: #8 proposal <- 2
+// expect: #2 context <- 1
+// expect: #1 task <- 
+[2] workspace 8 0 provenance 11
+// expect: #11 decision <- 10 [phase=done accept=true]
+// expect: #10 decision <- 8
+[2] workspace 9 0 provenance 5
+// expect: #5 model_call <- 2 [mode=live in=120 out=30]
+// Гипернаблюдаемость: из контекста видны все уровни цепочки — исполнение, модель, запросы, предложение, решение.
+[2] workspace 10 0 observe 2
+// expect: #1 [намерение] task
+// expect: #3 [исполнение] run_event <- 2 [check ok=true]
+// expect: #5 [модель] model_call <- 2
+// expect: #6 [запрос] attempt <- 5 [n=1 in=60 out=10]
+// expect: #7 [запрос] attempt <- 5 [n=2 in=60 out=20]
+// expect: #8 [предложение] proposal <- 2
+// expect: #11 [решение] decision <- 10
+// Политика хранения: недостижимых блобов нет, все держат записи.
+[2] workspace 11 0 gc
+// expect: удалено блобов: 0

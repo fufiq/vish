@@ -23,33 +23,34 @@
 use tools;
 // Tuling: strings, session commands (lib/tools.vish)
 use versions;
-// merging (lib/versions.vish) - -state of views - -------------------------------------------------
-// Presentation layout - projection printing (print view): text and cursor places (before each code
-// point, the last is the end of text), nodes in print order with places of their text and pieces (your
-// text or child). Nodes are numbers (node code) the text of the projection of the first byte of the
-// symbol of each place ('\n' at the end - the edge of the last line) at the place: the node, the number
-// of its piece, the displacement in the piece (code points) - the place in the protocol at the place:
-// byte of the text by the layout number of the layout: the node by the layout number of the parent (-1
-// - the root) by the number of the layout number of the node: the place of the text of the node [from,
-// to] the signature of its pieces (type, children, note) - the signature of the subtregrowth (nodes,
-// the text at the beginning of the text by the text by the text of the paragraph 1st line of the text
-// by the text by the child (the text) - the beginning of the item by the text by the text by the text
-// by the paragraph (the text by the text by the text by the text by the text in the text of the text of
-// the text in the text by the paragraph 1st line number of the text in the text by the text by the text
-// by the text by the text by the paragraph of the text
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
-//
+use runlog;
+// database versions: merge (lib/versions.vish)
+// --- view state --------------------------------------------------------------
+// View layout: the print of the projection (print_view): the text and the cursor positions (before each
+// code point, the last one is the end of the text), nodes in print order with the places of their text and
+// pieces (own text or a child). Node numbers are numbers (node_code is the node code).
+// projection text
+// first byte of the character at each place ('\n' at the end is the edge of the last line)
+// per place: node, number of its piece, offset within the piece (code points); the place in the protocol
+// per place: text byte
+// per layout number: node
+// per layout number: the parent's layout (-1 is the root)
+// per layout number: the node's text places [from, to)
+// signature of its own pieces (kind, texts, children, note)
+// signature of the subtree (nodes, own pieces, children)
+// pieces of a node: [first, first + count) in pchild/pbyte
+// per piece: child (-1 is text)
+// per piece: start of its text in ptext
+// per piece: number of text code points (0 for a child)
+// per piece: its first place
+// texts of the pieces in a row
+// nodes in ascending order
+// their layout numbers
+// module: per element number, the byte where its piece starts (-1 means not printed)
+// - starts of its lines
+// end of the elements (before the comments at the end of the module)
+// draft text [draft_begin, draft_end)
+// printed with the module draft: elements [group_at, group_at + group_count); -1 means without
 struct layout { str text; str lead; array node; array piece; array offset; array byte; array nodes; array up; array from; array to; array sig; array sub; array first; array count; array pchild; array pbyte; array plen; array pplace; str ptext; array sorted; array order; array chunk_at; array content_at; i64 items_end; i64 draft_begin; i64 draft_end; i64 group_at; i64 group_count; }
 // Draft (author's decision 2026-10-12): the elements of the module that rule - the text exactly as
 // typed; in the representation of the function - it itself. elements of the draft module
@@ -5547,10 +5548,96 @@ change_of(str base, str other) {
   note = if(removed == "") "+ " + clip(trim_lead(added), 30) else if(added == "") "− " + clip(trim_lead(removed), 30) else clip(trim_lead(removed), 20) + " → " + clip(trim_lead(added), 20);
   text_change{code_points(slice_text(other, 0, p)), code_points(slice_text(other, 0, other.size - q)), note}
 }
-// --- The AI decision is made by a person, the AI only offers) - so the editing of the agent into the
-// program does not go by itself: all clients see the proposal, the person accepts (with one edit journal, as
-// editing a function). The whole device.
-//
+// --- AI (user decision of 2026-10-27: "on top of the existing design"; the agent is a VM client, edits are proposals)
+// The author distrusts neural networks ("a neural net never gives a reliable decision") -
+// so an agent's edit does not go into the program by itself: every client sees the proposal, a human accepts it
+// (with one journal edit, like an edit by a function). *Mine:* the whole mechanism.
+// --- environment objects (epic vsh-u4e, *mine*; lib/runlog.vish): context -> proposal -> check -> decision --------------
+// Written only when the program is opened from a .vishrepo (next to it is <repo>.runlog) or VISH_RUNLOG_DIR is set; otherwise nothing changes. A write error of the
+// journal does not break the editor: it is lost, not raised (the journal is observation, not part of the decision).
+obj_logs = array{};
+obj_task = 0;
+obj_last_context = 0;
+obj_of = array{};
+obj_attempts = array{};
+obj_last_call = 0;
+// journal directory: VISH_RUNLOG_DIR (host/test; not the agent and not the program) or <repo>.runlog for a program from a .vishrepo; "" means off
+obj_dir() {
+  d = env_get("VISH_RUNLOG_DIR");
+  n = program_name();
+  if(d != "") d else if((n.size > 9) && (slice_text(n, n.size - 9, n.size) == ".vishrepo")) n + ".runlog" else ""
+}
+obj_on() => obj_dir() != "";
+// the journal is opened once and lives in obj_logs[0]: runlog changes in place (end, next_id), do not take a copy
+obj_ready() {
+  if(obj_logs.size == 0) {
+    rl_set_dir(obj_dir());
+    obj_logs.push(runlog_open("journal"));
+  }
+  0
+}
+obj_put(str body) {
+  if(!obj_on()) return "";
+  try {
+    rl_set_dir(obj_dir());
+    runlog_blob_put(body)
+  } catch(e) {
+    ""
+  }
+}
+obj_add(str kind, caused, fields) {
+  if(!obj_on()) return 0;
+  try {
+    rl_set_dir(obj_dir());
+    obj_ready();
+    if(obj_task == 0) obj_task = runlog_append(obj_logs[0], rl_make("task", 0, array{}, array{"title", "сессия ИИ: " + clients[client_of(now_peer())].name}));
+    cs = array{};
+    for(c : caused) cs.push(if(c == 0) obj_task else c);
+    runlog_append(obj_logs[0], rl_make(kind, 0, cs, fields))
+  } catch(e) {
+    0
+  }
+}
+obj_link(i64 proposal_id, i64 obj) {
+  obj_of.push(array{proposal_id, obj});
+  0
+}
+obj_for(i64 proposal_id) {
+  r = 0;
+  for(x : obj_of) if(x[0] == proposal_id) r = x[1];
+  r
+}
+// short note of a record in the chain: a decision is the phase and the outcome, a model call is the mode and whose repeat it is
+obj_note(x) {
+  if(x.kind == "decision") return " [phase=" + rl_field(x, "phase") + " accept=" + rl_field(x, "accept") + (if(rl_field(x, "snapshot") != "") " snapshot=" + rl_field(x, "snapshot") else "") + "]";
+  if(x.kind == "model_call") return " [mode=" + rl_field(x, "mode") + (if(rl_field(x, "replay_of") != "") " replay_of=" + rl_field(x, "replay_of") else "") + (" in=" + rl_field(x, "usage_in")) + (" out=" + rl_field(x, "usage_out")) + "]";
+  if(x.kind == "attempt") return " [n=" + rl_field(x, "n") + " in=" + rl_field(x, "usage_in") + " out=" + rl_field(x, "usage_out") + "]";
+  if(x.kind == "run_event") return " [" + rl_field(x, "event") + " ok=" + rl_field(x, "ok") + "]";
+  ""
+}
+// hyperobservability: the environment of a record at all levels - causes and effects (lib/runlog.vish, runlog_observe)
+obj_observe(i64 id) {
+  if(!obj_on()) return "журнал объектов выключен: программа не из .vishrepo";
+  obj_ready();
+  r = "";
+  for(x : runlog_observe(obj_logs[0], id)) r = (r + (if(r == "") "" else "\n")) + ((((("#" + text(x.id)) + (" [" + rl_level(x.kind))) + ("] " + x.kind)) + (" <- " + rl_ids_text(x.caused_by))) + obj_note(x));
+  r
+}
+// collection of unreachable blobs (retention policy; the number of removed ones)
+obj_gc() {
+  if(!obj_on()) return "журнал объектов выключен: программа не из .vishrepo";
+  obj_ready();
+  "удалено блобов: " + text(runlog_gc(obj_logs[0]))
+}
+obj_provenance(i64 id) {
+  if(!obj_on()) return "журнал объектов выключен: программа не из .vishrepo";
+  rl_set_dir(obj_dir());
+  obj_ready();
+  chain = runlog_provenance(obj_logs[0], id);
+  r = "";
+  for(x : chain) r = (r + (if(r == "") "" else "\n")) + ((("#" + text(x.id)) + (" " + x.kind)) + (" <- " + rl_ids_text(x.caused_by))) + obj_note(x);
+  r
+}
 struct proposal { i64 id; str key; str base; str text; str why; str from; i64 node; array changes; i64 revision; str checks; }
 // Semantic context and verifiable AI packages (my, author's decision 2026-10-28). "board on the
 // server." For the model, text saves line translations: UI clip glues //-comments to the code.
@@ -5699,6 +5786,8 @@ on_context(i64 request, i64 id, i64 wanted_node, i64 wanted) {
   if((context_targets.size == 0) && given(code_parent(context_node))) context_targets = call_targets(code_parent(context_node));
   body = body + "\n" + agent_refs("выбранные перегрузки выражения:", context_targets);
   body = body + ("\nпроверка: " + (if(errors_now == "") "ошибок нет" else errors_now));
+  blob = obj_put(body);
+  if(obj_on()) obj_last_context = obj_add("context", array{obj_task}, array{"blob", blob, "bytes", text(body.size), "version", text(program_revision()), "why", "c_context"});
   agent_reply(request, 0, 0, true, body)
 }
 // Requests for a working copy belong to her client. Disabling removes unfinished copies.
@@ -5716,6 +5805,9 @@ on_workspace(i64 request, i64 work, str action, i64 wanted, str key, str body, s
     if(available < 0) agent_works.push(created) else agent_works[available] = created;
     return agent_reply(request, next_agent_work, 0, true, "копия программы создана");
   }
+  if(action == "provenance") return agent_reply(request, work, 0, true, obj_provenance(wanted));
+  if(action == "observe") return agent_reply(request, work, 0, true, obj_observe(wanted));
+  if(action == "gc") return agent_reply(request, work, 0, true, obj_gc());
   wi = -1;
   for(j : range(agent_works.size)) if((agent_works[j].id == work) && (agent_works[j].peer == now_peer())) wi = j;
   if(wi < 0) return agent_reply(request, work, 0, false, "нет вашей рабочей копии");
@@ -5756,6 +5848,7 @@ on_workspace(i64 request, i64 work, str action, i64 wanted, str key, str body, s
       probe_error = "тест " + text(agent_works[wi].tests) + (if(probe_ok) ": прошёл" else ": не прошёл") + ("\nаргументы: " + args + ("\nввод: " + agent_excerpt(input, 2000) + ("\nожидалось: " + agent_excerpt(expected, 4000) + ("\nполучено: " + agent_excerpt(probe_out, 4000) + ("\n" + probe_error)))));
       agent_works[wi].checks = agent_works[wi].checks + "\n" + probe_error;
     }
+    obj_add("run_event", array{if(obj_last_call > 0) obj_last_call else obj_last_context}, array{"event", action, "ok", text(probe_ok), "tool", "vish_propose", "n", text(agent_works[wi].tests)});
     return agent_reply(request, work, 0, probe_ok, if(action == "check") agent_works[wi].checks else probe_error);
   }
   if(action == "offer") {
@@ -5774,6 +5867,11 @@ on_workspace(i64 request, i64 work, str action, i64 wanted, str key, str body, s
     evidence = "исходная ревизия " + text(agent_works[wi].revision) + "\n" + agent_works[wi].checks;
     if(agent_works[wi].tests == 0) evidence = evidence + "\nтесты исполнения не заданы";
     proposals.push(proposal{next_proposal, package_keys, before_all, after_all, body, who, -1, agent_works[wi].changes, agent_works[wi].revision, evidence});
+    prop_obj = obj_add("proposal", array{obj_last_context}, array{"key", package_keys, "why", body, "revision", text(agent_works[wi].revision), "from", who, "blob", obj_put(after_all)});
+    if(prop_obj > 0) {
+      obj_link(next_proposal, prop_obj);
+      obj_add("check", array{prop_obj}, array{"ok", text(!agent_works[wi].failed), "why", evidence, "tests", text(agent_works[wi].tests), "version", text(agent_works[wi].revision), "proposal", text(next_proposal)});
+    }
     version_close(agent_works[wi].copy);
     clear_agent_work(wi);
     share_proposals();
@@ -5852,9 +5950,66 @@ on_task_output(str chunk, bool done, i64 status, bool stopped) {
   if(stopped) send_status(now_peer(), "done", "задача остановлена", "") else if(status == 0) send_status(now_peer(), "done", "задача выполнена", "") else send_status(now_peer(), "error", "задача не удалась: код " + text(status), "вывод — в панели запуска");
   calm_status(now_peer());
 }
-// Human decision: Accept - the key element is replaced by text (no - added), with hot replacement in a
-// live process (edit_command, as vish vm edit); reject - remove
+// the human's decision: accept replaces the element by key with the text (or adds it if absent), with a hot
+// replacement in a live process (edit_command, as in vish vm edit); reject removes it
+// an accepted proposal for a program from a .vishrepo is a repository snapshot (a new version of the program); the snapshot number goes into the decision record.
+// Only when the journal is enabled: without it, acceptance behaves as before. A snapshot error does not cancel acceptance - the field stays empty.
+obj_snapshot(i64 id) {
+  n = program_name();
+  if(!obj_on() || (n.size <= 9) || (slice_text(n, n.size - 9, n.size) != ".vishrepo")) return "";
+  try {
+    r = repository_command(program_session(), "snapshot", "ИИ: принято #" + text(id), "");
+    if(r[0]) text(repo_head(program_session())) else ""
+  } catch(e) {
+    ""
+  }
+}
+// the result of a model call from an external agent (c_record): attempts - one attempt; mode live (replay - when the answer is taken from a record)
+on_record(str kind, str session, str model, i64 usage_in, i64 usage_out, i64 usage_cached, i64 usage_cache_write, i64 usage_thinking, i64 ms, str error, str request, str response) {
+  usage = array{"usage_in", text(usage_in), "usage_out", text(usage_out), "usage_cached", text(usage_cached), "usage_cache_write", text(usage_cache_write), "usage_thinking", text(usage_thinking)};
+  if(kind == "attempt") {
+    // an attempt (one model request inside an agent run): accumulates until the call result, then is written as a nested record
+    fs = array{"n", text(obj_attempts.size + 1), "model", model, "captured", "agent-boundary"};
+    for(x : usage) fs.push(x);
+    obj_attempts.push(fs);
+    return 0;
+  }
+  if((kind == "model_call") || (kind == "replay")) {
+    fs = array{"provider", "claude-code", "model", model, "ms", text(ms), "error", error, "captured", "agent-boundary"};
+    for(x : usage) fs.push(x);
+    if(kind == "model_call") {
+      for(x : array{"mode", "live", "session", session, "attempts", text(if(obj_attempts.size == 0) 1 else obj_attempts.size)}) fs.push(x);
+    } else {
+      for(x : array{"mode", "replay", "replay_of", session, "attempts", "0"}) fs.push(x);
+    }
+    rq = if(request != "") obj_put(request) else "";
+    rs = if(response != "") obj_put(response) else "";
+    if(rq != "") { fs.push("blob_request"); fs.push(rq); }
+    if(rs != "") { fs.push("blob_response"); fs.push(rs); }
+    call = obj_add("model_call", array{obj_last_context}, fs);
+    if(call > 0) {
+      obj_last_call = call;
+      for(a : obj_attempts) obj_add("attempt", array{call}, a);
+    }
+    obj_attempts = array{};
+  }
+  0
+}
+// the human's decision goes to the journal as two records: intent before applying, done after; intent without done means the application was interrupted
 on_decide(i64 id, bool accept) {
+  found = false;
+  for(q : proposals) if(q.id == id) found = true;
+  intent = if(found) obj_add("decision", array{obj_for(id)}, array{"phase", "intent", "accept", text(accept), "proposal", text(id)}) else 0;
+  result = on_decide_core(id, accept);
+  if(intent > 0) {
+    still = false;
+    for(q : proposals) if(q.id == id) still = true;
+    taken = accept && !still;
+    obj_add("decision", array{intent}, array{"phase", "done", "accept", text(taken), "applied_version", text(program_revision()), "proposal", text(id), "snapshot", if(taken) obj_snapshot(id) else ""});
+  }
+  result
+}
+on_decide_core(i64 id, bool accept) {
   k = -1;
   for(i : range(proposals.size)) if(proposals[i].id == id) k = i;
   if(k < 0) return report("нет такого предложения");

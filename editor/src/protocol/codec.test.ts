@@ -108,6 +108,28 @@ describe('кодек по схеме', () => {
         frame(schema, schema.client, ask).subarray(4),
       ),
     ).toEqual(ask);
+    const record = {
+      type: 'c_record',
+      kind: 'model_call',
+      session: 's1',
+      model: 'm',
+      usage_in: 10,
+      usage_out: 4,
+      usage_cached: 2,
+      usage_cache_write: 7,
+      usage_thinking: 1,
+      ms: 1234,
+      error: '',
+      request: 'q',
+      response: 'a',
+    };
+    expect(
+      decode(
+        schema,
+        schema.client,
+        frame(schema, schema.client, record).subarray(4),
+      ),
+    ).toEqual(record);
   });
 
   it('лишние байты и обрыв — ошибки', () => {

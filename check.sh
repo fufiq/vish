@@ -82,7 +82,20 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # Transfer to vish, step 3a: Phase 2 expressions (literals, names, calls, postfixes, operator series) in language vs. C++ stage0
     ( $b exprcheck tests/data/expr_corpus.txt tests/data/expr_random.txt ) > $L/t_expr.log 2>&1
     echo "expr: код $?" > $L/r_expr
-    # Close/Open: The database saved after the text is restored in `vish serve X.vish`
+    # epic vsh-u4e: the environment object journal (lib/runlog.vish): write, blobs, truncation, corruption, cause chain; each run uses its own directory
+    ( rm -rf $L/runlog && mkdir -p $L/runlog && $b runlogcheck $PWD/$L/runlog ) > $L/t_runlog.log 2>&1
+    echo "runlog: код $?" > $L/r_runlog
+    # environment object journal in the editor: an acceptance scenario -> cause chain; the second process runs after a restart
+    ( rm -rf $L/runlog_wire $L/runlog_wire_stale && mkdir -p $L/runlog_wire $L/runlog_wire_stale && VISH_RUNLOG_DIR=$PWD/$L/runlog_wire $b test tests/runlog/obj.wire && VISH_RUNLOG_DIR=$PWD/$L/runlog_wire $b test tests/runlog/obj_after.wire && VISH_RUNLOG_DIR=$PWD/$L/runlog_wire_stale $b test tests/runlog/obj_stale.wire ) > $L/t_runlog_wire.log 2>&1
+    echo "runlog_wire: код $?" > $L/r_runlog_wire
+    # retention policy: bodies switched off (metadata stays) and the blob limit (host variables, not the agent)
+    ( rm -rf $L/runlog_off $L/runlog_cap && mkdir -p $L/runlog_off $L/runlog_cap \
+      && VISH_RUNLOG_BODIES=off VISH_RUNLOG_DIR=$PWD/$L/runlog_off $b test tests/runlog/obj.wire \
+      && [ -z "$(find $L/runlog_off -name 'blob.*')" ] \
+      && VISH_RUNLOG_MAX_BLOB=10 VISH_RUNLOG_DIR=$PWD/$L/runlog_cap $b test tests/runlog/obj.wire \
+      && [ -n "$(find $L/runlog_cap -name 'blob.*')" ] && [ -z "$(find $L/runlog_cap -name 'blob.*' -size +18c)" ] ) > $L/t_runlog_policy.log 2>&1
+    echo "runlog_policy: код $?" > $L/r_runlog_policy
+    # close/open: a database saved later than the text is restored on `vish serve X.vish`
     ( sh tests/restore.sh $PWD/$b $L/restore ) > $L/t_restore.log 2>&1
     echo "restore: код $?" > $L/r_restore
     # JIT to random program interpreter (tools/jit_fuzz .py): three code generation errors per day were random

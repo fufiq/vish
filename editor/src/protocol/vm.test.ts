@@ -59,6 +59,20 @@ describe('живая VM', () => {
       'input',
       'expected',
     ]);
+    expect(fields('c_record')).toEqual([
+      'kind',
+      'session',
+      'model',
+      'usage_in',
+      'usage_out',
+      'usage_cached',
+      'usage_cache_write',
+      'usage_thinking',
+      'ms',
+      'error',
+      'request',
+      'response',
+    ]);
     expect(fields('c_repository')).toEqual([
       'request',
       'action',

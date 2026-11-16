@@ -1,0 +1,447 @@
+module runlog;
+// Environment objects and their journal (epic Beads vsh-u4e, 2026-11-15, *mine*, user decision "start executing";
+// spec §13.1 "Environment objects..."). An environment record is task, context, model_call, proposal, check, decision, run_event:
+// id (monotonic in the journal), kind, at (the caller supplies the time - the prelude has no clock), caused_by (ids of causes) and
+// "name, value" fields. Large bodies (the context text, the model answer) are blobs by sha256; the record holds only the hash.
+// The journal is a sidecar in the `storage` service (<program>.storage/<name>), append-only; the storage has no
+// truncation, so reliability is a commit pointer: the word [0,8) is the end of the last committed record.
+// Write: frame -> commit -> pointer -> commit. The reader takes [16, pointer), checks the sum of every frame and
+// stops at the first broken one (truncated); garbage past the pointer is ignored and overwritten by the next record.
+// The author's requirements: a log has no reliability of its own, so it must be saved and changes to it requested;
+// "there is a write and a sync, and then faith"; "a version number is a poor crutch"
+// - there is no format version number, a frame that does not fit is simply not read; and no external DB
+// is needed. Everything else is mine. Secrets are not scrubbed here (task vsh-u4e.4).
+
+use tools;
+
+struct rl_rec { i64 id; str kind; i64 at; array caused_by; array fields; }
+struct runlog { i64 s; i64 end; i64 next_id; }
+struct rl_read { array recs; bool truncated; i64 good_end; }
+
+rl_header() => 16;
+
+// --- storage access: a capability of the VM itself (tooling host), not a right of the program ----------------------------------
+// The author: a whitelist that forbids everything; each program must work on its own, with no filesystem;
+// all your communication with the outside world goes through the VM; the language has no link to the outside world.
+// The journal is a VM service: the same os::storage_area as the prelude's
+// `storage`, but with its own table and a host directory; the authority is as for a repository (tool_authority).
+rl_raw(str op, a1, a2, a3) => native "cpp" {
+  if(vm.checking()) return vm.host_reply(erase(value(int64_t(0))), erase(value(int64_t(0))), erase(value(std::string())));
+  if(!tools_host || vm.fuel || !std::ranges::contains(tools_host->authorities, &vm)) throw diagnostic("журнал среды доступен только хосту", where);
+  std::string op = std::string((a[0]).as<str_v>().view());
+  std::size_t n = (op == "storage_raw_read" || op == "storage_raw_write" || op == "storage_raw_write_i64") ? 3 : (op == "storage_raw_grow" || op == "storage_raw_read_i64") ? 2 : 1;
+  std::vector<value> rest(a.begin() + 1, a.begin() + 1 + n);
+  return vm.storage_call(tools_host->runlog_table, true, false, op, rest, where, &tools_host->runlog_dir);
+};
+rl_set_dir(str dir) => native "cpp" {
+  if(vm.checking()) return erase(value(int64_t(0)));
+  if(!tools_host || vm.fuel || !std::ranges::contains(tools_host->authorities, &vm)) throw diagnostic("журнал среды доступен только хосту", where);
+  tools_host->runlog_dir = std::string((a[0]).as<str_v>().view());
+  return value(int64_t(0));
+};
+rl_now() => native "cpp" {
+  if(vm.checking()) return erase(value(int64_t(0)));
+  return value(int64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+};
+// blobs of the journal directory (names blob.<sha256>) and the removal of one - the host only (like rl_raw)
+rl_blobs() => native "cpp" {
+  if(vm.checking()) return erase(value(array_v::of({})));
+  if(!tools_host || vm.fuel || !std::ranges::contains(tools_host->authorities, &vm)) throw diagnostic("журнал среды доступен только хосту", where);
+  std::vector<value> xs;
+  std::error_code ec;
+  for(auto & e: std::filesystem::directory_iterator(tools_host->runlog_dir, ec))
+    if(e.path().filename().string().starts_with("blob.")) xs.push_back(value(e.path().filename().string()));
+  return value(array_v::of(std::move(xs)));
+};
+rl_remove_blob(str name) => native "cpp" {
+  if(vm.checking()) return erase(value(int64_t(0)));
+  if(!tools_host || vm.fuel || !std::ranges::contains(tools_host->authorities, &vm)) throw diagnostic("журнал среды доступен только хосту", where);
+  std::string n = std::string((a[0]).as<str_v>().view());
+  if(!n.starts_with("blob.") || n.find('/') != std::string::npos) return value(int64_t(0));
+  std::error_code ec;
+  return value(int64_t(std::filesystem::remove(std::filesystem::path(tools_host->runlog_dir) / n, ec) ? 1 : 0));
+};
+rl_chk(r, str what) {
+  if(r.status != 0) throw io_error{"журнал среды: " + what + ": " + (if(r.status == 4) r.text else "статус " + text(r.status))};
+  r
+}
+rl_open(str name) => rl_chk(rl_raw("storage_raw_open", name, 0, 0), "открытие " + name).num;
+rl_size(i64 h) => rl_chk(rl_raw("storage_raw_size", h, 0, 0), "размер").num;
+rl_grow(i64 h, i64 n) => rl_chk(rl_raw("storage_raw_grow", h, n, 0), "рост").num;
+rl_read(i64 h, i64 at, i64 n) => rl_chk(rl_raw("storage_raw_read", h, at, n), "чтение").text;
+rl_write(i64 h, i64 at, str bytes) {
+  rl_chk(rl_raw("storage_raw_write", h, at, bytes), "запись");
+}
+rl_read_i64(i64 h, i64 at) => rl_chk(rl_raw("storage_raw_read_i64", h, at, 0), "слово").num;
+rl_write_i64(i64 h, i64 at, i64 x) {
+  rl_chk(rl_raw("storage_raw_write_i64", h, at, x), "слово");
+}
+rl_commit(i64 h) {
+  rl_chk(rl_raw("storage_raw_commit", h, 0, 0), "фиксация");
+}
+rl_close(i64 h) => rl_raw("storage_raw_close", h, 0, 0);
+
+rl_pad(i64 n, i64 w) {
+  r = text(n);
+  while(r.size < w) r = "0" + r;
+  r
+}
+rl_is_num(str s) {
+  ok = s.size > 0;
+  for(k : range(s.size)) if((s[k] < 48) || (s[k] > 57)) ok = false;
+  ok
+}
+// frame sum (Adler-32): cheap in an interpreter, catches truncation and corruption - not protection against malice
+rl_sum(str s) {
+  a = 1;
+  b = 0;
+  for(k : range(s.size)) {
+    a = (a + s[k]) % 65521;
+    b = (b + a) % 65521;
+  }
+  (b * 65536) + a
+}
+// list of strings <-> one string "length:bytes..." (the length works for any bytes, no escaping)
+rl_pack(items) {
+  r = "";
+  for(x : items) r = ((r + text(x.size)) + ":") + x;
+  r
+}
+rl_unpack(str s) {
+  xs = array{};
+  pos = 0;
+  while(pos < s.size) {
+    c = find_from(s, ":", pos);
+    if(c < 0) return xs;
+    head = slice_text(s, pos, c);
+    if(!rl_is_num(head)) return xs;
+    n = parse_int(head).value;
+    if(((c + 1) + n) > s.size) return xs;
+    xs.push(slice_text(s, c + 1, (c + 1) + n));
+    pos = (c + 1) + n;
+  }
+  xs
+}
+rl_ids_text(ids) {
+  r = "";
+  for(x : ids) r = (r + (if(r == "") "" else ",")) + text(x);
+  r
+}
+rl_ids_of(str s) {
+  xs = array{};
+  pos = 0;
+  while(pos < s.size) {
+    c = find_from(s, ",", pos);
+    if(c < 0) c = s.size;
+    p = slice_text(s, pos, c);
+    if(rl_is_num(p)) xs.push(parse_int(p).value);
+    pos = c + 1;
+  }
+  xs
+}
+rl_payload(rec) {
+  items = array{text(rec.id), rec.kind, text(rec.at), rl_ids_text(rec.caused_by)};
+  for(f : rec.fields) items.push(f);
+  rl_pack(items)
+}
+rl_decode(str payload) {
+  xs = rl_unpack(payload);
+  if(xs.size < 4) return rl_rec{0, "", 0, array{}, array{}};
+  fs = array{};
+  for(k : range(xs.size)) if(k >= 4) fs.push(xs[k]);
+  if(!rl_is_num(xs[0]) || !rl_is_num(xs[2])) return rl_rec{0, "", 0, array{}, array{}};
+  rl_rec{parse_int(xs[0]).value, xs[1], parse_int(xs[2]).value, rl_ids_of(xs[3]), fs}
+}
+// record: fields are an array of strings "name, value, name, value..."
+rl_make(str kind, i64 at, caused_by, fields) => rl_rec{0, kind, at, caused_by, fields};
+rl_field(rec, str name) {
+  r = "";
+  for(k : range(rec.fields.size)) if((k % 2 == 0) && (rec.fields[k] == name) && (k + 1 < rec.fields.size)) r = rec.fields[k + 1];
+  r
+}
+
+// --- secrets: a whitelist of fields before writing (task vsh-u4e.4) ----------------------------------------------------
+// The author: a whitelist that forbids everything; blacklists are "leaky... by design".
+// Only the fields named here for the record kind get into the journal; the rest is not written,
+// only a dropped field remains, with the NAMES of what was dropped (not the values). *Mine:* bodies (the context text, the model answer)
+// are put into a blob by the caller, who is responsible for what is in them; the whitelist does not see secrets inside such text -
+// this is not a guarantee, it is the boundary of the journal.
+rl_allowed(str kind) {
+  if(kind == "task") return array{"title", "goal"};
+  if(kind == "context") return array{"blob", "version", "included", "excluded", "why", "budget", "bytes"};
+  if(kind == "model_call") return array{"provider", "model", "attempts", "usage_in", "usage_out", "usage_cached", "usage_cache_write", "usage_thinking", "ms", "mode", "replay_of", "session", "blob_request", "blob_response", "error", "captured"};
+  if(kind == "attempt") return array{"n", "model", "usage_in", "usage_out", "usage_cached", "usage_cache_write", "usage_thinking", "captured"};
+  if(kind == "proposal") return array{"key", "blob", "why", "revision", "from"};
+  if(kind == "check") return array{"ok", "why", "tests", "blob", "version", "proposal"};
+  if(kind == "decision") return array{"phase", "accept", "applied_version", "proposal", "snapshot"};
+  if(kind == "run_event") return array{"n", "event", "detail", "ms", "tool", "ok"};
+  array{}
+}
+rl_filter(str kind, fields) {
+  ok = rl_allowed(kind);
+  kept = array{};
+  dropped = "";
+  for(k : range(fields.size)) if(k % 2 == 0) {
+    allowed = false;
+    for(x : ok) if(x == fields[k]) allowed = true;
+    if(allowed && (k + 1 < fields.size)) {
+      kept.push(fields[k]);
+      kept.push(fields[k + 1]);
+    } else dropped = (dropped + (if(dropped == "") "" else ",")) + fields[k];
+  }
+  if(dropped != "") {
+    kept.push("dropped");
+    kept.push(dropped);
+  }
+  kept
+}
+
+// we read [header, pointer): whole frames; the first broken one is the end (truncated)
+runlog_read(runlog log) {
+  recs = array{};
+  pos = rl_header();
+  truncated = false;
+  while(!truncated && (pos < log.end)) {
+    if((pos + 20) > log.end) truncated = true;
+    else {
+      lt = rl_read(log.s, pos, 10);
+      st = rl_read(log.s, pos + 10, 10);
+      if(!rl_is_num(lt) || !rl_is_num(st)) truncated = true;
+      else {
+        n = parse_int(lt).value;
+        if(((pos + 20) + n) > log.end) truncated = true;
+        else {
+          payload = rl_read(log.s, pos + 20, n);
+          if(rl_sum(payload) != parse_int(st).value) truncated = true;
+          else {
+            rec = rl_decode(payload);
+            if(rec.id == 0) truncated = true;
+            else {
+              recs.push(rec);
+              pos = (pos + 20) + n;
+            }
+          }
+        }
+      }
+    }
+  }
+  rl_read{recs, truncated, pos}
+}
+// the name is a storage key (no "/", not starting with a dot); continues from the last whole record
+runlog_open(str name) {
+  s = rl_open(name);
+  if(rl_size(s) < rl_header()) {
+    rl_grow(s, rl_header() - rl_size(s));
+    rl_write_i64(s, 0, rl_header());
+    rl_commit(s);
+  }
+  end = rl_read_i64(s, 0);
+  if((end < rl_header()) || (end > rl_size(s))) end = rl_header();
+  log = runlog{s, end, 1};
+  got = runlog_read(log);
+  if(got.truncated) {
+    log.end = got.good_end;
+    rl_write_i64(s, 0, got.good_end);
+    rl_commit(s);
+  }
+  if(got.recs.size > 0) log.next_id = got.recs[got.recs.size - 1].id + 1;
+  log
+}
+// id of the new record; the frame and the pointer are committed separately so that the pointer never overtakes the data
+runlog_append(runlog log, rec) {
+  id = log.next_id;
+  full = rl_rec{id, rec.kind, if(rec.at == 0) rl_now() else rec.at, rec.caused_by, rl_filter(rec.kind, rec.fields)};
+  payload = rl_payload(full);
+  frame = (rl_pad(payload.size, 10) + rl_pad(rl_sum(payload), 10)) + payload;
+  need = (log.end + frame.size);
+  if(rl_size(log.s) < need) rl_grow(log.s, need - rl_size(log.s));
+  rl_write(log.s, log.end, frame);
+  rl_commit(log.s);
+  rl_write_i64(log.s, 0, need);
+  rl_commit(log.s);
+  log.end = need;
+  log.next_id = id + 1;
+  id
+}
+runlog_close(runlog log) => rl_close(log.s);
+
+// blob: key blob.<sha256>, a length word + bytes; repeating the same text writes nothing; a half-written one is rewritten
+runlog_blob_put(str body) {
+  // policy (host, not agent): VISH_RUNLOG_BODIES=off - bodies are not written at all (metadata stays); VISH_RUNLOG_MAX_BLOB=<bytes> -
+  // a longer one is truncated. There are no default thresholds - the user sets them (*mine*; in BAML they are tied to the telemetry level, #5309).
+  if(env_get("VISH_RUNLOG_BODIES") == "off") return "";
+  cap = env_get("VISH_RUNLOG_MAX_BLOB");
+  data = body;
+  if(rl_is_num(cap) && (parse_int(cap).value < body.size)) data = slice_text(body, 0, parse_int(cap).value);
+  h = sha256_hex(data);
+  b = rl_open("blob." + h);
+  if((rl_size(b) < 8) || ((rl_read_i64(b, 0) + 8) != rl_size(b))) {
+    if(rl_size(b) < (8 + data.size)) rl_grow(b, (8 + data.size) - rl_size(b));
+    rl_write(b, 8, data);
+    rl_write_i64(b, 0, data.size);
+    rl_commit(b);
+  }
+  rl_close(b);
+  h
+}
+runlog_blob_get(str hash) {
+  b = rl_open("blob." + hash);
+  n = rl_read_i64(b, 0);
+  body = if((n >= 0) && ((n + 8) == rl_size(b))) rl_read(b, 8, n) else "";
+  rl_close(b);
+  body
+}
+runlog_blob_ok(str hash) {
+  body = runlog_blob_get(hash);
+  sha256_hex(body) == hash
+}
+
+// cause chain: record id and all its ancestors (by caused_by), from the record to the root; a repeat appears once
+runlog_provenance(runlog log, i64 id) {
+  all = runlog_read(log).recs;
+  out_recs = array{};
+  seen = array{};
+  todo = array{id};
+  while(todo.size > 0) {
+    cur = todo[todo.size - 1];
+    rest = array{};
+    for(k : range(todo.size - 1)) rest.push(todo[k]);
+    todo = rest;
+    done = false;
+    for(x : seen) if(x == cur) done = true;
+    if(!done) {
+      seen.push(cur);
+      for(r : all) if(r.id == cur) {
+        out_recs.push(r);
+        for(c : r.caused_by) todo.push(c);
+      }
+    }
+  }
+  out_recs
+}
+
+// --- collection of unreachable blobs (host retention policy; journal records are not touched) ------------------------------
+// A blob is held by the blob/blob_request/blob_response fields of any record; unreachable ones (abandoned, truncated, from a disabled mode)
+// are deleted. Accepted proposals and their context are always reachable - their bodies do not go away. Retention period: records have a time
+// (at, ms), the threshold is a user decision, there is none here (*mine*).
+runlog_gc(runlog log) {
+  held = array{};
+  for(r : runlog_read(log).recs) for(k : range(r.fields.size)) if((k % 2 == 0) && ((r.fields[k] == "blob") || (r.fields[k] == "blob_request") || (r.fields[k] == "blob_response")) && (k + 1 < r.fields.size)) held.push("blob." + r.fields[k + 1]);
+  removed = 0;
+  for(n : rl_blobs()) {
+    keep = false;
+    for(h : held) if(h == n) keep = true;
+    if(!keep) removed += rl_remove_blob(n);
+  }
+  removed
+}
+
+// --- "hyperobservability" (*mine*; the term is the user's, in BAML it is not confirmed as a capability) ----------------------
+// Levels of one chain: intent (task) -> prompt (context) -> model (model_call) -> request (attempt) -> proposal ->
+// check/execution (run_event) -> decision. From any node both the causes (up) and the effects (down) are visible at all levels.
+rl_level(str kind) {
+  if(kind == "task") return "намерение";
+  if(kind == "context") return "промпт";
+  if(kind == "model_call") return "модель";
+  if(kind == "attempt") return "запрос";
+  if(kind == "proposal") return "предложение";
+  if(kind == "check") return "проверка";
+  if(kind == "run_event") return "исполнение";
+  if(kind == "decision") return "решение";
+  "?"
+}
+// the related environment of a record: ancestors and descendants (by caused_by), without repeats, in ascending id order
+runlog_observe(runlog log, i64 id) {
+  all = runlog_read(log).recs;
+  seen = array{id};
+  todo = array{id};
+  while(todo.size > 0) {
+    cur = todo[todo.size - 1];
+    rest = array{};
+    for(k : range(todo.size - 1)) rest.push(todo[k]);
+    todo = rest;
+    for(r : all) {
+      linked = false;
+      if(r.id == cur) for(c : r.caused_by) {
+        had = false;
+        for(x : seen) if(x == c) had = true;
+        if(!had && (c > 0)) { seen.push(c); todo.push(c); }
+      }
+      for(c : r.caused_by) if(c == cur) linked = true;
+      if(linked) {
+        had = false;
+        for(x : seen) if(x == r.id) had = true;
+        if(!had) { seen.push(r.id); todo.push(r.id); }
+      }
+    }
+  }
+  out_recs = array{};
+  for(r : all) for(x : seen) if(x == r.id) out_recs.push(r);
+  out_recs
+}
+
+// --- self-check: vish runlogcheck <journal name> (tests/*_runlog.* and check.sh) -------------------------------
+all_at_zero(recs) {
+  z = true;
+  for(r : recs) if(r.at != 0) z = false;
+  z
+}
+selftest_fail(str what) {
+  print("FAIL: " + what);
+  1
+}
+selftest_cli(args) {
+  if(args.size > 0) rl_set_dir(args[0]);
+  name = "runlog_selftest";
+  bad = 0;
+  log = runlog_open(name);
+  t = runlog_append(log, rl_make("task", 1, array{}, array{"title", "починить f"}));
+  body = "контекст: узел #7\nвыражение: f(x)";
+  h = runlog_blob_put(body);
+  c = runlog_append(log, rl_make("context", 2, array{t}, array{"blob", h, "version", "7"}));
+  p = runlog_append(log, rl_make("proposal", 3, array{c}, array{"key", "f(x)", "why", "x + 1"}));
+  k = runlog_append(log, rl_make("check", 4, array{p}, array{"ok", "false", "why", "тест 1 не прошёл"}));
+  d = runlog_append(log, rl_make("decision", 5, array{p, k}, array{"phase", "done"}));
+  leak = runlog_append(log, rl_make("task", 9, array{}, array{"title", "ok", "api_key", "SECRET-VALUE-123"}));
+  raw = rl_read(log.s, 0, rl_size(log.s));
+  if(find_text(raw, "SECRET-VALUE-123") >= 0) bad += selftest_fail("секрет попал в журнал");
+  if(find_text(raw, "api_key") < 0) bad += selftest_fail("имя отброшенного поля не записано (dropped)");
+  obs = runlog_observe(log, p);
+  if(obs.size != 5) bad += selftest_fail("observe: " + text(obs.size) + " записей, ждали 5");
+  if(runlog_blob_put("сирота-блоб") == "") bad += selftest_fail("блоб-сирота не записан");
+  if(runlog_gc(log) != 1) bad += selftest_fail("gc: ждали удаление одного блоба");
+  if(runlog_blob_get(h) != body) bad += selftest_fail("gc удалил достижимый блоб");
+  if(all_at_zero(runlog_read(log).recs)) bad += selftest_fail("время записи не проставлено");
+  if(runlog_blob_put(body) != h) bad += selftest_fail("блоб не идемпотентен");
+  if(runlog_blob_get(h) != body) bad += selftest_fail("блоб не читается");
+  if(!runlog_blob_ok(h)) bad += selftest_fail("блоб: хеш не сошёлся");
+  all = runlog_read(log);
+  if(all.recs.size != 6 || all.truncated) bad += selftest_fail((("чтение: " + text(all.recs.size)) + " записей, truncated=") + text(all.truncated));
+  chain = runlog_provenance(log, k);
+  if(chain.size != 4) bad += selftest_fail("цепочка check: " + text(chain.size));
+  if(rl_field(all.recs[1], "blob") != h) bad += selftest_fail("поле blob");
+  good_end = log.end;
+  // truncation: the frame is written, the pointer is not (like a crash between two commits)
+  extra = rl_payload(rl_rec{99, "run_event", 6, array{d}, array{"x", "y"}});
+  frame = (rl_pad(extra.size, 10) + rl_pad(rl_sum(extra), 10)) + extra;
+  rl_grow(log.s, frame.size);
+  rl_write(log.s, log.end, frame);
+  rl_commit(log.s);
+  runlog_close(log);
+  log2 = runlog_open(name);
+  if(log2.end != good_end) bad += selftest_fail((("обрыв до указателя: конец " + text(log2.end)) + " вместо ") + text(good_end));
+  if(runlog_read(log2).recs.size != 6) bad += selftest_fail("обрыв до указателя: записей не 6");
+  runlog_append(log2, rl_make("run_event", 7, array{d}, array{"n", "6"}));
+  if(runlog_read(log2).recs.size != 7) bad += selftest_fail("после обрыва дописали — записей не 7");
+  // corruption of a byte inside a committed record: the reader stops at the last whole one
+  rl_write(log2.s, log2.end - 3, "#");
+  rl_commit(log2.s);
+  runlog_close(log2);
+  log3 = runlog_open(name);
+  got = runlog_read(log3);
+  if(got.recs.size != 6) bad += selftest_fail(("порча: записей " + text(got.recs.size)) + ", ждали 6");
+  if(runlog_append(log3, rl_make("run_event", 8, array{}, array{})) != 7) bad += selftest_fail("после порчи id не 7");
+  runlog_close(log3);
+  print(if(bad == 0) "runlog: ok" else ("runlog: ошибок " + text(bad)));
+  if(bad == 0) 0 else 1
+}

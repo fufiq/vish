@@ -156,6 +156,22 @@ struct c_propose {
   std::string text;
   std::string why;
 };
+// Model call (epic vsh-u4e, *mine*): the external agent (claude -p) reports the result, usage and time; the VM does not receive the request text
+// (level A of the "exact request": what the VM handed over + what the agent reported). Written to the object journal if it is enabled.
+struct c_record {
+  std::string kind; // model_call | attempt | replay
+  std::string session;
+  std::string model;
+  uint64_t usage_in;
+  uint64_t usage_out;
+  uint64_t usage_cached; // read from the cache
+  uint64_t usage_cache_write; // create the cache
+  uint64_t usage_thinking;
+  uint64_t ms;
+  std::string error;
+  std::string request; // what was asked (the agent boundary, not an HTTP body)
+  std::string response; // what the agent answered
+};
 struct c_decide {
   uint32_t id;
   bool accept;
@@ -184,7 +200,7 @@ struct c_repository {
   std::string text;
   uint64_t revision;
 };
-using client_msg = std::variant<c_hello, c_open_view, c_open_module, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_task, c_command, c_propose, c_decide, c_context, c_check, c_workspace, c_repository>;
+using client_msg = std::variant<c_hello, c_open_view, c_open_module, c_close_view, c_key, c_pointer, c_goto, c_layer, c_run, c_save, c_trace, c_merge, c_take, c_projection, c_input, c_select, c_hover, c_open, c_inspect, c_apply, c_stop, c_trace_step, c_name, c_items, c_extensions, c_task, c_command, c_propose, c_decide, c_context, c_check, c_workspace, c_repository, c_record>;
 
 // --- VM customer ---
 

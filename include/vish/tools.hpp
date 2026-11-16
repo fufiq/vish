@@ -38,6 +38,9 @@ constexpr unsigned char lexer_bytes[] = {
 constexpr unsigned char parser_bytes[] = {
 #embed "../../lib/parser.vish"
 };
+constexpr unsigned char runlog_bytes[] = {
+#embed "../../lib/runlog.vish"
+};
 std::string_view builtin_text(std::string_view key) {
   auto view = [](auto const & bytes) { return std::string_view(reinterpret_cast<char const *>(bytes), sizeof bytes); };
   if(key == "tools") return view(tools_bytes);
@@ -46,6 +49,7 @@ std::string_view builtin_text(std::string_view key) {
   if(key == "cli") return view(cli_bytes);
   if(key == "lexer") return view(lexer_bytes);
   if(key == "parser") return view(parser_bytes);
+  if(key == "runlog") return view(runlog_bytes);
   return {};
 }
 
@@ -107,7 +111,7 @@ node_id load_tools(ast_db & db) { return load_builtin(db, "tools"); }
 
 // the file name of the embedded module, where the error text (import source); not built-in - "tools.vish"
 std::string builtin_file(ast_db const & db, uint32_t source) {
-  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer", "parser"})
+  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer", "parser", "runlog"})
     for(uint32_t i = 0; i < db.size(); ++i)
       if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == key && db[node_id(i)].where.source == source)
         return cat(key, ".vish");
@@ -135,10 +139,12 @@ struct side_repository {
 };
 
 struct tools_context {
-  std::deque<std::unique_ptr<side_repository>> sides; // open-ended repositories
-  std::deque<version> versions; // Deque: Links stable; language number
-  std::string error; // opening error
-  ast_db * db = nullptr; // base of the tool module (command vish): its functions - by name
+  std::deque<std::unique_ptr<side_repository>> sides; // other people's repositories opened for the duration of an operation
+  std::deque<version> versions; // deque: references are stable; the number belongs to the language
+  std::deque<os::storage_area> runlog_table; // environment object journal (lib/runlog.vish): a capability of the VM itself, not a right of the program
+  std::string runlog_dir;
+  std::string error; // last open error
+  ast_db * db = nullptr; // database of the tools module (the vish command): its functions are found by name
   node_id module;
   std::vector<interpreter *> authorities; // Temporary capabilities of executing host
   std::vector<vm_session *> sessions; // VM sessions (vish vm, scripts .session, vish apply): language number

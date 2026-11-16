@@ -22,6 +22,7 @@ std::string const & editor_text() {
 // versions modules - before it (use)
 node_id load_editor(ast_db & db) {
   load_builtin(db, "versions");
+  load_builtin(db, "runlog");
   return load_builtin_module(db, "editor", editor_text(), "editor.vish");
 }
 

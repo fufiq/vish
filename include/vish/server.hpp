@@ -434,6 +434,7 @@ struct editor_server {
   void handle(peer & p, proto::c_task const & m) { decide(&p, -1, "on_task", {value(m.name)}); }
   void handle(peer & p, proto::c_command const & m) { decide(&p, -1, "on_command", {value(m.name)}); }
   void handle(peer & p, proto::c_propose const & m) { decide(&p, -1, "on_propose", {value(m.key), value(m.text), value(m.why)}); }
+  void handle(peer & p, proto::c_record const & m) { decide(&p, -1, "on_record", {value(m.kind), value(m.session), value(m.model), value(int64_t(m.usage_in)), value(int64_t(m.usage_out)), value(int64_t(m.usage_cached)), value(int64_t(m.usage_cache_write)), value(int64_t(m.usage_thinking)), value(int64_t(m.ms)), value(m.error), value(m.request), value(m.response)}); }
   void handle(peer & p, proto::c_decide const & m) { decide(&p, -1, "on_decide", {value(int64_t(m.id)), value(m.accept)}); }
   void handle(peer & p, proto::c_context const & m) { decide(&p, m.view, "on_context", {value(int64_t(m.request)), value(int64_t(m.view)), value(int64_t(m.node.value)), value(int64_t(m.revision))}); }
   void handle(peer & p, proto::c_check const & m) { decide(&p, -1, "on_agent_check", {value(int64_t(m.request)), value(int64_t(m.revision))}); }

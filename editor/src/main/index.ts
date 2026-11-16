@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { encodeClient, type RecordAsk } from '../protocol/messages';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,6 +37,8 @@ function toWindow(channel: string, ...args: unknown[]): void {
 function status(text: string, lost = false, hint = ''): void {
   toWindow('vm:status', text, lost, hint);
 }
+
+
 
 function tryConnect(): Promise<Socket> {
   return new Promise((ok, fail) => {
@@ -142,6 +145,14 @@ const aiSystem = [
   'Не называй проверку исходной программы проверкой своей правки. Синтаксис бери из программы; спецификация —',
   'docs/spec.md репозитория vish, если доступна. Отвечай по-русски, коротко.',
 ].join(' ');
+interface Usage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  output_tokens_details?: { thinking_tokens?: number };
+}
+let aiLastPrompt = '';
 let aiSession: string | undefined;
 let aiProc: ChildProcess | undefined;
 function ai(kind: string, text: string): void {
@@ -149,6 +160,7 @@ function ai(kind: string, text: string): void {
 }
 ipcMain.on('ai:ask', (_e, text: string) => {
   if (aiProc) return;
+  aiLastPrompt = text;
   const mcp = JSON.stringify({
     mcpServers: {
       vish: {
@@ -204,6 +216,10 @@ ipcMain.on('ai:ask', (_e, text: string) => {
       };
       result?: string;
       is_error?: boolean;
+      session_id?: string;
+      duration_ms?: number;
+      usage?: Usage & { iterations?: Usage[] };
+      modelUsage?: Record<string, unknown>;
     };
     try {
       m = JSON.parse(line) as typeof m;
@@ -221,6 +237,44 @@ ipcMain.on('ai:ask', (_e, text: string) => {
       }
     if (m.type === 'result') {
       finished = true;
+      // the result of a model call goes to the VM object journal (agent boundary: the user's request, the answer, usage per attempt and in total)
+      if (socket && !socket.destroyed) {
+        const send = (r: Partial<RecordAsk>) =>
+          socket?.write(
+            encodeClient({
+              type: 'c_record',
+              kind: 'model_call',
+              session: m.session_id ?? aiSession ?? '',
+              model: Object.keys(m.modelUsage ?? {}).join(','),
+              usage_in: 0,
+              usage_out: 0,
+              usage_cached: 0,
+              usage_cache_write: 0,
+              usage_thinking: 0,
+              ms: 0,
+              error: '',
+              request: '',
+              response: '',
+              ...r,
+            }),
+          );
+        const parts = (u?: Usage) => ({
+          usage_in: u?.input_tokens ?? 0,
+          usage_out: u?.output_tokens ?? 0,
+          usage_cached: u?.cache_read_input_tokens ?? 0,
+          usage_cache_write: u?.cache_creation_input_tokens ?? 0,
+          usage_thinking: u?.output_tokens_details?.thinking_tokens ?? 0,
+        });
+        for (const it of m.usage?.iterations ?? [])
+          send({ kind: 'attempt', ...parts(it) });
+        send({
+          ...parts(m.usage),
+          ms: m.duration_ms ?? 0,
+          error: m.is_error ? (m.result ?? 'ошибка').slice(0, 200) : '',
+          request: aiLastPrompt,
+          response: m.is_error ? '' : (m.result ?? ''),
+        });
+      }
       ai(
         m.is_error ? 'error' : 'done',
         m.is_error ? (m.result ?? 'ошибка') : '',
