@@ -372,7 +372,7 @@ primary(ps s) {
       return if(r.ok) pn{"n_ready", "", array{}, array{}, array{}, "", r.node} else pn_hole("");
     }
     cw_ci = cons_of(s, w);
-    if((cw_ci >= 0) && (is_open_ch(s, 40, 1) || ((s.cons[cw_ci][2] == 1) && is_open_ch(s, 123, 1)))) {
+    if((cw_ci >= 0) && ((is_open_ch(s, 40, 1) && tk(s, 1).glued) || ((s.cons[cw_ci][2] == 1) && is_open_ch(s, 123, 1) && !tk(s, 1).glued))) { // as postfix parser.hpp: `(` is glued, a bare `{` is not
       cw_head = s.pos == s.head;
       s.pos += 1;
       return cons_call(s, pn_new("n_ident", " name=" + w, array{}), cw_ci, cw_head);
