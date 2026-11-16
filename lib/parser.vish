@@ -1164,9 +1164,9 @@ statement_node(ps s) {
   if(is_open_ch(s, 91, 0) && is_open_ch(s, 91, 1)) { want(s, "атрибуты в блоке"); return nres{false, code()}; }
   if((tk_text(s, 0) == "ct") && (tk(s, 1).kind == kind_ident()) && is_op_at(s, "=", 2)) {
     sn_head0 = s.head;
-    sn_cv = ct_var(s);
-    s.head = sn_head0;
     s.lwv = false;
+    sn_cv = ct_var(s); // last_was_value from an inner block (ct x = if(c) {1}; ...) leaks through, as in C++: statement() resets it only at the start
+    s.head = sn_head0;
     return sn_cv;
   }
   s.tail = false;
@@ -1229,7 +1229,7 @@ item_node(ps s) {
     }
     if(is_close_ch(s, 93) && is_close_ch_at(s, 93, 1)) s.pos += 2 else { want(s, "атрибуты: ]]"); why = s.unsupported; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
   }
-  if((attrs.size > 0) && (tk(s, 0).kind == kind_ident()) && is_op_at(s, "=", 1)) {
+  if((attrs.size > 0) && (tk(s, 0).kind == kind_ident()) && !is_keyword_word(tk_text(s, 0)) && is_op_at(s, "=", 1)) { // a record word name - C++ rejects it
     // [[state]] x = e; - program state (§12.2): a module variable
     sv_ok = true;
     for(a : attrs) if(!((code_kind(a) == ast.name) && (node_field(a, "name") == "state"))) sv_ok = false;
@@ -1379,8 +1379,7 @@ ct_var(ps s) {
   if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
   cv_r = node_of(cv_e);
   if(!cv_r.ok) { want(s, "значение ct-переменной без узла"); return nres{false, code()}; }
-  if(!is_op_at(s, ";", 0)) { want(s, "ct-переменная без ;"); return nres{false, code()}; }
-  s.pos += 1;
+  if(is_op_at(s, ";", 0)) s.pos += 1 else if(!is_close_ch(s, 125)) { want(s, "ct-переменная без ;"); return nres{false, code()}; } // end_statement
   nres{true, ast.variable{cv_name, code(), cv_r.node, false, true, false, false, array{}}}
 }
 struct plres { bool ok; array items; }
@@ -1453,11 +1452,10 @@ operator_item(ps s, attrs) {
     s.tail = false;
     s.head = s.pos;
     oi_e = expression(s);
-    oi_ended = s.tail || is_op_at(s, ";", 0);
-    if((s.error != "") || (s.unsupported != "") || !oi_ended) { if(s.unsupported == "") want(s, "тело-выражение оператора"); return nres{false, code()}; }
+    if((s.error != "") || (s.unsupported != "")) { if(s.unsupported == "") want(s, "тело-выражение оператора"); return nres{false, code()}; }
     oi_r = node_of(oi_e);
     if(!oi_r.ok) { want(s, "выражение без узла"); return nres{false, code()}; }
-    if(s.tail) s.tail = false else s.pos += 1;
+    if(s.tail) s.tail = false else if(is_op_at(s, ";", 0)) s.pos += 1; // end_expr_body: `;` is optional
     return nres{true, ast.function{oi_name, oi_params, code(), oi_r.node, false, true, attrs, false, array{}}};
   }
   if(!is_open_ch(s, 123, 0)) { want(s, "оператор: тело"); return nres{false, code()}; }
