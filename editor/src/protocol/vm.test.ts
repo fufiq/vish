@@ -2,11 +2,11 @@
 // types match it, messages through real `vish serve` give text equal to projection
 // `vish fmt`.
 import { spawn, execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { FrameSplitter } from './codec';
 import {
   decodeServer,
@@ -19,6 +19,17 @@ import {
 const root = join(import.meta.dirname, '../../..');
 const vish = join(root, 'out/vish');
 const program = join(root, 'tests/editor_text.vish');
+
+// Temporary directories (with 50 MB databases in them) are deleted when the file ends: they used to leak on every check.sh run (tmpfs filled up).
+const ownedDirs: string[] = [];
+function ownedTmp(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+  ownedDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const d of ownedDirs) rmSync(d, { recursive: true, force: true });
+});
 
 describe('живая VM', () => {
   it('schema.json совпадает с `vish schema`', () => {
@@ -197,7 +208,7 @@ describe('живая VM', () => {
   });
 
   it('hello, представление и курсор через сокет', async () => {
-    const sock = join(mkdtempSync(join(tmpdir(), 'vish-')), 's');
+    const sock = join(ownedTmp(), 's');
     const vm = spawn(vish, ['serve', program, sock], { stdio: 'ignore' });
     try {
       // up to 5 s: under load check.sh (asan, debug parallel) VM rises longer
@@ -312,7 +323,7 @@ describe('живая VM', () => {
   });
 
   it('запуск и сохранение: F5 — текущее состояние, Ctrl+S — .vishdb, которую понимает vish run', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const dir = ownedTmp();
     const prog = join(dir, 'p.vish');
     copyFileSync(join(root, 'tests/editor_overloads.vish'), prog);
     const sock = join(dir, 's');
@@ -358,7 +369,7 @@ describe('живая VM', () => {
   });
 
   it('автосохранение: правка без Ctrl+S попадает в .vishdb по паузе набора, текст не тронут', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const dir = ownedTmp();
     const prog = join(dir, 'p.vish');
     copyFileSync(program, prog);
     const before = readFileSync(prog, 'utf8');
@@ -417,7 +428,7 @@ describe('живая VM', () => {
   });
 
   it('обмен репозиториями: разошедшиеся журналы сливаются по элементам модулей, конфликт — мой вариант', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const dir = ownedTmp();
     const prog = join(dir, 'p.vish');
     copyFileSync(program, prog);
     const repo = (name: string) => join(dir, `${name}.vishrepo`);
@@ -502,7 +513,7 @@ describe('живая VM', () => {
   });
 
   it('обмен из редактора: c_repository pull — в живой сессии (перемотка или слияние), push — в файл', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const dir = ownedTmp();
     const prog = join(dir, 'p.vish');
     copyFileSync(program, prog);
     const repo = (name: string) => join(dir, `${name}.vishrepo`);
@@ -583,7 +594,7 @@ describe('живая VM', () => {
   });
 
   it('версии: трёхстороннее слияние копий базы — CLI и редактор', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vish-'));
+    const dir = ownedTmp();
     const prog = join(dir, 'p.vish');
     copyFileSync(join(root, 'tests/editor_overloads.vish'), prog);
     // Two copies diverge: “me” - area(i64) and main, “them” - area(f64) and main.
