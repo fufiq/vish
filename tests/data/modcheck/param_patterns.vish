@@ -1,0 +1,2 @@
+f(point{x, y}, {a: p, b: q}, array{h, ...t}) => x;
+g(mut int n, ...rest) => n;

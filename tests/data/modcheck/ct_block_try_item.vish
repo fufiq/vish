@@ -1,0 +1,5 @@
+ct { 1 }
+try(expr e) {
+  e
+}
+h(x) => x;
