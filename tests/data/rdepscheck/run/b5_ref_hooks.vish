@@ -1,0 +1,19 @@
+// no-jit
+// out: 4
+// out: ref_taken true
+// out: ref_used true
+// out: ORACLE true
+// B5 (the second RA-1 review): `&slot = xs[0]` implicitly calls the prelude's ref_taken/ref_used (reference supports). An edit of the body of ref_taken
+// broke the successful check of function reader, and reader was not in impact_of(ref_taken). Now the core's implicit calls (the table
+// ast_db::implicit_hooks) make any function of the program dependent.
+use rdeps;
+reader() { xs = array{4, 5}; &slot = xs[0]; print(slot); }
+main() {
+  reader();
+  for(name : array{"ref_taken", "ref_used"}) {
+    found = false;
+    for(f : functions_named(name)) for(x : impact_of(array{f})) if(code_name(x) == "reader") found = true;
+    print(name, found);
+  }
+  print("ORACLE", rdeps_oracle_report() == "");
+}

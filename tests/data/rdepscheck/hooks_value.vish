@@ -1,0 +1,16 @@
+// The I2 corpus (RA-1, B5): destroy/copy/implicit/text - implicit calls by the value's type.
+struct file { str name; }
+destroy(file f) { print("закрыт", f.name); }
+copy(file f) => file{f.name + "'"};
+keeper() { d = file{"d"}; e = d; print(d.name, e.name); }
+struct meters { __int64 value; }
+f64 implicit(meters m) => f64(m.value);
+text(meters m) => "m" + text(m.value);
+half(f64 x) => x / 2.0;
+converter() => half(meters{5});
+shower() { print(meters{3}); }
+main() {
+  keeper();
+  print(converter());
+  shower();
+}

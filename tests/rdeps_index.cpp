@@ -1,9 +1,13 @@
 // RA-1: independent expected answers (written by hand, not from the index), not only the equality of two dumps.
 // Each block is a reproduction of a review defect: B1 (late interning of .field), B2 (ref), B3 (operators), B4 (inheritance).
-// A build with -DVISH_RA1_MUTANT_NO_REF / -DVISH_RA1_MUTANT_NO_MEMBER must fail (a check of the oracle itself).
+// B5 (the second review cycle): the core's implicit calls - the table ast_db::implicit_hooks, the rule "all the program's functions", a comparison of the table with the core sources.
+// A build with -DVISH_RA1_MUTANT_NO_REF / _NO_MEMBER / _NO_HOOKS must fail (a check of the oracle itself).
 #include "vish/ast.hpp"
 #include "vish/rdeps_oracle.hpp"
 #include <cassert>
+#include <fstream>
+#include <regex>
+#include <set>
 using namespace vish;
 namespace ro = vish::rdeps_oracle;
 
@@ -155,21 +159,196 @@ int main() {
   assert(std::ranges::contains(leaf_impact, eat_fn) && !std::ranges::contains(leaf_impact, consume_fn)); // the dependency does not go up the bases
   agree(db, {base_node, derived_node, leaf_node, consume_fn, eat_fn, root4});
 
-  // destroy/copy/implicit are called implicitly (by the value's type): all the functions of the program are dependent, but not those of the prelude.
-  n_fn hook; hook.name = sym("destroy");
-  auto hook_fn = db.add(hook, {});
-  n_module m5; m5.name = sym("m5"); m5.items = {hook_fn};
-  auto root5 = db.add(m5, {});
-  db.link_parents(root5);
-  auto hook_dependents = db.dependents_of_fn(hook_fn);
-  assert(std::ranges::contains(hook_dependents, consume_fn) && std::ranges::contains(hook_dependents, user_fn));
-  n_fn conv; conv.name = sym("implicit");
-  auto conv_fn = db.add(conv, {});
-  n_module m6; m6.name = sym("m6"); m6.items = {conv_fn};
-  auto root6 = db.add(m6, {});
-  db.link_parents(root6);
-  assert(std::ranges::contains(db.dependents_of_fn(conv_fn), consume_fn));
-  agree(db, {hook_fn, conv_fn});
+  // B5. The core's implicit calls (ast_db::implicit_hooks): all the program's functions are dependent, but not the prelude's.
+  n_fn prel_user; prel_user.name = sym("prelude_user");
+  auto prel_user_fn = db.add(prel_user, {});
+  n_module prel; prel.name = sym("prelude"); prel.items = {prel_user_fn};
+  auto prel_root = db.add(prel, {});
+  db.link_parents(prel_root); // the name "prelude" makes a module the database's prelude
+  assert(db.prelude == prel_root && db.in_prelude(prel_user_fn));
+  std::vector<std::pair<std::string, node_id>> hook_fns;
+  for(auto const & h: ast_db::implicit_hooks) {
+    if(h.name.empty()) continue;
+    n_fn hook; hook.name = sym(std::string(h.name).c_str());
+    auto hook_fn = db.add(hook, {});
+    n_module hm; hm.name = sym((std::string("hm_") + std::string(h.name)).c_str()); hm.items = {hook_fn};
+    auto hroot = db.add(hm, {});
+    db.link_parents(hroot);
+    hook_fns.push_back({std::string(h.name), hook_fn});
+  }
+  assert(hook_fns.size() == 12); // destroy copy implicit text ref_taken ref_used eval + rules in the language: fit_rule join_rule analysis_limit chain_resolve overload_pick
+  for(auto const & [name, f]: hook_fns) {
+    auto dep = db.dependents_of_fn(f);
+    bool is_eval = name == "eval"; // eval outside a declaration of kind ast.X is an ordinary function, not a kind member
+    if(is_eval) assert(!db.is_implicit_hook(f) && !std::ranges::contains(dep, consume_fn));
+    else {
+      assert(db.is_implicit_hook(f));
+      assert(std::ranges::contains(dep, consume_fn) && std::ranges::contains(dep, user_fn) && std::ranges::contains(dep, eat_fn)); // the program's functions
+      assert(!std::ranges::contains(dep, prel_user_fn)); // the prelude - no
+      assert(std::ranges::contains(db.impact_of(node_list{f}), consume_fn));
+    }
+  }
+  { // eval is a kind member: inside an n_extend named ast.X
+    n_fn ev; ev.name = sym("eval");
+    auto ev_fn = db.add(ev, {});
+    n_extend kind_ext; kind_ext.name = sym("ast.twice"); kind_ext.of = sym("struct"); kind_ext.items = {ev_fn};
+    auto kind_node = db.add(kind_ext, {});
+    n_module km; km.name = sym("km"); km.items = {kind_node};
+    auto kroot = db.add(km, {});
+    db.link_parents(kroot);
+    assert(db.is_implicit_hook(ev_fn));
+    assert(std::ranges::contains(db.dependents_of_fn(ev_fn), consume_fn));
+    assert(std::ranges::contains(db.impact_of(node_list{ev_fn}), user_fn));
+    agree(db, {ev_fn, kind_node, kroot});
+  }
+  { // [[transform]] is a function with an attribute: called by the core during elaboration on the nodes of all the program's modules
+    auto attr = db.add(n_ident{sym("transform")}, {});
+    n_fn tr; tr.name = sym("my_rewrite"); tr.attrs = {attr};
+    auto tr_fn = db.add(tr, {});
+    n_module tm; tm.name = sym("tm"); tm.items = {tr_fn};
+    auto troot = db.add(tm, {});
+    db.link_parents(troot);
+    assert(db.is_implicit_hook(tr_fn));
+    assert(std::ranges::contains(db.dependents_of_fn(tr_fn), consume_fn) && std::ranges::contains(db.dependents_of_fn(tr_fn), user_fn));
+    assert(!std::ranges::contains(db.dependents_of_fn(tr_fn), prel_user_fn));
+    assert(!db.is_implicit_hook(consume_fn));
+    agree(db, {tr_fn, troot});
+  }
+  agree(db, {hook_fns[0].second, hook_fns[4].second, hook_fns[5].second});
+
+  // A field (n_var) is a declaration: users_of(field) finds `.field` (a query by a field's declaration must not lose the n_var branch).
+  {
+    n_var field; field.name = sym("ra1_field");
+    auto field_node = db.add(field, {});
+    n_op access; access.op = sym(".ra1_field"); access.postfix = true; access.args = {f_use};
+    auto access_node = db.add(access, {});
+    n_fn field_user; field_user.name = sym("field_user"); field_user.body = access_node;
+    auto field_user_fn = db.add(field_user, {});
+    n_extend holder; holder.name = sym("FieldHolder"); holder.of = sym("struct"); holder.items = {field_node};
+    auto holder_node = db.add(holder, {});
+    n_module fm; fm.name = sym("fm"); fm.items = {holder_node, field_user_fn};
+    auto froot = db.add(fm, {});
+    db.link_parents(froot);
+    assert(db.users_of(field_node) == node_list{access_node});
+    assert(std::ranges::contains(db.dependents_of_fn(field_node), field_user_fn));
+    agree(db, {field_node, holder_node, field_user_fn});
+  }
+  // A mutation and a rollback of a node that was not detached but never attached (parent is empty): the index follows its kind.
+  {
+    auto never = db.add(n_ident{sym("ra1_never_attached")}, {});
+    assert(!db[never].parent);
+    db.mutate(never, n_ident{sym("ra1_never_other")}, root.value + 3000);
+    assert(db.users_of(sym("ra1_never_attached")).empty() && !db.users_of(sym("ra1_never_other")).empty());
+    assert(ro::compare_index(db).empty());
+    db.rollback(root.value + 3000);
+    assert(!db.users_of(sym("ra1_never_attached")).empty() && db.users_of(sym("ra1_never_other")).empty());
+    assert(ro::compare_index(db).empty());
+  }
+
+  // A use outside a function: an extension's field type and a module's global variable/ct block are not lost.
+  {
+    auto field_type = db.add(n_ident{sym("Inner")}, {});
+    n_var field; field.name = sym("inner"); field.type = field_type;
+    auto field_node = db.add(field, {});
+    n_extend outer; outer.name = sym("Outer"); outer.of = sym("struct"); outer.items = {field_node};
+    auto outer_node = db.add(outer, {});
+    n_extend inner; inner.name = sym("Inner"); inner.of = sym("struct");
+    auto inner_node = db.add(inner, {});
+    auto outer_type = db.add(n_ident{sym("Outer")}, {});
+    n_param op_param; op_param.name = sym("o"); op_param.type = outer_type;
+    auto op_param_node = db.add(op_param, {});
+    n_fn take_outer; take_outer.name = sym("take_outer"); take_outer.params = {op_param_node};
+    auto take_outer_fn = db.add(take_outer, {});
+    auto global_use = db.add(n_ident{sym("take_outer")}, {}); // a module's ct block/global variable calls take_outer
+    n_var global; global.name = sym("g_state"); global.init = global_use;
+    auto global_node = db.add(global, {});
+    n_fn other_fn_k; other_fn_k.name = sym("module_mate");
+    auto module_mate = db.add(other_fn_k, {});
+    n_module nm; nm.name = sym("nested_m"); nm.items = {inner_node, outer_node, take_outer_fn, global_node, module_mate};
+    auto nroot = db.add(nm, {});
+    db.link_parents(nroot);
+    assert(std::ranges::contains(db.impact_of(node_list{inner_node}), take_outer_fn)); // Inner -> a field of Outer -> a consumer of Outer
+    assert(std::ranges::contains(db.dependents_of_fn(take_outer_fn), module_mate)); // a use outside functions: the module's functions
+    agree(db, {inner_node, outer_node, take_outer_fn, nroot});
+  }
+
+  // A comparison of the table with the core sources: every name that the core looks up in functions/member_fn_of/hook symbols or compares with a function name
+  // must be in the table or in the list of explicit forms below (a name from the node's text is in the index anyway). A new implicit call in the core without
+  // an entry in the table breaks this test instead of passing silently.
+  {
+    std::set<std::string> found;
+    std::regex member_fn(R"re(member_fn_of\("([a-z_]+)")re");
+    std::regex find_sym(R"re(functions\.(?:find|contains|at)\(.*?sym\("([^"]+)"\)\))re");
+    std::regex hook_sym(R"re(symbol h = sym\("([a-z_]+)"\))re");
+    std::regex fn_name_eq(R"re(n_fn>\(.*?\)\.name\) == "([a-z_]+)")re"); // iterating the database's functions by name: eval, chain_resolve, overload_pick
+    std::regex lang_rule_call(R"re(lang_rule\(\w+, "([a-z_]+)")re");      // fit_rule, join_rule, analysis_limit
+    std::regex attr_eq(R"re(n_ident>\(a\)\.name\) == "([a-z_]+)")re");   // a mark attribute: transform, service
+    for(char const * file: {"include/vish/interp.hpp", "include/vish/machine.hpp"}) {
+      std::ifstream in(file);
+      assert(in && "запускать из корня репозитория");
+      std::string line;
+      while(std::getline(in, line)) {
+        std::smatch m;
+        for(auto const * re: {&member_fn, &find_sym, &hook_sym, &fn_name_eq, &lang_rule_call, &attr_eq})
+          for(auto it = std::sregex_iterator(line.begin(), line.end(), *re); it != std::sregex_iterator(); ++it) found.insert((*it)[1]);
+      }
+    }
+    std::set<std::string> allowed{"main", "service"}; // main is the program's entry (no dependents); service is a mark attribute (it calls no functions)
+    for(auto const & h: ast_db::implicit_hooks) if(!h.name.empty()) allowed.insert(std::string(h.name));
+    allowed.insert("transform"); // the [[transform]] attribute is a mark in is_implicit_hook
+    for(auto const & name: found)
+      if(!allowed.contains(name)) fprintf(stderr, "неявный вызов в ядре без записи в ast_db::implicit_hooks: %s\n", name.c_str());
+    for(auto const & name: found) assert(allowed.contains(name));
+    for(auto const & h: ast_db::implicit_hooks) if(!h.name.empty()) assert(found.contains(std::string(h.name))); // and back: the table entry exists in the core
+    assert(found.contains("transform") && found.contains("main"));
+  }
+
+  // A detached node: after a rollback the parent of the detached node is stale (database behaviour, a rollback does not reset it), but the index tables do not
+  // depend on parent - they equal the earlier ones and the recount, and a mutation and a rollback of a DETACHED node do not spoil the index either (I1/I3 without a manual reset).
+  {
+    auto tables = [&](ast_db const & d) { // the r/t lines of the dump (the tables), without the f lines of enclosing_fn
+      std::string out, dump = d.rdeps_dump(), line;
+      for(std::size_t i = 0; i < dump.size();) { auto e = dump.find('\n', i); line = dump.substr(i, e - i); if(line.starts_with("r ") || line.starts_with("t ")) out += line + "\n"; i = e + 1; }
+      return out;
+    };
+    auto free_node = db.add(n_ident{sym("ra1_free")}, {});
+    auto before_tables = tables(db);
+    auto module_body = db.copy_of<n_module>(root4);
+    module_body.items.push_back(free_node);
+    db.mutate(root4, module_body, root.value + 2000);
+    db.link_parents(root4);
+    assert(db[free_node].parent == root4 && !db.users_of(sym("ra1_free")).empty());
+    db.rollback(root.value + 2000);
+    assert(db[free_node].parent == root4); // the detached node keeps a stale parent - the harness does not reset it
+    assert(tables(db) == before_tables); // and the index equals the earlier one
+    assert(db.rdeps_dump() == db.rdeps_dump(true) && ro::compare_index(db).empty());
+    // a mutation and a rollback of the detached node itself (after detaching it stays in the database): the index follows the node's kind
+    db.mutate(free_node, n_ident{sym("ra1_free_other")}, root.value + 2001);
+    assert(db.users_of(sym("ra1_free")).empty() && !db.users_of(sym("ra1_free_other")).empty());
+    assert(ro::compare_index(db).empty());
+    db.rollback(root.value + 2001);
+    assert(!db.users_of(sym("ra1_free")).empty() && db.users_of(sym("ra1_free_other")).empty());
+    assert(tables(db) == before_tables && ro::compare_index(db).empty());
+  }
+
+  // A derived node (derive): a node taken anew gets its kind at birth - the index follows it, not the completed kind.
+  {
+    std::vector<uint32_t> holder;
+    auto born = db.derive(n_ident{sym("ra1_born")}, span{}, holder);
+    db.mutate(born, n_ident{sym("ra1_built")}, 0); // completion (no source): the former kind - not in the mutations
+    assert(ro::compare_index(db).empty() && !db.users_of(sym("ra1_built")).empty());
+    db.release(holder);
+    std::vector<uint32_t> again;
+    auto reborn = db.derive(n_ident{sym("ra1_born")}, span{}, again); // the same kind and place - the same node, the kind at birth
+    assert(reborn == born);
+    assert(db.rdeps_dump() == db.rdeps_dump(true));
+    auto report = ro::compare_index(db);
+    if(!report.empty()) fprintf(stderr, "%s", report.c_str());
+    assert(report.empty());
+    assert(!db.users_of(sym("ra1_born")).empty() && db.users_of(sym("ra1_built")).empty());
+    db.release(again);
+    assert(ro::compare_index(db).empty());
+  }
 
   // use: a list of names - uses of names.
   n_use use; use.key = sym("geo"); use.names = {sym("norm_fn")};

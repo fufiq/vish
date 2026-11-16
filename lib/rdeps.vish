@@ -50,7 +50,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
   uint64_t seed = uint64_t(a[1].as<int64_t>());
   auto random = [&]() { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return uint32_t(seed >> 32); };
   int64_t steps = a[2].as<int64_t>(), i2cases = a[3].as<int64_t>(), i2offset = a[4].as<int64_t>();
-  int64_t bad_live = 0, bad_oracle = 0, bad_query = 0, bad3 = 0, cases = 0, supers = 0, strict = 0, bad2 = 0, diag_changed = 0, fresh_nodes = 0, oracle_checks = 0, query_checks = 0, parse_errors = int64_t(errors.size()), check_errors = 0, lib_changed = 0, indirect_explained = 0, ct_gap = 0;
+  int64_t bad_live = 0, bad_oracle = 0, bad_query = 0, bad3 = 0, cases = 0, supers = 0, strict = 0, bad2 = 0, diag_changed = 0, fresh_nodes = 0, oracle_checks = 0, query_checks = 0, parse_errors = int64_t(errors.size()), check_errors = 0, lib_changed = 0, tier1 = 0, ct_gap = 0, tier2 = 0, hook_cases = 0, full_actual = 0, full_direct = 0, inst_set_changes = 0, sig_cases = 0, hook_bad = 0;
   for(auto const & e: errors) fprintf(stderr, "%s: разбор: %s\n", path.c_str(), e.what());
   auto text_of = [&](symbol s) { return std::string(db.strings.text(s)); };
   // I1: the live index = a recount by the same extraction (in case of staleness) AND the independent reference (reflection over the fields).
@@ -76,6 +76,14 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
   // The program's declarations: query targets (functions, extensions, modules).
   for(uint32_t i = 0; i < count; ++i)
     if((db.is<n_fn>(node_id(i)) || db.is<n_extend>(node_id(i)) || db.is<n_module>(node_id(i))) && db.within(node_id(i), root)) decls.push_back(node_id(i));
+  // Program fields and variables (n_var) are also declarations: users_of/dependents_of over them are checked separately from functions.
+  node_list vars;
+  for(uint32_t i = 0; i < count; ++i) if(db.is<n_var>(node_id(i)) && db.within(node_id(i), root)) vars.push_back(node_id(i));
+  auto pick_vars = [&](std::size_t k) {
+    node_list out;
+    for(std::size_t i = 0; i < k && !vars.empty(); ++i) out.push_back(vars[random() % vars.size()]);
+    return out;
+  };
   auto pick_decls = [&](std::size_t k) {
     node_list out;
     if(decls.size() <= k) return decls;
@@ -89,27 +97,55 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
     ++query_checks;
     ro::model m(db);
     std::string report;
-    if(int bad = ro::compare_queries(db, m, probes, report)) { bad_query += bad; fprintf(stderr, "%s: [%s] запросы ≠ эталон\n%s", path.c_str(), when, report.c_str()); }
+    node_list all_probes = probes;
+    for(auto v: pick_vars(4)) all_probes.push_back(v);
+    if(int bad = ro::compare_queries(db, m, all_probes, report)) { bad_query += bad; fprintf(stderr, "%s: [%s] запросы ≠ эталон\n%s", path.c_str(), when, report.c_str()); }
   };
   verify_queries("начало", decls.size() <= 60 ? decls : pick_decls(60));
-  auto snapshot = [&]() { return std::pair<std::string, std::string>(db.rdeps_dump(), ro::query_snapshot(db, fixed_probes)); };
-  // A rollback does not restore the parent of detached children (database behaviour): the caller's link_parents fixes them - for every changed node.
+  // Forward reachability (by the children lists from the prelude's and the program's modules), not by parent: a rollback does not reset the parent of detached nodes
+  // (database behaviour), so the answers for detached nodes depend on a stale parent and are not compared in I3. The index tables
+  // (the r/t lines of the dump) do not depend on parent at all and are compared in full, including detached nodes.
+  auto reachable = [&]() {
+    std::vector<uint8_t> seen(db.size(), 0);
+    node_list todo{db.prelude, root};
+    while(!todo.empty()) {
+      node_id x = todo.back();
+      todo.pop_back();
+      if(!x || x.value >= seen.size() || seen[x.value]) continue;
+      seen[x.value] = 1;
+      db.for_each_child(x, [&](node_id c) { todo.push_back(c); });
+    }
+    return seen;
+  };
+  auto attached_dump = [&](std::vector<uint8_t> const & seen) {
+    std::string out, dump = db.rdeps_dump();
+    std::istringstream in(dump);
+    std::string line;
+    while(std::getline(in, line)) {
+      if(line.starts_with("f ")) {
+        uint32_t i = uint32_t(std::strtoul(line.c_str() + 2, nullptr, 10));
+        if(i >= seen.size() || !seen[i]) continue;
+      }
+      out += line + "\n";
+    }
+    return out;
+  };
+  auto snapshot = [&]() { auto seen = reachable(); return std::pair<std::string, std::string>(attached_dump(seen), ro::query_snapshot(db, fixed_probes, &seen)); };
+  // A rollback does not restore the parent of children that a mutation re-attached: the caller's link_parents fixes them - for every changed
+  // node (as the editor does). The harness does NOT touch the free nodes (extra, extra_fn): their stale parent is the database state after a rollback.
   auto roll_back = [&](uint32_t source, std::pair<std::string, std::string> const & before, char const * what, node_list const & touched) {
     db.rollback(source);
     for(auto t: touched) db.link_parents(t);
-    // The harness's free nodes were inserted into a module and detached by a rollback; the database does not reset their parent (database behaviour; an extra dependent
-    // "inside the module" is conservativeness). The harness returns them to the initial free state to compare the query answers.
-    db[extra].parent = {};
-    db[extra_fn].parent = {};
     verify(what);
-    if(auto now = db.rdeps_dump(); now != before.first) {
+    auto seen_now = reachable();
+    if(auto now = attached_dump(seen_now); now != before.first) {
       ++bad3;
       std::size_t i = 0;
       while(i < now.size() && i < before.first.size() && now[i] == before.first[i]) ++i;
       while(i > 0 && now[i - 1] != '\n') --i; // the beginning of the mismatch line
       fprintf(stderr, "%s: [%s] И3: содержимое индекса после отката ≠ прежнему: после %.40s / до %.40s\n", path.c_str(), what, now.c_str() + i, before.first.c_str() + i);
     }
-    else if(auto now = ro::query_snapshot(db, fixed_probes); now != before.second) {
+    else if(auto now = ro::query_snapshot(db, fixed_probes, &seen_now); now != before.second) {
       ++bad3;
       std::size_t i = 0;
       while(i < now.size() && i < before.second.size() && now[i] == before.second[i]) ++i;
@@ -250,7 +286,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
     };
     auto op_text = [&](node_id x) { return text_of(db.as<n_op>(x).op); };
     for(int64_t ci = 0; ci < i2cases; ++ci) {
-      int kind = int((uint64_t(ci) + uint64_t(i2offset)) % 8);
+      int kind = int((uint64_t(ci) + uint64_t(i2offset)) % 10);
       uint32_t src = root.value + 1000 + uint32_t(ci);
       node_id target, link;
       node_kind replacement;
@@ -330,14 +366,41 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
           }
           break;
         }
-        default: // an expression: a call or an operator -> a literal
+        case 7: // an expression: a call or an operator -> a literal
           target = pick([&](node_id x) { return (db.is<n_call>(x) || (db.is<n_op>(x) && !db.as<n_op>(x).postfix)) && db.enclosing_fn(x); });
           if(target) { replacement = n_int{3}; ready = true; }
+          break;
+        case 8: { // signature: an extra parameter or without the last one (callers by name lose the overload)
+          target = pick([&](node_id x) { return plain_fn(x) && (!db.as<n_fn>(x).params.empty() || random() % 2 == 0); });
+          if(target) {
+            auto f = db.as<n_fn>(target);
+            if(!f.params.empty() && random() % 2 == 0) { std::vector<node_id> keep; for(std::size_t i = 0; i + 1 < f.params.size(); ++i) keep.push_back(f.params[i]); f.params = keep; }
+            else { n_param p; p.name = db.strings.intern("ra1_extra_param"); f.params.push_back(db.add(p, {})); }
+            replacement = f; ready = true;
+          }
+          break;
+        }
+        default: { // the body of a function called implicitly by the core (the table ast_db::implicit_hooks, [[transform]]): in the prelude and in the program
+          node_list hooks;
+          for(uint32_t i = 0; i < count; ++i) {
+            if(!db.is_implicit_hook(node_id(i))) continue;
+            if(db.in_prelude(node_id(i)) && text_of(db.as<n_fn>(node_id(i)).name) == "text" && random() % 8 != 0) continue; // there are about a dozen text overloads in the prelude: they do not drown the other hooks
+            hooks.push_back(node_id(i));
+          }
+          if(!hooks.empty()) {
+            target = hooks[random() % hooks.size()];
+            auto f = db.as<n_fn>(target);
+            f.body = db.add(n_int{99}, {});
+            f.expr_body = true;
+            replacement = f; ready = true;
+          }
+        }
       }
       if(!ready) continue;
       if(delta.empty()) delta = {target};
       link = target;
       auto impact_before = db.impact_of(delta);
+      ro::model pre_edit(db); // the reference model BEFORE the edit: callers that the edit took away (a call replaced by a literal: the callee's instance disappeared)
       db.mutate(target, std::move(replacement), src);
       db.link_parents(link);
       edit_hi = db.size();
@@ -350,13 +413,29 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       std::vector<node_id> actual;
       std::map<uint32_t, std::string> why;
       std::optional<ro::model> post_edit; // the reference model over the database after the edit: the calling functions
-      auto callers = [&](node_id g) { if(!post_edit) post_edit.emplace(db); return post_edit->dependents(g); };
-      // A change in the layer (or the diagnostics) of function g is explained if g is in impact or is called by a function from impact: the instance's layer
-      // is a fold over all calls, and the argument values/types, the data flows between calls come down from
-      // the caller, not by name. Strictly: a function for which neither it nor its callers are in impact must not change.
-      auto explained = [&](node_id g) -> std::pair<bool, int> { // (explained, 0 - itself in impact, 1 - by a caller)
+      auto callers = [&](node_id g) {
+        if(!post_edit) post_edit.emplace(db);
+        auto out = post_edit->dependents(g);
+        if(g.value < pre_edit.db.size()) for(auto c: pre_edit.dependents(g)) out.push_back(c); // the same database: the nodes before the edit; reading through the model taken before the mutation
+        ast_db::unique_nodes(out);
+        return out;
+      };
+      // A change in the layer (or the diagnostics) of function g is explained by tiers (the lower the number, the stricter):
+      //   0 - g is in impact;
+      //   1 - g calls the edited function (the edit itself changes its text: the argument values and types come down from it, not by name);
+      //   2 - g calls a function from impact that the edit did not change (a transitive downward flow; for an edit of an implicit hook's body it is off -
+      //       it is exactly the masking of a missed dependency: a common caller in impact would "forgive" any missed function).
+      // No tier - an I2 violation. Tiers 1 and 2 are counted separately and printed in the result.
+      bool hook_case = kind == 9;
+      node_list direct; // the functions whose text the edit itself changes: a body, a signature, a name, a new/deleted function
+      for(auto x: delta) { if(db.is<n_fn>(x)) direct.push_back(x); else if(auto f = db.enclosing_fn(x)) direct.push_back(f); }
+      if(auto f = db.enclosing_fn(target)) direct.push_back(f);
+      ast_db::unique_nodes(direct);
+      auto explained = [&](node_id g) -> std::pair<bool, int> { // (explained, tier)
         if(std::ranges::contains(impact, g)) return {true, 0};
-        for(auto c: callers(g)) if(std::ranges::contains(impact, c)) return {true, 1};
+        auto cs = callers(g);
+        for(auto c: cs) if(std::ranges::contains(direct, c)) return {true, 1};
+        if(!hook_case) for(auto c: cs) if(std::ranges::contains(impact, c)) return {true, 2};
         return {false, 0};
       };
       bool same_failure = before.failed == after.failed && before.what == after.what;
@@ -379,29 +458,48 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
           fprintf(stderr, "%s: И2 вид %d: ни одна функция цепочки диагностики (и ни один её вызывающий) не входит в impact, правка узла %u; цепочка: %s; impact программы: %s\n", path.c_str(), kind, target.value, names.c_str(), imp.c_str());
         }
       }
-      for(auto const & [f, keys]: after.layers)
-        for(auto const & [key, now]: keys) {
-          auto bf = before.layers.find(f);
-          if(bf == before.layers.end() || !bf->second.contains(key)) continue; // a new instance: it is a consequence of the caller's edit
-          auto const & was = bf->second.at(key);
-          if(was.ct == now.ct && was.fixed == now.fixed && was.derived == now.derived) continue;
-          // Library functions (the prelude) are constructs with blocks and expressions as parameters (for, if...): the layers of their instances
-          // depend on the caller's expressions, not on names; such differences are counted and are not part of the strict check.
-          if(!db.within(node_id(f), root)) { ++lib_changed; continue; }
-          // the first difference - for analyzing violations
-          std::string & note = why[f];
-          if(was.ct != now.ct) note = cat("свёрнутость: было ", was.ct, " стало ", now.ct);
-          for(auto const & [nid, v]: now.fixed) {
-            if(!note.empty()) break;
-            auto it = was.fixed.find(nid);
-            if(it == was.fixed.end()) note = cat("узел ", nid, " (вид ", db[node_id(nid)].kind.index(), ") новый: ", v);
-            else if(it->second != v) note = cat("узел ", nid, " (вид ", db[node_id(nid)].kind.index(), "): было ", it->second, " стало ", v);
-          }
-          if(note.empty()) for(auto const & [nid, v]: was.fixed) if(!now.fixed.contains(nid)) { note = cat("узел ", nid, " исчез: ", v); break; }
-          if(note.empty()) note = "различие в производных узлах";
-          if(auto [ok, how] = explained(node_id(f)); ok) { if(how == 1) ++indirect_explained; continue; }
-          actual.push_back(node_id(f));
+      // An independent full comparison "actual": a full recount of check before and after, ALL the program's functions, by the instance keys of both runs:
+      // a change in the layer of a common instance, new and vanished instances (the set - only if both checks reached the end: a check abort
+      // itself changes the set). The prelude's functions are outside the strict check (their layers depend on the caller's expressions), a counter only.
+      bool both_ok = !before.failed && !after.failed;
+      std::set<uint32_t> changed_fns;
+      for(auto const & [f, keys]: after.layers) changed_fns.insert(f);
+      for(auto const & [f, keys]: before.layers) changed_fns.insert(f);
+      std::map<std::string, instance> const no_instances;
+      for(auto f: changed_fns) {
+        auto bf = before.layers.find(f), af = after.layers.find(f);
+        auto const & bk = bf == before.layers.end() ? no_instances : bf->second;
+        auto const & ak = af == after.layers.end() ? no_instances : af->second;
+        std::string note;
+        if(both_ok) {
+          for(auto const & [key, now]: ak) if(note.empty() && !bk.contains(key)) note = "новый экземпляр " + key;
+          for(auto const & [key, was]: bk) if(note.empty() && !ak.contains(key)) note = "исчез экземпляр " + key;
         }
+        bool set_changed = !note.empty();
+        for(auto const & [key, now]: ak) {
+          if(!bk.contains(key)) continue;
+          auto const & was = bk.at(key);
+          if(was.ct == now.ct && was.fixed == now.fixed && was.derived == now.derived) continue;
+          if(note.empty()) {
+            if(was.ct != now.ct) note = cat("свёрнутость: было ", was.ct, " стало ", now.ct);
+            for(auto const & [nid, v]: now.fixed) {
+              if(!note.empty()) break;
+              auto it = was.fixed.find(nid);
+              if(it == was.fixed.end()) note = cat("узел ", nid, " (вид ", db[node_id(nid)].kind.index(), ") новый: ", v);
+              else if(it->second != v) note = cat("узел ", nid, " (вид ", db[node_id(nid)].kind.index(), "): было ", it->second, " стало ", v);
+            }
+            if(note.empty()) for(auto const & [nid, v]: was.fixed) if(!now.fixed.contains(nid)) { note = cat("узел ", nid, " исчез: ", v); break; }
+            if(note.empty()) note = "различие в производных узлах";
+          }
+        }
+        if(note.empty()) continue;
+        if(!db.within(node_id(f), root)) { ++lib_changed; continue; }
+        ++full_actual;
+        if(set_changed) ++inst_set_changes;
+        why[f] = note;
+        if(auto [ok, how] = explained(node_id(f)); ok) { if(how == 0) ++full_direct; else if(how == 1) ++tier1; else ++tier2; continue; }
+        actual.push_back(node_id(f));
+      }
       ast_db::unique_nodes(actual);
       bool includes = diag_explained;
       for(auto f: actual) if(!std::ranges::contains(impact, f)) {
@@ -409,11 +507,13 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
         fprintf(stderr, "%s: И2 вид %d: impact не содержит %u (%s), правка узла %u: %s\n", path.c_str(), kind, f.value, text_of(db.as<n_fn>(f).name).c_str(), target.value, why[f.value].c_str());
       }
       ++cases;
+      if(kind == 8) ++sig_cases;
+      if(hook_case) ++hook_cases;
       if(includes) { ++supers; if(impact.size() > actual.size()) ++strict; }
-      else if(has_ct_block) { // ct code reads and changes the AST by reflection (functions_named, f.body...): the dependency is not by name - RA-1b
+      else if(has_ct_block && !hook_case) { // ct code reads and changes the AST by reflection (functions_named, f.body...): the dependency is not by name - RA-1b
         ++ct_gap;
         fprintf(stderr, "%s: И2 вид %d: расхождение в программе с ct-блоками — зависимость ct-кода от АСТ по рефлексии, RA-1b (вне строгой проверки)\n", path.c_str(), kind);
-      } else ++bad2;
+      } else { ++bad2; if(hook_case) ++hook_bad; }
       db.rollback(src);
       db.link_parents(link);
       verify("И2 после отката");
@@ -432,7 +532,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
     size_t i = 0; while(i < mine.size() && i < ref.size() && mine[i] == ref[i]) ++i;
     fprintf(stderr, "%s: replay content at %zu: live %.80s / replay %.80s\n", path.c_str(), i, mine.c_str() + i, ref.c_str() + i);
   }
-  return value(array_v::of({value(steps), value(bad_live), value(bad_oracle), value(bad_query), value(bad3), value(cases), value(supers), value(strict), value(bad2), value(diag_changed), value(fresh_nodes), value(oracle_checks), value(query_checks), value(parse_errors), value(check_errors), value(lib_changed), value(indirect_explained), value(ct_gap)}));
+  return value(array_v::of({value(steps), value(bad_live), value(bad_oracle), value(bad_query), value(bad3), value(cases), value(supers), value(strict), value(bad2), value(diag_changed), value(fresh_nodes), value(oracle_checks), value(query_checks), value(parse_errors), value(check_errors), value(lib_changed), value(tier1), value(ct_gap), value(tier2), value(hook_cases), value(full_actual), value(full_direct), value(inst_set_changes), value(sig_cases), value(hook_bad)}));
 };
 // vish rdepscheck <files> [seed] [steps] [I2 cases per file]
 check_cli(files) {
@@ -445,14 +545,14 @@ check_cli(files) {
   if(nums.size > 0) seed = number_of(nums[0]);
   if(nums.size > 1) steps = number_of(nums[1]);
   if(nums.size > 2) i2 = number_of(nums[2]);
-  total = array{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  total = array{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   for(i : range(paths.size)) {
     n = (steps / paths.size) + (if(i < (steps % paths.size)) 1 else 0);
     r = rdeps_probe(paths[i], seed + i, n, i2, i);
-    for(k : range(18)) total[k] += r[k];
+    for(k : range(25)) total[k] += r[k];
     if((r[1] + r[2] + r[3] + r[4] + r[8]) > 0) write_out(paths[i] + ": И1-живой=" + text(r[1]) + " И1-эталон=" + text(r[2]) + " запросы=" + text(r[3]) + " И3=" + text(r[4]) + " И2=" + text(r[8]) + "\n");
   }
   bad = total[1] + total[2] + total[3] + total[4] + total[8];
-  write_out("rdeps: файлов " + text(paths.size) + ", шагов " + text(total[0]) + ", сверок эталона " + text(total[11]) + ", сверок запросов " + text(total[12]) + ", И1-живой=" + text(total[1]) + ", И1-эталон=" + text(total[2]) + ", запросы=" + text(total[3]) + ", И3=" + text(total[4]) + ", И2: случаев " + text(total[5]) + ", надмножеств " + text(total[6]) + ", строгих " + text(total[7]) + ", нарушений " + text(total[8]) + ", диагностик изменилось " + text(total[9]) + ", новых узлов правок " + text(total[10]) + ", ошибок разбора " + text(total[13]) + ", ошибок check " + text(total[14]) + ", библиотечных экземпляров изменилось (вне строгой проверки) " + text(total[15]) + ", изменений объяснено вызывающим из impact " + text(total[16]) + ", вне строгой проверки из-за ct-блоков (RA-1b) " + text(total[17]) + "\n");
+  write_out("rdeps: файлов " + text(paths.size) + ", шагов " + text(total[0]) + ", сверок эталона " + text(total[11]) + ", сверок запросов " + text(total[12]) + ", И1-живой=" + text(total[1]) + ", И1-эталон=" + text(total[2]) + ", запросы=" + text(total[3]) + ", И3=" + text(total[4]) + ", И2: случаев " + text(total[5]) + ", надмножеств " + text(total[6]) + ", строгих " + text(total[7]) + ", нарушений " + text(total[8]) + ", диагностик изменилось " + text(total[9]) + ", новых узлов правок " + text(total[10]) + ", ошибок разбора " + text(total[13]) + ", ошибок check " + text(total[14]) + ", библиотечных экземпляров изменилось (вне строгой проверки) " + text(total[15]) + ", полная сверка actual: изменилось функций программы " + text(total[20]) + " (в impact " + text(total[21]) + ", поток вниз от правленой функции " + text(total[16]) + ", поток вниз от затронутой " + text(total[18]) + ", изменений набора экземпляров " + text(total[22]) + "), правок сигнатуры " + text(total[23]) + ", правок тела неявного хука " + text(total[19]) + " нарушений среди них " + text(total[24]) + ", вне строгой проверки из-за ct-блоков (RA-1b) " + text(total[17]) + "\n");
   if(bad == 0) 0 else 1
 }

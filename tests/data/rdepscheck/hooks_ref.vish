@@ -1,0 +1,8 @@
+// The I2 corpus (RA-1, B5): references to elements - the implicit ref_taken/ref_used; an edit of their body (generator kind 9) changes reader and its callers.
+reader() { xs = array{4, 5}; &slot = xs[0]; print(slot); }
+second() { ys = array{7, 8, 9}; &s = ys[1]; return s + 1; }
+twice_ref() { zs = array{1, 2}; &a = zs[0]; &b = zs[1]; return a + b; }
+main() {
+  reader();
+  print(second(), twice_ref());
+}

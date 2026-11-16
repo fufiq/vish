@@ -1,0 +1,25 @@
+// no-jit
+// out: 2.5
+// out: m3
+// out: implicit true
+// out: text true
+// out: ORACLE true
+// B5: implicit(got x) is an implicit conversion on passing (half(meters{5}) nowhere names implicit), text(T) is the print output of a value
+// of its type (print(meters{3}) nowhere names text): converter and shower are in the hooks' impact.
+use rdeps;
+struct meters { __int64 value; }
+f64 implicit(meters m) => f64(m.value);
+text(meters m) => "m" + text(m.value);
+half(f64 x) => x / 2.0;
+converter() => half(meters{5});
+shower() { print(meters{3}); }
+main() {
+  print(converter());
+  shower();
+  for(name : array{"implicit", "text"}) {
+    found = false;
+    for(f : functions_named(name)) for(x : impact_of(array{f})) if(code_name(x) == "converter" || code_name(x) == "shower") found = true;
+    print(name, found);
+  }
+  print("ORACLE", rdeps_oracle_report() == "");
+}

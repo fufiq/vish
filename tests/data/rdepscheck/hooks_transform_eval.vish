@@ -1,0 +1,13 @@
+// The I2 corpus (RA-1, B5): [[transform]] and a node kind's eval - implicit core calls during elaboration and parsing.
+struct ast.twice { code x; }
+syntax twice (x) => ast.twice{x};
+ast.twice { eval(expr x) => x + x; }
+[[transform]] shrink(c) {
+  if((code_kind(c) != ast.int) || (code_text(c) != "7000")) return;
+  ast.int{7}
+}
+plain() => 7000;
+doubled(a) => twice (a);
+main() {
+  print(plain(), doubled(4));
+}

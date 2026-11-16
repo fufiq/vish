@@ -1,0 +1,23 @@
+// no-jit
+// out: d d'
+// out: закрыт d'
+// out: закрыт d
+// out: destroy true
+// out: copy true
+// out: ORACLE true
+// B5: destroy(T) and copy(T) are called by the core by the value's type (the end of life, copying on read after an assignment), not by name
+// in the text: an edit of their body changes keeper - it must be in impact.
+use rdeps;
+struct file { str name; }
+destroy(file f) { print("закрыт", f.name); }
+copy(file f) => file{f.name + "'"};
+keeper() { d = file{"d"}; e = d; print(d.name, e.name); }
+main() {
+  keeper();
+  for(name : array{"destroy", "copy"}) {
+    found = false;
+    for(f : functions_named(name)) for(x : impact_of(array{f})) if(code_name(x) == "keeper") found = true;
+    print(name, found);
+  }
+  print("ORACLE", rdeps_oracle_report() == "");
+}

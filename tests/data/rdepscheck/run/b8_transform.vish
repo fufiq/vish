@@ -1,0 +1,19 @@
+// no-jit
+// out: 7
+// out: transform true
+// out: ORACLE true
+// B5: [[transform]] is called by the core during elaboration on every suitable node of all the program's modules: an edit of the transformer changes any
+// function (plain), although it does not name it.
+use rdeps;
+[[transform]] shrink(c) {
+  if((code_kind(c) != ast.int) || (code_text(c) != "7000")) return;
+  ast.int{7}
+}
+plain() => 7000;
+main() {
+  print(plain());
+  found = false;
+  for(f : functions_named("shrink")) for(x : impact_of(array{f})) if(code_name(x) == "plain") found = true;
+  print("transform", found);
+  print("ORACLE", rdeps_oracle_report() == "");
+}

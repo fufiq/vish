@@ -9,6 +9,7 @@
 #include "vish/ast.hpp"
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -90,6 +91,20 @@ inline std::string describe(ast_db const & db, entry const & e) {
   return cat(key, " → использование ", e[2], " (вид ", db[node_id(e[2])].kind.index(), ")");
 }
 
+// The structure of the tables: every bucket strictly increases (no repeats), and the tables are no longer than the largest possible key (a symbol / a node number) -
+// the capacity does not bloat. The content comparison (compare_index) does not see them: the dump sorts and removes repeats, empty buckets are not printed.
+inline std::string structure_report(ast_db const & db) {
+  std::string out;
+  auto check = [&](auto const & by, std::size_t limit, char const * what) {
+    if(by.size() > limit) out += cat(what, ": таблица длиннее наибольшего ключа (", by.size(), " > ", limit, ")\n");
+    for(std::size_t k = 0; k < by.size(); ++k)
+      if(std::ranges::adjacent_find(by[k], std::greater_equal<>{}) != by[k].end()) out += cat(what, "[", k, "]: корзина не строго возрастает (повтор или порядок)\n");
+  };
+  check(db.refs_by_name, std::size_t(db.strings.size()) + 1, "refs_by_name");
+  check(db.refs_by_target, std::size_t(db.size()) + 1, "refs_by_target");
+  return out;
+}
+
 // "" - the index equals the reference; otherwise the first mismatches. missing - reference is not a subset of the index (a missed dependency),
 // extra - the index is not a subset of the reference (a stale or an extra entry).
 inline std::string compare_index(ast_db const & db, uint32_t limit = ~uint32_t{0}, std::size_t * missing_count = nullptr) {
@@ -102,6 +117,7 @@ inline std::string compare_index(ast_db const & db, uint32_t limit = ~uint32_t{0
   for(std::size_t k = 0; k < missing.size() && k < 3; ++k) out += cat("эталон ⊄ индекс: ", describe(db, missing[k]), "\n");
   for(std::size_t k = 0; k < extra.size() && k < 3; ++k) out += cat("индекс ⊄ эталон: ", describe(db, extra[k]), "\n");
   if(missing.size() > 3 || extra.size() > 3) out += cat("всего: пропусков ", missing.size(), ", лишних ", extra.size(), "\n");
+  out += structure_report(db);
   return out;
 }
 
@@ -160,20 +176,54 @@ struct model {
         if(name.size() > role.size() && name.starts_with(role)) { add_text(name.substr(role.size()), out); break; }
     return sorted(std::move(out));
   }
+  bool in_fn_or_extend_parent(node_id n, node_id & ext, node_id & mod) const { // the nearest extension / module up the tree for a node outside functions
+    ext = {}; mod = {};
+    for(; n; n = db[n].parent) {
+      if(std::holds_alternative<n_fn>(db[n].kind)) return false;
+      if(std::holds_alternative<n_extend>(db[n].kind)) { ext = n; return true; }
+      if(std::holds_alternative<n_module>(db[n].kind)) { mod = n; return true; }
+    }
+    return true;
+  }
+  // A function called implicitly by the core (ast_db::implicit_hooks is the common list of names; the mark by the [[transform]] attribute has its own parse).
+  bool is_hook(node_id d) const {
+    auto const * f = std::get_if<n_fn>(&db[d].kind);
+    if(!f) return false;
+    auto text = db.strings.text(f->name);
+    for(auto const & h: ast_db::implicit_hooks) {
+      if(h.name.empty() || h.name != text) continue;
+      if(text == "eval") {
+        auto p = db[d].parent;
+        if(p && !(std::holds_alternative<n_extend>(db[p].kind) && db.strings.text(std::get<n_extend>(db[p].kind).name).starts_with("ast."))) continue;
+      }
+      return true;
+    }
+    for(auto a: f->attrs)
+      if(a)
+        if(auto const * id = std::get_if<n_ident>(&db[a].kind); id && db.strings.text(id->name) == "transform") return true;
+    return false;
+  }
   node_list dependents(node_id d) const {
     node_list out;
     for(auto u: users(d)) {
-      if(auto f = fn_of(u)) out.push_back(f);
+      auto f = fn_of(u);
+      if(f) out.push_back(f);
       bool extend = std::holds_alternative<n_extend>(db[u].kind), use = std::holds_alternative<n_use>(db[u].kind);
       if(extend || use) { // an extension or use changes any function of its scope: an extension inside itself, use - the module
         node_id top = u;
         if(use) while(db[top].parent && !std::holds_alternative<n_module>(db[top].kind)) top = db[top].parent;
-        for(auto f: fns) if(inside(node_id(f), top)) out.push_back(node_id(f));
+        for(auto g: fns) if(inside(node_id(g), top)) out.push_back(node_id(g));
+      }
+      if(!f && !extend && !use) { // outside functions: a field type/value inside an extension - its members; global variables, ct, module attributes - the module's functions
+        node_id ext, mod;
+        in_fn_or_extend_parent(u, ext, mod);
+        node_id top = ext ? ext : mod;
+        if(top && !in_prelude(top))
+          for(auto g: fns) if(inside(node_id(g), top)) out.push_back(node_id(g));
       }
     }
-    // destroy/copy (the value's life) and implicit (a conversion) are called implicitly, by the value's type: any function of the program (not of the prelude) is dependent
-    auto name = name_of(d);
-    if(std::holds_alternative<n_fn>(db[d].kind) && (name == "destroy" || name == "copy" || name == "implicit"))
+    // the core's implicit calls (the table ast_db::implicit_hooks, the [[transform]] attribute): any function of the program (not of the prelude) is dependent
+    if(is_hook(d))
       for(auto f: fns) if(!in_prelude(node_id(f))) out.push_back(node_id(f));
     return sorted(std::move(out));
   }
@@ -196,6 +246,10 @@ struct model {
       if(!name.empty())
         for(auto u: users(n))
           if(auto const * e = std::get_if<n_extend>(&db[u].kind); e && e->base && std::string(db.strings.text(e->base)) == name) todo.push_back(u);
+      for(auto u: users(n)) { // a use inside an extension (a field type) - the consumers of the extension itself
+        node_id ext, mod;
+        if(!fn_of(u) && !std::holds_alternative<n_extend>(db[u].kind) && in_fn_or_extend_parent(u, ext, mod) && ext) todo.push_back(ext);
+      }
     }
     return sorted(std::move(out));
   }
@@ -222,15 +276,17 @@ inline int compare_queries(ast_db const & db, model const & m, node_list const &
   return bad;
 }
 
-// A snapshot of query answers over a set of nodes - for I3: after a rollback the answers must match the earlier ones.
-inline std::string query_snapshot(ast_db const & db, node_list const & probes) {
+// A snapshot of query answers over a set of nodes - for I3: after a rollback the answers must match the earlier ones. attached - forward-reachable
+// nodes: answers with detached nodes (a stale parent after a rollback is database behaviour) are not included.
+inline std::string query_snapshot(ast_db const & db, node_list const & probes, std::vector<uint8_t> const * attached = nullptr) {
   std::string out;
+  auto keep = [&](node_id x) { return !attached || (x.value < attached->size() && (*attached)[x.value]); };
   for(auto d: probes) {
     node_list ch{d};
     out += cat("q ", d.value, ":");
-    for(auto x: db.users_of(d)) out += cat(" u", x.value);
-    for(auto x: db.dependents_of_fn(d)) out += cat(" d", x.value);
-    for(auto x: db.impact_of(ch)) out += cat(" i", x.value);
+    for(auto x: db.users_of(d)) if(keep(x)) out += cat(" u", x.value);
+    for(auto x: db.dependents_of_fn(d)) if(keep(x)) out += cat(" d", x.value);
+    for(auto x: db.impact_of(ch)) if(keep(x)) out += cat(" i", x.value);
     out += "\n";
   }
   return out;

@@ -1037,6 +1037,64 @@ struct ast_db {
     unique_nodes(out);
     return out;
   }
+  // Mine (RA-1, B5): the FULL table of implicit calls - the program's functions that the VM core (interp.hpp, machine.hpp) calls
+  // not by name in the text, but by the value's type, by a construct or by an attribute. A dependent of such a function is a function where the
+  // construct may arise; this is not computable by name, so it is ALL the program's functions (not the prelude's), a superset.
+  // One source for the index, the reference model (rdeps_oracle.hpp), the unit that checks against the core sources, and docs/spec.md (the RA-1 paragraph).
+  // The explicit core forms (intercept, alloc_in, append, push, pin_storage, set_ct_state, fiber_start, pressure_handler, process, yield,
+  // is_index) and operators (infix+ ..., the infix entity op_associative/declared_ops) are resolved by name/symbol from the node's text -
+  // they are already in the index (n_ident / n_op), and are not in the table.
+  struct implicit_hook {
+    std::string_view name; // the function name (empty - a mark by attribute, see is_implicit_hook)
+    std::string_view when; // the implicit call condition (for documentation and check messages)
+  };
+  static constexpr implicit_hook implicit_hooks[] = {
+      {"destroy", "конец жизни значения struct (res_any/member_fn_of: interp.hpp ~2399/2431/2514, machine.hpp ~1442/1468)"},
+      {"copy", "копирование значения struct при присваивании/передаче (member_fn_of: interp.hpp ~2598, machine.hpp ~1504)"},
+      {"implicit", "неявное преобразование got → want при передаче и присваивании (implicit_fn: interp.hpp ~3071, machine.hpp ~2264)"},
+      {"text", "print значения именованного типа без своего вывода (print_text: interp.hpp ~9377, machine.hpp ~692/1545)"},
+      {"ref_taken", "взятие ссылки `&x = …` на элемент/путь (hook_ref_taken: interp.hpp ~5955)"},
+      {"ref_used", "использование ссылки (hook_ref_used: interp.hpp ~5980)"},
+      {"eval", "член вида узла программы ast.X { eval(…) } (eval_node: interp.hpp ~5117, kind_members), узлы вида порождают разбор, ct и transform"},
+      {"fit_rule", "правило на языке (lang_rule, interp.hpp ~3017): отношение типов got → want при каждой передаче, присваивании, возврате"},
+      {"join_rule", "правило на языке (lang_rule, interp.hpp ~2189): слияние состояний/значений на путях"},
+      {"analysis_limit", "правило на языке (lang_rule, interp.hpp ~3090): пределы разбора циклов и рекурсии"},
+      {"chain_resolve", "правило на языке (interp.hpp ~5354): разбор цепочки операторов a + b * c"},
+      {"overload_pick", "правило на языке (interp.hpp ~8323): выбор перегрузки при каждом вызове"},
+      {"", "функция с атрибутом [[transform]] (transforms: interp.hpp ~939): зовётся при элаборации на каждом подходящем узле всех модулей программы"},
+  };
+  bool is_implicit_hook(node_id f) const {
+    if(!is<n_fn>(f)) return false;
+    auto const & fn = as<n_fn>(f);
+    auto text = strings.text(fn.name);
+    for(auto const & h: implicit_hooks) {
+      if(h.name.empty() || h.name != text) continue;
+      if(text == "eval") { // "a kind member" - only inside a declaration of kind ast.X; an unknown parent is conservatively a hook
+        auto p = nodes[f].parent;
+        if(p && !(is<n_extend>(p) && strings.text(as<n_extend>(p).name).starts_with("ast."))) continue;
+      }
+      return true;
+    }
+    for(auto a: fn.attrs)
+      if(a && is<n_ident>(a) && strings.text(as<n_ident>(a).name) == "transform") return true;
+    return false;
+  }
+  // The nearest declaration of an extension up the tree (struct/Name { ... }), if the node is not inside a function; otherwise empty.
+  node_id enclosing_extend(node_id n) const {
+    for(; n; n = nodes[n].parent) {
+      if(is<n_fn>(n)) return {};
+      if(is<n_extend>(n)) return n;
+    }
+    return {};
+  }
+  // The module in which the node stands outside functions and extensions (a global variable, a ct block, module attributes, [[extension(g)]]).
+  node_id enclosing_module_level(node_id n) const {
+    for(; n; n = nodes[n].parent) {
+      if(is<n_fn>(n) || is<n_extend>(n)) return {};
+      if(is<n_module>(n)) return n;
+    }
+    return {};
+  }
   node_list dependents_of_fn(node_id n) const {
     node_list out;
     for(auto u: users_of(n)) {
@@ -1047,14 +1105,20 @@ struct ast_db {
         if(is<n_use>(u)) while(nodes[top].parent && !is<n_module>(top)) top = nodes[top].parent;
         for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) out.push_back(node_id(i));
       }
+      // A use outside functions: inside an extension (a struct field type, a default value) - changes the extension's members;
+      // outside an extension (a global variable, a ct block, [[extension(g)]]) - runs before the module's functions are parsed and may
+      // change any of them (conservatively; the prelude is not edited by the user).
+      if(!enclosing_fn(u) && !is<n_extend>(u) && !is<n_use>(u)) {
+        node_id top = enclosing_extend(u);
+        if(!top) top = enclosing_module_level(u);
+        if(top && !in_prelude(top))
+          for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) out.push_back(node_id(i));
+      }
     }
-    // Called implicitly by the value's type, not by name, destroy/copy (the value's life) and implicit (a conversion on passing and assignment):
-    // any function of the program may be a dependent.
-    if(is<n_fn>(n)) {
-      auto text = strings.text(as<n_fn>(n).name);
-      if(text == "destroy" || text == "copy" || text == "implicit")
-        for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && !in_prelude(node_id(i))) out.push_back(node_id(i));
-    }
+#ifndef VISH_RA1_MUTANT_NO_HOOKS // an oracle check (rdepscheck must fail): the core's implicit calls are not accounted for
+    if(is_implicit_hook(n))
+      for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && !in_prelude(node_id(i))) out.push_back(node_id(i));
+#endif
     unique_nodes(out);
     return out;
   }
@@ -1070,9 +1134,13 @@ struct ast_db {
       if(is<n_fn>(n) || is<n_module>(n)) out.push_back(n);
       if(auto p = nodes[n].parent) todo.push_back(p);
       for(auto d: dependents_of_fn(n)) todo.push_back(d);
+      auto users = users_of(n);
       if(auto name = dependency_name(n))
-        for(auto u: users_of(n))
+        for(auto u: users)
           if(is<n_extend>(u) && as<n_extend>(u).base == name) todo.push_back(u);
+      // A use inside an extension (a field type) - the change propagates to the consumers of the extension itself.
+      for(auto u: users)
+        if(auto e = enclosing_extend(u); e && e != u) todo.push_back(e);
     }
     unique_nodes(out);
     return out;
