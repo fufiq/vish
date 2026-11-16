@@ -555,6 +555,7 @@ using server_msg = std::variant<s_hello, s_view, s_cursor, s_error, s_update, s_
 // frame goes into tap_frames - "c" (a client message) or "s" (a VM message) and the body without the length.
 bool tap_on = false;
 std::vector<std::string> tap_frames;
+std::vector<std::string> tap_routes; // server decisions for the accepted client frames: "database size#decision|view|arguments" or "...#-" (lib/server.vish)
 
 std::string frame(auto const & msg) {
   writer w;

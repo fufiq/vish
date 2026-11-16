@@ -171,6 +171,19 @@ struct editor_server {
   // Editor's solution: name function in language; view - representation of the client (protocol number; -1
   // - first) whose projection can override the solution
   void decide(peer * p, int64_t view, std::string_view name, std::vector<value> args) {
+    if(proto::tap_on && in_handle && !tapped && !deciding) { // a route snapshot for comparing lib/server.vish (*mine, temporary*, E7b)
+      std::string row = cat(tap_size, "#", name, "|", view, "|");
+      bool first = true;
+      for(auto const & x: args) {
+        if(!std::exchange(first, false)) row += ',';
+        if(x.is<str_v>()) row += cat("s", x.as<str_v>().view());
+        else if(x.is<bool>()) row += cat("b", x.as<bool>() ? 1 : 0);
+        else if(x.is<int64_t>()) row += cat("i", x.as<int64_t>());
+        else row += "n";
+      }
+      proto::tap_routes.push_back(std::move(row));
+      tapped = true;
+    }
     uint64_t before = session.db.edits;
     {
       ++deciding;
@@ -375,12 +388,18 @@ struct editor_server {
   void on_frame(peer & p, std::string_view body) {
     ++p.handled;
     proto::client_msg m;
+    tap_size = session.db.size();
+    tapped = false;
     try {
       proto::decode(body, m);
+      in_handle = true;
       std::visit([&](auto const & x) { handle(p, x); }, m);
+      in_handle = false;
     } catch(diagnostic const & d) {
+      in_handle = false;
       send(p, proto::s_error{d.what()});
     }
+    if(proto::tap_on && !tapped) proto::tap_routes.push_back(cat(tap_size, "#-"));
     if(!deciding) {
       session.db.sweep_retired(); // Message served - no rounds
       session.db.maybe_compact(); // pool: abandoned chunks of rewriting lists (S5.1)
@@ -1520,6 +1539,8 @@ struct editor_server {
   };
   std::vector<run_note> run_notes;
   uint32_t deciding = 0;
+  bool in_handle = false, tapped = false; // a snapshot of routes (lib/server.vish)
+  uint32_t tap_size = 0;
   void run_output(std::string_view state) {
     live_run & r = *live;
     bool more = std::exchange(r.sent, true);

@@ -1,0 +1,199 @@
+module server;
+// The editor server logic in the language: the routing of client messages and the answers without a decision - a port of what is in include/vish/server.hpp
+// and is not a socket, not io_uring and not a process (E7b of the porting plan, branch t3/cpp-to-vish-migration). "the board is on the server. On the client it is just
+// graphics" (the author's remark, R11): the editor's decisions have long been in the language (lib/editor.vish: on_key, on_input, ...), the client
+// draws; what is left in C++ is the table "message -> decision and its arguments" (editor_server::handle, 34 overloads), the version check in
+// c_hello and two refusals before the decision (a foreign view kind, no such node). Here is this table as data and the route function.
+// "all your communication with the outside world goes through it" (R9) - about the VM: the socket, the ring, the subscribers
+// and the processes are held by the host; what to do with an accepted message is decided by the language.
+// A map of server.hpp (1632 lines) - "what is not yet in Vish", by area (more in HANDOFF):
+//   * already in the language (lib/editor.vish, 6432 lines): the on_* decisions themselves - the cursor, an edit, a draft, completion, hints, layers, the trace,
+//     merging, AI proposals, the repository, cursor broadcast (share_cursors), the state of views;
+//   * here: the route table handle(c_*) and the answers before a decision (hello, refusals);
+//   * stays in C++ (the link with the OS and the evaluator): the socket and io_uring (listen, step, complete, send_next, arm_recv), the launch process and
+//     the machine (start_run, run_quantum, live_*), the project's tasks (fork, a pipe, a timer), the typing pause timer, the print layout
+//     (print_view, print_splice, wire_nodes - the printer and the database), parsing an edit into the database (draft_parse, unit_edit, line_edit, graft - the parser
+//     and the database), the check facts (recheck, layer_of) and the module interpreters (lang_of, decide_now) - core calls, not logic.
+// The C++ version stays working (the switch is E8). Equivalence is `vish servercheck <files>`: the .wire scenarios are executed with
+// the decision snapshot on (proto.hpp: tap_routes), for every client frame the route record (decision|view|arguments or "-")
+// is compared with what the C++ server really called in on_frame/handle.
+
+use tools;
+use tests;
+use proto;
+// a snapshot of C++ decisions (after proto_tap_start): lines "database size#decision|view|arguments" or "database size#-"
+proto_routes_take() => native "cpp" {
+  auto r = std::move(proto::tap_routes);
+  proto::tap_routes.clear();
+  return strings_value(r);
+};
+// --- the route table -----------------------------------------------------------------------------------------------------------
+// a message (without c_) -> a decision, the view number field ("" - no view, -1), the decision arguments: "f:field" - the field value
+// (a string, a number or a bool), "N:field" - a node as a code (code_value), "k:number" - a constant.
+routes() => array{
+  array{"open_view", "on_open_view", "", array{}},
+  array{"open_module", "on_open_module", "", array{"f:key"}},
+  array{"close_view", "on_close_view", "view", array{"f:view"}},
+  array{"key", "on_key", "view", array{"f:view", "f:key", "f:mods"}},
+  array{"input", "on_input", "view", array{"f:view", "f:text"}},
+  array{"select", "on_select", "view", array{"f:view", "f:node", "f:piece", "f:offset", "f:clicks"}},
+  array{"pointer", "on_pointer", "view", array{"f:view", "f:node", "f:piece", "f:offset"}},
+  array{"hover", "on_hover", "view", array{"f:view", "N:node"}},
+  array{"open", "on_open", "view", array{"f:view", "N:node"}},
+  array{"inspect", "on_inspect", "view", array{"f:view", "N:node"}},
+  array{"goto", "on_goto", "view", array{"f:view", "f:text"}},
+  array{"layer", "on_layer", "view", array{"f:view", "f:key"}},
+  array{"projection", "on_projection", "view", array{"f:view", "f:key"}},
+  array{"run", "on_run", "", array{"f:args", "f:stdin_text"}},
+  array{"stop", "on_stop", "", array{}},
+  array{"save", "on_save", "", array{}},
+  array{"trace", "on_trace_run", "", array{"k:-1", "f:args", "f:stdin_text"}},
+  array{"apply", "on_apply", "", array{"f:fn"}},
+  array{"trace_step", "on_trace_step", "", array{"f:step"}},
+  array{"name", "on_name", "", array{"f:name"}},
+  array{"items", "on_items", "", array{}},
+  array{"extensions", "on_extensions", "", array{}},
+  array{"task", "on_task", "", array{"f:name"}},
+  array{"command", "on_command", "", array{"f:name"}},
+  array{"propose", "on_propose", "", array{"f:key", "f:text", "f:why"}},
+  array{"record", "on_record", "", array{"f:kind", "f:session", "f:model", "f:usage_in", "f:usage_out", "f:usage_cached", "f:usage_cache_write", "f:usage_thinking", "f:ms", "f:error", "f:request", "f:response"}},
+  array{"decide", "on_decide", "", array{"f:id", "f:accept"}},
+  array{"context", "on_context", "view", array{"f:request", "f:view", "f:node", "f:revision"}},
+  array{"check", "on_agent_check", "", array{"f:request", "f:revision"}},
+  array{"workspace", "on_workspace", "", array{"f:request", "f:workspace", "f:action", "f:revision", "f:key", "f:text", "f:args", "f:input", "f:expected"}},
+  array{"repository", "on_repository", "", array{"f:request", "f:action", "f:key", "f:text", "f:revision"}},
+  array{"merge", "on_merge", "", array{"f:path"}},
+  array{"take", "on_take", "", array{"f:key", "f:theirs"}}
+};
+// the route result: the decision ("" - no decision, the client was answered directly: reply is the error text or "" for hello), the decision's view (-1 -
+// the first), the arguments - values with a kind: "stext", "inumber" (signed), "b0/1", "n" - a node as a code
+struct routed { str decision; i64 view; array args; str reply; }
+field_named(schema sc, pv m, str name) {
+  fs = sc.aggs[m.kids[0].ix].fields;
+  for(i : range(fs.size)) if(fs[i].name == name) return m.kids[0].kids[i];
+  throw proto_error{"нет поля " + name}
+}
+// a field value for a decision - with a kind (a string is s, a bool is b, the rest is i; u64 as bits as signed, like int64_t(m.x) in C++)
+marked(pv x) => if(x.tag == 7) "s" + x.s else if(x.tag == 1) (if(x.n != 0) "b1" else "b0") else "i" + text(x.n);
+// The route of client message m (parsed by proto.msg_decode): vm_version - the VM protocol version, db_size - the number of nodes in the session database
+// (the c_open refusal on a "no such node" node), as editor_server::handle.
+route(schema sc, pv m, i64 vm_version, i64 db_size) {
+  name = msg_name(sc, m);
+  if(name == "hello") {
+    err = hello_error(field_named(sc, m, "version").n, vm_version);
+    return routed{"", -1, array{}, err};
+  }
+  if((name == "open_view") && (field_named(sc, m, "kind").s != "module")) {
+    return routed{"", -1, array{}, "неизвестный вид представления: " + field_named(sc, m, "kind").s};
+  }
+  if(name == "open") {
+    node = field_named(sc, m, "node").n;
+    if((node == 0xFFFFFFFF) || (node >= db_size)) return routed{"", -1, array{}, "нет такого узла"};
+  }
+  for(r : routes()) {
+    if(r[0] != name) continue;
+    view = if(r[2] == "") -1 else field_named(sc, m, r[2]).n;
+    vals = array{};
+    for(a : r[3]) {
+      what = text_from(a, 2);
+      if(starts_with(a, "f:")) {
+        vals.push(marked(field_named(sc, m, what)));
+      } else if(starts_with(a, "N:")) {
+        vals.push("n");
+      } else {
+        vals.push("i" + what);
+      }
+    }
+    return routed{r[1], view, vals, ""};
+  }
+  throw proto_error{"нет маршрута для " + name}
+}
+// a route record, as in the C++ snapshot: "decision|view|arguments separated by commas" or "-"
+route_text(routed r) {
+  if(r.decision == "") return "-";
+  out = r.decision + "|" + text(r.view) + "|";
+  for(i : range(r.args.size)) out = out + (if(i > 0) "," else "") + r.args[i];
+  out
+}
+// --- answers without a decision: VM message frames -------------------------------------------------------------------------------------------
+server_index(schema sc, str name) {
+  for(k : range(sc.server.targs.size)) if(short_of(sc.aggs[sc.server.targs[k].ix].name) == name) return k;
+  throw proto_error{"нет сообщения VM " + name}
+}
+// s_error{text}
+error_frame(schema sc, str why) {
+  k = server_index(sc, "error");
+  frame_of(msg_encode(sc, sc.server, pv{11, 0, "", k, array{pv{12, 0, "", sc.server.targs[k].ix, array{pv{7, 0, why, 0, array{}}}}}}))
+}
+// s_hello{version, program, revision}
+hello_frame(schema sc, i64 vm_version, str program, i64 revision) {
+  k = server_index(sc, "hello");
+  frame_of(msg_encode(sc, sc.server, pv{11, 0, "", k, array{pv{12, 0, "", sc.server.targs[k].ix, array{pv{3, vm_version, "", 0, array{}}, pv{7, 0, program, 0, array{}}, pv{4, revision, "", 0, array{}}}}}}))
+}
+// --- comparison with C++ (vish servercheck) -----------------------------------------------------------------------------------------------------
+// *.wire - the scenario is executed with a snapshot; the client frames in order <-> the C++ route records in order (every accepted frame leaves
+// one record). The VM frames s_hello and s_error are rebuilt from their fields and match byte by byte. Code 0 - no mismatches.
+server_check_cli(files) {
+  sc = schema_load(proto_schema_reference());
+  bad = 0;
+  total = 0;
+  seen = array{};
+  rebuilt = 0;
+  for(f : files) {
+    proto_tap_start();
+    state_fresh();
+    why = run_scenario(f);
+    state_clear();
+    frames = proto_tap_take();
+    rts = proto_routes_take();
+    if(why != "") write_out(f + ": сценарий не прошёл: " + why + "\n");
+    clients = array{};
+    for(x : frames) {
+      body = text_from(x, 1);
+      if(x[0] == 99) {
+        clients.push(body);
+        continue;
+      }
+      d = msg_decode(sc, sc.server, body);
+      if(!d.ok) continue;
+      nm = short_of(sc.aggs[d.msg.kids[0].ix].name);
+      if(nm == "error") {
+        rebuilt += 1;
+        if(error_frame(sc, d.msg.kids[0].kids[0].s) != frame_of(body)) {
+          bad += 1;
+          write_out(f + ": s_error пересобран иначе\n");
+        }
+      } else if(nm == "hello") {
+        rebuilt += 1;
+        k = d.msg.kids[0].kids;
+        if(hello_frame(sc, k[0].n, k[1].s, k[2].n) != frame_of(body)) {
+          bad += 1;
+          write_out(f + ": s_hello пересобран иначе\n");
+        }
+      }
+    }
+    if(clients.size != rts.size) {
+      bad += 1;
+      write_out(f + ": кадров клиента " + text(clients.size) + ", записей маршрутов C++ " + text(rts.size) + "\n");
+      continue;
+    }
+    for(i : range(clients.size)) {
+      total += 1;
+      cut = find_text(rts[i], "#");
+      size = number_of(text_range(rts[i], 0, cut));
+      want = text_from(rts[i], cut + 1);
+      d = msg_decode(sc, sc.client, clients[i]);
+      got = if(d.ok) route_text(route(sc, d.msg, proto_ref_version(), size)) else "-";
+      if(d.ok && !has_text(seen, msg_name(sc, d.msg))) seen.push(msg_name(sc, d.msg));
+      if(got != want) {
+        bad += 1;
+        show_bad(f + " кадр " + text(i + 1), "маршрут", got, want);
+      }
+    }
+  }
+  missing = "";
+  for(r : routes()) if(!has_text(seen, r[0])) missing = missing + " " + r[0];
+  if(!has_text(seen, "hello")) missing = missing + " hello";
+  write_out("сервер: маршрутов сверено " + text(total) + " (видов клиента " + text(seen.size) + " из " + text(routes().size + 1) + "), ответов hello/error пересобрано " + text(rebuilt) + ", расхождений " + text(bad) + (if(missing == "") "" else "; сценариями не покрыты:" + missing) + "\n");
+  if(bad == 0) 0 else 1
+}

@@ -253,6 +253,12 @@ cli(args) {
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
     return run_module("proto", "check_cli", files);
   }
+  if(cmd == "servercheck") {
+    // vish servercheck <.wire files>: the routing of client messages in the language (lib/server.vish, E7b) against the C++ editor_server (stage0)
+    files = array{};
+    for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    return run_module("server", "server_check_cli", files);
+  }
   if(cmd == "fmtcheck") {
     // vish fmtcheck <files>: the printer in the language (lib/printer.vish, E5) against the C++ print (stage0), byte by byte: *.vish files are modules (elements,
     // the whole module, the print -> parse round trip), the others are by expression in a line

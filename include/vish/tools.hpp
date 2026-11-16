@@ -64,6 +64,9 @@ constexpr unsigned char session_bytes[] = {
 constexpr unsigned char proto_bytes[] = {
 #embed "../../lib/proto.vish"
 };
+constexpr unsigned char server_bytes[] = {
+#embed "../../lib/server.vish"
+};
 std::string_view builtin_text(std::string_view key) {
   auto view = [](auto const & bytes) { return std::string_view(reinterpret_cast<char const *>(bytes), sizeof bytes); };
   if(key == "tools") return view(tools_bytes);
@@ -79,6 +82,7 @@ std::string_view builtin_text(std::string_view key) {
   if(key == "complete") return view(complete_bytes);
   if(key == "session") return view(session_bytes);
   if(key == "proto") return view(proto_bytes);
+  if(key == "server") return view(server_bytes);
   return {};
 }
 
@@ -134,7 +138,8 @@ node_id load_builtin(ast_db & db, std::string_view key) {
   if(key != "tools") load_builtin_module(db, "tools", builtin_text("tools"), "tools.vish");
   if(builtin_text(key).empty()) throw diagnostic(cat("нет встроенного модуля ", key), {});
   if(key == "parser" || key == "printer" || key == "modules" || key == "views" || key == "session") load_builtin_module(db, "lexer", builtin_text("lexer"), "lexer.vish"); // parser — use lexer
-  if(key == "proto") load_builtin_module(db, "tests", builtin_text("tests"), "tests.vish"); // proto - use tests (scenarios for comparing frames)
+  if(key == "proto" || key == "server") load_builtin_module(db, "tests", builtin_text("tests"), "tests.vish"); // proto, server - use tests (scenarios for comparing frames)
+  if(key == "server") load_builtin_module(db, "proto", builtin_text("proto"), "proto.vish"); // server — use proto
   if(key == "views" || key == "session") load_builtin_module(db, "modules", builtin_text("modules"), "modules.vish"); // views, session — use modules
   if(key == "printer") load_builtin_module(db, "parser", builtin_text("parser"), "parser.vish"); // printer — use parser
   return load_builtin_module(db, key, builtin_text(key), cat(key, ".vish"));
@@ -143,7 +148,7 @@ node_id load_tools(ast_db & db) { return load_builtin(db, "tools"); }
 
 // the file name of the embedded module, where the error text (import source); not built-in - "tools.vish"
 std::string builtin_file(ast_db const & db, uint32_t source) {
-  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer", "parser", "printer", "runlog", "modules", "views", "complete", "session", "proto"})
+  for(std::string_view key: {"tools", "versions", "tests", "cli", "lexer", "parser", "printer", "runlog", "modules", "views", "complete", "session", "proto", "server"})
     for(uint32_t i = 0; i < db.size(); ++i)
       if(db.is<n_module>(node_id(i)) && !db[node_id(i)].parent && db.as<n_module>(node_id(i)).name && db.strings.text(db.as<n_module>(node_id(i)).name) == key && db[node_id(i)].where.source == source)
         return cat(key, ".vish");
