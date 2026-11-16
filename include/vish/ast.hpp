@@ -1307,16 +1307,6 @@ struct ast_db {
   // source - node ct-code number + 1; 0 - without writing: the node created by the
   // same elaboration is completed, and does not mutate the program (no rollback)
   using mutation = mutation_rec;
-  void relink_kind(node_id n, node_kind const & next) {
-    std::visit([&](auto const & old) {
-      auto detach = [&](node_id c) { if(nodes[c].parent == n) nodes[c].parent = {}; };
-      for_each_child_of(old, detach);
-    }, nodes[n].kind);
-    std::visit([&](auto const & k) {
-      auto attach = [&](node_id c) { nodes[c].parent = n; };
-      for_each_child_of(k, attach);
-    }, next);
-  }
   void mutate(node_id n, node_kind k, uint32_t source) {
     use_pool();
     use_pool();
@@ -1328,7 +1318,6 @@ struct ast_db {
           inst_emits.insert(x.value);
           emit_owner[x.value] = n.value;
         }
-    relink_kind(n, k);
     index_refs(n, false);
     if(source) mutations.push_back({n.value, source, revision, std::move(nodes[n].kind)});
     else retired.push_back(std::move(nodes[n].kind));
@@ -1354,7 +1343,6 @@ struct ast_db {
       mutation & m = mutations[i];
       node_id n(m.target);
       if(m.target < edited_at.size() && edited_at[m.target] > m.at) continue;
-      relink_kind(n, m.old);
       index_refs(n, false);
       retired.push_back(std::move(nodes[n].kind));
       nodes[n].kind = std::move(m.old);
