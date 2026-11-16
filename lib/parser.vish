@@ -1501,7 +1501,7 @@ module_attrs_ahead(ps s) {
 }
 // `module a.b;` is the module header: skipped up to the elements; with attributes/sealed the file is not compared
 module_header_ok(ps s) {
-  if(tk_text(s, 0) == "sealed") return false;
+  if((tk_text(s, 0) == "sealed") && (tk_text(s, 1) == "module")) return false;
   if(module_attrs_ahead(s)) return false;
   if(!((tk(s, 0).kind == kind_ident()) && (tk_text(s, 0) == "module"))) return true;
   if(tk(s, 1).kind != kind_ident()) return false;
@@ -1597,6 +1597,10 @@ mod_check_cli(files) {
     // after program rules (syntax/operator/use/...) Vish's element boundaries are approximate (skip_item): we compare only the prefix before them
     cut = -1;
     for(k : range(mine.size)) if((cut < 0) && starts_with(mine[k].why, "правила программы выше")) cut = k;
+    // the prefix is reliable only if all its elements are parsed (for unsupported ones the boundaries are an approximation, skip_item: an index shift gives a false "matched")
+    prefix_ok = cut >= 0;
+    for(k : range(mine.size)) if((k < cut) && !mine[k].ok) prefix_ok = false;
+    if(!prefix_ok) cut = -1;
     if((cut >= 0) && (ref.size >= cut)) {
       for(k : range(mine.size - cut)) { total += 1; w0 = mine[cut + k].why; at0 = -1; for(j : range(reasons.size)) if(reasons[j] == w0) at0 = j; if(at0 < 0) { reasons.push(w0); counts.push(1); } else counts[at0] += 1; }
       head = array{};
