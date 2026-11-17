@@ -894,12 +894,14 @@ node_of(pn x) {
 }
 // vish nodecheck <corpus>: for an expression in a line - nodes from the Vish parser tree: the structure = the C++ dump (stage0);
 // the chain operators by a round trip: print the nodes -> C++ parse -> dump = the dump of the original line
-node_check_cli(es) {
+node_check_cli_result(es) {
+  log = "";
   same = 0;
   bad = 0;
   skipped = 0;
-  for(f : es) {
-    for(line : lines_of(read_text(f))) {
+  for(entry : es) {
+    f = entry[0];
+    for(line : lines_of(entry[1])) {
       if(line == "") continue;
       mine = expr_of_pn(line);
       if(mine.error != "" || mine.unsupported != "") {
@@ -921,12 +923,20 @@ node_check_cli(es) {
       round = again == ref;
       if(structure && round) same += 1 else {
         bad += 1;
-        write_out(line + ": расхождение (структура " + text(structure) + ", круг " + text(round) + ", печать " + printed + ")\n");
+        log = log + (line + ": расхождение (структура " + text(structure) + ", круг " + text(round) + ", печать " + printed + ")\n");
       }
     }
   }
-  write_out("узлы из языка: совпало " + text(same) + ", пропущено " + text(skipped) + ", расхождений " + text(bad) + "\n");
-  if(bad == 0) 0 else 1
+  log = log + ("узлы из языка: совпало " + text(same) + ", пропущено " + text(skipped) + ", расхождений " + text(bad) + "\n");
+  rc = if(bad == 0) 0 else 1;
+  array{rc, log}
+}
+node_check_cli(es) {
+  sources = array{};
+  for(f : es) sources.push(array{f, read_text(f)});
+  r = node_check_cli_result(sources);
+  write_out(r[1]);
+  r[0]
 }
 
 // --- E4c (the porting plan): record words (if/loop/break/continue/return/throw) - the engine in Vish by the prelude's table ---------------
@@ -2267,7 +2277,8 @@ src_has_word(str src, str w) {
   false
 }
 // vish modcheck <files>: element by element - functions from the Vish parser nodes against the C++ dump; a mismatch in the number of elements - the file is skipped
-mod_check_cli(files) {
+mod_check_cli_result(files) {
+  log = "";
   total = 0;
   supported = 0;
   same = 0;
@@ -2276,11 +2287,12 @@ mod_check_cli(files) {
   reasons = array{};
   counts = array{};
   samples = 0;
-  for(f : files) {
-    src = read_text(f);
+  for(entry : files) {
+    f = entry[0];
+    src = entry[1];
     if(module_header_skip(src)) { // attributes [[...]] module/sealed: C++ gives attributes in the dump as extra elements - comparison by number is impossible
       skipped_files += 1;
-      write_out("  пропущен файл " + f + ": заголовок module\n");
+      log = log + ("  пропущен файл " + f + ": заголовок module\n");
       continue;
     }
     mine = module_items_of(src);
@@ -2300,7 +2312,7 @@ mod_check_cli(files) {
     }
     if(((cut < 0) && (mine.size != ref.size)) || ((cut >= 0) && (ref.size < cut))) {
       skipped_files += 1;
-      write_out("  пропущен файл " + f + ": элементов у Vish " + text(mine.size) + ", у C++ " + text(ref.size) + "\n");
+      log = log + ("  пропущен файл " + f + ": элементов у Vish " + text(mine.size) + ", у C++ " + text(ref.size) + "\n");
       continue;
     }
     for(k : range(mine.size)) {
@@ -2310,7 +2322,7 @@ mod_check_cli(files) {
         if((mine[k].why == "") && (samples < 14)) {
           samples += 1;
           tk0 = phase1_of(src).tokens;
-          write_out("  пример без причины: " + f + " элемент " + text(k) + ": " + slice_text(slice_text(src, tk0[mine[k].from].from, tk0[mine[k].to - 1].to), 0, 90) + "\n");
+          log = log + ("  пример без причины: " + f + " элемент " + text(k) + ": " + slice_text(slice_text(src, tk0[mine[k].from].from, tk0[mine[k].to - 1].to), 0, 90) + "\n");
         }
         at = -1;
         for(j : range(reasons.size)) if(reasons[j] == w) at = j;
@@ -2321,13 +2333,21 @@ mod_check_cli(files) {
       got = dump_code(mine[k].node);
       if(got == ref[k]) same += 1 else {
         bad += 1;
-        write_out(f + ": элемент " + text(k) + " расхождение\n--- vish\n" + got + "--- C++\n" + ref[k]);
+        log = log + (f + ": элемент " + text(k) + " расхождение\n--- vish\n" + got + "--- C++\n" + ref[k]);
       }
     }
   }
-  write_out("модуль: элементов " + text(total) + ", функций из узлов Vish " + text(supported) + ", совпало " + text(same) + ", расхождений " + text(bad) + ", файлов пропущено (число элементов не сошлось) " + text(skipped_files) + "\n");
-  for(j : range(reasons.size)) write_out("  не поддержано: " + reasons[j] + " — " + text(counts[j]) + "\n");
-  if(bad == 0) 0 else 1
+  log = log + ("модуль: элементов " + text(total) + ", функций из узлов Vish " + text(supported) + ", совпало " + text(same) + ", расхождений " + text(bad) + ", файлов пропущено (число элементов не сошлось) " + text(skipped_files) + "\n");
+  for(j : range(reasons.size)) log = log + ("  не поддержано: " + reasons[j] + " — " + text(counts[j]) + "\n");
+  rc = if(bad == 0) 0 else 1;
+  array{rc, log}
+}
+mod_check_cli(files) {
+  sources = array{};
+  for(f : files) sources.push(array{f, read_text(f)});
+  r = mod_check_cli_result(sources);
+  write_out(r[1]);
+  r[0]
 }
 
 // The prelude's syntax records as data (E4c; the rules are code in the language, not hard-coded in the parser: the author's requirement;
@@ -2447,3 +2467,150 @@ syntax_rules_cli(args) {
   write_out(syntax_rules_dump());
   0
 }
+
+// RA-3, mine, temporary: a bridge to a separate corpus database. tools.vm_* does not give
+// impact by the ID of this database. The alternative is to extend the public session API.
+// The cache unit is the whole file: n_module always invalidates the whole file's result.
+// The delta is a replacement of the file's snapshot, the rollback is the real ast_db journal.
+oracle_impact_plan(sources, edits, bool expressions) => native "cpp" {
+  for(auto const & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  ast_db db;
+  load_prelude(db);
+  pool_scope keep(current_pool);
+  db.use_pool();
+  auto const & inputs = a[0].as<array_v>();
+  std::vector<std::string> texts, names;
+  node_list roots;
+  bool uncertain = false;
+  auto parse = [&](std::string const & text, size_t index) {
+    std::string program = text;
+    if(a[2].as<bool>() || !names[index].ends_with(".vish")) {
+      program.clear();
+      size_t begin = 0, line = 0;
+      while(begin < text.size()) {
+        auto end = text.find('\n', begin);
+        if(end == std::string::npos) end = text.size();
+        if(end > begin) program += cat("ra3_line_", index, "_", line++, "() => ", text.substr(begin, end - begin), ";\n");
+        begin = end + 1;
+      }
+    }
+    parser p(db, program, "<ra3>");
+    auto root = p.parse_module();
+    if(!p.errors().empty()) uncertain = true; // parsing with recovery: it does not prove the absence of links
+    db.link_parents(root);
+    return root;
+  };
+  for(uint32_t i = 0; i < inputs.size(); ++i) {
+    auto row = inputs.get(i).as<array_v>();
+    names.emplace_back(row.get(0).as<str_v>().view());
+    texts.emplace_back(row.get(1).as<str_v>().view());
+    roots.push_back(parse(texts.back(), i));
+  }
+  std::vector<value> stages;
+  auto stage = [&](node_list const & impact, bool initial) {
+    std::vector<value> rows;
+    for(size_t i = 0; i < roots.size(); ++i) {
+      bool dirty = initial || uncertain;
+      for(auto n: impact) if(n == roots[i] || db.within(n, roots[i])) dirty = true;
+#ifdef VISH_RA3_MUTANT_NO_IMPACT
+      if(!initial) dirty = false;
+#endif
+      rows.push_back(value(array_v::of({value(names[i]), value(texts[i]), value(dirty)})));
+    }
+    stages.push_back(value(array_v::of(std::move(rows))));
+  };
+  stage({}, true);
+  auto original = texts;
+  auto const & changes = a[1].as<array_v>();
+  for(uint32_t step = 0; step < changes.size(); ++step) {
+    auto row = changes.get(step).as<array_v>();
+    int64_t index = row.get(0).as<int64_t>();
+    node_list delta;
+    if(index == -1) delta = roots;
+    else {
+      if(index < 0 || size_t(index) >= roots.size()) throw diagnostic("RA-3: индекс файла вне корпуса", where);
+      delta.push_back(roots[index]);
+      for(auto n: db.as<n_module>(roots[index]).items) delta.push_back(n);
+    }
+    auto impact = db.impact_of(delta);
+    if(index == -1) {
+      db.rollback(0);
+      texts = original;
+    } else {
+      texts[index] = std::string(row.get(1).as<str_v>().view());
+      auto fresh = parse(texts[index], index);
+      db.mutate(roots[index], db.copy_kind(fresh), step + 1);
+      db.link_parents(roots[index]);
+      for(auto n: db.as<n_module>(roots[index]).items) delta.push_back(n);
+    }
+    for(auto n: db.impact_of(delta)) impact.push_back(n);
+    stage(impact, false);
+  }
+  return value(array_v::of(std::move(stages)));
+};
+oracle_impact_ms() => native "cpp" { return value(int64_t(os::ipc_channel::now_ms())); };
+
+// --impact <files> [--delta <zero-based number> <snapshot>]... [--rollback]...
+// The full reference calls ALL the old checks anew. The cache stores the code and the whole
+// report (with numbers, refusals, the round trip and diagnostics), every slot is compared.
+oracle_impact_check(es, oracle, bool expressions) {
+  sources = array{};
+  edits = array{};
+  k = 1;
+  while(k < es.size) {
+    if(es[k] == "--delta") {
+      if((k + 2) >= es.size) return fail("RA-3: --delta требует индекс и снимок");
+      edits.push(array{number_of(es[k + 1]), read_text(es[k + 2])});
+      k += 3;
+    } else if(es[k] == "--rollback") {
+      edits.push(array{-1, ""});
+      k += 1;
+    } else {
+      sources.push(array{es[k], read_text(es[k])});
+      k += 1;
+    }
+  }
+  if(sources.size == 0) return fail("RA-3: пустой корпус");
+  t0 = oracle_impact_ms();
+  stages = oracle_impact_plan(sources, edits, expressions);
+  planning = oracle_impact_ms() - t0;
+  cache = array{};
+  failures = 0;
+  for(step : range(stages.size)) {
+    rows = stages[step];
+    performed = 0;
+    reused = 0;
+    differences = 0;
+    t1 = oracle_impact_ms();
+    for(i : range(rows.size)) {
+      row = rows[i];
+      if(step == 0) cache.push(oracle(array{array{row[0], row[1]}})) else if(row[2]) {
+        cache[i] = oracle(array{array{row[0], row[1]}});
+      } else reused += 1;
+      if((step == 0) || row[2]) performed += 1;
+    }
+    incremental_ms = oracle_impact_ms() - t1;
+    t2 = oracle_impact_ms();
+    full_results = array{};
+    for(i : range(rows.size)) {
+      row = rows[i];
+      full_results.push(oracle(array{array{row[0], row[1]}}));
+    }
+    full_ms = oracle_impact_ms() - t2;
+    for(i : range(rows.size)) {
+      row = rows[i];
+      full = full_results[i];
+      if((full[0] != cache[i][0]) || (full[1] != cache[i][1])) {
+        differences += 1;
+        write_out("RA-3: " + row[0] + " кэш != полный эталон\n" + cache[i][1] + full[1]);
+      }
+      if(full[0] != 0) failures += 1;
+      write_out(full[1]);
+    }
+    failures += differences;
+    write_out("impact: шаг " + text(step) + ", выполнено файлов " + text(performed) + ", повторно использовано " + text(reused) + ", всего " + text(rows.size) + ", расхождения " + text(differences) + ", incremental_ms " + text(incremental_ms) + ", full_ms " + text(full_ms) + ", plan_ms " + text(planning) + "\n");
+  }
+  if(failures == 0) 0 else 1
+}
+mod_impact_cli(es) => oracle_impact_check(es, mod_check_cli_result, false);
+node_impact_cli(es) => oracle_impact_check(es, node_check_cli_result, true);

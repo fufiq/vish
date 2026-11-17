@@ -213,12 +213,14 @@ cli(args) {
     // vish modcheck <files>: module functions from the Vish parser nodes against C++ stage0 (step E4a)
     files = array{};
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    if((files.size > 0) && (files[0] == "--impact")) return run_module("parser", "mod_impact_cli", files);
     return run_module("parser", "mod_check_cli", files);
   }
   if(cmd == "nodecheck") {
     // vish nodecheck <corpus>: ast.* nodes from the parser tree in Vish (step E3): the structure and the chain operators against C++ stage0
     files = array{};
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    if((files.size > 0) && (files[0] == "--impact")) return run_module("parser", "node_impact_cli", files);
     return run_module("parser", "node_check_cli", files);
   }
   if(cmd == "exprcheck") {
@@ -274,6 +276,7 @@ cli(args) {
     // the whole module, the print -> parse round trip), the others are by expression in a line
     files = array{};
     for(k : range(args.size)) if(k > 0) files.push(args[k]);
+    if((files.size > 0) && (files[0] == "--impact")) return run_module("printer", "fmt_impact_cli", files);
     return run_module("printer", "fmt_check_cli", files);
   }
   if((cmd == "lib") && (args.size > 3)) {

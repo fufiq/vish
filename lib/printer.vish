@@ -860,15 +860,17 @@ expr_print_reference(str src) => native "cpp" {
 
 // vish fmtcheck <corpus files>: for an expression in a line - the print in the language (print_code of a node from the Vish parser tree) byte by byte
 // against the C++ print of the same expression; what is not supported goes into the histogram of reasons
-fmt_check_lines(es) {
+fmt_check_lines_result(es) {
+  log = "";
   same = 0;
   bad = 0;
   unsupported = 0;
   skipped = 0;
   reasons = array{};
   counts = array{};
-  for(f : es) {
-    for(line : lines_of(read_text(f))) {
+  for(entry : es) {
+    f = entry[0];
+    for(line : lines_of(entry[1])) {
       if(line == "") continue;
       mine = expr_of_pn(line);
       if((mine.error != "") || (mine.unsupported != "")) { // no tree in the language: the parser's refusal, not the printer's
@@ -891,18 +893,26 @@ fmt_check_lines(es) {
       ref = expr_print_reference(line);
       if(ref == "") { // C++ did not parse it, but the Vish parser gave a tree - a parser mismatch (not the printer's), but we see it too
         bad += 1;
-        write_out(line + ": C++ не разобрал / не та форма, печать vish: " + p.text + "\n");
+        log = log + (line + ": C++ не разобрал / не та форма, печать vish: " + p.text + "\n");
         continue;
       }
       if(p.text == ref) same += 1 else {
         bad += 1;
-        write_out(line + ": расхождение\n--- vish: " + p.text + "\n--- C++:  " + ref + "\n");
+        log = log + (line + ": расхождение\n--- vish: " + p.text + "\n--- C++:  " + ref + "\n");
       }
     }
   }
-  write_out("принтер, выражения: совпало " + text(same) + ", не поддержано " + text(unsupported) + ", расхождений " + text(bad) + " (без дерева у парсера на Vish: " + text(skipped) + ")\n");
-  for(j : range(reasons.size)) write_out("  " + reasons[j] + " — " + text(counts[j]) + "\n");
-  if(bad == 0) 0 else 1
+  log = log + ("принтер, выражения: совпало " + text(same) + ", не поддержано " + text(unsupported) + ", расхождений " + text(bad) + " (без дерева у парсера на Vish: " + text(skipped) + ")\n");
+  for(j : range(reasons.size)) log = log + ("  " + reasons[j] + " — " + text(counts[j]) + "\n");
+  rc = if(bad == 0) 0 else 1;
+  array{rc, log}
+}
+fmt_check_lines(es) {
+  sources = array{};
+  for(f : es) sources.push(array{f, read_text(f)});
+  r = fmt_check_lines_result(sources);
+  write_out(r[1]);
+  r[0]
 }
 
 // The C++ (stage0) print of a module from text: array{the whole module, element 0, element 1, ...}; empty - C++ did not parse it. The layout (blank lines) and
@@ -941,8 +951,9 @@ fmt_count(reasons, counts, str why) {
 
 // vish fmtcheck <files.vish>: element by element, the print_code of a node from the Vish parser's module against the C++ print of the same element; then the module
 // as a whole (print_module) and the print -> parse round trip (the text is parsed by the Vish parser into the same nodes). What is not supported goes into the histogram of reasons
-fmt_check_modules(files) {
+fmt_check_modules_result(files) {
   total = 0;
+  log = "";
   same = 0;
   bad = 0;
   unsupported = 0;
@@ -960,8 +971,9 @@ fmt_check_modules(files) {
   tree_counts = array{};
   whole_reasons = array{};
   whole_counts = array{};
-  for(f : files) {
-    src = read_text(f);
+  for(entry : files) {
+    f = entry[0];
+    src = entry[1];
     if(module_header_skip(src)) { // module header: C++ gives attributes in the dump as extra elements - comparison by number is impossible
       skipped_files += 1;
       continue;
@@ -974,7 +986,7 @@ fmt_check_modules(files) {
     refs = module_print_reference(src);
     if(refs.size == 0) {
       skipped_files += 1;
-      write_out("  пропущен файл " + f + ": C++ не разобрал\n");
+      log = log + ("  пропущен файл " + f + ": C++ не разобрал\n");
       continue;
     }
     ref = array{};
@@ -1035,7 +1047,7 @@ fmt_check_modules(files) {
       if(p.text == ref[k]) same += 1 else {
         bad += 1;
         all_ok = false;
-        write_out(f + ": элемент " + text(k) + " расхождение\n--- vish\n" + p.text + "\n--- C++\n" + ref[k] + "\n");
+        log = log + (f + ": элемент " + text(k) + " расхождение\n--- vish\n" + p.text + "\n--- C++\n" + ref[k] + "\n");
       }
       texts.push(p.text);
     }
@@ -1057,36 +1069,44 @@ fmt_check_modules(files) {
     }
     if(w.text == refs[0]) whole_same += 1 else {
       whole_bad += 1;
-      write_out(f + ": модуль целиком, расхождение\n--- vish\n" + w.text + "--- C++\n" + refs[0]);
+      log = log + (f + ": модуль целиком, расхождение\n--- vish\n" + w.text + "--- C++\n" + refs[0]);
     }
     // round trip: the printed module is parsed by the same parser into the same nodes. The print removes the extra parentheses of an associative operator
     // ((a + b) + c -> a + b + c, as in C++): the parse gives a chain, not nested operations - the tree is different, the print is the same (a fixed point)
     again = module_items_of(w.text);
     circle = again.size == n_mine;
-    if(!circle) write_out(f + ": круг печать→разбор: элементов " + text(again.size) + ", было " + text(n_mine) + "\n");
+    if(!circle) log = log + (f + ": круг печать→разбор: элементов " + text(again.size) + ", было " + text(n_mine) + "\n");
     if(circle) for(k : range(n_mine)) {
       if(!again[k].ok) {
         circle = false;
-        write_out(f + ": круг печать→разбор, элемент " + text(k) + " — " + again[k].why + "\n--- напечатано\n" + texts[k] + "\n");
+        log = log + (f + ": круг печать→разбор, элемент " + text(k) + " — " + again[k].why + "\n--- напечатано\n" + texts[k] + "\n");
       } else if(dump_code(again[k].node) != dump_code(mine[k].node)) {
         // the dump differs: only a difference in the parentheses of an [[associative]] operator's chain is allowed (pr_canon), and the print is the same (a fixed point)
         again_p = print_code(again[k].node);
         if(again_p.ok && ((again_p.text == texts[k]) && (pr_canon(again[k].node) == pr_canon(mine[k].node)))) circle_fix += 1 else {
           circle = false;
-          write_out(f + ": круг печать→разбор, элемент " + text(k) + " — другое дерево\n--- напечатано\n" + texts[k] + "\n");
+          log = log + (f + ": круг печать→разбор, элемент " + text(k) + " — другое дерево\n--- напечатано\n" + texts[k] + "\n");
         }
       }
     }
     if(circle) circle_same += 1 else circle_bad += 1;
   }
-  write_out("принтер, модули: элементов " + text(total) + ", совпало " + text(same) + ", не поддержано " + text(unsupported) + ", расхождений " + text(bad) + " (без дерева у парсера на Vish: " + text(no_tree) + ", файлов пропущено: " + text(skipped_files) + ")\n");
-  for(j : range(reasons.size)) write_out("  " + reasons[j] + " — " + text(counts[j]) + "\n");
-  write_out("  без дерева у парсера на Vish (Э4, не принтер):\n");
-  for(j : range(tree_reasons.size)) write_out("    " + tree_reasons[j] + " — " + text(tree_counts[j]) + "\n");
-  write_out("принтер, модуль целиком: совпало " + text(whole_same) + ", расхождений " + text(whole_bad) + ", не напечатано целиком " + text(whole_skipped) + "\n");
-  for(j : range(whole_reasons.size)) write_out("    модуль целиком: " + whole_reasons[j] + " — " + text(whole_counts[j]) + "\n");
-  write_out("принтер, круг печать→разбор: модулей совпало " + text(circle_same) + ", расхождений " + text(circle_bad) + " (элементов с другим дампом при равной каноне и печати — цепочка вместо скобок [[associative]] оператора: " + text(circle_fix) + ")\n");
-  if((bad == 0) && ((whole_bad == 0) && (circle_bad == 0))) 0 else 1
+  log = log + ("принтер, модули: элементов " + text(total) + ", совпало " + text(same) + ", не поддержано " + text(unsupported) + ", расхождений " + text(bad) + " (без дерева у парсера на Vish: " + text(no_tree) + ", файлов пропущено: " + text(skipped_files) + ")\n");
+  for(j : range(reasons.size)) log = log + ("  " + reasons[j] + " — " + text(counts[j]) + "\n");
+  log = log + ("  без дерева у парсера на Vish (Э4, не принтер):\n");
+  for(j : range(tree_reasons.size)) log = log + ("    " + tree_reasons[j] + " — " + text(tree_counts[j]) + "\n");
+  log = log + ("принтер, модуль целиком: совпало " + text(whole_same) + ", расхождений " + text(whole_bad) + ", не напечатано целиком " + text(whole_skipped) + "\n");
+  for(j : range(whole_reasons.size)) log = log + ("    модуль целиком: " + whole_reasons[j] + " — " + text(whole_counts[j]) + "\n");
+  log = log + ("принтер, круг печать→разбор: модулей совпало " + text(circle_same) + ", расхождений " + text(circle_bad) + " (элементов с другим дампом при равной каноне и печати — цепочка вместо скобок [[associative]] оператора: " + text(circle_fix) + ")\n");
+  rc = if((bad == 0) && ((whole_bad == 0) && (circle_bad == 0))) 0 else 1;
+  array{rc, log}
+}
+fmt_check_modules(files) {
+  sources = array{};
+  for(f : files) sources.push(array{f, read_text(f)});
+  r = fmt_check_modules_result(sources);
+  write_out(r[1]);
+  r[0]
 }
 
 // vish fmtcheck <files>: *.vish are modules (element by element, whole, round trip); the others are by expression in a line
@@ -1102,3 +1122,8 @@ fmt_check_cli(es) {
   }
   rc
 }
+
+fmt_impact_result(sources) {
+  if(ends_with(sources[0][0], ".vish")) fmt_check_modules_result(sources) else fmt_check_lines_result(sources)
+}
+fmt_impact_cli(es) => oracle_impact_check(es, fmt_impact_result, false);
