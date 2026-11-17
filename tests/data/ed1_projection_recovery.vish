@@ -1,0 +1,19 @@
+// out: true
+// out: true
+// out: true
+// out: true
+use parser;
+use tools;
+use geo.words;
+main() {
+  // A repaired boundary of a nested block must give a hole, keeping the outer block.
+  snap = syntax_context(code_parent(code(main)), code(main), code());
+  broken = unit_from_context("define f() {\n  forever {print(1);\n}", false, snap);
+  print(broken[0]);
+  print(code_kind(broken[1]) == ast.hole);
+  snap = syntax_context(code_parent(code(main)), code(main), code());
+  fixed = unit_from_context("{\n  forever {}\n  print(1);\n}", true, snap);
+  print(fixed[0]);
+  its = node_field(fixed[1], "items");
+  print((its.size == 2) && (code_kind(its[0]) == ast.loop));
+}
