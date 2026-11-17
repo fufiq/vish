@@ -375,6 +375,9 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       ast_db::unique_nodes(impact);
       verify("И2 после правки");
       auto after = run_check();
+      // Elaboration could have produced new functions: the same delta on the actual AST.
+      for(auto f: db.impact_of(delta)) impact.push_back(f);
+      ast_db::unique_nodes(impact);
       std::vector<node_id> actual;
       std::map<uint32_t, std::string> why;
       bool hook_case = kind == 9;

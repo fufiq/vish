@@ -5366,11 +5366,20 @@ struct interpreter {
     for(symbol o: c.ops) ops.push_back(value(std::string(str(o))));
     for(char a: assoc_of) assoc.push_back(value(a == '1'));
     value r = in_helper(chain_fn, {value(int64_t(k)), value(array_v::of(std::move(ops))), value(array_v::of(std::move(assoc))), value(open)});
+    if(!r.is<agg_v>()) fail("chain_resolve: ожидалась запись status/tree/notes", db[n].where);
     auto field = [&](std::string_view f) -> value const & {
       for(auto const & [s, v]: r.as<agg_v>().fields)
         if(str(s) == f) return v;
       fail(cat("chain_resolve: нет поля ", f), db[n].where);
     };
+    if(!field("status").is<int64_t>() || !field("tree").is<array_v>() || !field("notes").is<array_v>())
+      fail("chain_resolve: неверные типы полей status/tree/notes", db[n].where);
+    auto const & tree_fields = field("tree").as<array_v>();
+    for(uint32_t i = 0; i < tree_fields.size(); ++i)
+      if(!tree_fields.get(i).is<int64_t>()) fail("chain_resolve: tree должен содержать целые", db[n].where);
+    auto const & note_fields = field("notes").as<array_v>();
+    for(uint32_t i = 0; i < note_fields.size(); ++i)
+      if(!note_fields.get(i).is<str_v>()) fail("chain_resolve: notes должен содержать строки", db[n].where);
     int64_t status = field("status").as<int64_t>();
     if(status == 1) return {}; // atom with and not one tree - the type is still bred
     chain_open = open; // tree with an atom is not cached (*my*)
@@ -8333,12 +8342,18 @@ struct interpreter {
         ms.push_back(value(bool(maybes[k])));
       }
       value r = in_helper(overload_fn, {value(array_v::of(std::move(fs))), value(array_v::of(std::move(ms))), value(checking())});
+      if(!r.is<agg_v>()) fail("overload_pick: ожидалась запись order/reach/ambiguous/tied", where);
       auto field = [&](std::string_view f) -> value const & {
         for(auto const & [k, v]: r.as<agg_v>().fields)
           if(str(k) == f) return v;
         fail(cat("overload_pick: нет поля ", f), where);
       };
+      if(!field("order").is<array_v>() || !field("reach").is<int64_t>() ||
+          !field("ambiguous").is<bool>() || !field("tied").is<int64_t>())
+        fail("overload_pick: неверные типы полей order/reach/ambiguous/tied", where);
       auto const & order = field("order").as<array_v>();
+      for(uint32_t k = 0; k < order.size(); ++k)
+        if(!order.get(k).is<int64_t>()) fail("overload_pick: order должен содержать целые", where);
       for(uint32_t k = 0; k < order.size(); ++k) out.order.push_back(uint32_t(order.get(k).as<int64_t>()));
       out.reach = uint32_t(field("reach").as<int64_t>());
       out.ambiguous = field("ambiguous").as<bool>();

@@ -1,0 +1,11 @@
+// no-jit
+// out: AFTER 7 true true
+// out: AFTER 2 true true
+// F1: add_big is born during a repeated elaboration after the edit.
+use rdeps;
+main() {
+  for(seed : array{7, 2}) {
+    r = rdeps_probe("tests/219_store_after_reuse.vish", seed, if(seed == 7) 60 else 40, if(seed == 7) 8 else 6, 0);
+    print("AFTER", seed, r[8] == 0, (r[20] > 0) && (r[20] == r[21]));
+  }
+}

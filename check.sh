@@ -99,10 +99,13 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # RA-1: the index unit (independent expectations B1-B4, the oracle); examples with the answers in the header (rdeps is a module, the programs do not see it: copies of lib/rdeps.vish and lib/tools.vish are next to them);
     # rdepscheck - the oracle by reflection, queries against the model, I1/I3 on mutations, I2 by ten kinds of edits (including the signature and the body of an implicit hook; >= 50 cases)
     ( $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/rdeps_index.cpp -o $L/rdeps_index && $L/rdeps_index \
+      && $CXX -std=c++26 -freflection -fcontracts -Iinclude -Iout tests/rule_results.cpp -o $L/rule_results -luring && $L/rule_results \
       && rm -rf $L/rdeps_run && mkdir -p $L/rdeps_run && cp tests/data/rdepscheck/run/*.vish lib/rdeps.vish lib/tools.vish $L/rdeps_run/ \
       && for t in $L/rdeps_run/b*.vish; do $b test $t || exit 1; done \
       && $b rdepscheck tests/data/rdepscheck/*.vish tests/01*.vish 1 200 12 \
       && $b rdepscheck tests/data/rdepscheck/graph.vish 3 100 30 \
+      && $b rdepscheck tests/219_store_after_reuse.vish 7 60 8 \
+      && $b rdepscheck tests/219_store_after_reuse.vish 2 40 6 \
       && $b rdepscheck tests/data/rdepscheck/ct/module_diagnostic.vish 9 60 12 ) > $L/t_rdeps.log 2>&1
     echo "rdeps: код $?" > $L/r_rdeps
     # E6: modules in Vish (lib/modules.vish) against C++ stage0 - use keys, module file paths, loading (errors + the dump of the database's modules)
