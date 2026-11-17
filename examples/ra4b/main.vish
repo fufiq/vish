@@ -1,0 +1,135 @@
+use parser;
+use reactive;
+use rdeps;
+// Mine: the if tree is a real derived AST, not a second hand-written longest_op.
+longest_op_gen(ops, tag, reverse, broken) {
+  body = ast.name{"best"};
+  // Returning the maximum: longer checks end up outside.
+  names = array{...core_ops(), ...roles_infix0(), ...ops[0]};
+  require(names.size <= 128); // generation budget: at most 128 names
+  max = 0; for(o : names) if(o.size > max) max = o.size;
+  require(max <= 32);
+  for(n : range(max + 1)) for(j : range(names.size)) {
+    i = if(reverse) (names.size - 1) - j else j;
+    o = names[i];
+    if(o.size > 1) if(o.size == n) {
+      prev = body;
+      body = ast.if{ast.call{ast.name{"glued_as"},array{ast.name{"s"},ast.string{o},ast.name{"k"}}},ast.string{o},prev};
+    }
+  }
+  tree = body;
+  emit(quote {
+    ra4b_generated(s,k,identity) {
+      require(identity == #tag);
+      if(#broken) return "wrong";
+      t0 = tk(s,k);
+      if(t0.kind != kind_op()) return "";
+      best = text_range(s.src,t0.from,t0.from + 1);
+      t1 = tk(s,k + 1);
+      if(!((t1.kind == kind_op()) && t1.glued)) return best;
+      return #tree;
+    }
+  });
+  (s,k) => ra4b_generated(s,k,tag)
+}
+state(src,ops) {
+ r = phase1_of(src);
+ s = ps{src,r.tokens,r.match,0,"",""}; s.ops = ops; s
+}
+policy(generation,checking,base,fast,execution_budget) => (generation < 2000) && ((checking < 5000) && ((fast < execution_budget) && (fast < base)));
+main() {
+ total_start = oracle_impact_ms();
+ declarations = quote { operator (a) +++ (b) => a + b; operator (a) ++++ (b) => a + b; };
+ print("2 impact count",impact_of(code_items(declarations)).size);
+ context = state("",array{array{},array{},array{}});
+ for(decl : code_items(declarations)) learn_op(context,code_name(decl));
+ db = new_db(true,(a,b) => deep_equal(a,b));
+ ops = context.ops;
+ set_input(db,"operators",ops);
+ query_define(db,"tables",(mut d) => get(d,"operators"));
+ store = derived_new(); derived_version(store,"longest_op_gen","1");
+ print("1 operator inputs",get(db,"tables"));
+ print("2 RA-2 read-set",derived_reads(db,"tables"));
+ for(version : range(2)) {
+  if(version == 1) derived_version(store,"longest_op_gen","2");
+  start = oracle_impact_ms();
+  f = longest_op_gen(get(db,"tables"),version + 1,version == 1,false);
+  generation = oracle_impact_ms() - start;
+  print("3/7 generated AST version",version + 1,"generation_ms",generation);
+  count = 0; bad = 0; begin = oracle_impact_ms();
+  for(src : array{"1 custom 2","++++x","+++ x","++ +x","+ + +","=>","...","custom","x + y","<<=",""}) {
+   s = state(src,ops);
+   for(k : range(s.toks.size)) {
+    require(count < 256);
+    if(f(s,k) != longest_op_reference(s,k)) { bad += 1; print("mismatch",src,k,f(s,k),longest_op_reference(s,k)); }
+    count += 1;
+   }
+  }
+  // A real expression context is parsed through the same dispatch.
+  for(src : array{"1 ++++ 2","1 +++ 2","1 + 2","(1 ++++ 2)","f(1 +++ 2)"}) {
+   a = state(src,ops); b = state(src,ops); b.variant = array{f,ops};
+   left = dump_pn(value_expr(a),0); right = dump_pn(value_expr(b),0);
+   if(left != right) bad += 1;
+   count += 1;
+  }
+  checking = oracle_impact_ms() - begin;
+  s = state("++++x",ops); s.variant = array{f,ops};
+  // Warm-up and five pairs of measurements; only the selected part.
+  for(i : range(20)) { f(s,0); longest_op_reference(s,0); }
+  base = 0; fast = 0;
+  for(rep : range(5)) {
+   begin = oracle_impact_ms(); for(i : range(500)) longest_op_reference(s,0); base += oracle_impact_ms() - begin;
+   begin = oracle_impact_ms(); for(i : range(500)) longest_op(s,0); fast += oracle_impact_ms() - begin;
+  }
+  rec = derived_revision{"operators",db.revision,"longest_op_gen",text(version + 1),text(ops),array{},derived_reads(db,"tables"),array{array{"longest_op","targeted",count,bad}},array{generation,checking,fast},"кандидат","",array{f}};
+  if(fast >= base) rec.reason = "no measured benefit";
+  if((generation >= 2000) || (checking >= 5000)) rec.reason = "budget";
+  idx = derived_candidate(store,rec);
+  accepted = false;
+  if((bad == 0) && policy(generation,checking,base,fast,5000)) accepted = derived_publish(store,db,idx);
+  print("4 checks",count,"differences",bad,"check_ms",checking,"reference_ms",base,"generated_ms",fast);
+  require(count <= 256); // a separate checks budget
+  print("5 accepted",accepted,"(otherwise reference; no measured benefit/budget)");
+  if(accepted) {
+   require(derived_current(db,store.records[store.active].dependencies));
+   s.variant = array{store.records[store.active].result[0],ops};
+   print("dispatch",longest_op(s,0));
+  }
+
+  print("6 inspector",store.records[idx],"journal",store.journal);
+  if(accepted) {
+   event = store.journal.size - 1;
+   second = derived_candidate(store,rec); require(derived_publish(store,db,second));
+   require(derived_rollback(store,db,event)); require(store.active == idx); require(store.working == second);
+   print("rollback",idx,"working",store.working);
+  }
+  // A separate real short context: the dispatch price is often above the reference.
+  single = state("+",ops); single.variant = array{f,ops};
+  begin = oracle_impact_ms(); for(i : range(500)) longest_op_reference(single,0); single_base = oracle_impact_ms() - begin;
+  begin = oracle_impact_ms(); for(i : range(500)) longest_op(single,0); single_fast = oracle_impact_ms() - begin;
+  print("single character no-benefit decision",policy(generation,checking,single_base,single_fast,5000),single_base,single_fast);
+  before = store.active;
+  require(!policy(generation,checking,base,fast,0));
+  require(store.active == before);
+  print("execution budget 0: stopped, active preserved",before);
+  // The counterexample is obtained by executing a faulty generator.
+  wrong = longest_op_gen(ops,version + 11,false,true);
+  mismatches = 0;
+  for(src : array{"++++","=>","x"}) { st = state(src,ops); if(wrong(st,0) != longest_op_reference(st,0)) mismatches += 1; }
+  invalid = rec; invalid.result = array{wrong}; invalid.checks = array{array{"longest_op","intentional mutant",3,mismatches}};
+  rejected = derived_candidate(store,invalid); require(!derived_publish(store,db,rejected));
+  print("counterexample",mismatches,store.records[rejected].status);
+  stale = derived_candidate(store,rec);
+  changed = array{array{...ops[0],"+++++"},array{},array{}};
+  set_input(db,"operators",changed);
+  require(!derived_publish(store,db,stale));
+  st = state("+++++",changed); st.variant = array{f,ops};
+  require(longest_op(st,0) == longest_op_reference(st,0));
+  print("stale",store.records[stale].status,"scoped table fallback",longest_op(st,0));
+  set_input(db,"operators",ops);
+  require(derived_audit(store));
+ }
+ print("pilot_total_ms",oracle_impact_ms() - total_start);
+ print("stop: attempt budget exhausted (2 versions, 2 mutants; 256 checks/variant; 5 x 500 measurements)");
+ print("UNVERIFIED: full RA-4b acceptance; ordinary-project speedup; nested syntax corpus");
+}

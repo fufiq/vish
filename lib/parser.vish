@@ -186,7 +186,7 @@ check_cli(args) {
 // lambdas, `name"..."`, trailing call blocks, declarations in parentheses; the prelude's record words and `Name{...}`/`...x` - see record_use and postfix.
 // Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
 struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; }
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; array variant = array{}; }
 pn_new(str kind, str info, kids) => pn{kind, info, kids, array{}};
 two(pn a, pn b) {
   r = array{};
@@ -226,7 +226,7 @@ roles_postfix0() => array{"?"};
 roles_infix(ps s) => array{...roles_infix0(), ...s.ops[0]};
 roles_prefix(ps s) => array{...roles_prefix0(), ...s.ops[1]};
 roles_postfix(ps s) => array{...roles_postfix0(), ...s.ops[2]};
-longest_op(ps s, i64 k) {
+longest_op_reference(ps s, i64 k) {
   t0 = tk(s, k);
   if(t0.kind != kind_op()) return "";
   best = text_range(s.src, t0.from, t0.from + 1);
@@ -235,6 +235,18 @@ longest_op(ps s, i64 k) {
   for(o : core_ops()) if((o.size > best.size) && glued_as(s, o, k)) best = o;
   for(o : roles_infix(s)) if((o.size > best.size) && glued_as(s, o, k)) best = o;
   best
+}
+// RA-4b, mine: a variant acts only for the exact snapshot of all the scope's tables.
+longest_op(ps s, i64 k) {
+  if(s.variant.size > 0) {
+    same = true;
+    for(j : range(3)) {
+      if(s.ops[j].size != s.variant[1][j].size) same = false;
+      else for(i : range(s.ops[j].size)) if(s.ops[j][i] != s.variant[1][j][i]) same = false;
+    }
+    if(same) return s.variant[0](s,k);
+  }
+  longest_op_reference(s,k)
 }
 is_op_at(ps s, str o, i64 k) => longest_op(s, k) == o;
 is_role(ps s, str sym, i64 role) => has_text(if(role == 0) roles_prefix(s) else if(role == 1) roles_infix(s) else roles_postfix(s), sym);
