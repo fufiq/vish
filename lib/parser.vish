@@ -2474,9 +2474,9 @@ syntax_rules_cli(args) {
 // The delta is a replacement of the file's snapshot, the rollback is the real ast_db journal.
 oracle_impact_plan(sources, edits, bool expressions) => native "cpp" {
   for(auto const & x: a) if(!x.known()) return erase(value(array_v::of({})));
-  ast_db db;
-  load_prelude(db);
   pool_scope keep(current_pool);
+  ast_db db;
+  db.prelude = load_prelude(db);
   db.use_pool();
   auto const & inputs = a[0].as<array_v>();
   std::vector<std::string> texts, names;
@@ -2498,6 +2498,13 @@ oracle_impact_plan(sources, edits, bool expressions) => native "cpp" {
     auto root = p.parse_module();
     if(!p.errors().empty()) uncertain = true; // parsing with recovery: it does not prove the absence of links
     db.link_parents(root);
+    // This separate database does not resolve imports. Even a local use may
+    // change the parsing rules: the absence of an edge here is not a proof.
+    auto inspect = [&](auto && self, node_id n) -> void {
+      if(db.is<n_use>(n)) uncertain = true;
+      db.for_each_child(n, [&](node_id child) { self(self, child); });
+    };
+    inspect(inspect, root);
     return root;
   };
   for(uint32_t i = 0; i < inputs.size(); ++i) {
@@ -2515,12 +2522,17 @@ oracle_impact_plan(sources, edits, bool expressions) => native "cpp" {
 #ifdef VISH_RA3_MUTANT_NO_IMPACT
       if(!initial) dirty = false;
 #endif
-      rows.push_back(value(array_v::of({value(names[i]), value(texts[i]), value(dirty)})));
+      rows.push_back(value(array_v::of({value(names[i]), value(texts[i]), value(dirty), value(uncertain)})));
     }
     stages.push_back(value(array_v::of(std::move(rows))));
   };
   stage({}, true);
   auto original = texts;
+  std::vector<std::vector<node_id>> original_items;
+  for(auto root: roots) {
+    auto const & items = db.as<n_module>(root).items;
+    original_items.emplace_back(items.begin(), items.end());
+  }
   auto const & changes = a[1].as<array_v>();
   for(uint32_t step = 0; step < changes.size(); ++step) {
     auto row = changes.get(step).as<array_v>();
@@ -2535,6 +2547,14 @@ oracle_impact_plan(sources, edits, bool expressions) => native "cpp" {
     auto impact = db.impact_of(delta);
     if(index == -1) {
       db.rollback(0);
+      // We check the journal's result before marking the text as the source.
+      if(!db.mutations.empty()) throw diagnostic("RA-3: журнал rollback не пуст", where);
+      for(size_t i = 0; i < roots.size(); ++i) {
+        auto const & items = db.as<n_module>(roots[i]).items;
+        if(items.size() != original_items[i].size()
+          || !std::equal(items.begin(), items.end(), original_items[i].begin()))
+          throw diagnostic("RA-3: rollback не восстановил исходные элементы", where);
+      }
       texts = original;
     } else {
       texts[index] = std::string(row.get(1).as<str_v>().view());
@@ -2560,12 +2580,16 @@ oracle_impact_check(es, oracle, bool expressions) {
   while(k < es.size) {
     if(es[k] == "--delta") {
       if((k + 2) >= es.size) return fail("RA-3: --delta требует индекс и снимок");
-      edits.push(array{number_of(es[k + 1]), read_text(es[k + 2])});
+      number = es[k + 1];
+      if((number.size == 0) || (number.size > 9)) return fail("RA-3: невалидный индекс файла");
+      for(j : range(number.size)) if((number[j] < '0') || (number[j] > '9')) return fail("RA-3: невалидный индекс файла");
+      edits.push(array{number_of(number), read_text(es[k + 2])});
       k += 3;
     } else if(es[k] == "--rollback") {
       edits.push(array{-1, ""});
       k += 1;
     } else {
+      if(starts_with(es[k], "--")) return fail("RA-3: неизвестный аргумент " + es[k]);
       sources.push(array{es[k], read_text(es[k])});
       k += 1;
     }
@@ -2578,6 +2602,7 @@ oracle_impact_check(es, oracle, bool expressions) {
   failures = 0;
   for(step : range(stages.size)) {
     rows = stages[step];
+    if(rows[0][3]) write_out("impact: консервативный fallback (ошибка разбора или use без разрешения импортов)\n");
     performed = 0;
     reused = 0;
     differences = 0;

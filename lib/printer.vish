@@ -1126,4 +1126,69 @@ fmt_check_cli(es) {
 fmt_impact_result(sources) {
   if(ends_with(sources[0][0], ".vish")) fmt_check_modules_result(sources) else fmt_check_lines_result(sources)
 }
-fmt_impact_cli(es) => oracle_impact_check(es, fmt_impact_result, false);
+// The call of the result stays in module printer: use in Vish is not transitive.
+fmt_oracle_impact_check(es) {
+  sources = array{};
+  edits = array{};
+  k = 1;
+  while(k < es.size) {
+    if(es[k] == "--delta") {
+      if((k + 2) >= es.size) return fail("RA-3: --delta требует индекс и снимок");
+      number = es[k + 1];
+      if((number.size == 0) || (number.size > 9)) return fail("RA-3: невалидный индекс файла");
+      for(j : range(number.size)) if((number[j] < '0') || (number[j] > '9')) return fail("RA-3: невалидный индекс файла");
+      edits.push(array{number_of(number), read_text(es[k + 2])});
+      k += 3;
+    } else if(es[k] == "--rollback") {
+      edits.push(array{-1, ""});
+      k += 1;
+    } else {
+      if(starts_with(es[k], "--")) return fail("RA-3: неизвестный аргумент " + es[k]);
+      sources.push(array{es[k], read_text(es[k])});
+      k += 1;
+    }
+  }
+  if(sources.size == 0) return fail("RA-3: пустой корпус");
+  t0 = oracle_impact_ms();
+  stages = oracle_impact_plan(sources, edits, false);
+  planning = oracle_impact_ms() - t0;
+  cache = array{};
+  failures = 0;
+  for(step : range(stages.size)) {
+    rows = stages[step];
+    if(rows[0][3]) write_out("impact: консервативный fallback (ошибка разбора или use без разрешения импортов)\n");
+    performed = 0;
+    reused = 0;
+    differences = 0;
+    t1 = oracle_impact_ms();
+    for(i : range(rows.size)) {
+      row = rows[i];
+      if(step == 0) cache.push(fmt_impact_result(array{array{row[0], row[1]}})) else if(row[2]) {
+        cache[i] = fmt_impact_result(array{array{row[0], row[1]}});
+      } else reused += 1;
+      if((step == 0) || row[2]) performed += 1;
+    }
+    incremental_ms = oracle_impact_ms() - t1;
+    t2 = oracle_impact_ms();
+    full_results = array{};
+    for(i : range(rows.size)) {
+      row = rows[i];
+      full_results.push(fmt_impact_result(array{array{row[0], row[1]}}));
+    }
+    full_ms = oracle_impact_ms() - t2;
+    for(i : range(rows.size)) {
+      row = rows[i];
+      full = full_results[i];
+      if((full[0] != cache[i][0]) || (full[1] != cache[i][1])) {
+        differences += 1;
+        write_out("RA-3: " + row[0] + " кэш != полный эталон\n" + cache[i][1] + full[1]);
+      }
+      if(full[0] != 0) failures += 1;
+      write_out(full[1]);
+    }
+    failures += differences;
+    write_out("impact: шаг " + text(step) + ", выполнено файлов " + text(performed) + ", повторно использовано " + text(reused) + ", всего " + text(rows.size) + ", расхождения " + text(differences) + ", incremental_ms " + text(incremental_ms) + ", full_ms " + text(full_ms) + ", plan_ms " + text(planning) + "\n");
+  }
+  if(failures == 0) 0 else 1
+}
+fmt_impact_cli(es) => fmt_oracle_impact_check(es);

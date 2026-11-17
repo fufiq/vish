@@ -46,12 +46,13 @@ with tempfile.TemporaryDirectory(prefix='vish-ra3-') as directory:
         print(result.stderr)
         if mutant:
             assert result.returncode != 0, 'мутация пропуска impact не поймана'
+            assert 'кэш != полный эталон' in result.stdout, 'мутация должна дать расхождение результатов'
             continue
         assert result.returncode == 0
         rows = re.findall(r'выполнено файлов (\d+), повторно использовано (\d+), всего (\d+), расхождения (\d+)', result.stdout)
         assert len(rows) == len(versions) + 15, rows
         assert rows[0] == ('2', '0', '2', '0'), rows[0]
-        assert rows[1] == ('1', '1', '2', '0'), rows[1]
+        assert rows[1] == ('2', '0', '2', '0'), rows[1]  # the regular closure through implicit hooks
         assert all(int(a) + int(b) == int(c) and int(d) == 0 for a, b, c, d in rows)
         if not expr:
             assert rows[len(versions)] == ('2', '0', '2', '0'), 'ct должен широко инвалидировать'
@@ -62,4 +63,21 @@ with tempfile.TemporaryDirectory(prefix='vish-ra3-') as directory:
         expected = ('совпало 2, пропущено 0, расхождений 0' if expr else
                     'совпало 1, расхождений 0')
         assert expected in legacy.stdout, legacy.stdout
+# A non-trivial unchanged data file contains no functions: the regular impact
+# allows reuse here. This is a separate file-level case, not a speedup inside a file.
+    if not mutant:
+        data = base / 'data.vish'
+        data.write_text(''.join(f'{n};\n' for n in range(41, 105)))
+        first = base / 'reuse.vish'
+        first.write_text('ra3_a() => 1;\n')
+        delta = base / 'reuse.snapshot'
+        delta.write_text('ra3_a() => 2;\nra3_new() => 3;\n')
+        for cmd in ('modcheck', 'fmtcheck'):
+            result = subprocess.run([binary, cmd, '--impact', str(first), str(data), '--delta', '0', str(delta), '--rollback'], text=True, capture_output=True)
+            print('reuse', cmd, 'exit', result.returncode)
+            print(result.stdout)
+            print(result.stderr)
+            assert result.returncode == 0
+            rows = re.findall(r'выполнено файлов (\d+), повторно использовано (\d+), всего (\d+), расхождения (\d+)', result.stdout)
+            assert rows == [('2','0','2','0'), ('1','1','2','0'), ('2','0','2','0')], rows
 print('RA-3: PASS')
