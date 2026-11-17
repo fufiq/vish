@@ -124,11 +124,16 @@ struct scenario {
   // client message c: frame - at the end of a pair of sockets, the server spins until it responds
   void send(int c, proto::client_msg const & m) {
     if(getenv("VISH_TEST_SCENE_CRASH")) throw std::runtime_error("injected scene crash");
+    auto started = std::chrono::steady_clock::now();
     client & x = clients[c];
     os::write_all(x.fd, proto::frame(m));
     ++x.sent;
     while(x.peer->handled < x.sent || !server->settled(*x.peer)) server->step();
     settle();
+    if(getenv("VISH_TEST_WIRE_TIMING"))
+      if(auto key = std::get_if<proto::c_key>(&m))
+        fprintf(stderr, "WIRE_US %s %lld\n", key->key.c_str(),
+          (long long)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count());
   }
   // start: quanta to the end (n < 0) or n quanta until the process waits for host
   void wait(int64_t n) {
