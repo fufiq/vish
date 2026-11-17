@@ -21,7 +21,8 @@
 //
 
 use tools;
-// Tuling: strings, session commands (lib/tools.vish)
+use parser;
+// tooling: strings, session commands (lib/tools.vish)
 use versions;
 use runlog;
 // database versions: merge (lib/versions.vish)
@@ -168,17 +169,31 @@ print_splice(layout lay, root, projection, i64 at, old, i64 count, i64 source) =
   if(check) s.splice_check(vm, r, s.print_view(vm, root, true, s.node_or_none(vm, a[2], where), at, count, source, -1));
   return r;
 };
-// draft: the text of the elements of the module [at, at + old.size] (or root functions) to disassemble and
-// put in the base; the result is array{elements, import of text, empty lines, end comments, redisassembled}
-draft_parse(bool as_module, root, str text, old, next, i64 at, projection) => native "cpp" {
+// draft: the text of module elements [at, at + old.size) (or of function root) is parsed and put into
+// the database; the result is array{elements, the text import, blank lines, trailing comments, reparsed ones}
+draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, leading) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(array_v::of({})));
   auto & s = *editor_host;
   node_list old;
   for(uint32_t k = 0; k < (a[3]).as<array_v>().size(); ++k) old.push_back(vm.code_node((a[3]).as<array_v>().get(k), where));
-  return s.draft_parse(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where));
+  node_list fresh;
+  for(uint32_t k = 0; k < a[7].as<array_v>().size(); ++k) fresh.push_back(vm.code_node(a[7].as<array_v>().get(k), where));
+  return s.draft_publish(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where), fresh, uint64_t(a[8].as<array_v>().get(0).as<int64_t>()), a[9].as<array_v>());
 };
-// Canon of draft in the database: empty lines, end comments, keys - one edit journal
+node_parent(n) => native "cpp" {
+  return vm.code_value(vm.db[vm.code_node(a[0], where)].parent);
+};
+draft_parse(bool as_module, root, str text, old, next, i64 at, projection) {
+  if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
+  ctx = if(as_module) root else node_parent(root);
+  before = if(old.size > 0) old[0] else next;
+  snapshot = syntax_context(ctx, before, projection);
+  parsed = unit_from_context(text, false, snapshot);
+  if(!parsed[0]) throw "ED-1 Vish: " + parsed[2] + parsed[3];
+  draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6])
+}
+// the draft canon in the database: blank lines, trailing comments, keys - one journal edit
 draft_close(bool as_module, i64 at, i64 count, next, blank, rest, i64 since, sources, i64 source) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(int64_t(0)));

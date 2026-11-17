@@ -2831,7 +2831,9 @@ unit_from_context(str src, bool block, snapshot) {
   if(block) { n = block_node(s); ok = n.ok; node = n.node; }
   else { n = item_node(s); ok = n.ok; node = n.node; }
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после единицы");
-  array{ok && ((s.error == "") && (s.unsupported == "")), node, s.unsupported, s.error, "Vish", src.size}
+  leading = array{};
+  for(c : lex(src).comments) if(c.to <= r.tokens[0].from) leading.push(slice_text(src, c.from, c.to));
+  array{ok && ((s.error == "") && (s.unsupported == "")), node, s.unsupported, s.error, "Vish", src.size, leading}
 }
 
 record_arg(ps s, row, i64 slot) {

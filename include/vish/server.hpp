@@ -1087,11 +1087,97 @@ struct editor_server {
     return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
   }
 
-  // node of the new subtree, which coincided in place and appearance with the old ones, get the old id:
-  // 
-// Labels, cursors of other clients and layers
-  // going through the set. Children's lists are matched from the beginning and end -
-  // inserting or deleting in the middle doesn't shift neighbors.
+  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading) {
+    auto & db = session.db;
+    if(db.edits != revision) throw diagnostic("ED-1: stale publication", {});
+    ++edits;
+    parser pr(db, nullptr); // only resolve_refs, no text parsing
+    pr.source = db.record_import(text, cat("<черновик #", edits, ">"));
+    reparsed.clear();
+    parser::draft_items d;
+    d.items = fresh;
+    for(auto x: fresh) db.place(x, span{0, uint32_t(text.size()), pr.source});
+    // The metadata of a unit already parsed by Vish; the text is not parsed here.
+    if(!fresh.empty()) {
+      node_note note;
+      for(uint32_t i = 0; i < leading.size(); ++i) note.lead.emplace_back(leading.get(i).as<str_v>().view());
+      db.set_note(fresh[0], std::move(note));
+    }
+    node_list ids;
+    if(!module) {
+      pr.place(db[fn_root].parent, fn_root);
+      projection_rules(pr, projection);
+
+      node_list all = db.as<n_module>(session.root).items;
+      all.insert(all.end(), d.items.begin(), d.items.end());
+      pr.resolve_refs(all);
+      if(d.items.size() == 1 && db.is<n_fn>(d.items[0])) {
+        if(!db.is<n_fn>(fn_root)) { // was a hole - a function again
+          db.replace(fn_root, db[d.items[0]].kind);
+          db.place(fn_root, db[d.items[0]].where);
+          db.set_note(fn_root, db.note_of(d.items[0]) ? *db.note_of(d.items[0]) : node_note{});
+        } else graft(fn_root, d.items[0]);
+      } else { // stopped being a function - a hole (the same node), until it becomes one again
+        db.replace(fn_root, n_hole{text, "не функция"});
+        db.place(fn_root, span{0, uint32_t(text.size()), pr.source});
+      }
+      ids = {fn_root};
+    } else {
+      uint32_t count = uint32_t(old.size());
+      pr.place(session.root, count ? old[0] : next); // the rules of its own place (§4.4)
+      projection_rules(pr, projection);
+
+      n_module m = db.as<n_module>(session.root);
+      {
+        node_list all = m.items; // &f(...) - a reference to a module function
+        all.insert(all.end(), d.items.begin(), d.items.end());
+        pr.resolve_refs(all);
+      }
+      // the draft declared other parse rules - the following elements are reparsed:
+      // "each following line describes how to parse the next one"
+      std::string was_rules, now_rules;
+      for(node_id x: old) was_rules += parser::rule_trace(db, x);
+      for(node_id x: d.items) now_rules += parser::rule_trace(db, x);
+      for(uint32_t i = 0; i < d.items.size(); ++i) {
+        node_id f = d.items[i];
+        if(i >= count) ids.push_back(f);
+        else if(db[old[i]].kind.index() == db[f].kind.index()) ids.push_back(graft(old[i], f)); // nodes of the same kind - the same ids
+        else { // a module element keeps its id even when its kind changes: an edit of the ct code's source rolls back its changes (§7.4)
+          db.replace(old[i], db[f].kind);
+          db.place(old[i], db[f].where);
+          db.set_note(old[i], db.note_of(f) ? *db.note_of(f) : node_note{});
+          ids.push_back(old[i]);
+        }
+      }
+      m.items.erase(m.items.begin() + at, m.items.begin() + at + count);
+      m.items.insert(m.items.begin() + at, ids.begin(), ids.end());
+      if(!m.blank.empty()) {
+        m.blank.resize(std::max<std::size_t>(m.blank.size(), at + count + 1), 0);
+        m.blank.erase(m.blank.begin() + at, m.blank.begin() + at + count);
+        m.blank.insert(m.blank.begin() + at, ids.size(), 0);
+        parser::trim_blank(m.blank);
+      }
+      // a module changes only if its elements changed: an edit inside an element does not
+      // touch the others (and does not roll back their changes by ct code, §7.4)
+      if(m.items != db.as<n_module>(session.root).items || m.blank != db.as<n_module>(session.root).blank) db.replace(session.root, std::move(m));
+      db.link_parents(session.root);
+      if(was_rules != now_rules) {
+        reparse_after(session.root, at + ids.size());
+        reparse_users(session.root);
+      }
+    }
+    db.link_parents(session.root);
+    array_v blank, rest;
+    for(uint32_t x: d.blank) blank.push(value(int64_t(x)));
+    for(auto & x: d.rest) rest.push(value(x));
+    return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
+  }
+
+  // The nodes of the new subtree that match old ones by place and kind get the old ids:
+  // "when you track text editing... you can compensate all
+  // the positions of the old words". Marks, other clients' cursors and layers
+  // survive typing. The children lists are matched from the start and from the end - an insertion or
+  // a deletion in the middle does not shift the neighbours.
   node_id graft(node_id o, node_id n) {
     auto & db = session.db;
     if(!o || !n || o == n || db[o].kind.index() != db[n].kind.index()) return n;
