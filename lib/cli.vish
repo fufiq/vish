@@ -180,6 +180,7 @@ cli(args) {
     write_out(proto_schema());
     return 0;
   }
+  if((args.size == 1) && (args[0] == "derivedcheck")) return run_module("reactive", "derived_check_cli", array{});
   if(args.size < 2) return usage();
   cmd = args[0];
   if(cmd == "runlogcheck") {

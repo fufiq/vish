@@ -93,6 +93,8 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     echo "fmtmod: код $?" > $L/r_fmtmod
     ( $b reactcheck 1 300 && $b reactcheck 17 300 && $b reactcheck 91 300 && sh tests/data/reactcheck/run.sh "$PWD/$b" ) > $L/t_react.log 2>&1
     echo "react: код $?" > $L/r_react
+    ( $b derivedcheck && sh tests/data/derivedcheck/mutants.sh "$PWD/$b" ) > $L/t_derived.log 2>&1
+    echo "derived: код $?" > $L/r_derived
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules

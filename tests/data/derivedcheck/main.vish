@@ -1,0 +1,2 @@
+use reactive;
+main() { print("oracle return=" + text(derived_check_cli(array{}))); }
