@@ -1,6 +1,6 @@
 module reactive;
 // RA-2, mine: incremental queries without native. Keys are strings.
-// new_db(push, equal) takes a value comparison (for code - a dump comparison).
+// new_db(push, equal) takes a value comparison; the recommended comparator is deep_equal.
 // set_input(db,key,value); query_define(db,key,fn): fn(mut db) reads get(db,key).
 // get records the dynamic read-set; stats returns [computations, hits, cutoffs].
 // watch(db,key,handler): handler(key,value). batch(db){...} merges changes;
@@ -132,7 +132,8 @@ rx_changed(mut ch_db, ch_d) {
 // the elements of arrays/tuples (the number and the order), the fields of a struct. It does not rely on text(): `array{1}` and `array{"1"}`,
 // `array{"a, b"}` and `array{"a","b"}`, `1` and `"1"`, `1` and `1.0`, `true` and `"true"` are DIFFERENT values. The Vish `==` for values
 // of different types is not a result but a program error, so the types are compared before the values. Conservatively "not equal"
-// (the cutoff does not fire - safe): functions and value types, f64 NaN (NaN != NaN). Values are trees, there are no cycles.
+// (the cutoff does not fire - safe): functions, type values, code/ref/expr and f64 NaN. The signs of +-0.0 differ.
+// Values are trees, there are no cycles.
 // The recommended comparator for new_db: (a,b) => deep_equal(a,b).
 deep_equal(de_a, de_b) {
   de_t = typeof(de_a);
