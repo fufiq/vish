@@ -960,7 +960,7 @@ derived_version(mut dv_s, str dv_name, str dv_version) {
   if(!dv_found) dv_s.generators.push(array{dv_name,dv_version});
   for(dv_i : range(dv_s.records.size)) {
     dv_r = dv_s.records[dv_i];
-    if((dv_r.generator == dv_name) && (dv_r.version != dv_version)) {
+    if((dv_r.generator == dv_name) && (dv_r.version != dv_version) && (dv_r.status != "отвергнут")) {
       derived_event(dv_s,dv_i,"устарел","generator version");
       if(dv_s.active == dv_i) dv_s.active = -1;
     }
@@ -969,6 +969,9 @@ derived_version(mut dv_s, str dv_name, str dv_version) {
 derived_publish(mut dp_s, mut dp_db, dp_i) {
   dp_r = dp_s.records[dp_i];
   if(dp_r.status != "кандидат") throw "derived: not candidate";
+  if((rx_find(dp_db,dp_r.source) < 0) || (dp_r.revision < 0) || (dp_r.revision > dp_db.revision) || (dp_r.dependencies.size == 0)) {
+    derived_event(dp_s,dp_i,"отвергнут","invalid source snapshot"); return false;
+  }
   dp_valid = derived_current(dp_db,dp_r.dependencies);
   for(dp_g : dp_s.generators) if(dp_g[0] == dp_r.generator) if(dp_g[1] != dp_r.version) dp_valid = false;
   dp_now = array{}; for(dp_d : dp_r.dependencies) dp_now.push(dp_db.revs[dp_d[0]]);
@@ -994,10 +997,11 @@ derived_rollback(mut db_s, mut db_db, db_event) {
   if(db_e[0] != "status") throw "derived: not status event";
   if(db_e[3] != "принят") throw "derived: not acceptance";
   db_i = db_e[1]; db_r = db_s.records[db_i];
+  if(db_r.status != "принят") return false;
   if(!derived_current(db_db,db_r.dependencies)) return false;
   for(db_g : db_s.generators) if(db_g[0] == db_r.generator) if(db_g[1] != db_r.version) return false;
   db_s.journal.push(array{"rollback",db_i});
-  db_s.active = db_i; db_s.working = db_i;
+  db_s.active = db_i;
   return true;
 }
 // An independent fold of the journal from scratch (it does not call the production model's transitions).
@@ -1024,8 +1028,9 @@ derived_audit(da_s) {
       if(da_e[3] == "принят") { da_active = da_e[1]; da_work = da_e[1]; }
       if(da_e[3] == "устарел") if(da_active == da_e[1]) da_active = -1;
     }
-    if(da_e[0] == "rollback") { da_active = da_e[1]; da_work = da_e[1]; }
+    if(da_e[0] == "rollback") { if(da_states[da_e[1]] != "принят") return false; da_active = da_e[1]; }
   }
+  if(da_active >= 0) if(da_states[da_active] != "принят") return false;
   if(da_pending >= 0) return false;
   if((da_active != da_s.active) || (da_work != da_s.working) || (da_stale != da_s.stale)) return false;
   if(da_states.size != da_s.records.size) return false;
@@ -1048,9 +1053,53 @@ derived_check_cli(dd_args) {
     if(dd_s.active != dd_i) dd_bad = dd_bad + 1;
     dd_k = derived_candidate(dd_s,dd_r); set_input(dd_db,"source",dd_n + 2);
     if(derived_publish(dd_s,dd_db,dd_k)) dd_bad = dd_bad + 1;
-    if(dd_s.working != dd_i) dd_bad = dd_bad + 1;
+    if(dd_s.working != dd_j) dd_bad = dd_bad + 1;
     if(derived_rollback(dd_s,dd_db,dd_accept)) dd_bad = dd_bad + 1;
     if(!derived_audit(dd_s)) dd_bad = dd_bad + 1;
+    // Two generators, version changes in the middle, a return of the version does not revive a record.
+    dd_t = derived_new(); derived_version(dd_t,"A","1"); derived_version(dd_t,"B","1");
+    dd_r.dependencies = derived_reads(dd_db,"q"); dd_r.revision = dd_db.revision; dd_r.generator = "A";
+    dd_a = derived_candidate(dd_t,dd_r); derived_publish(dd_t,dd_db,dd_a); dd_acc = dd_t.journal.size - 1;
+    dd_r.generator = "B"; dd_b = derived_candidate(dd_t,dd_r); derived_publish(dd_t,dd_db,dd_b);
+    derived_version(dd_t,"A","2");
+    if(dd_t.records[dd_b].status != "принят") dd_bad = dd_bad + 1;
+    if(derived_rollback(dd_t,dd_db,dd_acc)) dd_bad = dd_bad + 1;
+    dd_r.generator = "A"; dd_old = derived_candidate(dd_t,dd_r);
+    if(derived_publish(dd_t,dd_db,dd_old)) dd_bad = dd_bad + 1;
+    derived_version(dd_t,"A","1");
+    if(derived_rollback(dd_t,dd_db,dd_acc)) dd_bad = dd_bad + 1;
+    if(dd_t.active != dd_b) dd_bad = dd_bad + 1;
+    if(!derived_audit(dd_t)) dd_bad = dd_bad + 1;
+    // An isolated check of the rollback version protection: fault injection of the version table.
+    dd_guard = derived_new(); dd_r.generator = "A";
+    dd_gi = derived_candidate(dd_guard,dd_r); derived_publish(dd_guard,dd_db,dd_gi); dd_ge = dd_guard.journal.size - 1;
+    dd_guard.generators.push(array{"A","2"});
+    if(derived_rollback(dd_guard,dd_db,dd_ge)) dd_bad = dd_bad + 1;
+    dd_r.generator = "B"; dd_r.checks = array{array{"oracle","zero",0,0}};
+    dd_zero = derived_candidate(dd_t,dd_r);
+    if(derived_publish(dd_t,dd_db,dd_zero)) dd_bad = dd_bad + 1;
+    derived_version(dd_t,"B","2");
+    if(dd_t.records[dd_zero].status != "отвергнут") dd_bad = dd_bad + 1;
+    if(!derived_audit(dd_t)) dd_bad = dd_bad + 1;
+    dd_r.generator = "B"; dd_r.version = "2"; dd_r.checks = array{array{"oracle","valid",1,0}};
+    dd_r.source = "missing"; dd_invalid = derived_candidate(dd_t,dd_r);
+    if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
+    dd_r.source = "source"; dd_r.revision = dd_db.revision + 1;
+    dd_invalid = derived_candidate(dd_t,dd_r);
+    if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
+    dd_r.revision = dd_db.revision; dd_r.dependencies = array{};
+    dd_invalid = derived_candidate(dd_t,dd_r);
+    if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
+    if(!derived_audit(dd_t)) dd_bad = dd_bad + 1;
+    // Lazy query only: its revision changes only after evaluation.
+    dd_lazy = new_db(false,(a,b) => deep_equal(a,b)); set_input(dd_lazy,"x",dd_n); set_input(dd_lazy,"y",dd_n);
+    query_define(dd_lazy,"qx",(mut d) => get(d,"x")); query_define(dd_lazy,"qy",(mut d) => get(d,"y"));
+    get(dd_lazy,"qx"); get(dd_lazy,"qy");
+    dd_x = rx_find(dd_lazy,"qx"); dd_y = rx_find(dd_lazy,"qy");
+    dd_reads = array{array{dd_x,dd_lazy.revs[dd_x]},array{dd_y,dd_lazy.revs[dd_y]}};
+    set_input(dd_lazy,"y",dd_n + 1);
+    if(derived_current(dd_lazy,dd_reads)) dd_bad = dd_bad + 1;
+    if(derived_current(dd_lazy,dd_reads)) dd_bad = dd_bad + 1;
     dd_steps = dd_steps + 1;
   }
   dd_r = derived_revision{"source",dd_db.revision,"gen","1","hash",array{},derived_reads(dd_db,"q"),array{},array{0,0,0},"кандидат","",array{0}};
@@ -1064,7 +1113,7 @@ derived_check_cli(dd_args) {
   if(!derived_audit(dd_s)) dd_bad = dd_bad + 1;
   if(get(dd_db,"source") != 21) dd_bad = dd_bad + 1;
   derived_version(dd_s,"gen","2");
-  for(dd_r : dd_s.records) if(dd_r.status != "устарел") dd_bad = dd_bad + 1;
+  for(dd_r : dd_s.records) if((dd_r.status != "устарел") && (dd_r.status != "отвергнут")) dd_bad = dd_bad + 1;
   if(dd_s.working < 0) dd_bad = dd_bad + 1;
   if(!derived_audit(dd_s)) dd_bad = dd_bad + 1;
   print("derivedcheck: циклов=" + text(dd_steps) + " записей=" + text(dd_s.records.size) + " устаревших=" + text(dd_s.stale) + " нарушений=" + text(dd_bad));
