@@ -1,0 +1,2 @@
+ed1_foreign() => 7;
+main() { print(10); print(ed1_foreign()); }

@@ -4670,7 +4670,19 @@ struct interpreter {
           std::vector<value> vals{reader.code_value(b)};
           flow r = reader.invoke(f, vals, {}, reader.globals, {where, "raw_code_from_context", 0, 0});
           if(r.kind == flow_kind::thr) reader.uncaught(r);
-          return reader.code_node(r.v, where);
+          node_id result = reader.code_node(r.v, where);
+          uint32_t origin = db[result].where.source;
+          auto rebase = [&](auto && self, node_id n) -> void {
+            span loc = db[n].where;
+            if(loc.source != origin) return;
+            loc.begin += w.begin;
+            loc.end += w.begin;
+            loc.source = w.source;
+            db.place(n, loc);
+            db.for_each_child(n, [&](node_id child) { self(self, child); });
+          };
+          rebase(rebase, result);
+          return result;
         }
       fail("parser: нет raw_code_from_context", where);
     }

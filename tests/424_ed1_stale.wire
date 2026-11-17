@@ -1,0 +1,7 @@
+// program: ed1_stale.vish
+open_view module
+pointer 1 @10 0 2
+key 1 1
+key 1 Escape
+run
+// expect: output text="101\n8\n" ok=true

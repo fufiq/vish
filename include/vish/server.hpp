@@ -1090,7 +1090,45 @@ struct editor_server {
 
   value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading, node_id target = {}, int64_t origin = -1, int64_t offset = 0, array_v const & locations = {}) {
     auto & db = session.db;
-    if(db.edits != revision) throw diagnostic("ED-1: stale publication", {});
+    // Opt-in synchronous interleaving probe: a real foreign canonical edit.
+    static bool probe_done = false;
+    if(getenv("VISH_TEST_ED1_STALE") && !probe_done) {
+      probe_done = true;
+      node_id foreign;
+      for(uint32_t i = 0; i < db.size(); ++i) {
+        node_id n{i};
+        if(db.is<n_fn>(n) && db.strings.text(db.as<n_fn>(n).name) == "ed1_foreign") {
+          auto visit = [&](auto && self, node_id x) -> void {
+            if(db.is<n_int>(x)) foreign = x;
+            db.for_each_child(x, [&](node_id c) { self(self, c); });
+          };
+          visit(visit, n);
+        }
+      }
+      if(!foreign) throw diagnostic("stale probe: missing foreign integer", {});
+      auto changed = db.as<n_int>(foreign);
+      ++changed.value;
+      db.replace(foreign, changed);
+      auto nodes = db.size();
+      auto sources = db.source_count();
+      auto journal = db.journal().size();
+      auto clock = db.edits;
+      auto publication = edits;
+      bool rejected = false;
+      try {
+        draft_publish(vm, module, fn_root, text, old, next, at, projection, fresh, revision, leading, target, origin, offset, locations);
+      } catch(diagnostic const & e) {
+        rejected = std::string(e.what()).find("stale publication") != std::string::npos;
+      }
+      if(!rejected || db.size() != nodes || db.source_count() != sources || db.journal().size() != journal || db.edits != clock || edits != publication || db.as<n_int>(foreign).value != changed.value)
+        throw diagnostic("stale probe: invariant failed", {});
+      fprintf(stderr, "ED1_STALE rejected before mutation; foreign=%lld sources=%u journal=%zu\n", (long long)changed.value, sources, journal);
+      auto result = draft_publish(vm, module, fn_root, text, old, next, at, projection, fresh, db.edits, leading, target, origin, offset, locations);
+      if(db.as<n_int>(foreign).value != changed.value) throw diagnostic("stale probe: lost foreign edit", {});
+      fprintf(stderr, "ED1_STALE fresh retry accepted\n");
+      return result;
+    }
+    if(db.edits != revision && !getenv("VISH_TEST_ED1_NO_STALE_GUARD")) throw diagnostic("ED-1: stale publication", {});
     if(getenv("VISH_UNDO_TRACE")) fprintf(stderr, "TRACE publish target=%u text=%s\n", target.value, text.c_str());
     if(getenv("VISH_UNDO_TRACE")) {
       for(auto x: old) fprintf(stderr, "TRACE AST before=%s\n", printer(db).print(x).c_str());
@@ -1114,8 +1152,9 @@ struct editor_server {
       }
     }
     // The metadata of a unit already parsed by Vish; the text is not parsed here.
-    if(!fresh.empty()) {
-      node_note note;
+    if(!fresh.empty() && leading.size()) {
+      node_note note = db.note_of(fresh[0]) ? *db.note_of(fresh[0]) : node_note{};
+      note.lead.clear();
       for(uint32_t i = 0; i < leading.size(); ++i) note.lead.emplace_back(leading.get(i).as<str_v>().view());
       db.set_note(fresh[0], std::move(note));
     }
