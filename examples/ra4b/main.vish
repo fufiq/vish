@@ -126,6 +126,13 @@ main() {
   }
   rejected = derived_candidate(store,invalid); require(!derived_publish(store,db,rejected));
   print("counterexample",mismatches,store.records[rejected].status);
+  // Only f is corrupted for its tables; other contexts are generated correctly.
+  own_invalid = rec; own_invalid.result = array{wrong};
+  own_checks = candidate_oracles(wrong,ops,version == 1,true,true);
+  own_invalid.checks = array{own_checks[2]};
+  own_rejected = derived_candidate(store,own_invalid);
+  require(!derived_publish(store,db,own_rejected));
+  print("own-table-only counterexample",store.records[own_rejected].status);
   stale = derived_candidate(store,rec);
   changed = array{array{...ops[0],"+++++"},array{},array{}};
   set_input(db,"operators",changed);
@@ -149,7 +156,7 @@ main() {
 use parser;
 use tools;
 // Mine: the cache belongs to one synchronous run. There is no global dispatch.
-struct candidate_cache { array tables = array{}; array funcs = array{}; i64 calls = 0; i64 serial = 100; bool broken = false; bool reverse = false; }
+struct candidate_cache { array tables = array{}; array funcs = array{}; i64 calls = 0; i64 hits0 = 0; i64 serial = 100; bool broken = false; bool reverse = false; }
 candidate_call(candidate_cache c, s, k) {
  c.calls += 1;
  at = -1;
@@ -160,30 +167,35 @@ candidate_call(candidate_cache c, s, k) {
   c.tables.push(s.ops);
   c.funcs.push(longest_op_gen(s.ops,c.serial,c.reverse,c.broken));
  }
+ if(at == 0) c.hits0 += 1;
  c.funcs[at](s,k)
 }
-candidate_oracles(f,ops,reverse,broken) {
- c = candidate_cache{}; c.broken = broken; c.reverse = reverse; c.serial = (if(reverse) 2000 else 1000) + (if(broken) 10000 else 0); c.tables.push(ops); c.funcs.push(f);
+candidate_oracles(f,ops,reverse,broken) => candidate_oracles(f,ops,reverse,broken,false);
+candidate_oracles(f,ops,reverse,broken,own_only) {
+ c = candidate_cache{}; c.broken = broken && !own_only; c.reverse = reverse; c.serial = (if(reverse) 2000 else 1000) + (if(broken) 10000 else 0) + (if(own_only) 100000 else 0); c.tables.push(ops); c.funcs.push(f);
  variant = array{(s,k) => candidate_call(c,s,k)};
  corpus = array{array{"operators","1 + 2\nx.y\nf(1 + 2)\n"}};
- modules = array{array{"local","f() => x.y;\ng() { operator (a) +++ (b) => a + b; 1 +++ 2; }\nh() => 3 + 4;"}};
+ modules = array{array{"candidate tables","operator (a) +++ (b) => a + b;\noperator (a) ++++ (b) => a + b;\nf() => x.y;\ng() => 1 ++++ 2;"},array{"local","f() => x.y;\ng() { operator (a) +++ (b) => a + b; 1 +++ 2; }\nh() => 3 + 4;"}};
 
  results = array{expr_check_cli_result(corpus,variant)};
 
  results.push(node_check_cli_result(corpus,variant));
 
+ before_module = c.hits0;
  results.push(mod_check_cli_result(modules,variant));
+ require(c.hits0 > before_module); // exactly the published f was checked, not only its generator
+ print("published candidate hits",c.hits0,"own-only mutant",own_only);
  checks = array{};
  for(i : range(results.size)) {
   r = results[i]; print("candidate oracle",i,"broken",broken,r,"dispatch calls",c.calls,"generated contexts",c.tables.size);
   require(r[2] > 0);
-  if(broken) require(r[3] > 0) else require(r[0] == 0);
+  if(broken && (!own_only || (i == 2))) require(r[3] > 0) else require(r[0] == 0);
   checks.push(array{text(i),"candidate dispatch",r[2],r[3]});
  }
  require(expr_check_cli_result(corpus)[0] == 0);
  require(node_check_cli_result(corpus)[0] == 0);
  require(mod_check_cli_result(modules)[0] == 0);
- require(c.calls > 0);
+ require(c.calls > 0); require(c.hits0 > 0);
  checks
 }
 
