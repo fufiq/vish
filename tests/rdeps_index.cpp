@@ -40,7 +40,7 @@ int main() {
     auto hu = graph.add(n_ident{graph.strings.intern("h")}, {});
     auto main = add_fn("main", hu);
     auto isolated = add_fn("isolated", graph.add(n_int{7}, {}));
-    n_module m; m.items = {f, g, h, main, isolated};
+    n_module m; m.items = {isolated, f, g, h, main};
     auto root = graph.add(m, {}); graph.link_parents(root);
     auto expected = node_list{f, g, h, main, root};
     // A hand-written expectation checks the downward direction and the absence of an unrelated function.
@@ -209,13 +209,13 @@ int main() {
   auto eat_fn = db.add(eat, {});
   n_fn unrelated; unrelated.name = sym("unrelated");
   auto unrelated_fn = db.add(unrelated, {});
-  n_module m4; m4.name = sym("m4"); m4.items = {base_node, derived_node, leaf_node, consume_fn, eat_fn, unrelated_fn};
+  n_module m4; m4.name = sym("m4"); m4.items = {unrelated_fn, base_node, derived_node, consume_fn, leaf_node, eat_fn};
   auto root4 = db.add(m4, {});
   db.link_parents(root4);
   auto base_impact = db.impact_of(node_list{base_node});
   assert(std::ranges::contains(base_impact, consume_fn));
   assert(std::ranges::contains(base_impact, eat_fn)); // through Derived -> Leaf
-  assert(!std::ranges::contains(base_impact, unrelated_fn));
+  assert(!std::ranges::contains(base_impact, unrelated_fn)); // stands before the rule
   auto leaf_impact = db.impact_of(node_list{leaf_node});
   assert(std::ranges::contains(leaf_impact, eat_fn) && !std::ranges::contains(leaf_impact, consume_fn)); // the dependency does not go up the bases
   agree(db, {base_node, derived_node, leaf_node, consume_fn, eat_fn, root4});

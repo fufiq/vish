@@ -265,6 +265,16 @@ struct model {
     if(reflection && !reached.empty()) for(auto f: fns) reached.insert(f);
     std::vector<std::pair<uint32_t, uint32_t>> edges;
     for(auto f: fns) for(auto caller: dependents(node_id(f))) edges.emplace_back(caller.value, f);
+    std::set<uint32_t> suffix_items, ordered, descended;
+    // A structural snapshot through field reflection, without the live index's walk/rules.
+    std::vector<node_list> children(db.size());
+    for(uint32_t j = 1; j < db.size(); ++j) std::visit([&](auto const & k) {
+      template for(constexpr auto field: fields_of<std::remove_cvref_t<decltype(k)>>()) {
+        using F = [:std::meta::type_of(field):];
+        if constexpr(std::is_same_v<F, node_id>) { if(k.[:field:]) children[j].push_back(k.[:field:]); }
+        else if constexpr(std::is_same_v<F, list<node_id>>) for(auto c: k.[:field:]) if(c) children[j].push_back(c);
+      }
+    }, db[node_id(j)].kind);
     bool more = true;
     while(more) {
       more = false;
@@ -274,6 +284,32 @@ struct model {
         node_id n(id);
         put(db[n].parent);
         for(auto d: dependents(n)) put(d);
+        if(ordered.insert(id).second) {
+          auto const & k = db[n].kind;
+          bool rule = std::holds_alternative<n_fn>(k) || std::holds_alternative<n_use>(k)
+            || std::holds_alternative<n_extend>(k) || std::holds_alternative<n_ct>(k);
+          if(auto v = std::get_if<n_var>(&k)) rule |= v->ct;
+          auto parent = db[n].parent;
+          if(rule && parent) std::visit([&](auto const & container) {
+            using K = std::remove_cvref_t<decltype(container)>;
+            if constexpr(std::is_same_v<K, n_module> || std::is_same_v<K, n_block>
+              || std::is_same_v<K, n_quote> || std::is_same_v<K, n_extend>) {
+              bool after = false;
+              for(auto item: container.items) {
+                if(after && suffix_items.insert(item.value).second)
+                {
+                  auto visit = [&](auto && self, node_id child) -> void {
+                    if(!descended.insert(child.value).second) return;
+                    put(child);
+                    for(auto c: children[child.value]) self(self, c);
+                  };
+                  visit(visit, item);
+                }
+                after |= item == n;
+              }
+            }
+          }, db[parent].kind);
+        }
         auto name = name_of(n);
         for(auto u: users(n)) {
           if(!name.empty())
@@ -286,7 +322,7 @@ struct model {
     }
     node_list out;
     for(auto id: reached)
-      if(std::holds_alternative<n_fn>(db[node_id(id)].kind) || std::holds_alternative<n_module>(db[node_id(id)].kind)) out.push_back(node_id(id));
+      if(suffix_items.contains(id) || std::holds_alternative<n_fn>(db[node_id(id)].kind) || std::holds_alternative<n_module>(db[node_id(id)].kind)) out.push_back(node_id(id));
     return sorted(std::move(out));
   }
 

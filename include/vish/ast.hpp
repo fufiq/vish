@@ -1126,6 +1126,29 @@ struct ast_db {
     unique_nodes(out);
     return out;
   }
+  // RA-1b, mine: syntax/operator - n_fn; an ordinary function also closes
+  // the record (parser::learn/shadow_records). A ct variable changes the visible state.
+  bool context_rule(node_id n) const {
+    return is<n_fn>(n) || is<n_use>(n) || is<n_extend>(n) || is<n_ct>(n)
+      || (is<n_var>(n) && as<n_var>(n).ct);
+  }
+  // A rule acts after its own record in the nearest context. Nested
+  // elements are also check inputs; an extension has its own member list.
+  node_list rule_suffix(node_id n) const {
+    node_list out;
+    if(!context_rule(n)) return out;
+    auto p = nodes[n].parent;
+    if(!p) return out;
+    node_span items;
+    if(is_context(p)) items = context_items(p);
+    else if(is<n_extend>(p)) items = as<n_extend>(p).items;
+    bool after = false;
+    for(auto item: items) {
+      if(after) out.push_back(item);
+      if(item == n) after = true;
+    }
+    return out;
+  }
   // The transitive closure. A descendant (struct D : B) is a dependent of B itself: the composition of D (the base's fields first) changes
   // together with B, so the walk continues from the descendant node - through its name to the consumers of D and to its descendants.
   node_list impact_of(node_span changed_nodes) const {
@@ -1142,13 +1165,26 @@ struct ast_db {
 #ifndef VISH_RA1_MUTANT_NO_CT_COVER
     if(reflection && !changed_nodes.empty()) for(auto f: fn_nodes) todo.push_back(node_id(f));
 #endif
-    std::vector<uint8_t> seen(size(), 0);
+    std::vector<uint8_t> seen(size(), 0), expanded(size(), 0);
     for(size_t i = 0; i < todo.size(); ++i) {
       auto n = todo[i];
       if(!n || n.value >= size() || seen[n.value]) continue;
       seen[n.value] = 1;
       if(is<n_fn>(n) || is<n_module>(n)) out.push_back(n);
       if(auto p = nodes[n].parent) todo.push_back(p);
+#ifndef VISH_RA1B_MUTANT_NO_RULES
+      for(auto item: rule_suffix(n)) {
+        out.push_back(item);
+        // Including functions inside the following blocks/extensions, without a dependency by name.
+        auto descend = [&](auto && self, node_id child) -> void {
+          if(expanded[child.value]) return;
+          expanded[child.value] = 1;
+          todo.push_back(child);
+          for_each_child(child, [&](node_id next) { self(self, next); });
+        };
+        descend(descend, item);
+      }
+#endif
       for(auto d: dependents_of_fn(n)) todo.push_back(d);
 #ifndef VISH_RA1_MUTANT_NO_DOWN
       for(auto f: callees[n.value]) todo.push_back(f);

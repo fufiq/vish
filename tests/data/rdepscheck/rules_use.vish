@@ -1,0 +1,5 @@
+// RA-1b: an import of a real local module, the full check initially succeeds.
+preceding() => 1;
+use rules.dep;
+follower() => imported();
+main() => follower();

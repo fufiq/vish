@@ -252,7 +252,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
     };
     auto op_text = [&](node_id x) { return text_of(db.as<n_op>(x).op); };
     for(int64_t ci = 0; ci < i2cases; ++ci) {
-      int kind = int((uint64_t(ci) + uint64_t(i2offset)) % 10);
+      int kind = int((uint64_t(ci) + uint64_t(i2offset)) % (path.find("rules_") != std::string::npos ? 13 : 10));
       uint32_t src = root.value + 1000 + uint32_t(ci);
       node_id target, link;
       node_kind replacement;
@@ -346,7 +346,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
           }
           break;
         }
-        default: { // the body of a function called implicitly by the core (the table ast_db::implicit_hooks, [[transform]]): in the prelude and in the program
+        case 9: { // the body of a function called implicitly by the core (the table ast_db::implicit_hooks, [[transform]]): in the prelude and in the program
           node_list hooks;
           for(uint32_t i = 0; i < count; ++i) {
             if(!db.is_implicit_hook(node_id(i))) continue;
@@ -360,6 +360,48 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
             f.expr_body = true;
             replacement = f; ready = true;
           }
+          break;
+        }
+        case 10: case 11: case 12: { // RA-1b: a rule change / deletion / insertion
+          node_list rules;
+          for(auto x: program_nodes) {
+            if(!db.context_rule(x) || !db[x].parent || !db.is_context(db[x].parent)) continue;
+            if(db.is<n_fn>(x) && plain_fn(x)) continue;
+            rules.push_back(x);
+          }
+          if(rules.empty()) break;
+          auto rule = rules[(uint64_t(ci) / 13) % rules.size()];
+          target = rule;
+          if(kind == 10) {
+            replacement = db.copy_kind(rule);
+            std::visit([&](auto & k) {
+              using K = std::remove_cvref_t<decltype(k)>;
+              if constexpr(std::is_same_v<K, n_fn> || std::is_same_v<K, n_ct>) k.body = db.add(n_int{8}, db[rule].where);
+              else if constexpr(std::is_same_v<K, n_var>) k.init = db.add(n_float{8.0}, db[rule].where);
+              else if constexpr(std::is_same_v<K, n_use>) k.names.push_back(db.strings.intern("ra1b_missing"));
+              else if constexpr(std::is_same_v<K, n_extend>) k.name = db.strings.intern("ra1b_changed");
+            }, replacement);
+          } else {
+            target = db[rule].parent;
+            replacement = db.copy_kind(target);
+            node_id added;
+            if(kind == 12) added = db.clone(rule, [](node_id) { return std::optional<node_id>{}; });
+            std::visit([&](auto & k) {
+              using K = std::remove_cvref_t<decltype(k)>;
+              if constexpr(std::is_same_v<K, n_module> || std::is_same_v<K, n_block> || std::is_same_v<K, n_quote>) {
+                node_list items;
+                for(auto x: k.items) {
+                  if(x == rule && added) items.push_back(added);
+                  if(x != rule || kind == 12) items.push_back(x);
+                }
+                k.items = items;
+              }
+            }, replacement);
+            delta = {kind == 12 ? added : rule};
+          }
+          fprintf(stderr, "%s: RA-1b вид %d правило %u\n", path.c_str(), kind, rule.value);
+          ready = true;
+          break;
         }
       }
       if(!ready) continue;

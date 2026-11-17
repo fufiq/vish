@@ -100,9 +100,11 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     # rdepscheck - the oracle by reflection, queries against the model, I1/I3 on mutations, I2 by ten kinds of edits (including the signature and the body of an implicit hook; >= 50 cases)
     ( $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/rdeps_index.cpp -o $L/rdeps_index && $L/rdeps_index \
       && $CXX -std=c++26 -freflection -fcontracts -Iinclude -Iout tests/rule_results.cpp -o $L/rule_results -luring && $L/rule_results \
+      && $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/rdeps_rules.cpp -o $L/rdeps_rules && $L/rdeps_rules \
       && rm -rf $L/rdeps_run && mkdir -p $L/rdeps_run && cp tests/data/rdepscheck/run/*.vish lib/rdeps.vish lib/tools.vish $L/rdeps_run/ \
       && for t in $L/rdeps_run/b*.vish; do $b test $t || exit 1; done \
       && $b rdepscheck tests/data/rdepscheck/*.vish tests/01*.vish 1 200 12 \
+      && $b rdepscheck tests/data/rdepscheck/rules_*.vish 17 16 13 \
       && $b rdepscheck tests/data/rdepscheck/graph.vish 3 100 30 \
       && $b rdepscheck tests/219_store_after_reuse.vish 7 60 8 \
       && $b rdepscheck tests/219_store_after_reuse.vish 2 40 6 \

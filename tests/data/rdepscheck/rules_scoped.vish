@@ -1,0 +1,4 @@
+// RA-1b: scoped; the preceding function does not use the rule.
+preceding() => 1;
+outer() { using operator (f64 a) + (f64 b) => a - b; print(3.0 + 1.0); 7 }
+main() => outer();

@@ -1,0 +1,6 @@
+// RA-1b: extend; the preceding function does not use the rule.
+preceding() => 1;
+struct cell { i64 x; }
+cell { get(cell c) => c.x; }
+follower() => 7;
+main() { get(cell{3}); follower(); }

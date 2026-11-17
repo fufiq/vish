@@ -1,0 +1,5 @@
+// RA-1b: ct; the preceding function does not use the rule.
+preceding() => 1;
+ct { 1; }
+follower() => 7;
+main() => follower();
