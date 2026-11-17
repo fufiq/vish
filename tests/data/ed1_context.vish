@@ -1,0 +1,67 @@
+// out: true
+// out: true
+// out: Vish
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+// out: true
+use parser;
+use tools;
+use geo.words;
+syntax again {body} => quote { loop { #body } };
+expected_each() { for(x : xs) print(x); }
+expected_attempt() { try { throw 5; } catch(e) { print(e); } }
+f(x) { x }
+struct Point { i64 x; }
+shadow_holder() { again(x) => x; 0 }
+main() {
+  snapshot = syntax_context(code_parent(code(main)), code(main), code());
+  print(syntax_context_current(snapshot));
+  result = unit_from_context("{ 10 + 1 }", true, snapshot);
+  print(result[0]);
+  print(result[4]);
+  snap2 = syntax_context(code_parent(code(main)), code(main), code());
+  templ = unit_from_context("{ again { 1; } }", true, snap2);
+  print(templ[0]);
+  for(src : array{"{ each(x) in(xs) print(x); }", "{ attempt { throw 5; } rescue(e) { print(e); } }", "define f (x) { x }", "record Point { i64 x; }"}) {
+    sn = syntax_context(code_parent(code(main)), code(main), code());
+    rr = unit_from_context(src, starts_with(src, "{"), sn);
+    print(rr[0]);
+    if(!rr[0]) print(rr[2] + ":" + rr[3]);
+  }
+  for(pair : array{array{"{ each(x) in(xs) print(x); }", code(expected_each)}, array{"{ attempt { throw 5; } rescue(e) { print(e); } }", code(expected_attempt)}}) {
+    sn = syntax_context(code_parent(code(main)), code(main), code());
+    rr = unit_from_context(pair[0], true, sn);
+    print(dump_code(rr[1]) == dump_code(node_field(pair[1], "body")));
+  }
+  for(pair : array{array{"define f (x) { x }", code(f)}, array{"record Point { i64 x; }", code(Point)}}) {
+    sn = syntax_context(code_parent(code(main)), code(main), code());
+    rr = unit_from_context(pair[0], false, sn);
+    print(dump_code(rr[1]) == dump_code(pair[1]));
+  }
+  ctx = node_field(code(shadow_holder), "body");
+  before = node_field(ctx, "items")[0];
+  sb = syntax_context(ctx, before, code());
+  sa = syntax_context(ctx, code(), code());
+  has_before = false;
+  has_after = false;
+  for(row : sb[1]) if(row[0] == "again") has_before = true;
+  for(row : sa[1]) if(row[0] == "again") has_after = true;
+  print(has_before && !has_after);
+  projection = code();
+  for(row : snapshot[1]) if(row[0] == "each") projection = code_module(row[5]);
+  sp = syntax_context(code(), code(), projection);
+  has_projection = false;
+  for(row : sp[1]) if(row[0] == "each") has_projection = true;
+  print(has_projection);
+  snap2[0] = -1;
+  print(!syntax_context_current(snap2));
+}

@@ -1078,11 +1078,11 @@ record_use(ps s) {
       s.tail = false;
       s.pos += 1;
       ru_items = array{};
-      if(!is_close_ch(s, 41)) { ru_it = expression(s); if((s.error != "") || (s.unsupported != "")) return nres{false, code()}; ru_items.push(ru_it); }
+      if(!is_close_ch(s, 41)) { ru_it = record_arg(s, s.rules[ru_live[0]], ru_args.size); if((s.error != "") || (s.unsupported != "")) return nres{false, code()}; ru_items.push(ru_it); }
       loop {
         if(!is_op_at(s, ",", 0)) break;
         s.pos += 1;
-        ru_it2 = expression(s);
+        ru_it2 = record_arg(s, s.rules[ru_live[0]], ru_args.size);
         if((s.error != "") || (s.unsupported != "")) return nres{false, code()};
         ru_items.push(ru_it2);
       }
@@ -1151,7 +1151,13 @@ record_use(ps s) {
     if(ru_bv.size > 0) {
       ru_live = ru_bv;
       s.tail = false;
-      if(is_open_ch(s, 123, 0)) {
+      if(is_open_ch(s, 123, 0) && (s.rules[ru_live[0]][2] == -3) && (s.rules[ru_live[0]][8][ru_args.size] == 4)) {
+        // The part's fields are the same existing parse of an extension's fields.
+        s.pos -= 1;
+        fields_part = extension_item(s, "");
+        if(!fields_part.ok) return nres{false, code()};
+        ru_args.push(ast.block{node_field(fields_part.node, "items"), false, array{}});
+      } else if(is_open_ch(s, 123, 0)) {
         // `{}` is a value of the place's type only in the value slot `{=` (empty_value_ahead); a record `{x: ...}` is not a block (record_ahead)
         ru_value_slot = false;
         for(i : ru_bv) if(rule_piece(s, i, ru_at) == "{=") ru_value_slot = true;
@@ -1191,6 +1197,7 @@ record_use(ps s) {
     for(i : ru_live) if(ru_at >= s.rules[i][1].size) ru_done.push(i);
     if(ru_done.size == 0) { want(s, "запись " + ru_w + ": форма не подошла"); return nres{false, code()}; }
     ru_d = ru_done[0];
+    if(s.rules[ru_d][2] == -3) return nres{true, template_apply(s.rules[ru_d], s.rules[ru_d][6], ru_args)};
     ru_places = array{};
     for(j : range(s.rules[ru_d][4])) ru_places.push(code());
     for(j : range(ru_args.size)) ru_places[s.rules[ru_d][3][j]] = ru_args[j];
@@ -1565,6 +1572,12 @@ item_node(ps s) {
     why = s.unsupported;
     skip_item(s);
     return ires{false, code(), from, s.pos, why};
+  }
+  template_head = false;
+  for(row : s.rules) if((row[0] == tk_text(s, 0)) && (row[2] == -3)) template_head = true;
+  if(template_head) {
+    rr = record_use(s);
+    return ires{rr.ok, rr.node, from, s.pos, if(s.unsupported != "") s.unsupported else s.error};
   }
   attrs = array{};
   loop {
@@ -2684,3 +2697,148 @@ oracle_impact_check(es, oracle, bool expressions) {
 }
 mod_impact_cli(es) => oracle_impact_check(es, mod_check_cli_result, false);
 node_impact_cli(es) => oracle_impact_check(es, node_check_cli_result, true);
+
+// ED-1, mine, temporary: a read-only snapshot of the rules of the LIVE database vm.db.
+// ctx/before/projection are code from this same database (an empty code is allowed).
+// The order/shadowing is computed by the existing place, then learn_item of the projection.
+// array{edits_revision, records, constructs, operators}; records keep the first five
+// syntax_records fields; then declaration, template, params, part. The code values are borrowed
+// IDs of this database, the arrays are the VM's own values. No text parsing here.
+// The consumer must check the revision before building new nodes; after building
+// starts it owns the synchronous operation itself. The alternative is porting place to Vish.
+syntax_context(ctx, before, projection) => native "cpp" {
+  for(auto const & x: a) if(!x.known()) return erase(value(array_v::of({})));
+  auto node = [&](value const & x) -> node_id {
+    if(x.is<agg_v>() && !x.as<agg_v>().fields.empty() && (!x.as<agg_v>().fields[0].second.is<int64_t>() || !node_id(uint32_t(x.as<agg_v>().fields[0].second.as<int64_t>())))) return {};
+    return vm.code_node(x, where);
+  };
+  parser pr(vm.db, nullptr);
+  pr.place(node(a[0]), node(a[1]));
+  node_id projection = node(a[2]);
+  if(projection) {
+    if(!vm.db.is<n_module>(projection)) throw diagnostic("syntax_context: projection должна быть модулем", where);
+    for(node_id x: vm.db.as<n_module>(projection).items) pr.learn_item(x);
+  }
+  std::vector<value> records, constructs, ops(3, value(array_v::of({})));
+  // We do not iterate an unordered_map: we keep a stable order of head IDs,
+  // and inside a head the original order of place overloads.
+  std::vector<uint32_t> heads;
+  for(auto const & [head, ds]: pr.rules.syntaxes) heads.push_back(head);
+  std::ranges::sort(heads);
+  for(uint32_t head: heads) for(node_id d: pr.rules.syntaxes.at(head)) {
+    auto r = record_of(vm.db, d);
+    if(!r) throw diagnostic("syntax_context: форма без record пока не поддержана", where);
+    auto const & f = vm.db.as<n_fn>(d);
+    std::vector<value> pieces, slots, params, parts;
+    for(size_t k = 0; k < f.form.size(); ++k) pieces.push_back(value(std::string(form_piece(vm.db, f, k))));
+    for(auto k: r->slot) slots.push_back(value(int64_t(k)));
+    for(node_id p: f.params) params.push_back(vm.code_value(p));
+    for(auto k: r->part) parts.push_back(value(int64_t(k)));
+    records.push_back(value(array_v::of({value(std::string(vm.db.strings.text(f.name))), value(array_v::of(std::move(pieces))), value(int64_t(r->kind)), value(array_v::of(std::move(slots))), value(int64_t(r->places)), vm.code_value(d), vm.code_value(r->tmpl), value(array_v::of(std::move(params))), value(array_v::of(std::move(parts)))})));
+  }
+  heads.clear();
+  for(auto const & [head, c]: pr.rules.constructs) heads.push_back(head);
+  std::ranges::sort(heads);
+  for(uint32_t head: heads) {
+    auto const & c = pr.rules.constructs.at(head);
+    std::vector<value> clauses;
+    bool raw = false;
+    for(node_id d: c.decls) if(raw_rule_of(vm.db, d)) raw = true;
+    for(auto const & [name, pack]: c.clauses) clauses.push_back(value(array_v::of({value(std::string(vm.db.strings.text(name))), value(int64_t(pack))})));
+    constructs.push_back(value(array_v::of({value(std::string(vm.db.strings.text(symbol{head}))), value(int64_t(c.tail)), value(int64_t(c.bare)), value(array_v::of(std::move(clauses))), value(int64_t(raw))})));
+  }
+  std::vector<value> prefix, infix, postfix;
+  for(auto const & [name, o]: pr.rules.operators) {
+    if(o.prefix) prefix.push_back(value(std::string(name)));
+    if(o.infix) infix.push_back(value(std::string(name)));
+    if(o.postfix) postfix.push_back(value(std::string(name)));
+  }
+  return value(array_v::of({value(int64_t(vm.db.edits)), value(array_v::of(std::move(records))), value(array_v::of(std::move(constructs))), value(array_v::of({value(array_v::of(std::move(infix))), value(array_v::of(std::move(prefix))), value(array_v::of(std::move(postfix)))}))}));
+};
+syntax_context_current(snapshot) => native "cpp" {
+  if(!a[0].known()) return erase(value(false));
+  auto const & xs = a[0].as<array_v>();
+  return value(xs.size() == 4 && xs.get(0).as<int64_t>() == int64_t(vm.db.edits));
+};
+// Substitution of an existing quote template, a port of parser::instantiate (mine).
+template_slot(row, str name) {
+  for(k : range(row[7].size)) if(node_field(row[7][k], "name") == name) return k;
+  -1
+}
+template_node_slot(row, t) {
+  if(!given(t)) return -1;
+  if(code_kind(t) == ast.splice) return template_slot(row, node_field(t, "name"));
+  if(code_kind(t) == ast.parameter) {
+    nm = node_field(t, "name");
+    if(starts_with(nm, "#")) return template_slot(row, slice_text(nm, 1, nm.size));
+  }
+  -1
+}
+template_apply(row, t, args) {
+  if(!given(t)) return t;
+  if(code_kind(t) == ast.block) {
+    its = node_field(t, "items");
+    if((its.size == 1) && (code_kind(its[0]) == ast.splice)) {
+      k = template_node_slot(row, its[0]);
+      if(k >= 0) {
+        a = args[k];
+        if((code_kind(a) == ast.block) || (code_kind(a) == ast.raw)) return a;
+        return ast.block{array{a}, false, array{}};
+      }
+    }
+  }
+  k = template_node_slot(row, t);
+  if(k >= 0) {
+    a = args[k];
+    if(code_kind(t) != ast.parameter) return a;
+    if(code_kind(a) != ast.parameter) throw "ожидалось имя";
+    return ast.parameter{node_field(a, "name"), node_field(a, "type"), node_field(a, "mode"), node_field(a, "pack"), node_field(t, "clause"), node_field(a, "strict"), node_field(t, "source")};
+  }
+  vals = code_fields(t);
+  out = array{};
+  field_defs = fields(code_kind(t));
+  for(vi : range(vals.size)) {
+    v = vals[vi];
+    if(typeof(v) == code) out.push(template_apply(row, v, args));
+    else if(typeof(v) == array) {
+      xs = array{};
+      slot = if((v.size == 1) && (typeof(v[0]) == code)) template_node_slot(row, v[0]) else -1;
+      if((slot >= 0) && (row[8][slot] == 3)) {
+        a = args[slot];
+        xs = if(code_kind(a) == ast.construct) node_field(a, "items") else array{a};
+      } else if((slot >= 0) && (row[8][slot] == 4)) xs = node_field(args[slot], "items");
+      else for(x : v) xs.push(if(typeof(x) == code) template_apply(row, x, args) else x);
+      out.push(xs);
+    } else if((typeof(v) == str) && (code_kind(t) != ast.parameter) && has_text(array{"name", "op", "clause", "of", "base", "key", "lang"}, field_defs[vi].name) && starts_with(v, "#")) {
+      slot = template_slot(row, slice_text(v, 1, v.size));
+      if(slot >= 0) {
+        if(code_kind(args[slot]) != ast.name) throw "ожидалось имя";
+        out.push(node_field(args[slot], "name"));
+      } else out.push(v);
+    } else out.push(v);
+  }
+  kind = code_kind(t);
+  kind{...out}
+}
+// An explicit result: array{ok, node, unsupported, error, backend, bytes}.
+// The snapshot is checked before the first AST constructor; there is no silent C++ fallback.
+unit_from_context(str src, bool block, snapshot) {
+  if(!syntax_context_current(snapshot)) return array{false, code(), "устаревший syntax_context", "", "Vish", src.size};
+  r = phase1_of(src);
+  s = ps{src, r.tokens, r.match, 0, "", "", snapshot[1], false, -1, false, false, snapshot[2], snapshot[3], false, r.errors};
+  ok = false;
+  node = code();
+  if(block) { n = block_node(s); ok = n.ok; node = n.node; }
+  else { n = item_node(s); ok = n.ok; node = n.node; }
+  if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после единицы");
+  array{ok && ((s.error == "") && (s.unsupported == "")), node, s.unsupported, s.error, "Vish", src.size}
+}
+
+record_arg(ps s, row, i64 slot) {
+  if((row[2] == -3) && ((row[8][slot] == 1) || (row[8][slot] == 3))) {
+    p = param_node(s);
+    if(!p.ok) return pn_hole("параметр части");
+    return pn{"n_ready", "", array{}, array{}, array{}, "", p.node};
+  }
+  expression(s)
+}

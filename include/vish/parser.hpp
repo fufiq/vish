@@ -23,8 +23,12 @@ namespace vish {
 node_id load_prelude(ast_db & db); // prelude.hpp: a module of constructions written in the language
 
 struct parser {
-  // The parser reads a copy of the text stored by the database when importing: tokens and
-  // holes refer to it, not to the caller string (which may be temporary).
+  // Only a read of the existing rules: without importing text and loading the prelude.
+  // ED-1, mine, temporary; apply only to an already loaded live database.
+  parser(ast_db & db, std::nullptr_t) : db(db) {}
+
+  // The parser reads the copy of the text that the database saved on import: the tokens and holes
+  // refer to it, not to the caller's string (which may be temporary).
   parser(ast_db & db, std::string_view text, std::string label = {}) : db(db) {
     db.use_pool(); // node lists are built in this database pool
     load_prelude(db); // before import: node of this text from this import

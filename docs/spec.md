@@ -1331,3 +1331,12 @@ RA-4b (моё, ограниченный пилот): явный testing-dispatch
 парсера; неподдержанные им формы остаются неподдержанными. saved ps.variant
 не проверяет смену generator version: отзыв активных кадров вне пилота.
 Результаты и границы: docs/research/reactive-reviews/ra4b-implementation.md.
+
+<!-- ED-1 implementation note, моё, временное, 2026-11-17 -->
+Экспериментальный внутренний API `parser.syntax_context(ctx, before, projection)`
+читает правила живой базы в порядке `parser::place` и накладывает проекцию.
+Результат: `[edits_revision, records, constructs, operators]`; code-ссылки
+заёмные, действуют только в исходной базе. Счётчик edits консервативно отменяет
+снимок при replace; добавление новых производных AST-узлов снимок не отменяет.
+`unit_from_context` возвращает `[ok, code, unsupported, error, backend, bytes]`,
+без C++ parse fallback. Это ещё не backend обычного ввода editor.
