@@ -1,0 +1,18 @@
+// Source byte ranges survive an inner publication before the next insertion.
+// program: editor_text.vish
+open_view module
+[2] open_view module
+pointer 1 @привет 0 7
+key 1 !
+// expect: kind="n_str" pieces=["\"привет!, мир\""]
+// expect: курсор:   s = "привет!‸, мир";
+key 1 End
+key 1 y
+key 1 =
+key 1 2
+key 1 ;
+// expect-not: kind="n_hole"
+// expect: другому клиенту:
+// expect:   y = 2;
+key 1 Escape
+// expect: курсор:   y = 2;‸

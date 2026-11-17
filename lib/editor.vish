@@ -171,7 +171,7 @@ print_splice(layout lay, root, projection, i64 at, old, i64 count, i64 source) =
 };
 // draft: the text of module elements [at, at + old.size) (or of function root) is parsed and put into
 // the database; the result is array{elements, the text import, blank lines, trailing comments, reparsed ones}
-draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, leading, target) => native "cpp" {
+draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, leading, target, i64 origin, i64 offset, locations) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(array_v::of({})));
   auto & s = *editor_host;
@@ -179,7 +179,7 @@ draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fre
   for(uint32_t k = 0; k < (a[3]).as<array_v>().size(); ++k) old.push_back(vm.code_node((a[3]).as<array_v>().get(k), where));
   node_list fresh;
   for(uint32_t k = 0; k < a[7].as<array_v>().size(); ++k) fresh.push_back(vm.code_node(a[7].as<array_v>().get(k), where));
-  return s.draft_publish(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where), fresh, uint64_t(a[8].as<array_v>().get(0).as<int64_t>()), a[9].as<array_v>(), s.node_or_none(vm, a[10], where));
+  return s.draft_publish(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where), fresh, uint64_t(a[8].as<array_v>().get(0).as<int64_t>()), a[9].as<array_v>(), s.node_or_none(vm, a[10], where), a[11].as<int64_t>(), a[12].as<int64_t>(), a[13].as<array_v>());
 };
 node_parent(n) => native "cpp" {
   return vm.code_value(vm.db[vm.code_node(a[0], where)].parent);
@@ -191,7 +191,7 @@ draft_parse(bool as_module, root, str text, old, next, i64 at, projection) {
   snapshot = syntax_context(ctx, before, projection);
   parsed = unit_from_context(text, false, snapshot);
   if(!parsed[0]) throw "ED-1 Vish: " + parsed[2] + parsed[3];
-  draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6], code())
+  draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6], code(), parsed[7], 0, array{})
 }
 // the draft canon in the database: blank lines, trailing comments, keys - one journal edit
 draft_close(bool as_module, i64 at, i64 count, next, blank, rest, i64 since, sources, i64 source) => native "cpp" {
@@ -2111,6 +2111,7 @@ draft_edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
   ia = byte_of(v, a) - base;
   ib = byte_of(v, b) - base;
   edited = slice_text(t, 0, ia) + ins + text_from(t, ib);
+  if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE edit ins=" + ins + " cursor=" + text(views[v].cursor) + " base=" + text(base) + " bytes=" + text(ia) + ":" + text(ib) + "\n");
   word = (a == b) && ((code_points(ins) == 1) && ident_byte(ins[0]));
   if(!(word && views[v].typing)) {
     views[v].undo.push(snapshot{t, byte_of(v, views[v].cursor) - base});
@@ -2128,12 +2129,26 @@ draft_edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
     views[v].d.target_to = ((byte_of(v, u.to) - base) + ins.size) - (ib - ia);
     views[v].d.target_revision = revision();
   }
-  commit_draft(v, edited, ia + cp_bytes(ins, caret), r.from, r.to);
+  locations = array{};
+  if(given(views[v].d.target)) {
+    lo = views[v].d.target_from;
+    hi = (views[v].d.target_to - ins.size) + (ib - ia);
+    for(k : range(views[v].lay.nodes.size)) {
+      lf = byte_of(v, range_from(v, k)) - base;
+      lt = byte_of(v, range_to(v, k)) - base;
+      if((lf >= 0) && ((lt <= t.size) && !((lf >= lo) && (lt <= hi)))) {
+        n = node_code(views[v].lay.nodes[k]);
+        if(code_kind(n) != ast.module) locations.push(array{n, lf + (if(lf >= ib) ins.size - (ib - ia) else 0), lt + (if(lt >= ib) ins.size - (ib - ia) else 0)});
+      }
+    }
+  }
+  commit_draft(v, edited, ia + cp_bytes(ins, caret), r.from, r.to, locations);
   1
 }
-// Disassemble the text of the draft and put its elements in the module (id elements of the same
-// type are saved); send out the layout. From, to - the draft places before editing.
-commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) {
+// Parse the draft text and put its elements into the module (the ids of elements of the same kind
+// are kept); broadcast the layout. from, to are the draft's places before the edit.
+commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) => commit_draft(v, t, caret_at, from, to, array{});
+commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to, locations) {
   if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE commit input=" + t + " before=" + views[v].d.before + "\n");
   at = if(views[v].kind == "module") group_at(v) else 0;
   old = views[v].d.items;
@@ -2142,8 +2157,9 @@ commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) {
     target = views[v].d.target;
     snapshot = syntax_context(node_parent(target), target, views[v].projection);
     parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot);
+    if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE unit bytes=" + text(views[v].d.target_from) + ":" + text(views[v].d.target_to) + " ok=" + text(parsed[0]) + " reason=" + parsed[2] + parsed[3] + "\n");
     if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
-    if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, parsed[6], target);
+    if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, parsed[6], target, parsed[7], views[v].d.target_from, locations);
   }
   if(result.size == 0) result = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
   array{ids, source, blank, rest, reparsed} = result;

@@ -1088,7 +1088,7 @@ struct editor_server {
     return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
   }
 
-  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading, node_id target = {}) {
+  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading, node_id target = {}, int64_t origin = -1, int64_t offset = 0, array_v const & locations = {}) {
     auto & db = session.db;
     if(db.edits != revision) throw diagnostic("ED-1: stale publication", {});
     if(getenv("VISH_UNDO_TRACE")) fprintf(stderr, "TRACE publish target=%u text=%s\n", target.value, text.c_str());
@@ -1102,7 +1102,17 @@ struct editor_server {
     reparsed.clear();
     parser::draft_items d;
     d.items = fresh;
-    for(auto x: fresh) db.place(x, span{0, uint32_t(text.size()), pr.source});
+    // Only written nodes of this parse are rebased; template provenance stays intact.
+    for(uint32_t i = 0; i < db.size(); ++i) {
+      node_id n{i};
+      auto w = db[n].where;
+      if(origin >= 0 && w.source == uint32_t(origin)) {
+        w.begin += uint32_t(offset);
+        w.end += uint32_t(offset);
+        w.source = pr.source;
+        db.place(n, w);
+      }
+    }
     // The metadata of a unit already parsed by Vish; the text is not parsed here.
     if(!fresh.empty()) {
       node_note note;
@@ -1120,6 +1130,10 @@ struct editor_server {
       pr.resolve_refs(all);
       bool body_rules = items_trace(target) != items_trace(fresh[0]);
       graft(target, fresh[0]);
+      for(uint32_t i = 0; i < locations.size(); ++i) {
+        auto row = locations.get(i).as<array_v>();
+        db.place(vm.code_node(row.get(0), {}), span{uint32_t(row.get(1).as<int64_t>()), uint32_t(row.get(2).as<int64_t>()), pr.source});
+      }
       if(body_rules) reparse_users(target);
       ids.assign(old.begin(), old.end());
     } else if(!module) {

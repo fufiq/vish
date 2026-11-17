@@ -185,8 +185,22 @@ check_cli(args) {
 // Not supported (the reason is in ps.unsupported, the comparison skips such texts): record words (if/loop/return...), `{...}` blocks and records,
 // lambdas, `name"..."`, trailing call blocks, declarations in parentheses; the prelude's record words and `Name{...}`/`...x` - see record_use and postfix.
 // Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
-struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; array variant = array{}; }
+struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); i64 origin = -1; i64 begin = 0; i64 end = 0; } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; array variant = array{}; i64 origin = -1; }
+// Source locations are projection metadata, selected by the Vish lexer.
+source_import(str src) => native "cpp" {
+  return value(int64_t(vm.db.record_import(std::string(a[0].as<str_v>().view()), "<Vish unit>")));
+};
+source_place(c, i64 origin, i64 begin, i64 end) => native "cpp" {
+  if(a[1].as<int64_t>() >= 0) vm.db.place(vm.code_node(a[0], where), span{uint32_t(a[2].as<int64_t>()), uint32_t(a[3].as<int64_t>()), uint32_t(a[1].as<int64_t>())});
+  return a[0];
+};
+located(ps s, i64 start, pn x) {
+  x.origin = s.origin;
+  x.begin = tk_at(s, start).from;
+  x.end = if(s.pos > start) tk_at(s, s.pos - 1).to else x.begin;
+  x
+}
 pn_new(str kind, str info, kids) => pn{kind, info, kids, array{}};
 two(pn a, pn b) {
   r = array{};
@@ -344,6 +358,11 @@ float_of(str lit) => native "cpp" {
   return value(double(std::stod(clean)));
 };
 primary(ps s) {
+  loc_start = s.pos;
+  loc_result = primary_body(s);
+  located(s, loc_start, loc_result)
+}
+primary_body(ps s) {
   if(pattern_ahead(s)) { // pattern = value in an expression is a predicate (parser.hpp primary)
     pu = unpack_node(s, true);
     if(!pu.ok) { if((s.unsupported == "") && (s.error == "")) want(s, "образец без узла"); return pn_hole(""); }
@@ -477,6 +496,11 @@ primary(ps s) {
   pn_hole("")
 }
 unary_core(ps s) {
+  loc_start = s.pos;
+  loc_result = unary_core_body(s);
+  located(s, loc_start, loc_result)
+}
+unary_core_body(ps s) {
   if((tk(s, 0).kind == kind_op()) && ((tk(s, 0).ch == 35) && (tk(s, 1).kind == kind_ident()))) {
     name = tk_text(s, 1);
     s.pos += 2;
@@ -506,6 +530,16 @@ call_of(ps s, pn callee) {
   pn{"n_call", "", es, array{callee}}
 }
 postfix(ps s, pn e0) {
+  loc_start = s.pos;
+  loc_result = postfix_body(s, e0);
+  if(e0.origin >= 0) {
+    loc_result.origin = e0.origin;
+    loc_result.begin = e0.begin;
+    loc_result.end = if(s.pos > loc_start) tk_at(s, s.pos - 1).to else e0.end;
+  }
+  loc_result
+}
+postfix_body(ps s, pn e0) {
   e = e0;
   loop {
     if(s.error != "") break;
@@ -742,6 +776,11 @@ value_expr(ps s) {
   expression(s)
 }
 expression(ps s) {
+  loc_start = s.pos;
+  loc_result = expression_body(s);
+  located(s, loc_start, loc_result)
+}
+expression_body(ps s) {
   lhs = chain(s);
   if(s.error != "") return lhs;
   if(s.tail || ((lhs.kind == "n_ready") && (code_kind(lhs.node) == ast.if) && if_closed_node(lhs.node))) return lhs;
@@ -885,6 +924,11 @@ after_text(str s, str key) {
   if(j < 0) rest else slice_text(rest, 0, j)
 }
 node_of(pn x) {
+  loc_result = node_of_body(x);
+  if(loc_result.ok) source_place(loc_result.node, x.origin, x.begin, x.end);
+  loc_result
+}
+node_of_body(pn x) {
   if(x.kind == "n_int") {
     v = parse_int(after_text(x.info, "value="));
     return if(v.ok) nres{true, ast.int{v.value, contains(x.info, " ch"), contains(x.info, " hex")}} else nres{false, code()};
@@ -1384,6 +1428,12 @@ skip_item(ps s) {
   s.pos
 }
 param_node(ps s) {
+  loc_start = s.pos;
+  loc_result = param_node_located_body(s);
+  if(loc_result.ok) source_place(loc_result.node, s.origin, tk_at(s, loc_start).from, if(s.pos > loc_start) tk_at(s, s.pos - 1).to else tk_at(s, loc_start).from);
+  loc_result
+}
+param_node_located_body(ps s) {
   // [mode] [explicit] [type] [...] name; the mode is let(0)/mut/own/out/expr/ct/implicit (parser.hpp param()); patterns, default values,
   // `#name` of templates - not supported
   mode = 0;
@@ -1452,6 +1502,12 @@ local_fn_ahead(ps s) {
 // one instruction (statement_body parser.hpp): a node or "not supported"; the end of an instruction - a tail record/construct has eaten the `;` itself,
 // otherwise `;`, or `}` (the value of a block), or the instruction ends with a block (if/loop/a construct with a block) - `;` is not needed
 statement_node(ps s) {
+  loc_start = s.pos;
+  loc_result = statement_node_located_body(s);
+  if(loc_result.ok) source_place(loc_result.node, s.origin, tk_at(s, loc_start).from, if(s.pos > loc_start) tk_at(s, s.pos - 1).to else tk_at(s, loc_start).from);
+  loc_result
+}
+statement_node_located_body(ps s) {
   // block rules: operator / using operator / [[...]] operator / syntax - apply to the end of the block (block_node restores the tables)
   sn_att = plres{true, array{}};
   if(is_open_ch(s, 91, 0) && is_open_ch(s, 91, 1)) {
@@ -1481,7 +1537,7 @@ statement_node(ps s) {
     return nres{true, sn_it.node};
   }
   if((tk(s, 0).kind == kind_ident()) && !rule_has(s, tk_text(s, 0)) && (cons_of(s, tk_text(s, 0)) < 0) && !((tk_text(s, 0) == "ct") && !((tk(s, 1).kind == kind_str()) && tk(s, 1).glued))) {
-    if((is_keyword_word(tk_text(s, 0)) || (tk(s, 1).kind == kind_ident())) && !var_decl_ahead(s)) {
+    if((is_keyword_word(tk_text(s, 0)) || ((tk(s, 1).kind == kind_ident()) && (line_begin(s.src, tk(s, 0).from) == line_begin(s.src, tk(s, 1).from)))) && !var_decl_ahead(s)) {
       want(s, if(is_keyword_word(tk_text(s, 0))) "в блоке слово «" + tk_text(s, 0) + "»" else "в блоке объявление «тип имя» (" + tk_text(s, 1) + ")");
       return nres{false, code()};
     }
@@ -1523,7 +1579,7 @@ statement_node(ps s) {
     s.pos += 1;
     s.lwv = false;
   } else if(is_close_ch(s, 125)) s.lwv = true
-  else if(!ends_with_block_pn(sn_e)) { want(s, "инструкция без ; перед «" + tk_text(s, 0) + "»"); return nres{false, code()}; }
+  else if(!ends_with_block_pn(sn_e)) { fail(s, "инструкция без ; перед «" + tk_text(s, 0) + "»"); return nres{false, code()}; }
   sn_r
 }
 block_body(ps s) {
@@ -1547,7 +1603,9 @@ block_body(ps s) {
       skip_stmt(s);
       if((s.pos == bn_p0) && (tk(s, 0).kind != kind_end())) s.pos += 1;
       bn_text = slice_text(s.src, tk_at(s, bn_p0).from, tk_at(s, s.pos - 1).to);
-      bn_items.push(ast.hole{bn_text, hole_reason(s, bn_p0, s.pos, s.error)});
+      bn_hole = ast.hole{bn_text, hole_reason(s, bn_p0, s.pos, s.error)};
+      source_place(bn_hole, s.origin, tk_at(s, bn_p0).from, tk_at(s, s.pos - 1).to);
+      bn_items.push(bn_hole);
       s.error = "";
       s.tail = false;
       s.lwv = false;
@@ -1564,6 +1622,12 @@ block_body(ps s) {
 }
 // one module element from token s.pos: a function or "not supported" (the position is after the element in any case)
 item_node(ps s) {
+  loc_start = s.pos;
+  loc_result = item_node_located_body(s);
+  if(loc_result.ok) source_place(loc_result.node, s.origin, tk_at(s, loc_start).from, if(s.pos > loc_start) tk_at(s, s.pos - 1).to else tk_at(s, loc_start).from);
+  loc_result
+}
+item_node_located_body(ps s) {
   from = s.pos;
   why = "";
   // program rules (syntax/operator/using/use, functions with expr parameters - "constructs") change the parsing of the following elements
@@ -2167,6 +2231,12 @@ extension_item(ps s, str ex_from) {
 }
 // a block with rules: constructs, operators and program records apply to its end - also on a refusal/parse error (context_scope parser.hpp)
 block_node(ps s) {
+  loc_start = s.pos;
+  loc_result = block_node_located_body(s);
+  if(loc_result.ok) source_place(loc_result.node, s.origin, tk_at(s, loc_start).from, if(s.pos > loc_start) tk_at(s, s.pos - 1).to else tk_at(s, loc_start).from);
+  loc_result
+}
+block_node_located_body(ps s) {
   bw_cons = s.cons;
   bw_ops = s.ops;
   bw_rules = s.rules;
@@ -2827,6 +2897,7 @@ unit_from_context(str src, bool block, snapshot) {
   if(!syntax_context_current(snapshot)) return array{false, code(), "устаревший syntax_context", "", "Vish", src.size};
   r = phase1_of(src);
   s = ps{src, r.tokens, r.match, 0, "", "", snapshot[1], false, -1, false, false, snapshot[2], snapshot[3], false, r.errors};
+  s.origin = source_import(src);
   ok = false;
   node = code();
   if(block) { n = block_node(s); ok = n.ok; node = n.node; }
@@ -2834,7 +2905,7 @@ unit_from_context(str src, bool block, snapshot) {
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после единицы");
   leading = array{};
   for(c : lex(src).comments) if(c.to <= r.tokens[0].from) leading.push(slice_text(src, c.from, c.to));
-  array{ok && ((s.error == "") && (s.unsupported == "")), node, s.unsupported, s.error, "Vish", src.size, leading}
+  array{ok && ((s.error == "") && (s.unsupported == "")), node, s.unsupported, s.error, "Vish", src.size, leading, s.origin}
 }
 
 record_arg(ps s, row, i64 slot) {
