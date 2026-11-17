@@ -1,4 +1,4 @@
-RA-2 (mine, 2026-11-16; fixes after the review - the same day, three cycles)
+RA-2 (mine, 2026-11-16; fixes after the review - the same day, four cycles)
 
 The API is documented in lib/reactive.vish (the header). Values may have different types;
 the comparator passed to new_db must support all the types in use. The recommended comparator is
@@ -24,7 +24,7 @@ Run: out/vish reactcheck [seed] [steps]. The oracle: 12 queries (11 kinds: sum, 
 a conditional read, a guard with an exception, catching a read error, an optional key, a "thrower", a typed
 catch, a catch with a report, an array result), inputs, optional keys, repeated query definitions,
 subscriptions; push and pull against a naive recursive recomputation, a structural audit of the edges, subscription delivery.
-Kind 7 throws an exception of one of 22 kinds (numbers, strings, arrays, nested arrays, a struct, tuples, bool, f64,
+Kind 7 throws an exception of one of 30 kinds (numbers, strings, arrays, nested arrays, a struct, tuples, bool, f64,
 an empty array/string; many pairs have the SAME text for different types/structure); kind 8 is a typed catch
 (`catch(str e)`); kind 9 is a catch with a report (a hash of the exception's full structural record), kind 10 is an array result
 (early cutoff of arrays). The oracle's output is the structural record `rx_ser` (independent of `deep_equal`).
@@ -37,7 +37,7 @@ cycles: B1/B2, M1, M2, depth; a typed catch, a caught cycle + an independent sub
 a depth error and set_max_depth; H1 - the truth table of `deep_equal` over 22x22 kinds, all pairs of exceptions with one text
 and neighbouring kinds through a query/catch/consumer in push and pull, the reviewer's regressions `array{1}`->`array{"1"}` and
 `array{"a, b"}`->`array{"a","b"}`, early cutoff of arrays with exact numbers, nested batches).
-Examples with modules next to the program and a mutation check of the oracle (14 mutations, all must be caught;
+Examples with modules next to the program and a mutation check of the oracle (17 mutations, all must be caught;
 a-h are the earlier ones, i-l are the third-cycle reviewer's mutations 9-12, m-n are our own for `deep_equal`): sh tests/data/reactcheck/run.sh out/vish.
 
 Basis: the author's earlier remark, confirmed:
@@ -49,3 +49,24 @@ Vish specifics: str has no < operator (we compare bytes); use modules are not tr
 a named function of the program's module cannot be passed to reactive (isolation) - wrap it in a lambda;
 the closure specification is copied into a local value before saving; there is no general array.slice
 or pop; free names are looked up along the caller chain - deep recursion is quadratic.
+
+Cycle 4 (mine, 2026-11-17): eight new payload classes 22-29 - a signed zero,
+a nested array and a struct with a zero, code, ref, fn, type and NaN. The consumer observes
+the sign by dividing 1.0/e, the code through code_text, the function by a call, the type by name.
+The rx_ser oracle observes fn by a call with 3 (only generated pure unary functions),
+and the independent rx_cuttable forbids expecting a cutoff of opaque/NaN even with the same observation.
+The fixed cases check values and exceptions, a direct deep_equal and the consumer's recomputation;
+cycle4.vish holds separate explicit expectations for H1/H2 and checks that the process continues.
+Mutations o/p/q (15-17) independently resolve the equality of fn/type/NaN.
+
+## Known limitations
+
+- The negative slots of absent keys accumulate without cleanup.
+- deep_equal conservatively returns false for functions, type values, code/ref,
+  expr and unsupported parameterized types; NaN is also always false.
+  For f64 the bits are compared after the NaN refusal: +0.0 and -0.0 differ, including nested ones.
+- The oracle does not prove the equivalence of arbitrary functions or code: the observations
+  are limited to the generated classes. The rx_ser function is a helper of this corpus.
+- The depth of deep_equal is not limited separately; the success of a comparison at 6000 levels
+  is not confirmed (a timeout in the earlier review). This is not a safety guarantee for any depth.
+- The full check.sh integration check and an independent review are done by the coordinator.

@@ -1,0 +1,43 @@
+use reactive;
+f() => 1;
+g() => 2;
+struct box { array v; }
+expect(got, want) { if(got != want) throw "cycle4: " + text(got) + " != " + text(want); }
+main() {
+  expect(deep_equal(0.0,-0.0),false);
+  expect(deep_equal(array{box{array{0.0}}},array{box{array{-0.0}}}),false);
+  expect(deep_equal(code(f),code(g)),false);
+  expect(deep_equal(ref(f),ref(g)),false);
+  expect(deep_equal(code(f),code(f)),false);
+  expect(deep_equal(ref(f),ref(f)),false);
+  expect(deep_equal((x) => x,(x) => x + 1),false);
+  expect(deep_equal(i64,str),false);
+  expect(deep_equal(0.0/0.0,0.0/0.0),false);
+  for(mode : array{false,true}) for(err : array{false,true}) {
+    for(kind : range(5)) {
+      d = new_db(mode,(a,b) => deep_equal(a,b)); set_input(d,"x",0);
+      query_define(d,"child",(mut db) => {
+        n = get(db,"x"); v = if(n == 0) 0.0 else -0.0;
+        if(kind == 1) v = array{box{array{v}}};
+        if(kind == 2) v = if(n == 0) code(f) else code(g);
+        if(kind == 3) v = if(n == 0) ref(f) else ref(g);
+        if(kind == 4) v = if(n == 0) box{array{0.0}} else box{array{-0.0}};
+        if(err) throw v; return v;
+      });
+      query_define(d,"parent",(mut db) => {
+        v = 0;
+        try { v = get(db,"child"); } catch(e) { v = e; }
+        if(kind == 1) return text(1.0 / v[0].v[0]);
+        if((kind == 2) || (kind == 3)) return code_text(v);
+        if(kind == 4) return text(1.0 / v.v[0]);
+        return text(1.0 / v);
+      });
+      expect(get(d,"parent"),if(kind == 2) "f() => 1;" else if(kind == 3) "f" else "inf");
+      set_input(d,"x",1);
+      expect(get(d,"parent"),if(kind == 2) "g() => 2;" else if(kind == 3) "g" else "-inf");
+      set_input(d,"x",0);
+      expect(get(d,"parent"),if(kind == 2) "f() => 1;" else if(kind == 3) "f" else "inf");
+    }
+  }
+  print("cycle4: survived, 20 value/error scenarios, both modes");
+}

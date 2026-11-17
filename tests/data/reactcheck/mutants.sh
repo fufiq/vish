@@ -48,3 +48,7 @@ mutate k 'if(re_db.vals[re_i].size > 0) re_same = re_eq(re_db.vals[re_i][0],re_v
 mutate l 'bt_db.depth = bt_db.depth - 1; if(bt_db.depth == 0) rx_flush(bt_db);' 'bt_db.depth = bt_db.depth - 1; rx_flush(bt_db);'
 mutate m 'for(de_i : range(de_a.size)) if(!deep_equal(de_a[de_i],de_b[de_i])) return false;' 'for(de_i : range(de_a.size)) if(text(de_a[de_i]) != text(de_b[de_i])) return false;'
 mutate n 'for(de_f : ct fields(de_t)) if(!deep_equal(de_a.[de_f],de_b.[de_f])) return false;' 'for(de_f : ct fields(de_t)) if(false) return false;'
+# Cycle 4, the reviewer's independent mutations 15-17.
+mutate o '  de_n = text(de_t);' '  de_n = text(de_t); if(de_n == "fn") return true;'
+mutate p '  de_n = text(de_t);' '  de_n = text(de_t); if(de_n == "type") return true;'
+mutate q '  if(de_t == f64) {' '  if(de_t == f64) { if((de_a != de_a) && (de_b != de_b)) return true;'

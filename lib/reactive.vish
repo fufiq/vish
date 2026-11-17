@@ -142,10 +142,14 @@ deep_equal(de_a, de_b) {
     for(de_i : range(de_a.size)) if(!deep_equal(de_a[de_i],de_b[de_i])) return false;
     return true;
   }
-  if((de_t == i64) || (de_t == str) || (de_t == f64) || (de_t == bool)) return de_a == de_b;
+  if(de_t == f64) {
+    if((de_a != de_a) || (de_b != de_b)) return false;
+    return f64_bits(de_a) == f64_bits(de_b);
+  }
+  if((de_t == i64) || (de_t == str) || (de_t == bool)) return de_a == de_b;
   de_n = text(de_t);
   if(de_n == "unit") return true;
-  if((de_n == "fn") || (de_n == "type") || (text(type_family(de_t)) != de_n)) return false;
+  if((de_n == "fn") || (de_n == "type") || (de_n == "code") || (de_n == "expr") || (text(type_family(de_t)) != de_n)) return false;
   for(de_f : ct fields(de_t)) if(!deep_equal(de_a.[de_f],de_b.[de_f])) return false;
   return true;
 }
@@ -330,17 +334,31 @@ rx_ser(sr_v) {
   }
   if((sr_t == i64) || (sr_t == str) || (sr_t == f64) || (sr_t == bool)) return text(sr_t) + ":" + text(sr_v);
   sr_n = text(sr_t);
+  if(sr_n == "code") return "code:" + code_text(sr_v);
+  if(sr_n == "fn") return "fn:" + text(sr_v(3));
+  if(sr_n == "type") return "type:" + text(sr_v);
   if(sr_n == "unit") return "unit:";
-  if((sr_n == "fn") || (sr_n == "type") || (text(type_family(sr_t)) != sr_n)) return "?" + sr_n;
+  if((sr_n == "fn") || (sr_n == "type") || (sr_n == "code") || (sr_n == "expr") || (text(type_family(sr_t)) != sr_n)) return "?" + sr_n;
   sr_s = sr_n + "{";
   for(sr_f : ct fields(sr_t)) { sr_e = rx_ser(sr_v.[sr_f]); sr_s = sr_s + sr_f.name + "=" + text(sr_e.size) + "~" + sr_e + ";"; }
   return sr_s + "}";
+}
+// An independent cutoff policy: an observation may match, but opaque/NaN do not promise equality.
+rx_cuttable(cc_v) {
+  cc_t = typeof(cc_v); cc_n = text(cc_t);
+  if((cc_n == "fn") || (cc_n == "type") || (cc_n == "code") || (cc_n == "expr")) return false;
+  if(cc_t == f64) return cc_v == cc_v;
+  if((cc_t == array) || (cc_t == tuple)) { for(cc_x : cc_v) if(!rx_cuttable(cc_x)) return false; }
+  if(cc_t == rx_box) return rx_cuttable(cc_v.v);
+  return true;
 }
 // A value in the oracle's output: a scalar - text (as before), a compound - a structural record.
 rx_vtext(vt_v) => if((typeof(vt_v) == array) || (typeof(vt_v) == tuple)) rx_ser(vt_v) else text(vt_v);
 // An array value is read as a string, its element 0.
 rx_norm(nm_v) => if(typeof(nm_v) == array) nm_v[0] else nm_v;
 // 22 exception kinds: at n=0/1 many pairs give the SAME text() for different types or structure.
+rx_f() => 1;
+rx_g() => 2;
 rx_payload(pv_k, pv_n) {
   if(pv_k == 0) return pv_n;
   if(pv_k == 1) return text(pv_n);
@@ -363,7 +381,15 @@ rx_payload(pv_k, pv_n) {
   if(pv_k == 18) return array{text(pv_n),pv_n};
   if(pv_k == 19) return array{f64(pv_n)};
   if(pv_k == 20) return array{pv_n == 1};
-  return array{text(pv_n == 1)};
+  if(pv_k == 21) return array{text(pv_n == 1)};
+  if(pv_k == 22) return if(pv_n == 0) 0.0 else -0.0;
+  if(pv_k == 23) return array{array{if(pv_n == 0) 0.0 else -0.0}};
+  if(pv_k == 24) return rx_box{array{if(pv_n == 0) 0.0 else -0.0}};
+  if(pv_k == 25) return if(pv_n == 0) code(rx_f) else code(rx_g);
+  if(pv_k == 26) return if(pv_n == 0) ref(rx_f) else ref(rx_g);
+  if(pv_k == 27) return if(pv_n == 0) (x) => x else (x) => x + 1;
+  if(pv_k == 28) return if(pv_n == 0) i64 else str;
+  return 0.0 / 0.0;
 }
 rx_spec(mut sp_seed, sp_n, sp_specs) {
   sp_k = rx_rand(sp_seed) % 11; sp_a = rx_rand(sp_seed) % sp_n; sp_b = rx_rand(sp_seed) % sp_n;
@@ -391,7 +417,7 @@ rx_naive(rn_specs, rn_inputs, rn_opts, rn_i, mut rn_count) {
   if(rn_s[0] == 7) {
     rn_x = parse_int(rn_a).value;
     if((rn_x % 4) == 1) return rn_a;
-    throw rx_payload((rn_x / 2) % 22,rn_x % 2);
+    throw rx_payload((rn_x / 2) % 30,rn_x % 2);
   }
   if(rn_s[0] == 6) {
     rn_j = parse_int(rn_a).value % 3;
@@ -428,7 +454,7 @@ rx_formula(mut fm_db, fm_s) {
   if(fm_s[0] == 7) {
     fm_x = parse_int(fm_a).value;
     if((fm_x % 4) == 1) return fm_a;
-    throw rx_payload((fm_x / 2) % 22,fm_x % 2);
+    throw rx_payload((fm_x / 2) % 30,fm_x % 2);
   }
   if(fm_s[0] == 6) {
     fm_j = parse_int(fm_a).value % 3;
@@ -457,7 +483,7 @@ rx_define(mut df_db, df_key, df_spec, df_ex, df_last) {
   query_define(df_db,df_key,(mut df_inner) => {
     df_ex[0] = df_ex[0] + 1; df_fail = false; df_exc = 0; df_val = 0; df_res = "";
     try { df_val = rx_formula(df_inner,df_copy); df_res = "V" + rx_ser(df_val); } catch(df_e) { df_fail = true; df_exc = df_e; df_res = "E" + rx_ser(df_e); }
-    if(df_last[df_slot] == df_res) df_ex[1] = df_ex[1] + 1;
+    if((df_last[df_slot] == df_res) && rx_cuttable(if(df_fail) df_exc else df_val)) df_ex[1] = df_ex[1] + 1;
     df_last[df_slot] = df_res;
     if(df_fail) throw df_exc;
     return df_val;
@@ -707,7 +733,7 @@ rx_cases() {
   rx_expect(cs_bad,"watch order",text(cs_events),"[q, r]");
   batch(cs_db) { set_input(cs_db,"y",1); set_input(cs_db,"x",10); }
   rx_expect(cs_bad,"watch once",cs_events.size,2);
-  return cs_bad + rx_cases_err() + rx_cases_val();
+  return cs_bad + rx_cases_err() + rx_cases_val() + rx_cases_cycle4();
 }
 
 // ---- Fixed cases of the second review cycle: the exception type, a cycle and delivery, the error cache, depth ----
@@ -860,4 +886,41 @@ rx_cases_val() {
     rx_expect(cv_bad,cv_m + "nested batch state",cv_db.depth + cv_db.busy,0);
   }
   return cv_bad;
+}
+
+// Cycle 4: the consumer's result, including observing the sign by division; opaque values are not cut off even against themselves.
+rx_observe(o_k, o_v) {
+  if(o_k == 22) return text(1.0 / o_v);
+  if(o_k == 23) return text(1.0 / o_v[0][0]);
+  if(o_k == 24) return text(1.0 / o_v.v[0]);
+  if((o_k == 25) || (o_k == 26)) return code_text(o_v);
+  if(o_k == 27) return text(o_v(3));
+  if(o_k == 28) return text(o_v);
+  return text(o_v != o_v);
+}
+rx_cases_cycle4() {
+  c4_bad = 0;
+  for(c4_offset : range(8)) {
+    c4_k = c4_offset + 22;
+    c4_a = rx_payload(c4_k,0); c4_b = rx_payload(c4_k,1);
+    rx_expect(c4_bad,"cycle4 direct different " + text(c4_k),deep_equal(c4_a,c4_b),false);
+    rx_expect(c4_bad,"cycle4 direct same " + text(c4_k),deep_equal(c4_a,c4_a),c4_k < 25);
+    for(c4_push : array{false,true}) for(c4_err : array{false,true}) {
+      c4_name = "cycle4 " + text(c4_k) + "/" + text(c4_push) + "/" + text(c4_err);
+      c4_db = new_db(c4_push,(a,b) => deep_equal(a,b)); set_input(c4_db,"x",0); c4_calls = array{0};
+      query_define(c4_db,"child",(mut d) => { c4_v = rx_payload(c4_k,get(d,"x")); if(c4_err) throw c4_v; return c4_v; });
+      query_define(c4_db,"parent",(mut d) => {
+        c4_calls[0] = c4_calls[0] + 1;
+        try { return rx_observe(c4_k,get(d,"child")); } catch(e) { return rx_observe(c4_k,e); }
+      });
+      rx_expect(c4_bad,c4_name + " before",get(c4_db,"parent"),rx_observe(c4_k,c4_a));
+      set_input(c4_db,"x",1);
+      rx_expect(c4_bad,c4_name + " after",get(c4_db,"parent"),rx_observe(c4_k,c4_b));
+      rx_expect(c4_bad,c4_name + " consumer recomputed",c4_calls[0],2);
+      set_input(c4_db,"x",0);
+      rx_expect(c4_bad,c4_name + " back",get(c4_db,"parent"),rx_observe(c4_k,c4_a));
+      rx_expect(c4_bad,c4_name + " alive",rx_audit(c4_db),0);
+    }
+  }
+  return c4_bad;
 }
