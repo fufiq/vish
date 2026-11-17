@@ -1091,8 +1091,11 @@ run_scenario(str path) {
     } else if(starts_with(l, "// expect-not:")) {
       bad = lines_joined(text_from(l, 14));
       if(contains(last, bad)) why = why + ("    строка " + at + ": лишнее " + in_quotes(bad) + " в выводе:\n" + last);
-    } else if((l == "") || (starts_with(l, "//") || !scn_ready(h))) {} else if(wire && (l == "journal")) {
-      // journal base growth since last time: records and bytes of import text
+    } else if((l == "") || starts_with(l, "//")) {} else if(!scn_ready(h)) {
+      scn_close(h);
+      return "    строка " + at + ": сценарий не готов\n";
+    } else if(wire && (l == "journal")) {
+      // the database journal growth since last time: records and bytes of import text
       array{n, kinds, counts, bytes} = scn_journal(h);
       by = "";
       for(k : range(kinds.size)) by = by + (if(by == "") "" else ", ") + kinds[k] + " " + text(counts[k]);
@@ -1147,6 +1150,7 @@ run_scenario(str path) {
     }
     i += 1;
   }
+  if(!scn_ready(h)) why = why + "    сценарий не завершён: нет программы\n";
   scn_close(h);
   why
 }
@@ -1191,8 +1195,8 @@ run_tests(str dir, bool a64, str projection) {
     why = "";
     if(jobs > 1) {
       array{got, code, whole} = tests_next();
-      if(code != 0) why = "    тест не закончился: " + (if(code < 0) "сигнал " + text(0 - code) else "код " + text(code)) + "\n" else if(!whole) why = got else {
-        // Child's AArch64 counters: "unchecked notes", notes, reasons
+      if(code != 0) why = "    тест не закончился: " + (if(code < 0) "сигнал " + text(0 - code) else "код " + text(code)) + "\n" else if(!whole) why = "    тест не завершён\n" + got else {
+        // the AArch64 counters of the child: "checked not_checked notes", notes, reasons
         nl = find_text(got, "\n");
         ws = words_of(slice_text(got, 0, nl));
         checked += number_of(ws[0]);

@@ -263,7 +263,11 @@ int run_cli(int argc, char ** argv) {
     // program operating without parsing - the start after edit fell on the instance ct code (test 218 via vish vm).
     vm.detached = true;
     try {
-      return int(vm.analyze_instance(f, {value(array_v::of(std::move(args)))}).as<int64_t>());
+      auto result = vm.analyze_instance(f, {value(array_v::of(std::move(args)))});
+      for(auto const & scene: host.tests.scenarios)
+        if(scene) throw diagnostic("раннер: сценарий не завершён", {});
+      if(!result.known()) throw diagnostic("раннер: команда не завершена", {});
+      return int(result.as<int64_t>());
     } catch(diagnostic const & d) {
       if(d.where.begin == 0 && d.where.end == 0 && d.where.source == 0) throw; // team error (file, base) - as is
       throw diagnostic(cat("tools: ", render(d, builtin_file(db, d.where.source), db)), {}); // Module code error - with space

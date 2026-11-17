@@ -123,6 +123,7 @@ struct scenario {
   }
   // client message c: frame - at the end of a pair of sockets, the server spins until it responds
   void send(int c, proto::client_msg const & m) {
+    if(getenv("VISH_TEST_SCENE_CRASH")) throw std::runtime_error("injected scene crash");
     client & x = clients[c];
     os::write_all(x.fd, proto::frame(m));
     ++x.sent;
@@ -388,8 +389,10 @@ struct test_host {
       for(; busy < jobs && next < files.size(); ++next, ++busy)
         kids[next].c = os::fork_child([&] {
           try {
-            auto text = std::string(1, '\1') + body(files[next]); // tongue performed the test to the end
-            if(fn_profile::on()) fn_profile::get().report(); // The child comes out via exit - the profile is printed by yourself.
+            auto text = std::string(1, '\1') + body(files[next]); // the language ran the test to the end
+            for(auto const & scene: scenarios)
+              if(scene) throw diagnostic("раннер: сценарий не завершён", {});
+            if(fn_profile::on()) fn_profile::get().report(); // the child exits through _exit - we print the profile ourselves
             return text;
           } catch(diagnostic const & d) {
             return std::string(1, '\0') + cat("    ", d.what(), "\n");
