@@ -1101,13 +1101,20 @@ struct ast_db {
   }
   node_list dependents_of_fn(node_id n) const {
     node_list out;
+    std::vector<uint8_t> included(size(), 0), scopes(size(), 0);
+    auto put = [&](node_id f) { if(!included[f.value]) { included[f.value] = 1; out.push_back(f); } };
+    auto scope = [&](node_id top) {
+      if(scopes[top.value]) return;
+      scopes[top.value] = 1;
+      for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) put(node_id(i));
+    };
     for(auto u: users_of(n)) {
-      if(auto f = enclosing_fn(u)) out.push_back(f);
+      if(auto f = enclosing_fn(u)) put(f);
       // Extensions and use at module level can change any of its functions.
       if(is<n_extend>(u) || is<n_use>(u)) {
         node_id top = u;
         if(is<n_use>(u)) while(nodes[top].parent && !is<n_module>(top)) top = nodes[top].parent;
-        for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) out.push_back(node_id(i));
+        scope(top);
       }
       // A use outside functions: inside an extension (a struct field type, a default value) - changes the extension's members;
       // outside an extension (a global variable, a ct block, [[extension(g)]]) - runs before the module's functions are parsed and may
@@ -1116,12 +1123,12 @@ struct ast_db {
         node_id top = enclosing_extend(u);
         if(!top) top = enclosing_module_level(u);
         if(top && !in_prelude(top))
-          for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && within(node_id(i), top)) out.push_back(node_id(i));
+          scope(top);
       }
     }
 #ifndef VISH_RA1_MUTANT_NO_HOOKS // an oracle check (rdepscheck must fail): the core's implicit calls are not accounted for
     if(is_implicit_hook(n))
-      for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && !in_prelude(node_id(i))) out.push_back(node_id(i));
+      for(auto i: fn_nodes) if(is<n_fn>(node_id(i)) && !in_prelude(node_id(i))) put(node_id(i));
 #endif
     unique_nodes(out);
     return out;
@@ -1152,50 +1159,96 @@ struct ast_db {
   // The transitive closure. A descendant (struct D : B) is a dependent of B itself: the composition of D (the base's fields first) changes
   // together with B, so the walk continues from the descendant node - through its name to the consumers of D and to its descendants.
   node_list impact_of(node_span changed_nodes) const {
-    node_list todo(changed_nodes.begin(), changed_nodes.end()), out;
+    node_list todo, out;
+    std::vector<uint8_t> queued(size(), 0);
+    auto put = [&](node_id n) {
+      if(n && n.value < size() && !queued[n.value]) { queued[n.value] = 1; todo.push_back(n); }
+    };
+    for(auto n: changed_nodes) put(n);
+    // Identical name queries have identical answers within this call.
+    // The target number, the operator form and the implicit hook are kept separately in the key.
+    struct impact_query { node_list users, dependents; bool expanded = false; };
+    std::map<std::array<uint32_t, 4>, impact_query> queries;
+    auto query = [&](node_id n) -> impact_query & {
+      std::array<uint32_t, 4> key{dependency_name(n).value,
+        n.value < refs_by_target.size() && !refs_by_target[n.value].empty() ? n.value : 0,
+        uint32_t(is<n_fn>(n)), uint32_t(is_implicit_hook(n))};
+      auto [it, fresh] = queries.try_emplace(key);
+      if(fresh) it->second = {users_of(n), dependents_of_fn(n), false};
+      return it->second;
+    };
     // Instances depend on the caller's inputs too: we close the graph both ways.
     // Detaching a call requires a union of the answers before and after the edit.
     std::vector<node_list> callees(size());
     for(auto f: fn_nodes) if(is<n_fn>(node_id(f)))
-      for(auto caller: dependents_of_fn(node_id(f))) callees[caller.value].push_back(node_id(f));
+      for(auto caller: query(node_id(f)).dependents) callees[caller.value].push_back(node_id(f));
     // ct reflection may read an arbitrary AST: until there is a read-set, the whole database.
     bool reflection = false;
     for(uint32_t j = 1; j < size(); ++j)
       if(is<n_ct>(node_id(j)) && !in_prelude(node_id(j))) { reflection = true; break; }
 #ifndef VISH_RA1_MUTANT_NO_CT_COVER
-    if(reflection && !changed_nodes.empty()) for(auto f: fn_nodes) todo.push_back(node_id(f));
+    if(reflection && !changed_nodes.empty()) for(auto f: fn_nodes) put(node_id(f));
 #endif
+    // Mine: per query the suffixes of one context form nested intervals.
+    // The positions are built once; an already included tail is not walked again.
+    std::vector<uint32_t> position(size(), ~uint32_t{0}), frontier(size());
+    std::vector<uint8_t> indexed(size(), 0);
+    auto suffix = [&](node_id n) {
+      node_list out;
+      if(!context_rule(n)) return out;
+      auto p = nodes[n].parent;
+      if(!p) return out;
+      node_span items;
+      if(is_context(p)) items = context_items(p);
+      else if(is<n_extend>(p)) items = as<n_extend>(p).items;
+      if(!indexed[p.value]) {
+        indexed[p.value] = 1;
+        frontier[p.value] = items.size();
+        for(uint32_t j = 0; j < items.size(); ++j) {
+          auto item = items[j];
+          if(item && nodes[item].parent == p && position[item.value] == ~uint32_t{0}) position[item.value] = j;
+        }
+      }
+      if(position[n.value] == ~uint32_t{0}) return out;
+      uint32_t start = position[n.value] + 1;
+      for(uint32_t j = start; j < frontier[p.value]; ++j) out.push_back(items[j]);
+      frontier[p.value] = std::min(frontier[p.value], start);
+      return out;
+    };
     std::vector<uint8_t> seen(size(), 0), expanded(size(), 0);
     for(size_t i = 0; i < todo.size(); ++i) {
       auto n = todo[i];
       if(!n || n.value >= size() || seen[n.value]) continue;
       seen[n.value] = 1;
       if(is<n_fn>(n) || is<n_module>(n)) out.push_back(n);
-      if(auto p = nodes[n].parent) todo.push_back(p);
+      if(auto p = nodes[n].parent) put(p);
 #ifndef VISH_RA1B_MUTANT_NO_RULES
-      for(auto item: rule_suffix(n)) {
+      for(auto item: suffix(n)) {
         out.push_back(item);
         // Including functions inside the following blocks/extensions, without a dependency by name.
         auto descend = [&](auto && self, node_id child) -> void {
           if(expanded[child.value]) return;
           expanded[child.value] = 1;
-          todo.push_back(child);
+          put(child);
           for_each_child(child, [&](node_id next) { self(self, next); });
         };
         descend(descend, item);
       }
 #endif
-      for(auto d: dependents_of_fn(n)) todo.push_back(d);
+      auto & q = query(n);
+      // All the outgoing name links of this key are already added to the same queue.
+      if(!q.expanded) {
+        q.expanded = true;
+        for(auto d: q.dependents) put(d);
+        if(auto name = dependency_name(n))
+          for(auto u: q.users)
+            if(is<n_extend>(u) && as<n_extend>(u).base == name) put(u);
+        for(auto u: q.users)
+          if(auto e = enclosing_extend(u); e && e != u) put(e);
+      }
 #ifndef VISH_RA1_MUTANT_NO_DOWN
-      for(auto f: callees[n.value]) todo.push_back(f);
+      for(auto f: callees[n.value]) put(f);
 #endif
-      auto users = users_of(n);
-      if(auto name = dependency_name(n))
-        for(auto u: users)
-          if(is<n_extend>(u) && as<n_extend>(u).base == name) todo.push_back(u);
-      // A use inside an extension (a field type) - the change propagates to the consumers of the extension itself.
-      for(auto u: users)
-        if(auto e = enclosing_extend(u); e && e != u) todo.push_back(e);
     }
     unique_nodes(out);
     return out;

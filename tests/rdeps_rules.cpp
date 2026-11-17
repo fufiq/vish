@@ -2,6 +2,8 @@
 #include "vish/ast.hpp"
 #include "vish/rdeps_oracle.hpp"
 #include <cassert>
+#include "rdeps_impact_reference.hpp"
+#include <chrono>
 using namespace vish;
 int main() {
   for(int category = 0; category < 8; ++category) for(bool nested: {false, true}) {
@@ -39,6 +41,15 @@ int main() {
       assert(!std::ranges::contains(impact, before));
       assert(impact == rdeps_oracle::model(db).impact(node_list{rule}));
       assert(rdeps_oracle::compare_index(db).empty());
+      rdeps_oracle::impact_reference original(db);
+      rdeps_oracle::model fast(db);
+      for(uint32_t id = 0; id < db.size(); ++id) {
+        node_list delta{node_id(id)};
+        assert(original.impact(delta) == fast.impact(delta));
+        assert(db.impact_of(delta) == fast.impact(delta));
+      }
+      for(node_list delta: {node_list{}, node_list{before, rule, after}, node_list{rule, rule}})
+        assert(original.impact(delta) == fast.impact(delta));
     };
     check();
     auto snapshot = rdeps_oracle::query_snapshot(db, {rule, context});
@@ -67,6 +78,28 @@ int main() {
     ast_db replay; replay.replay(db.journal());
     assert(replay.impact_of(node_list{rule}) == db.impact_of(node_list{rule}));
     assert(replay.rdeps_dump() == db.rdeps_dump());
+  }
+  { // Cost localization on an independent, ordered graph; exact answers retained.
+    ast_db db;
+    n_module module;
+    for(int i = 0; i < 120; ++i) {
+      n_fn f; f.name = db.strings.intern(cat("f", i));
+      if(i) f.body = db.add(n_ident{db.strings.intern(cat("f", i - 1))}, {});
+      module.items.push_back(db.add(f, {}));
+    }
+    auto root = db.add(module, {}); db.link_parents(root);
+    auto run = [&](auto const & model, char const * label) {
+      auto start = std::chrono::steady_clock::now();
+      uint64_t total = 0;
+      for(auto f: module.items) total += model.impact(node_list{f}).size();
+      double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      fprintf(stderr, "%s: %.3f ms, answers %lu\n", label, ms, total);
+      return total;
+    };
+    auto old = run(rdeps_oracle::impact_reference(db), "original oracle");
+    assert(old == run(rdeps_oracle::model(db), "fast oracle"));
+    struct live { ast_db const & db; node_list impact(node_list const & d) const { return db.impact_of(d); } };
+    assert(old == run(live{db}, "live impact"));
   }
   fprintf(stderr, "RA-1b: 8 категорий × 2 области; изменение/удаление/вставка/rollback/replay OK\n");
 }

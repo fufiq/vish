@@ -153,12 +153,33 @@ struct model {
   std::unordered_map<std::string, std::vector<uint32_t>> by_text; // a name text -> the use nodes
   std::unordered_map<uint32_t, std::vector<uint32_t>> by_target;
   std::vector<uint32_t> fns;
+  // Immutable query snapshot. Owners construct a new model after each mutation,
+  // rollback/replay or elaboration; no cache is shared with ast_db/the live index.
+  mutable std::vector<node_list> user_cache, dependent_cache;
+  mutable std::vector<uint8_t> user_ready, dependent_ready;
+  std::vector<node_list> children;
+  mutable std::vector<node_list> callees;
+  mutable bool graph_ready = false;
+  bool reflection = false;
   explicit model(ast_db const & d) : db(d), uses(expected_entries(d)) {
     for(auto const & e: uses) {
       if(e[0]) by_target[e[1]].push_back(e[2]);
       else by_text[std::string(db.strings.text(symbol(e[1])))].push_back(e[2]);
     }
     for(uint32_t i = 0; i < db.size(); ++i) if(std::holds_alternative<n_fn>(db[node_id(i)].kind)) fns.push_back(i);
+    user_cache.resize(db.size()); dependent_cache.resize(db.size());
+    user_ready.resize(db.size()); dependent_ready.resize(db.size());
+    children.resize(db.size());
+    for(uint32_t j = 1; j < db.size(); ++j) {
+      if(std::holds_alternative<n_ct>(db[node_id(j)].kind) && !in_prelude(node_id(j))) reflection = true;
+      std::visit([&](auto const & k) {
+        template for(constexpr auto field: fields_of<std::remove_cvref_t<decltype(k)>>()) {
+          using F = [:std::meta::type_of(field):];
+          if constexpr(std::is_same_v<F, node_id>) { if(k.[:field:]) children[j].push_back(k.[:field:]); }
+          else if constexpr(std::is_same_v<F, list<node_id>>) for(auto c: k.[:field:]) if(c) children[j].push_back(c);
+        }
+      }, db[node_id(j)].kind);
+    }
   }
   static node_list sorted(node_list xs) {
     std::ranges::sort(xs, {}, &node_id::value);
@@ -186,7 +207,8 @@ struct model {
   void add_text(std::string const & t, node_list & out) const {
     if(auto it = by_text.find(t); it != by_text.end()) for(auto i: it->second) out.push_back(node_id(i));
   }
-  node_list users(node_id d) const {
+  node_list const & users(node_id d) const {
+    if(user_ready[d.value]) return user_cache[d.value];
     node_list out;
     auto name = name_of(d);
     if(!name.empty()) {
@@ -197,7 +219,8 @@ struct model {
     if(std::holds_alternative<n_fn>(db[d].kind)) // an operator function: infix+ - the uses of the operator `+` (any role and arity)
       for(std::string_view role: {"infix", "prefix", "postfix"})
         if(name.size() > role.size() && name.starts_with(role)) { add_text(name.substr(role.size()), out); break; }
-    return sorted(std::move(out));
+    user_ready[d.value] = 1;
+    return user_cache[d.value] = sorted(std::move(out));
   }
   bool in_fn_or_extend_parent(node_id n, node_id & ext, node_id & mod) const { // the nearest extension / module up the tree for a node outside functions
     ext = {}; mod = {};
@@ -226,7 +249,8 @@ struct model {
         if(auto const * id = std::get_if<n_ident>(&db[a].kind); id && db.strings.text(id->name) == "transform") return true;
     return false;
   }
-  node_list dependents(node_id d) const {
+  node_list const & dependents(node_id d) const {
+    if(dependent_ready[d.value]) return dependent_cache[d.value];
     node_list out;
     for(auto u: users(d)) {
       auto f = fn_of(u);
@@ -248,7 +272,8 @@ struct model {
     // the core's implicit calls (the table ast_db::implicit_hooks, the [[transform]] attribute): any function of the program (not of the prelude) is dependent
     if(is_hook(d))
       for(auto f: fns) if(!in_prelude(node_id(f))) out.push_back(node_id(f));
-    return sorted(std::move(out));
+    dependent_ready[d.value] = 1;
+    return dependent_cache[d.value] = sorted(std::move(out));
   }
   bool in_prelude(node_id n) const {
     for(; n && !std::holds_alternative<n_module>(db[n].kind); n = db[n].parent) {}
@@ -259,28 +284,19 @@ struct model {
     // An independent fixed point over a reflective snapshot; the live index is not read.
     std::set<uint32_t> reached;
     for(auto n: changed) if(n && n.value < db.size()) reached.insert(n.value);
-    bool reflection = false;
-    for(uint32_t j = 1; j < db.size(); ++j)
-      if(std::holds_alternative<n_ct>(db[node_id(j)].kind) && !in_prelude(node_id(j))) reflection = true;
     if(reflection && !reached.empty()) for(auto f: fns) reached.insert(f);
-    std::vector<std::pair<uint32_t, uint32_t>> edges;
-    for(auto f: fns) for(auto caller: dependents(node_id(f))) edges.emplace_back(caller.value, f);
+    if(!graph_ready) {
+      callees.resize(db.size());
+      for(auto f: fns) for(auto caller: dependents(node_id(f))) callees[caller.value].push_back(node_id(f));
+      graph_ready = true;
+    }
     std::set<uint32_t> suffix_items, ordered, descended;
-    // A structural snapshot through field reflection, without the live index's walk/rules.
-    std::vector<node_list> children(db.size());
-    for(uint32_t j = 1; j < db.size(); ++j) std::visit([&](auto const & k) {
-      template for(constexpr auto field: fields_of<std::remove_cvref_t<decltype(k)>>()) {
-        using F = [:std::meta::type_of(field):];
-        if constexpr(std::is_same_v<F, node_id>) { if(k.[:field:]) children[j].push_back(k.[:field:]); }
-        else if constexpr(std::is_same_v<F, list<node_id>>) for(auto c: k.[:field:]) if(c) children[j].push_back(c);
-      }
-    }, db[node_id(j)].kind);
-    bool more = true;
-    while(more) {
-      more = false;
-      auto put = [&](node_id n) { if(n && n.value < db.size()) more |= reached.insert(n.value).second; };
-      auto current = reached;
-      for(auto id: current) {
+    std::vector<uint32_t> pending(reached.begin(), reached.end());
+    auto put = [&](node_id n) {
+      if(n && n.value < db.size() && reached.insert(n.value).second) pending.push_back(n.value);
+    };
+    for(size_t cursor = 0; cursor < pending.size(); ++cursor) {
+        auto id = pending[cursor];
         node_id n(id);
         put(db[n].parent);
         for(auto d: dependents(n)) put(d);
@@ -317,8 +333,7 @@ struct model {
           node_id ext, mod;
           if(!fn_of(u) && !std::holds_alternative<n_extend>(db[u].kind) && in_fn_or_extend_parent(u, ext, mod) && ext) put(ext);
         }
-      }
-      for(auto [caller, callee]: edges) if(reached.contains(caller)) put(node_id(callee));
+        for(auto callee: callees[id]) put(callee);
     }
     node_list out;
     for(auto id: reached)
