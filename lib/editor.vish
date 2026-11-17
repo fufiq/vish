@@ -2153,10 +2153,38 @@ commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to, locations) {
   at = if(views[v].kind == "module") group_at(v) else 0;
   old = views[v].d.items;
   result = array{};
+  // The history keeps the whole text of an element; a raw block stays the publication unit.
+  if(!given(views[v].d.target)) {
+    base = byte_of(v, from);
+    now = slice_text(views[v].lay.text, base, byte_of(v, to));
+    diff = 0;
+    while((diff < now.size) && ((diff < t.size) && (now[diff] == t[diff]))) diff += 1;
+    p = place_of_byte(v, base + diff);
+    for(u : units_around(v, p, p)) if(!given(views[v].d.target) && ((u.kind == 0) && (code_kind(u.node) == ast.raw))) {
+      lo = byte_of(v, u.from) - base;
+      hi = byte_of(v, u.to) - base;
+      end = (hi + t.size) - now.size;
+      if((end >= lo) && ((slice_text(now, 0, lo) == slice_text(t, 0, lo)) && (text_from(now, hi) == text_from(t, end)))) {
+        views[v].d.target = u.node;
+        views[v].d.target_from = lo;
+        views[v].d.target_to = end;
+        views[v].d.target_kind = u.kind;
+        views[v].d.target_revision = revision();
+        for(k : range(views[v].lay.nodes.size)) {
+          lf = byte_of(v, range_from(v, k)) - base;
+          lt = byte_of(v, range_to(v, k)) - base;
+          if((lf >= 0) && ((lt <= now.size) && !((lf >= lo) && (lt <= hi)))) {
+            n = node_code(views[v].lay.nodes[k]);
+            if(code_kind(n) != ast.module) locations.push(array{n, lf + (if(lf >= hi) t.size - now.size else 0), lt + (if(lt >= hi) t.size - now.size else 0)});
+          }
+        }
+      }
+    }
+  }
   if(given(views[v].d.target)) {
     target = views[v].d.target;
     snapshot = syntax_context(node_parent(target), target, views[v].projection);
-    parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot);
+    parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot, target);
     if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE unit bytes=" + text(views[v].d.target_from) + ":" + text(views[v].d.target_to) + " ok=" + text(parsed[0]) + " reason=" + parsed[2] + parsed[3] + "\n");
     if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
     if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, parsed[6], target, parsed[7], views[v].d.target_from, locations);
@@ -2488,7 +2516,7 @@ units_around(i64 v, i64 a, i64 b) {
     t = range_to(v, k);
     if(((t - fr) >= 2) && ((a >= (fr + 1)) && (b <= (t - 1)))) {
       n = node_code(views[v].lay.nodes[k]);
-      if(code_kind(n) == ast.block) found.push(edit_unit{n, 0, fr, t});
+      if((code_kind(n) == ast.block) || (code_kind(n) == ast.raw)) found.push(edit_unit{n, 0, fr, t});
     }
     k = views[v].lay.up[k];
   }

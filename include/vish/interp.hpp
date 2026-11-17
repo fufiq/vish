@@ -4661,6 +4661,19 @@ struct interpreter {
       uint32_t p;
       ~restore() { db.pinned_source = p; }
     } hold{db, saved};
+    // ED-1: the loaded parser module owns the parse of the code of a raw block.
+    // Here only the VM node is passed, without the host parsing the text again.
+    if(node_id mod = find_module(db, sym("parser"))) {
+      for(node_id f: db.as<n_module>(mod).items)
+        if(db.is<n_fn>(f) && db.as<n_fn>(f).name == sym("raw_code_from_context")) {
+          interpreter reader(db, mod, {}, mode::run, std::nullopt, nullptr, this);
+          std::vector<value> vals{reader.code_value(b)};
+          flow r = reader.invoke(f, vals, {}, reader.globals, {where, "raw_code_from_context", 0, 0});
+          if(r.kind == flow_kind::thr) reader.uncaught(r);
+          return reader.code_node(r.v, where);
+        }
+      fail("parser: нет raw_code_from_context", where);
+    }
     parser pr(db, w.source, w);
     pr.place(db[top].parent, top);
     node_id x = pr.parse_unit(true);

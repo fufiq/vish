@@ -1121,14 +1121,14 @@ struct editor_server {
     }
     node_list ids;
     if(target) {
-      if(fresh.size() != 1 || !db.is<n_block>(target) || !db.is<n_block>(fresh[0]))
+      if(fresh.size() != 1 || (!(db.is<n_block>(target) && db.is<n_block>(fresh[0])) && !(db.is<n_raw>(target) && db.is<n_raw>(fresh[0]))))
         throw diagnostic("ED-1: invalid block publication", {});
       pr.place(db[target].parent, target);
       projection_rules(pr, projection);
       node_list all = db.as<n_module>(session.root).items;
       all.push_back(fresh[0]);
       pr.resolve_refs(all);
-      bool body_rules = items_trace(target) != items_trace(fresh[0]);
+      bool body_rules = db.is<n_block>(target) && items_trace(target) != items_trace(fresh[0]);
       graft(target, fresh[0]);
       for(uint32_t i = 0; i < locations.size(); ++i) {
         auto row = locations.get(i).as<array_v>();
@@ -1232,8 +1232,10 @@ struct editor_server {
         }
       }
     }, k);
-    // The same view (children - the same id) - the knot is not corrected: revision and caches behind it are
-    // intact, editing neighboring brackets does not touch it; the place is new.
+    // the kind is the same (the children are the same ids) - the node is not edited: the revision and the caches behind it are intact, an edit of the neighbouring
+    // brackets does not touch it - "everything outside the brackets was correct"; the place is new
+    if(getenv("VISH_UNDO_TRACE") && db.is<n_raw>(o))
+      fprintf(stderr, "TRACE raw graft id=%u changed=%d\n", o.value, !db.kind_equal(db[o].kind, k));
     if(!db.kind_equal(db[o].kind, k)) db.replace(o, std::move(k));
     db.place(o, db[n].where);
     db.set_note(o, db.note_of(n) ? *db.note_of(n) : node_note{});

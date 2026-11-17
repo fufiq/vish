@@ -1335,7 +1335,7 @@ cons_group(ps s, i64 ci, str word, bool head_stmt, cgroup cg) {
   if(cg_packed && (cg.args.size > cg_first)) { fail(s, "в скобках клаузы — только имена"); return false; }
   cg_body = code();
   if(is_open_ch(s, 123, 0)) {
-    cg_b = block_node(s);
+    cg_b = if((s.cons[ci].size > 5) && (s.cons[ci][4] == 1)) raw_node(s, s.cons[ci][5]) else block_node(s);
     if(!cg_b.ok) return false;
     cg_body = cg_b.node;
   } else if((word == "") && (s.cons[ci][1] == 1) && head_stmt && (tk(s, 0).kind == kind_ident())) {
@@ -2815,9 +2815,10 @@ syntax_context(ctx, before, projection) => native "cpp" {
     auto const & c = pr.rules.constructs.at(head);
     std::vector<value> clauses;
     bool raw = false;
-    for(node_id d: c.decls) if(raw_rule_of(vm.db, d)) raw = true;
+    uint32_t raw_decl = 0;
+    for(node_id d: c.decls) if(raw_rule_of(vm.db, d)) { raw = true; if(!raw_decl) raw_decl = d.value + 1; }
     for(auto const & [name, pack]: c.clauses) clauses.push_back(value(array_v::of({value(std::string(vm.db.strings.text(name))), value(int64_t(pack))})));
-    constructs.push_back(value(array_v::of({value(std::string(vm.db.strings.text(symbol{head}))), value(int64_t(c.tail)), value(int64_t(c.bare)), value(array_v::of(std::move(clauses))), value(int64_t(raw))})));
+    constructs.push_back(value(array_v::of({value(std::string(vm.db.strings.text(symbol{head}))), value(int64_t(c.tail)), value(int64_t(c.bare)), value(array_v::of(std::move(clauses))), value(int64_t(raw)), value(int64_t(raw_decl))})));
   }
   std::vector<value> prefix, infix, postfix;
   for(auto const & [name, o]: pr.rules.operators) {
@@ -2892,16 +2893,54 @@ template_apply(row, t, args) {
   kind = code_kind(t);
   kind{...out}
 }
+// Raw brackets of phase 1: atoms and nested brackets, without the grammar of instructions.
+raw_node(ps s, i64 rule) {
+  start = tk(s, 0);
+  close = s.match[s.pos];
+  if((close < 0) || (tk_at(s, close).err >= 0)) { fail(s, "незакрытая скобка"); return nres{false, code()}; }
+  open = tk_text(s, 0);
+  s.pos += 1;
+  items = array{};
+  while(s.pos < close) {
+    t = tk(s, 0);
+    lit = tk_text(s, 0);
+    n = code();
+    if(t.kind == kind_open()) {
+      sub = raw_node(s, 0);
+      if(!sub.ok) return sub;
+      items.push(sub.node);
+      continue;
+    }
+    if(t.kind == kind_ident()) n = ast.name{lit};
+    else if(t.kind == kind_int()) n = ast.int{int_value(lit), false, starts_with(lit, "0x") || starts_with(lit, "0X")};
+    else if(t.kind == kind_float()) n = ast.float{float_of(lit)};
+    else if(t.kind == kind_str()) n = ast.string{unescape_lit(lit)};
+    else if(t.kind == kind_char()) {
+      b = unescape_lit(lit);
+      n = if(b.size == 1) ast.int{b[0], true, false} else ast.hole{lit, "символ '…' — один байт"};
+    } else if(t.kind == kind_op()) n = ast.symbol{lit, t.glued};
+    else n = ast.hole{lit, "не лексема"};
+    source_place(n, s.origin, t.from, t.to);
+    items.push(n);
+    s.pos += 1;
+  }
+  end = tk(s, 0).to;
+  s.pos += 1;
+  n = ast.raw{open, items, slice_text(s.src, start.from, end), rule, start.glued};
+  source_place(n, s.origin, start.from, end);
+  nres{true, n}
+}
+unit_from_context(str src, bool block, snapshot) => unit_from_context(src, block, snapshot, code());
 // An explicit result: array{ok, node, unsupported, error, backend, bytes}.
 // The snapshot is checked before the first AST constructor; there is no silent C++ fallback.
-unit_from_context(str src, bool block, snapshot) {
+unit_from_context(str src, bool block, snapshot, target) {
   if(!syntax_context_current(snapshot)) return array{false, code(), "устаревший syntax_context", "", "Vish", src.size};
   r = phase1_of(src);
   s = ps{src, r.tokens, r.match, 0, "", "", snapshot[1], false, -1, false, false, snapshot[2], snapshot[3], false, r.errors};
   s.origin = source_import(src);
   ok = false;
   node = code();
-  if(block) { n = block_node(s); ok = n.ok; node = n.node; }
+  if(block) { n = if(given(target) && (code_kind(target) == ast.raw)) raw_node(s, node_field(target, "rule")) else block_node(s); ok = n.ok; node = n.node; }
   else { n = item_node(s); ok = n.ok; node = n.node; }
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после единицы");
   // Like recover_statement when parsing a draft group: an erroneous element
@@ -2928,4 +2967,15 @@ record_arg(ps s, row, i64 slot) {
     return pn{"n_ready", "", array{}, array{}, array{}, "", p.node};
   }
   expression(s)
+}
+
+// the code of a raw sub-block is parsed by the same Vish parser at the call site.
+raw_code_from_context(b) {
+  top = b;
+  while(given(code_parent(top)) && (code_kind(code_parent(top)) == ast.raw)) top = code_parent(top);
+  snapshot = syntax_context(code_parent(top), top, code());
+  if(env_get("VISH_ED1_DISABLE_RAW_CODE") == "1") throw "ED-1: Vish raw code parser disabled";
+  parsed = unit_from_context(node_field(b, "text"), true, snapshot);
+  if(!parsed[0]) return ast.hole{node_field(b, "text"), parsed[2] + parsed[3]};
+  parsed[1]
 }
