@@ -23,13 +23,16 @@ mutants=[
 ('pubgen','for(dp_g : dp_s.generators) if(dp_g[0] == dp_r.generator) if(dp_g[1] != dp_r.version) dp_valid = false;',''),
 ('zerocmp','if((dp_c[2] <= 0) || (dp_c[3] != 0))','if(dp_c[3] != 0)'),
 ('othergen','(dv_r.generator == dv_name) && ','true && '),
-
+('inv_noevent','derived_event(dp_s,dp_i,"отвергнут","invalid source snapshot"); return false;','return false;'),
+('inv_stale','derived_event(dp_s,dp_i,"отвергнут","invalid source snapshot");','derived_event(dp_s,dp_i,"устарел","invalid source snapshot");'),
+('inv_revneg',' || (dp_r.revision < 0)',''),
+('ver_cand_skip','(dv_r.status != "отвергнут"))','(dv_r.status != "отвергнут") && (dv_r.status != "кандидат"))'),
 ]
 for name,a,b in mutants:
     assert s.count(a)==1,(name,s.count(a))
     (d/(name+'.vish')).write_text(s.replace(a,b))
 PY
-for name in readset working rollback generator metric status noeval onlyfirst rbgen pubgen zerocmp othergen; do
+for name in readset working rollback generator metric status noeval onlyfirst rbgen pubgen zerocmp othergen inv_noevent inv_stale inv_revneg ver_cand_skip; do
   cp "$d/$name.vish" "$d/reactive.vish"
   "$b" run "$d/main.vish" > "$d/log" 2>&1 || true
   if ! grep -q 'oracle return=1' "$d/log"; then cat "$d/log"; echo "$name: не поймана поведенчески"; exit 1; fi

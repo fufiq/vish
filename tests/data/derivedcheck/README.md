@@ -4,7 +4,7 @@
 a change of the source input between the snapshot and the publication, a refusal of a stale rollback;
 refusals without checks and with a counterexample; a generator version change. The journal fold from scratch
 compares the statuses, the reasons, the active/working records and the counter of stale publications.
-`main.vish` runs the same oracle with the module next to it; `mutants.sh` creates twelve independent
+`main.vish` runs the same oracle with the module next to it; `mutants.sh` creates sixteen independent
 copies of the module. A mutation succeeds only as `oracle return=1`; a parse error does not count.
 
 ## Known limitations
@@ -23,7 +23,13 @@ The last working record is kept even after going stale; the active one is droppe
 generator changes. An edit of the input alone does not drop an already active variant: the check before execution
 and the reactive subscription are an RA-4b integration task. A rollback re-checks the dependencies and the version.
 The fold oracle is independent of the transition functions, but trusts the events, including the observed revisions
-of the publication (it recomputes the status decision itself); the fixed expectations additionally check the refusal of a stale publication.
+of the publication, the presence of the source and the database revision in the snapshot event. The preconditions of a refusal
+of a wrong snapshot are recomputed by the fold from create + snapshot: the source is absent,
+the revision is negative/future or the read-set is empty. Without a snapshot such a status is forbidden;
+with a correct snapshot it is also forbidden. This is a consistency check of the trusted journal,
+not a certification of observations by an external source. The fixed expectations additionally
+check the status and the reason of each of the four refusals, and the staleness of a candidate
+on a version change. The corrupted journals check a refusal without a snapshot and with a correct snapshot.
 Random sequences, concurrent publication and recovery after a crash are not covered.
 
 ## Cycle 2: the fix contract (mine)
@@ -47,4 +53,4 @@ The 20 cycles are extended with A/B, version changes in the middle and a version
 a zero number of comparisons, wrong snapshots, two independent lazy queries.
 For an isolated check of the rollback protection by version the oracle deliberately corrupts
 the generators table of a separate store (fault injection, not a supported API operation).
-mutants.sh checks 12 mutations, including six from the independent review.
+mutants.sh checks 16 mutations, including inv_noevent, inv_stale, inv_revneg and ver_cand_skip from N6.

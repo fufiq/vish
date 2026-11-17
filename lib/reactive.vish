@@ -969,6 +969,7 @@ derived_version(mut dv_s, str dv_name, str dv_version) {
 derived_publish(mut dp_s, mut dp_db, dp_i) {
   dp_r = dp_s.records[dp_i];
   if(dp_r.status != "кандидат") throw "derived: not candidate";
+  dp_s.journal.push(array{"snapshot",dp_i,rx_find(dp_db,dp_r.source) >= 0,dp_db.revision});
   if((rx_find(dp_db,dp_r.source) < 0) || (dp_r.revision < 0) || (dp_r.revision > dp_db.revision) || (dp_r.dependencies.size == 0)) {
     derived_event(dp_s,dp_i,"отвергнут","invalid source snapshot"); return false;
   }
@@ -1007,10 +1008,20 @@ derived_rollback(mut db_s, mut db_db, db_event) {
 // An independent fold of the journal from scratch (it does not call the production model's transitions).
 derived_audit(da_s) {
   da_states = array{}; da_reasons = array{}; da_active = -1; da_work = -1; da_stale = 0;
-  da_pending = -1; da_expect = ""; da_created = array{};
+  da_pending = -1; da_expect = ""; da_created = array{}; da_snapshot = -1; da_invalid = false;
+  da_gen = ""; da_version = "";
   for(da_e : da_s.journal) {
     if(da_e[0] == "create") { da_states.push("кандидат"); da_reasons.push(da_e[2].reason); da_created.push(da_e[2]); }
+    if(da_e[0] == "generator") { da_gen = da_e[1]; da_version = da_e[2]; }
+    if(da_e[0] == "snapshot") {
+      if((da_snapshot >= 0) || (da_pending >= 0)) return false;
+      da_snapshot = da_e[1]; da_r = da_created[da_snapshot];
+      if(da_states[da_snapshot] != "кандидат") return false;
+      da_invalid = (!da_e[2]) || (da_r.revision < 0) || (da_r.revision > da_e[3]) || (da_r.dependencies.size == 0);
+    }
     if(da_e[0] == "publish") {
+      if((da_snapshot != da_e[1]) || da_invalid) return false;
+      da_snapshot = -1;
       da_pending = da_e[1]; da_r = da_created[da_pending]; da_valid = da_e[3];
       for(da_j : range(da_r.dependencies.size)) if(da_r.dependencies[da_j][1] != da_e[2][da_j]) da_valid = false;
       da_expect = "принят";
@@ -1022,6 +1033,12 @@ derived_audit(da_s) {
       if(da_pending >= 0) {
         if((da_pending != da_e[1]) || (da_expect != da_e[3])) return false;
         da_pending = -1;
+      } else if(da_snapshot >= 0) {
+        if((da_snapshot != da_e[1]) || (!da_invalid) || (da_e[2] != "кандидат") || (da_e[3] != "отвергнут") || (da_e[4] != "invalid source snapshot")) return false;
+        da_snapshot = -1;
+      } else {
+        da_r = da_created[da_e[1]];
+        if((da_r.generator != da_gen) || (da_r.version == da_version) || (da_e[2] == "отвергнут") || (da_e[3] != "устарел") || (da_e[4] != "generator version")) return false;
       }
       if(da_states[da_e[1]] != da_e[2]) return false;
       da_states[da_e[1]] = da_e[3]; da_reasons[da_e[1]] = da_e[4];
@@ -1031,7 +1048,7 @@ derived_audit(da_s) {
     if(da_e[0] == "rollback") { if(da_states[da_e[1]] != "принят") return false; da_active = da_e[1]; }
   }
   if(da_active >= 0) if(da_states[da_active] != "принят") return false;
-  if(da_pending >= 0) return false;
+  if((da_pending >= 0) || (da_snapshot >= 0)) return false;
   if((da_active != da_s.active) || (da_work != da_s.working) || (da_stale != da_s.stale)) return false;
   if(da_states.size != da_s.records.size) return false;
   for(da_i : range(da_states.size)) if((da_states[da_i] != da_s.records[da_i].status) || (da_reasons[da_i] != da_s.records[da_i].reason)) return false;
@@ -1082,14 +1099,30 @@ derived_check_cli(dd_args) {
     if(dd_t.records[dd_zero].status != "отвергнут") dd_bad = dd_bad + 1;
     if(!derived_audit(dd_t)) dd_bad = dd_bad + 1;
     dd_r.generator = "B"; dd_r.version = "2"; dd_r.checks = array{array{"oracle","valid",1,0}};
-    dd_r.source = "missing"; dd_invalid = derived_candidate(dd_t,dd_r);
-    if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
-    dd_r.source = "source"; dd_r.revision = dd_db.revision + 1;
-    dd_invalid = derived_candidate(dd_t,dd_r);
-    if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
-    dd_r.revision = dd_db.revision; dd_r.dependencies = array{};
-    dd_invalid = derived_candidate(dd_t,dd_r);
-    if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
+    // All four wrong snapshots are checked together with the status, the reason and the fold.
+    for(dd_case : range(4)) {
+      dd_r.source = if(dd_case == 0) "missing" else "source";
+      dd_r.revision = dd_db.revision;
+      if(dd_case == 1) dd_r.revision = -1;
+      if(dd_case == 2) dd_r.revision = dd_db.revision + 1;
+      dd_r.dependencies = if(dd_case == 3) array{} else derived_reads(dd_db,"q");
+      dd_invalid = derived_candidate(dd_t,dd_r);
+      if(derived_publish(dd_t,dd_db,dd_invalid)) dd_bad = dd_bad + 1;
+      if((dd_t.records[dd_invalid].status != "отвергнут") || (dd_t.records[dd_invalid].reason != "invalid source snapshot")) dd_bad = dd_bad + 1;
+      if(!derived_audit(dd_t)) dd_bad = dd_bad + 1;
+    }
+    dd_r.revision = dd_db.revision; dd_r.dependencies = derived_reads(dd_db,"q");
+    // A corrupted journal: a refusal without an observation and a refusal with a correct snapshot.
+    dd_forged = derived_new(); dd_fi = derived_candidate(dd_forged,dd_r);
+    derived_event(dd_forged,dd_fi,"отвергнут","invalid source snapshot");
+    if(derived_audit(dd_forged)) dd_bad = dd_bad + 1;
+    dd_forged = derived_new(); dd_fi = derived_candidate(dd_forged,dd_r);
+    dd_forged.journal.push(array{"snapshot",dd_fi,true,dd_db.revision});
+    derived_event(dd_forged,dd_fi,"отвергнут","invalid source snapshot");
+    if(derived_audit(dd_forged)) dd_bad = dd_bad + 1;
+    dd_unpub = derived_candidate(dd_t,dd_r);
+    derived_version(dd_t,"B","3");
+    if((dd_t.records[dd_unpub].status != "устарел") || (dd_t.records[dd_unpub].reason != "generator version")) dd_bad = dd_bad + 1;
     if(!derived_audit(dd_t)) dd_bad = dd_bad + 1;
     // Lazy query only: its revision changes only after evaluation.
     dd_lazy = new_db(false,(a,b) => deep_equal(a,b)); set_input(dd_lazy,"x",dd_n); set_input(dd_lazy,"y",dd_n);
