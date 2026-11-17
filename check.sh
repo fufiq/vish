@@ -101,7 +101,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     ( $CXX -std=c++26 -freflection -fcontracts -Iinclude tests/rdeps_index.cpp -o $L/rdeps_index && $L/rdeps_index \
       && rm -rf $L/rdeps_run && mkdir -p $L/rdeps_run && cp tests/data/rdepscheck/run/*.vish lib/rdeps.vish lib/tools.vish $L/rdeps_run/ \
       && for t in $L/rdeps_run/b*.vish; do $b test $t || exit 1; done \
-      && $b rdepscheck tests/data/rdepscheck/*.vish tests/01*.vish 1 200 12 ) > $L/t_rdeps.log 2>&1
+      && $b rdepscheck tests/data/rdepscheck/*.vish tests/01*.vish 1 200 12 \
+      && $b rdepscheck tests/data/rdepscheck/graph.vish 3 100 30 \
+      && $b rdepscheck tests/data/rdepscheck/ct/module_diagnostic.vish 9 60 12 ) > $L/t_rdeps.log 2>&1
     echo "rdeps: код $?" > $L/r_rdeps
     # E6: modules in Vish (lib/modules.vish) against C++ stage0 - use keys, module file paths, loading (errors + the dump of the database's modules)
     ( $b modulescheck tests/*.vish tests/geo/*.vish tests/svc/*.vish tests/data/modcheck/*.vish tests/data/modulescheck/*.vish tests/data/modulescheck/*/*.vish ) > $L/t_modulescheck.log 2>&1

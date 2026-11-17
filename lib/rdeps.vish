@@ -214,16 +214,15 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       std::map<uint32_t, std::map<std::string, instance>> layers; // function -> instance key -> layer
       bool failed = false;
       std::string what;
-      std::vector<span> chain; // the diagnostic's place and the frames of its trace (the instantiation chain)
+      node_list owners; // the origin is fixed in the AST state where the error arose
     };
-    bool has_ct_block = false;
-    for(auto n: program_nodes) if(db.is<n_ct>(n)) has_ct_block = true;
     uint32_t program_end = count, edit_lo = 0, edit_hi = 0;
     auto is_program = [&](uint32_t id) { return id < program_end || (id >= edit_lo && id < edit_hi); };
     auto run_check = [&]() {
       run_result r;
       std::optional<interpreter> lang;
-      try { lang.emplace(db, root, std::vector<std::string>{path}, mode::check); lang->run_main(); } catch(diagnostic const & d) { r.failed = true; r.what = d.what(); r.chain.push_back(d.where); for(auto const & fr: d.trace) r.chain.push_back(fr.where); }
+      bool missing_main = false;
+      try { lang.emplace(db, root, std::vector<std::string>{path}, mode::check); missing_main = !lang->setup_error && !lang->functions.contains(lang->sym("main")); lang->run_main(); } catch(diagnostic const & d) { r.failed = true; r.what = d.what(); if(auto n = ro::diagnostic_owner(db, d.where)) r.owners.push_back(n); for(auto const & fr: d.trace) if(auto n = ro::diagnostic_owner(db, fr.where)) r.owners.push_back(n); }
       catch(std::exception const & d) { r.failed = true; r.what = d.what(); }
       if(lang) for(auto const & [f, keys]: lang->layers)
         for(auto const & [key, l]: keys) {
@@ -239,17 +238,10 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
           out.ct = l.ct;
           std::ranges::sort(out.derived);
         }
+      if(r.failed && missing_main && r.what == "нет функции main") r.owners.push_back(root); // контекст конкретного run_main, до elaborate
       if(r.failed) ++check_errors;
       verify("после check"); // проверка порождает узлы (ct-мутации, emit, ref, позднее интернирование имён)
       return r;
-    };
-    // The function whose text (span) contains the diagnostic's place; empty - undefined.
-    auto fn_at = [&](span w) -> node_id {
-      node_id best;
-      for(uint32_t i = 0; i < db.size(); ++i)
-        if(db.is<n_fn>(node_id(i)) && db[node_id(i)].where.source == w.source && db[node_id(i)].where.begin <= w.begin && w.end <= db[node_id(i)].where.end)
-          if(!best || db[node_id(i)].where.end - db[node_id(i)].where.begin < db[best].where.end - db[best].where.begin) best = node_id(i);
-      return best;
     };
     auto before = run_check();
     if(before.failed) fprintf(stderr, "%s: check (до правок): %s\n", path.c_str(), before.what.c_str());
@@ -374,7 +366,6 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       if(delta.empty()) delta = {target};
       link = target;
       auto impact_before = db.impact_of(delta);
-      ro::model pre_edit(db); // the reference model BEFORE the edit: callers that the edit took away (a call replaced by a literal: the callee's instance disappeared)
       db.mutate(target, std::move(replacement), src);
       db.link_parents(link);
       edit_hi = db.size();
@@ -386,56 +377,22 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       auto after = run_check();
       std::vector<node_id> actual;
       std::map<uint32_t, std::string> why;
-      std::optional<ro::model> post_edit; // the reference model over the database after the edit: the calling functions
-      auto callers = [&](node_id g) {
-        if(!post_edit) post_edit.emplace(db);
-        auto out = post_edit->dependents(g);
-        if(g.value < pre_edit.db.size()) for(auto c: pre_edit.dependents(g)) out.push_back(c); // the same database: the nodes before the edit; reading through the model taken before the mutation
-        ast_db::unique_nodes(out);
-        return out;
-      };
-      // A change in the layer (or the diagnostics) of function g is explained by tiers (the lower the number, the stricter):
-      //   0 - g is in impact;
-      //   1 - g calls the edited function (the edit itself changes its text: the argument values and types come down from it, not by name);
-      //   2 - g calls a function from impact that the edit did not change (a transitive downward flow; for an edit of an implicit hook's body it is off -
-      //       it is exactly the masking of a missed dependency: a common caller in impact would "forgive" any missed function).
-      // No tier - an I2 violation. Tiers 1 and 2 are counted separately and printed in the result.
       bool hook_case = kind == 9;
-      node_list direct; // the functions whose text the edit itself changes: a body, a signature, a name, a new/deleted function
-      for(auto x: delta) { if(db.is<n_fn>(x)) direct.push_back(x); else if(auto f = db.enclosing_fn(x)) direct.push_back(f); }
-      if(auto f = db.enclosing_fn(target)) direct.push_back(f);
-      ast_db::unique_nodes(direct);
-      auto explained = [&](node_id g) -> std::pair<bool, int> { // (explained, tier)
-        if(std::ranges::contains(impact, g)) return {true, 0};
-        if(kind == 8) return {false, 0}; // signature: no forgiveness through a caller
-        auto cs = callers(g);
-        for(auto c: cs) if(std::ranges::contains(direct, c)) return {true, 1};
-        if(!hook_case) for(auto c: cs) if(std::ranges::contains(impact, c)) return {true, 2};
-        return {false, 0};
-      };
+      auto explained = [&](node_id g) { return std::ranges::contains(impact, g); };
       bool same_failure = before.failed == after.failed && before.what == after.what;
-      // Diagnostics: the place of an error may be in the callee (a new instance by the argument types or values), and the cause higher up the instantiation
-      // chain. A changed diagnostic is "explained" if impact contains a function of its chain (the error place, the trace frames)
-      // or a caller of such a function; the layers of the functions below are checked by the same rule (see explained).
+      // A changed diagnostic requires a function of the chain directly in impact.
       bool diag_explained = true;
       if(!same_failure) {
         ++diag_changed;
         fprintf(stderr, "%s: И2 вид %d: диагностика изменилась: было [%.70s] стало [%.70s]\n", path.c_str(), kind, before.failed ? before.what.c_str() : "нет", after.failed ? after.what.c_str() : "нет");
-        node_list chain_fns;
-        for(auto const & w: before.chain) if(auto f = fn_at(w)) chain_fns.push_back(f);
-        for(auto const & w: after.chain) if(auto f = fn_at(w)) chain_fns.push_back(f);
-        diag_explained = chain_fns.empty() || before.failed; // a program with an error before the edit: a change of the error is counted but not checked
-        for(auto f: chain_fns) if(explained(f).first) diag_explained = true;
-        if(!diag_explained) {
-          std::string names, imp;
-          for(auto f: chain_fns) { names += text_of(db.as<n_fn>(f).name) + "(вызывающих " + std::to_string(callers(f).size()) + ") "; }
-          for(auto f: impact) if(db.is<n_fn>(f) && db.within(f, root)) imp += text_of(db.as<n_fn>(f).name) + " ";
-          fprintf(stderr, "%s: И2 вид %d: ни одна функция цепочки диагностики (и ни один её вызывающий) не входит в impact, правка узла %u; цепочка: %s; impact программы: %s\n", path.c_str(), kind, target.value, names.c_str(), imp.c_str());
-        }
+        // Every failed outcome is checked separately; an unknown origin is an oracle error.
+        diag_explained = (!before.failed || ro::diagnostic_covered(db, before.owners, impact)) &&
+          (!after.failed || ro::diagnostic_covered(db, after.owners, impact));
+        if(!diag_explained) fprintf(stderr, "%s: И2 вид %d: UNVERIFIED/ошибка оракула: происхождение диагностики неизвестно либо владелец отсутствует в impact, правка %u\n", path.c_str(), kind, target.value);
       }
       // An independent full comparison "actual": a full recount of check before and after, ALL the program's functions, by the instance keys of both runs:
       // a change in the layer of a common instance, new and vanished instances (the set - only if both checks reached the end: a check abort
-      // itself changes the set). The prelude's functions are outside the strict check (their layers depend on the caller's expressions), a counter only.
+      // itself changes the set). The prelude's functions are included on a par with the program's functions.
       bool both_ok = !before.failed && !after.failed;
       std::set<uint32_t> changed_fns;
       for(auto const & [f, keys]: after.layers) changed_fns.insert(f);
@@ -468,11 +425,11 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
           }
         }
         if(note.empty()) continue;
-        if(!db.within(node_id(f), root)) { ++lib_changed; continue; }
+        if(!db.within(node_id(f), root)) ++lib_changed;
         ++full_actual;
         if(set_changed) ++inst_set_changes;
         why[f] = note;
-        if(auto [ok, how] = explained(node_id(f)); ok) { if(how == 0) ++full_direct; else if(how == 1) ++tier1; else ++tier2; continue; }
+        if(explained(node_id(f))) ++full_direct;
         actual.push_back(node_id(f));
       }
       ast_db::unique_nodes(actual);
@@ -485,10 +442,7 @@ rdeps_probe(str path, i64 seed, i64 steps, i64 i2cases, i64 i2offset) => native 
       if(kind == 8) ++sig_cases;
       if(hook_case) ++hook_cases;
       if(includes) { ++supers; if(impact.size() > actual.size()) ++strict; }
-      else if(has_ct_block && !hook_case && kind != 8) { // ct code reads and changes the AST by reflection (functions_named, f.body...): the dependency is not by name - RA-1b
-        ++ct_gap;
-        fprintf(stderr, "%s: И2 вид %d: расхождение в программе с ct-блоками — зависимость ct-кода от АСТ по рефлексии, RA-1b (вне строгой проверки)\n", path.c_str(), kind);
-      } else { ++bad2; if(hook_case) ++hook_bad; }
+      else { ++bad2; if(hook_case) ++hook_bad; }
       db.rollback(src);
       verify("И2 после отката");
     }
@@ -527,6 +481,6 @@ check_cli(files) {
     if((r[1] + r[2] + r[3] + r[4] + r[8]) > 0) write_out(paths[i] + ": И1-живой=" + text(r[1]) + " И1-эталон=" + text(r[2]) + " запросы=" + text(r[3]) + " И3=" + text(r[4]) + " И2=" + text(r[8]) + "\n");
   }
   bad = total[1] + total[2] + total[3] + total[4] + total[8];
-  write_out("rdeps: файлов " + text(paths.size) + ", шагов " + text(total[0]) + ", сверок эталона " + text(total[11]) + ", сверок запросов " + text(total[12]) + ", И1-живой=" + text(total[1]) + ", И1-эталон=" + text(total[2]) + ", запросы=" + text(total[3]) + ", И3=" + text(total[4]) + ", И2: случаев " + text(total[5]) + ", надмножеств " + text(total[6]) + ", строгих " + text(total[7]) + ", нарушений " + text(total[8]) + ", диагностик изменилось " + text(total[9]) + ", новых узлов правок " + text(total[10]) + ", ошибок разбора " + text(total[13]) + ", ошибок check " + text(total[14]) + ", библиотечных экземпляров изменилось (вне строгой проверки) " + text(total[15]) + ", полная сверка actual: изменилось функций программы " + text(total[20]) + " (в impact " + text(total[21]) + ", поток вниз от правленой функции " + text(total[16]) + ", поток вниз от затронутой " + text(total[18]) + ", изменений набора экземпляров " + text(total[22]) + "), правок сигнатуры " + text(total[23]) + ", правок тела неявного хука " + text(total[19]) + " нарушений среди них " + text(total[24]) + ", вне строгой проверки из-за ct-блоков (RA-1b) " + text(total[17]) + "\n");
+  write_out("rdeps: файлов " + text(paths.size) + ", шагов " + text(total[0]) + ", сверок эталона " + text(total[11]) + ", сверок запросов " + text(total[12]) + ", И1-живой=" + text(total[1]) + ", И1-эталон=" + text(total[2]) + ", запросы=" + text(total[3]) + ", И3=" + text(total[4]) + ", И2: случаев " + text(total[5]) + ", надмножеств " + text(total[6]) + ", строгих надмножеств " + text(total[7]) + ", нарушений " + text(total[8]) + ", диагностик изменилось " + text(total[9]) + ", новых узлов правок " + text(total[10]) + ", ошибок разбора " + text(total[13]) + ", ошибок check " + text(total[14]) + ", библиотечных экземпляров изменилось (включены в И2) " + text(total[15]) + ", полная сверка actual: изменилось функций (включая библиотеки) " + text(total[20]) + " (в impact " + text(total[21]) + ", изменений набора экземпляров " + text(total[22]) + "), правок сигнатуры " + text(total[23]) + ", правок тела неявного хука " + text(total[19]) + " нарушений среди них " + text(total[24]) + "\n");
   if(bad == 0) 0 else 1
 }

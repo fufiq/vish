@@ -1130,6 +1130,18 @@ struct ast_db {
   // together with B, so the walk continues from the descendant node - through its name to the consumers of D and to its descendants.
   node_list impact_of(node_span changed_nodes) const {
     node_list todo(changed_nodes.begin(), changed_nodes.end()), out;
+    // Instances depend on the caller's inputs too: we close the graph both ways.
+    // Detaching a call requires a union of the answers before and after the edit.
+    std::vector<node_list> callees(size());
+    for(auto f: fn_nodes) if(is<n_fn>(node_id(f)))
+      for(auto caller: dependents_of_fn(node_id(f))) callees[caller.value].push_back(node_id(f));
+    // ct reflection may read an arbitrary AST: until there is a read-set, the whole database.
+    bool reflection = false;
+    for(uint32_t j = 1; j < size(); ++j)
+      if(is<n_ct>(node_id(j)) && !in_prelude(node_id(j))) { reflection = true; break; }
+#ifndef VISH_RA1_MUTANT_NO_CT_COVER
+    if(reflection && !changed_nodes.empty()) for(auto f: fn_nodes) todo.push_back(node_id(f));
+#endif
     std::vector<uint8_t> seen(size(), 0);
     for(size_t i = 0; i < todo.size(); ++i) {
       auto n = todo[i];
@@ -1138,6 +1150,9 @@ struct ast_db {
       if(is<n_fn>(n) || is<n_module>(n)) out.push_back(n);
       if(auto p = nodes[n].parent) todo.push_back(p);
       for(auto d: dependents_of_fn(n)) todo.push_back(d);
+#ifndef VISH_RA1_MUTANT_NO_DOWN
+      for(auto f: callees[n.value]) todo.push_back(f);
+#endif
       auto users = users_of(n);
       if(auto name = dependency_name(n))
         for(auto u: users)

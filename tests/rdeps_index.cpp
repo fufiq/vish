@@ -25,6 +25,67 @@ static void agree(ast_db & db, node_list probes) {
 }
 
 int main() {
+  { // B6: main -> h -> g -> f; removing the call of h keeps f/g in the union of impact before/after.
+    ast_db graph;
+    auto add_fn = [&](char const * name, node_id body) {
+      n_fn f; f.name = graph.strings.intern(name); f.body = body;
+      return graph.add(f, {});
+    };
+    auto leaf = graph.add(n_int{1}, {});
+    auto f = add_fn("f", leaf);
+    auto fu = graph.add(n_ident{graph.strings.intern("f")}, {});
+    auto g = add_fn("g", fu);
+    auto gu = graph.add(n_ident{graph.strings.intern("g")}, {});
+    auto h = add_fn("h", gu);
+    auto hu = graph.add(n_ident{graph.strings.intern("h")}, {});
+    auto main = add_fn("main", hu);
+    auto isolated = add_fn("isolated", graph.add(n_int{7}, {}));
+    n_module m; m.items = {f, g, h, main, isolated};
+    auto root = graph.add(m, {}); graph.link_parents(root);
+    auto expected = node_list{f, g, h, main, root};
+    // A hand-written expectation checks the downward direction and the absence of an unrelated function.
+    assert(graph.impact_of(node_list{hu}) == expected);
+    assert(ro::model(graph).impact(node_list{hu}) == expected);
+    auto before = graph.impact_of(node_list{hu});
+    graph.mutate(hu, n_int{0}, 999);
+    auto after = graph.impact_of(node_list{hu});
+    assert(!std::ranges::contains(after, f));
+    for(auto n: after) before.push_back(n);
+    ast_db::unique_nodes(before);
+    assert(before == expected);
+    agree(graph, {f, g, h, main, root});
+    graph.rollback(999);
+    assert(graph.impact_of(node_list{hu}) == expected);
+    ast_db replay; replay.replay(graph.journal());
+    assert(replay.impact_of(node_list{hu}) == expected);
+    // Arbitrary ct reflection requires coverage and unrelated functions.
+    auto ct = graph.add(n_ct{graph.add(n_int{0}, {})}, {});
+    auto module = graph.copy_of<n_module>(root); module.items.push_back(ct);
+    graph.replace(root, module); graph.link_parents(root);
+    assert(std::ranges::contains(graph.impact_of(node_list{hu}), isolated));
+    agree(graph, {hu, isolated, root});
+  }
+  { // A module-level ct diagnostic: its own origin, without substituting main.
+    ast_db d; d.pinned_source = 7;
+    auto expr = d.add(n_ident{d.strings.intern("helper")}, {20, 26, 7});
+    auto ct = d.add(n_ct{expr}, {15, 30, 7});
+    n_fn f; f.name = d.strings.intern("helper");
+    auto helper = d.add(f, {1, 10, 7});
+    n_module m; m.items = {helper, ct};
+    auto module = d.add(m, {0, 40, 7}); d.link_parents(module);
+    auto owner = ro::diagnostic_owner(d, {20, 26, 7});
+    assert(owner == module);
+    assert(ro::diagnostic_owner(d, {2, 4, 7}) == helper);
+    assert(!ro::diagnostic_owner(d, {}));
+    assert(!ro::diagnostic_owner(d, {20, 26, 8}));
+    auto impact = d.impact_of(node_list{helper});
+    assert(ro::diagnostic_covered(d, node_list{owner}, impact));
+    assert(!ro::diagnostic_covered(d, node_list{helper, module}, node_list{module}));
+    assert(ro::diagnostic_covered(d, node_list{helper, module}, node_list{helper}));
+    std::erase(impact, module); // a negative check: functions do not replace the module
+    assert(!ro::diagnostic_covered(d, node_list{owner}, impact));
+    assert(!ro::diagnostic_covered(d, {}, node_list{module}));
+  }
   ast_db db;
   auto sym = [&](char const * s) { return db.strings.intern(s); };
   auto f_name = sym("f"), g_name = sym("g");

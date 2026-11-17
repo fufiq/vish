@@ -1,0 +1,4 @@
+g(x) => x + x;
+f() => g(1);
+h() => g(f());
+main() { print(f()); print(h()); }

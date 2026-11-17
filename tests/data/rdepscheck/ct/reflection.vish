@@ -1,0 +1,7 @@
+// A separate I2 corpus: reflection reads a function by a string, without a name edge in the AST.
+reflectee() => 1;
+ct {
+  f = functions_named("reflectee")[0];
+  f.body = ast.int{7};
+}
+main() => reflectee();

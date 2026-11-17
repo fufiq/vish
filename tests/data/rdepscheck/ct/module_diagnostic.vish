@@ -1,0 +1,8 @@
+helper(i64 x) => x + 1;
+ct {
+  f = ast.function{"via", array{ast.parameter{"x"}}};
+  f.body = ast.call{ref(helper), array{ast.int{2}}};
+  f.expr_body = true;
+  emit(f);
+}
+main() => via(0);

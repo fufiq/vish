@@ -1,9 +1,11 @@
 // no-jit
 // out: CONSUME true
 // out: EAT_LEAF true
-// out: UNRELATED false
+// out: UNRELATED true
 // out: RESULT 2
 // out: ORACLE true
+// RA-1 B6: a conservative closure through a common main/tooling includes unrelated too.
+// The absence of an unrelated function in an isolated graph is checked by tests/rdeps_index.cpp.
 // B4 (the RA-1 review): a change to Base affects the consumers of Derived and the descendants of the descendant (transitively through n_extend.base).
 use rdeps;
 struct Base { i64 x; }

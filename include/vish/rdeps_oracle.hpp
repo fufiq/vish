@@ -18,6 +18,29 @@
 
 namespace vish::rdeps_oracle {
 
+// The owner of a diagnostic place: a function, otherwise the module of the source text.
+// An empty span does not prove the origin; there is no root substitution here.
+node_id diagnostic_owner(ast_db const & db, span w) {
+  if(w.end <= w.begin) return {};
+  node_id fn, module;
+  for(uint32_t i = 1; i < db.size(); ++i) {
+    node_id n(i);
+    auto s = db[n].where;
+    if(s.source != w.source || s.begin > w.begin || s.end < w.end) continue;
+    auto narrower = [&](node_id best) { return !best || s.end - s.begin < db[best].where.end - db[best].where.begin; };
+    if(db.is<n_fn>(n) && narrower(fn)) fn = n;
+    if(db.is<n_module>(n) && narrower(module)) module = n;
+  }
+  return fn ? fn : module;
+}
+
+bool diagnostic_covered(ast_db const & db, node_list const & owners, node_list const & impact) {
+  bool has_fn = std::ranges::any_of(owners, [&](node_id n) { return db.is<n_fn>(n); });
+  return std::ranges::any_of(owners, [&](node_id n) {
+    return (!has_fn || db.is<n_fn>(n)) && std::ranges::contains(impact, n);
+  });
+}
+
 using entry = std::array<uint32_t, 3>; // a table (0 - name, 1 - the target's node number), a key (a symbol or a number), the use node
 
 // Symbol fields that are NOT a use of someone else's name (every other symbol field is a use and must
@@ -233,26 +256,40 @@ struct model {
   }
   // impact: functions and modules - up the parent chain, the dependents, and the descendants of an entity as its dependents.
   node_list impact(node_list const & changed) const {
-    node_list todo = changed, out;
-    std::vector<uint8_t> seen(db.size(), 0);
-    for(std::size_t i = 0; i < todo.size(); ++i) {
-      auto n = todo[i];
-      if(!n || n.value >= db.size() || seen[n.value]) continue;
-      seen[n.value] = 1;
-      if(std::holds_alternative<n_fn>(db[n].kind) || std::holds_alternative<n_module>(db[n].kind)) out.push_back(n);
-      if(db[n].parent) todo.push_back(db[n].parent);
-      for(auto d: dependents(n)) todo.push_back(d);
-      auto name = name_of(n);
-      if(!name.empty())
-        for(auto u: users(n))
-          if(auto const * e = std::get_if<n_extend>(&db[u].kind); e && e->base && std::string(db.strings.text(e->base)) == name) todo.push_back(u);
-      for(auto u: users(n)) { // a use inside an extension (a field type) - the consumers of the extension itself
-        node_id ext, mod;
-        if(!fn_of(u) && !std::holds_alternative<n_extend>(db[u].kind) && in_fn_or_extend_parent(u, ext, mod) && ext) todo.push_back(ext);
+    // An independent fixed point over a reflective snapshot; the live index is not read.
+    std::set<uint32_t> reached;
+    for(auto n: changed) if(n && n.value < db.size()) reached.insert(n.value);
+    bool reflection = false;
+    for(uint32_t j = 1; j < db.size(); ++j)
+      if(std::holds_alternative<n_ct>(db[node_id(j)].kind) && !in_prelude(node_id(j))) reflection = true;
+    if(reflection && !reached.empty()) for(auto f: fns) reached.insert(f);
+    std::vector<std::pair<uint32_t, uint32_t>> edges;
+    for(auto f: fns) for(auto caller: dependents(node_id(f))) edges.emplace_back(caller.value, f);
+    bool more = true;
+    while(more) {
+      more = false;
+      auto put = [&](node_id n) { if(n && n.value < db.size()) more |= reached.insert(n.value).second; };
+      auto current = reached;
+      for(auto id: current) {
+        node_id n(id);
+        put(db[n].parent);
+        for(auto d: dependents(n)) put(d);
+        auto name = name_of(n);
+        for(auto u: users(n)) {
+          if(!name.empty())
+            if(auto const * e = std::get_if<n_extend>(&db[u].kind); e && e->base && std::string(db.strings.text(e->base)) == name) put(u);
+          node_id ext, mod;
+          if(!fn_of(u) && !std::holds_alternative<n_extend>(db[u].kind) && in_fn_or_extend_parent(u, ext, mod) && ext) put(ext);
+        }
       }
+      for(auto [caller, callee]: edges) if(reached.contains(caller)) put(node_id(callee));
     }
+    node_list out;
+    for(auto id: reached)
+      if(std::holds_alternative<n_fn>(db[node_id(id)].kind) || std::holds_alternative<n_module>(db[node_id(id)].kind)) out.push_back(node_id(id));
     return sorted(std::move(out));
   }
+
 };
 
 // A comparison of the live index's answers with the reference model for the probes declarations. Returns the number of mismatches;
