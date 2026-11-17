@@ -1,6 +1,8 @@
 use parser;
 use reactive;
 use rdeps;
+use tools;
+use lexer;
 // Mine: the if tree is a real derived AST, not a second hand-written longest_op.
 longest_op_gen(ops, tag, reverse, broken) {
   body = ast.name{"best"};
@@ -21,7 +23,7 @@ longest_op_gen(ops, tag, reverse, broken) {
   emit(quote {
     ra4b_generated(s,k,identity) {
       require(identity == #tag);
-      if(#broken) return "wrong";
+      if(#broken) if(tk(s,k).kind == kind_op()) if(tk(s,k).ch == 46) return "";
       t0 = tk(s,k);
       if(t0.kind != kind_op()) return "";
       best = text_range(s.src,t0.from,t0.from + 1);
@@ -72,6 +74,7 @@ main() {
    if(left != right) bad += 1;
    count += 1;
   }
+  oracle_checks = candidate_oracles(f,ops,version == 1,false);
   checking = oracle_impact_ms() - begin;
   s = state("++++x",ops); s.variant = array{f,ops};
   // Warm-up and five pairs of measurements; only the selected part.
@@ -81,7 +84,7 @@ main() {
    begin = oracle_impact_ms(); for(i : range(500)) longest_op_reference(s,0); base += oracle_impact_ms() - begin;
    begin = oracle_impact_ms(); for(i : range(500)) longest_op(s,0); fast += oracle_impact_ms() - begin;
   }
-  rec = derived_revision{"operators",db.revision,"longest_op_gen",text(version + 1),text(ops),array{},derived_reads(db,"tables"),array{array{"longest_op","targeted",count,bad}},array{generation,checking,fast},"кандидат","",array{f}};
+  rec = derived_revision{"operators",db.revision,"longest_op_gen",text(version + 1),text(ops),array{},derived_reads(db,"tables"),array{array{"longest_op","targeted",count,bad},...oracle_checks},array{generation,checking,fast},"кандидат","",array{f}};
   if(fast >= base) rec.reason = "no measured benefit";
   if((generation >= 2000) || (checking >= 5000)) rec.reason = "budget";
   idx = derived_candidate(store,rec);
@@ -115,8 +118,12 @@ main() {
   // The counterexample is obtained by executing a faulty generator.
   wrong = longest_op_gen(ops,version + 11,false,true);
   mismatches = 0;
-  for(src : array{"++++","=>","x"}) { st = state(src,ops); if(wrong(st,0) != longest_op_reference(st,0)) mismatches += 1; }
-  invalid = rec; invalid.result = array{wrong}; invalid.checks = array{array{"longest_op","intentional mutant",3,mismatches}};
+  for(src : array{"x.y","...","."}) { st = state(src,ops); if(wrong(st,0) != longest_op_reference(st,0)) mismatches += 1; }
+  invalid = rec; invalid.result = array{wrong}; invalid.checks = candidate_oracles(wrong,ops,version == 1,true);
+  for(check : invalid.checks) {
+   isolated = invalid; isolated.checks = array{check};
+   ri = derived_candidate(store,isolated); require(!derived_publish(store,db,ri));
+  }
   rejected = derived_candidate(store,invalid); require(!derived_publish(store,db,rejected));
   print("counterexample",mismatches,store.records[rejected].status);
   stale = derived_candidate(store,rec);
@@ -129,7 +136,77 @@ main() {
   set_input(db,"operators",ops);
   require(derived_audit(store));
  }
+ scoped_checks();
+ // A saved ps.variant is synchronous only: changing the store version does not revoke it.
+ saved = state("++++x",ops); saved.variant = array{longest_op_gen(ops,90000,false,false),ops};
+ derived_version(store,"longest_op_gen","3");
+ require(longest_op(saved,0) == "++++");
+ print("saved ps.variant survives generator version: active frames unsupported");
  print("pilot_total_ms",oracle_impact_ms() - total_start);
  print("stop: attempt budget exhausted (2 versions, 2 mutants; 256 checks/variant; 5 x 500 measurements)");
- print("UNVERIFIED: full RA-4b acceptance; ordinary-project speedup; nested syntax corpus");
+ print("UNVERIFIED: full gate; ordinary-project speedup; active frames");
+}
+use parser;
+use tools;
+// Mine: the cache belongs to one synchronous run. There is no global dispatch.
+struct candidate_cache { array tables = array{}; array funcs = array{}; i64 calls = 0; i64 serial = 100; bool broken = false; bool reverse = false; }
+candidate_call(candidate_cache c, s, k) {
+ c.calls += 1;
+ at = -1;
+ for(i : range(c.tables.size)) if(deep_equal(c.tables[i],s.ops)) at = i;
+ if(at < 0) {
+  at = c.tables.size;
+  c.serial += 1;
+  c.tables.push(s.ops);
+  c.funcs.push(longest_op_gen(s.ops,c.serial,c.reverse,c.broken));
+ }
+ c.funcs[at](s,k)
+}
+candidate_oracles(f,ops,reverse,broken) {
+ c = candidate_cache{}; c.broken = broken; c.reverse = reverse; c.serial = (if(reverse) 2000 else 1000) + (if(broken) 10000 else 0); c.tables.push(ops); c.funcs.push(f);
+ variant = array{(s,k) => candidate_call(c,s,k)};
+ corpus = array{array{"operators","1 + 2\nx.y\nf(1 + 2)\n"}};
+ modules = array{array{"local","f() => x.y;\ng() { operator (a) +++ (b) => a + b; 1 +++ 2; }\nh() => 3 + 4;"}};
+
+ results = array{expr_check_cli_result(corpus,variant)};
+
+ results.push(node_check_cli_result(corpus,variant));
+
+ results.push(mod_check_cli_result(modules,variant));
+ checks = array{};
+ for(i : range(results.size)) {
+  r = results[i]; print("candidate oracle",i,"broken",broken,r,"dispatch calls",c.calls,"generated contexts",c.tables.size);
+  require(r[2] > 0);
+  if(broken) require(r[3] > 0) else require(r[0] == 0);
+  checks.push(array{text(i),"candidate dispatch",r[2],r[3]});
+ }
+ require(expr_check_cli_result(corpus)[0] == 0);
+ require(node_check_cli_result(corpus)[0] == 0);
+ require(mod_check_cli_result(modules)[0] == 0);
+ require(c.calls > 0);
+ checks
+}
+
+scoped_checks() {
+ serial = 0;
+ for(src : array{
+ "f(x) { operator (a) <+> (b) => a; syntax blk {body} => ast.loop{body}; blk { x <+> x } } g(x) { x + x }",
+ "f(){syntax zap (x)=>ast.return{x};0} g(){zap(2)}",
+ "f(){operator (a) <+> (b)=>a; { syntax zap (x)=>ast.return{x}; zap(1); } 1 <+> 2;} g()=>1+2;",
+ "f(){syntax zap (x)=>ast.return{x}; operator (a) <+> (b)=>a; zap(; } g()=>1+2;"
+ }) {
+  for(rep : range(2)) {
+   c = candidate_cache{}; c.serial = 20000 + serial; serial += 100;
+   a = module_items_of(src); b = module_items_of(src,array{(s,k)=>candidate_call(c,s,k)});
+   require(a.size == b.size);
+   for(i : range(a.size)) { require(a[i].ok == b[i].ok); require(a[i].why == b[i].why); if(a[i].ok) require(dump_code(a[i].node) == dump_code(b[i].node)); }
+   print("nested module repeat",rep,"items",a.size,"calls",c.calls,"contexts",c.tables.size);
+  }
+ }
+ // block_node restores all tables even after early unsupported/error return.
+ for(src : array{"{operator (a) <+> (b)=>a; syntax zap (x)=>ast.return{x}; zap(1);}","{operator (a) <+> (b)=>a; syntax zap (x)=>ast.return{x}; zap(; }","{operator (a) <+> (b)=>a; syntax nm #x => ast.return{x};}","{operator (a) <+> (b)=>a; [[bad]] 1;}"}) {
+  st = state(src,array{array{},array{},array{}}); old = st.ops; rules = st.rules; cons = st.cons;
+  result = block_node(st); require(deep_equal(st.ops,old)); require(deep_equal(st.rules,rules)); require(deep_equal(st.cons,cons));
+  print("block restore",result.ok,st.error,st.unsupported);
+ }
 }

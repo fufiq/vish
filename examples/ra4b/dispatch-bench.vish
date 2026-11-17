@@ -1,0 +1,10 @@
+use parser;
+use tools;
+main() {
+ for(src : array{"1 + 2 * 3", "f(1 <= 2, x + y)", "(a + b)[2]"}) {
+  for(i : range(20)) expr_of(src);
+  for(rep : range(5)) { start = oracle_impact_ms(); for(i : range(100)) expr_of(src); print("expr",src,rep,oracle_impact_ms()-start); }
+ }
+ corpus = read_text("tests/data/expr_corpus.txt");
+ for(rep : range(6)) { start = oracle_impact_ms(); n=0; for(line : lines_of(corpus)) if(line != "") {expr_of(line);n+=1;} print("P0",rep,n,oracle_impact_ms()-start); }
+}

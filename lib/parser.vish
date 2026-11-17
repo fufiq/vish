@@ -238,6 +238,7 @@ longest_op_reference(ps s, i64 k) {
 }
 // RA-4b, mine: a variant acts only for the exact snapshot of all the scope's tables.
 longest_op(ps s, i64 k) {
+  if(s.variant.size == 1) return s.variant[0](s,k); // an explicit testing dispatch, only in the passed state
   if(s.variant.size > 0) {
     same = true;
     for(j : range(3)) {
@@ -772,19 +773,23 @@ dump_pn(pn x, i64 depth) {
   for(k : x.kids) out = out + dump_pn(k, depth + 1);
   out
 }
-// expression-text → (dump, reason "not supported", error); end of text is mandatory
-expr_of(str src) {
+// an expression text -> (dump, the "not supported" reason, an error); the end of the text is mandatory
+expr_of(str src) => expr_of(src, array{});
+expr_of(str src, variant) {
   r = phase1_of(src);
   s = ps{src, r.tokens, r.match, 0, "", "", syntax_records(), false, -1, false, false, syntax_constructs(), array{array{}, array{}, array{}}, true};
+  s.variant = variant;
   e = value_expr(s); // the reference parses `x = expression` - the right side of `=` (value_expr)
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после выражения");
   array{dump_pn(e, 0), s.unsupported, s.error}
 }
 struct expr_res { pn tree; str unsupported; str error; }
 // the same as expr_of, but the whole pn tree (for display into ast.* nodes)
-expr_of_pn(str src) {
+expr_of_pn(str src) => expr_of_pn(src, array{});
+expr_of_pn(str src, variant) {
   r = phase1_of(src);
   s = ps{src, r.tokens, r.match, 0, "", "", syntax_records(), false, -1, false, false, syntax_constructs(), array{array{}, array{}, array{}}, true};
+  s.variant = variant;
   e = value_expr(s); // the reference parses `x = expression` - the right side of `=` (value_expr)
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после выражения");
   expr_res{e, s.unsupported, s.error}
@@ -807,16 +812,18 @@ expr_reference(str src) => native "cpp" {
   node_id m = p.parse_module();
   return value(dumper(db).dump(m));
 };
-// vish exprcheck <body files>: in line expression; dump on language = C++ dump (unsupported parties and general failures - separately)
-expr_check_cli(es) {
+// vish exprcheck <corpus files>: by the expression in a line; the dump in the language = the C++ dump (sides without support and common refusals - separately)
+expr_check_cli_result(es) => expr_check_cli_result(es, array{});
+expr_check_cli_result(es, variant) {
+  log = "";
   same = 0;
   bad = 0;
   skipped = 0;
   both_fail = 0;
-  for(f : es) {
-    for(line : lines_of(read_text(f))) {
+  for(entry : es) {
+    for(line : lines_of(entry[1])) {
       if(line == "") continue;
-      mine = expr_of(line);
+      mine = expr_of(line, variant);
       ref = expr_reference(line);
       ref_lines = lines_of(ref);
       ref_hole = false;
@@ -828,25 +835,33 @@ expr_check_cli(es) {
       if(mine[2] != "") {
         if(ref_hole) both_fail += 1 else {
           bad += 1;
-          write_out(line + ": vish отказал (" + mine[2] + "), C++ разобрал\n");
+          log = log + (line + ": vish отказал (" + mine[2] + "), C++ разобрал\n");
         }
         continue;
       }
       if(ref_hole) {
         bad += 1;
-        write_out(line + ": C++ отказал, vish разобрал\n");
+        log = log + (line + ": C++ отказал, vish разобрал\n");
         continue;
       }
       body = "";
       for(k : range(ref_lines.size)) if(k >= 6) body = body + (text_range(ref_lines[k], 10, ref_lines[k].size) + "\n");
       if(body == mine[0]) same += 1 else {
         bad += 1;
-        write_out(line + ": расхождение\n--- vish\n" + mine[0] + "--- C++\n" + body);
+        log = log + (line + ": расхождение\n--- vish\n" + mine[0] + "--- C++\n" + body);
       }
     }
   }
-  write_out("парсер, выражения: совпало " + text(same) + ", общих отказов " + text(both_fail) + ", не поддержано " + text(skipped) + ", расхождений " + text(bad) + "\n");
-  if(bad == 0) 0 else 1
+  log = log + ("парсер, выражения: совпало " + text(same) + ", общих отказов " + text(both_fail) + ", не поддержано " + text(skipped) + ", расхождений " + text(bad) + "\n");
+  array{if(bad == 0) 0 else 1, log, same + bad + both_fail, bad}
+}
+
+expr_check_cli(es) {
+  sources = array{};
+  for(f : es) sources.push(array{f, read_text(f)});
+  r = expr_check_cli_result(sources);
+  write_out(r[1]);
+  r[0]
 }
 
 // --- step E3 (the porting plan): the parser tree in Vish -> real ast.* nodes from the language, without new C++ ------------------
@@ -906,7 +921,8 @@ node_of(pn x) {
 }
 // vish nodecheck <corpus>: for an expression in a line - nodes from the Vish parser tree: the structure = the C++ dump (stage0);
 // the chain operators by a round trip: print the nodes -> C++ parse -> dump = the dump of the original line
-node_check_cli_result(es) {
+node_check_cli_result(es) => node_check_cli_result(es, array{});
+node_check_cli_result(es, variant) {
   log = "";
   same = 0;
   bad = 0;
@@ -915,8 +931,13 @@ node_check_cli_result(es) {
     f = entry[0];
     for(line : lines_of(entry[1])) {
       if(line == "") continue;
-      mine = expr_of_pn(line);
+      mine = expr_of_pn(line, variant);
       if(mine.error != "" || mine.unsupported != "") {
+        baseline = expr_of_pn(line);
+        if((variant.size > 0) && ((baseline.error == "") && (baseline.unsupported == ""))) {
+          bad += 1;
+          continue;
+        }
         skipped += 1;
         continue;
       }
@@ -941,7 +962,7 @@ node_check_cli_result(es) {
   }
   log = log + ("узлы из языка: совпало " + text(same) + ", пропущено " + text(skipped) + ", расхождений " + text(bad) + "\n");
   rc = if(bad == 0) 0 else 1;
-  array{rc, log}
+  array{rc, log, same + bad, bad}
 }
 node_check_cli(es) {
   sources = array{};
@@ -2226,10 +2247,12 @@ module_header_skip(str src) {
   s = ps{src, r.tokens, r.match, 0, "", "", array{}, false, -1, false, false, array{}};
   !module_header_ok(s)
 }
-module_items_of(str src) {
+module_items_of(str src) => module_items_of(src, array{});
+module_items_of(str src, variant) {
   r = phase1_of(src);
   items = array{};
   s = ps{src, r.tokens, r.match, 0, "", "", syntax_records(), false, -1, false, false, syntax_constructs(), array{array{}, array{}, array{}}, false, r.errors};
+  s.variant = variant;
   if(!module_header_ok(s)) return items;
   loop {
     if(tk(s, 0).kind == kind_end()) break;
@@ -2289,7 +2312,8 @@ src_has_word(str src, str w) {
   false
 }
 // vish modcheck <files>: element by element - functions from the Vish parser nodes against the C++ dump; a mismatch in the number of elements - the file is skipped
-mod_check_cli_result(files) {
+mod_check_cli_result(files) => mod_check_cli_result(files, array{});
+mod_check_cli_result(files, variant) {
   log = "";
   total = 0;
   supported = 0;
@@ -2307,7 +2331,7 @@ mod_check_cli_result(files) {
       log = log + ("  пропущен файл " + f + ": заголовок module\n");
       continue;
     }
-    mine = module_items_of(src);
+    mine = module_items_of(src, variant);
     ref = ref_items(module_reference(src));
     // after program rules (syntax/operator/use/...) Vish's element boundaries are approximate (skip_item): we compare only the prefix before them
     cut = -1;
@@ -2349,10 +2373,19 @@ mod_check_cli_result(files) {
       }
     }
   }
+  if(variant.size > 0) {
+    baseline = mod_check_cli_result(files);
+    if(baseline[2] > supported) {
+      missing = baseline[2] - supported;
+      bad += missing;
+      supported += missing;
+      log = log + "candidate lost supported module checks\n";
+    }
+  }
   log = log + ("модуль: элементов " + text(total) + ", функций из узлов Vish " + text(supported) + ", совпало " + text(same) + ", расхождений " + text(bad) + ", файлов пропущено (число элементов не сошлось) " + text(skipped_files) + "\n");
   for(j : range(reasons.size)) log = log + ("  не поддержано: " + reasons[j] + " — " + text(counts[j]) + "\n");
   rc = if(bad == 0) 0 else 1;
-  array{rc, log}
+  array{rc, log, supported, bad}
 }
 mod_check_cli(files) {
   sources = array{};
