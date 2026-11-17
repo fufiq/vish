@@ -95,6 +95,9 @@ mode() { # режим: сборка → тесты; release — ещё --a64 и 
     echo "react: код $?" > $L/r_react
     ( $b derivedcheck && sh tests/data/derivedcheck/mutants.sh "$PWD/$b" ) > $L/t_derived.log 2>&1
     echo "derived: код $?" > $L/r_derived
+    # RA-4b: AST generation, candidate oracles, publication/rollback and our own mutant f.
+    ( $b run examples/ra4b/main.vish ) > $L/t_ra4b.log 2>&1
+    echo "ra4b: код $?" > $L/r_ra4b
     # E4a: module functions from the parser nodes in Vish against C++ stage0 (element by element; unsupported ones are skipped)
     ( $b modcheck tests/*.vish tests/data/modcheck/*.vish ) > $L/t_modules.log 2>&1
     echo "modules: код $?" > $L/r_modules
