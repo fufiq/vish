@@ -1,0 +1,25 @@
+// ED-1 baseline: настоящий ввод VM внутри вложенного блока, затем undo/redo.
+// Это проверка поведения, не утверждение о backend или объёме переразбора.
+// program: ed1_inner.vish
+open_view module
+// let: outside @7
+pointer 1 @10 0 2
+key 1 1
+// expect: курсор:     x = 101‸;
+key 1 Escape
+// expect: id=$outside kind="n_int" pieces=["7"]
+run
+// expect: output text="101\n7\n" ok=true
+key 1 z 2
+run
+// expect: output text="10\n7\n" ok=true
+key 1 y 2
+run
+// expect: output text="101\n7\n" ok=true
+
+key 1 z 2
+run
+// expect: output text="10\n7\n" ok=true
+key 1 y 2
+run
+// expect: output text="101\n7\n" ok=true

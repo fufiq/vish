@@ -1081,15 +1081,21 @@ struct editor_server {
       }
     }
     db.link_parents(session.root);
+    if(getenv("VISH_UNDO_TRACE")) for(auto x: ids) fprintf(stderr, "TRACE AST published=%s\n", printer(db).print(x).c_str());
     array_v blank, rest;
     for(uint32_t x: d.blank) blank.push(value(int64_t(x)));
     for(auto & x: d.rest) rest.push(value(x));
     return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
   }
 
-  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading) {
+  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading, node_id target = {}) {
     auto & db = session.db;
     if(db.edits != revision) throw diagnostic("ED-1: stale publication", {});
+    if(getenv("VISH_UNDO_TRACE")) fprintf(stderr, "TRACE publish target=%u text=%s\n", target.value, text.c_str());
+    if(getenv("VISH_UNDO_TRACE")) {
+      for(auto x: old) fprintf(stderr, "TRACE AST before=%s\n", printer(db).print(x).c_str());
+      for(auto x: fresh) fprintf(stderr, "TRACE AST fresh=%s\n", printer(db).print(x).c_str());
+    }
     ++edits;
     parser pr(db, nullptr); // only resolve_refs, no text parsing
     pr.source = db.record_import(text, cat("<черновик #", edits, ">"));
@@ -1104,7 +1110,19 @@ struct editor_server {
       db.set_note(fresh[0], std::move(note));
     }
     node_list ids;
-    if(!module) {
+    if(target) {
+      if(fresh.size() != 1 || !db.is<n_block>(target) || !db.is<n_block>(fresh[0]))
+        throw diagnostic("ED-1: invalid block publication", {});
+      pr.place(db[target].parent, target);
+      projection_rules(pr, projection);
+      node_list all = db.as<n_module>(session.root).items;
+      all.push_back(fresh[0]);
+      pr.resolve_refs(all);
+      bool body_rules = items_trace(target) != items_trace(fresh[0]);
+      graft(target, fresh[0]);
+      if(body_rules) reparse_users(target);
+      ids.assign(old.begin(), old.end());
+    } else if(!module) {
       pr.place(db[fn_root].parent, fn_root);
       projection_rules(pr, projection);
 

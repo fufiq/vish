@@ -53,18 +53,18 @@ use runlog;
 // draft text [draft_begin, draft_end)
 // printed with the module draft: elements [group_at, group_at + group_count); -1 means without
 struct layout { str text; str lead; array node; array piece; array offset; array byte; array nodes; array up; array from; array to; array sig; array sub; array first; array count; array pchild; array pbyte; array plen; array pplace; str ptext; array sorted; array order; array chunk_at; array content_at; i64 items_end; i64 draft_begin; i64 draft_end; i64 group_at; i64 group_count; }
-// Draft (author's decision 2026-10-12): the elements of the module that rule - the text exactly as
-// typed; in the representation of the function - it itself. elements of the draft module
-// (representation of the function - its root) element of the module after the draft (empty - at the
-// end) import of typed text: places node - in it empty lines parsing - for the canon of commentary
-// after the last element - the next revision of the base when opening: journal after it - one edit of
-// the text of the unit to the draft (canon) - for rollback of the accepted imports of typed text node
-// from the id less - were up to the draft (their parenthes - only together with node, O16)
-//
-//
-//
-//
-struct draft { bool open; array items; code next; i64 source; array blank; array rest; i64 since; str before; array sources; i64 known; }
+// The draft (user decision of 2026-10-12): the module elements being edited are text exactly as
+// typed; in a function view it is the function itself.
+// the module elements of the draft (a function view - its root)
+// the module element after the draft (empty - at the end)
+// the import of the typed text: the places of the nodes are in it
+// the blank lines of the parse - for the canon
+// the comments after the last element - to the next one
+// the database revision at opening: the journal after it is one edit
+// the unit's text before the draft (the canon) - for rolling back the accepted
+// the imports of the typed text
+// nodes with a smaller id existed before the draft (their brackets only together with the node, O16)
+struct draft { bool open; array items; code next; i64 source; array blank; array rest; i64 since; str before; array sources; i64 known; code target; i64 target_kind; i64 target_from; i64 target_to; i64 target_revision; }
 struct snapshot { str text; i64 caret; }
 // rollback inside the draft: text and byte of the cursor Accepted editing (closed draft): elements and their
 // text before and after - rollback and repetition of accepted - editing back. *Mine*: History is edited,
@@ -171,7 +171,7 @@ print_splice(layout lay, root, projection, i64 at, old, i64 count, i64 source) =
 };
 // draft: the text of module elements [at, at + old.size) (or of function root) is parsed and put into
 // the database; the result is array{elements, the text import, blank lines, trailing comments, reparsed ones}
-draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, leading) => native "cpp" {
+draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, leading, target) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(array_v::of({})));
   auto & s = *editor_host;
@@ -179,7 +179,7 @@ draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fre
   for(uint32_t k = 0; k < (a[3]).as<array_v>().size(); ++k) old.push_back(vm.code_node((a[3]).as<array_v>().get(k), where));
   node_list fresh;
   for(uint32_t k = 0; k < a[7].as<array_v>().size(); ++k) fresh.push_back(vm.code_node(a[7].as<array_v>().get(k), where));
-  return s.draft_publish(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where), fresh, uint64_t(a[8].as<array_v>().get(0).as<int64_t>()), a[9].as<array_v>());
+  return s.draft_publish(vm, (a[0]).as<bool>(), s.node_or_none(vm, a[1], where), std::string((a[2]).as<str_v>().view()), old, s.node_or_none(vm, a[4], where), uint32_t((a[5]).as<int64_t>()), s.node_or_none(vm, a[6], where), fresh, uint64_t(a[8].as<array_v>().get(0).as<int64_t>()), a[9].as<array_v>(), s.node_or_none(vm, a[10], where));
 };
 node_parent(n) => native "cpp" {
   return vm.code_value(vm.db[vm.code_node(a[0], where)].parent);
@@ -191,7 +191,7 @@ draft_parse(bool as_module, root, str text, old, next, i64 at, projection) {
   snapshot = syntax_context(ctx, before, projection);
   parsed = unit_from_context(text, false, snapshot);
   if(!parsed[0]) throw "ED-1 Vish: " + parsed[2] + parsed[3];
-  draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6])
+  draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6], code())
 }
 // the draft canon in the database: blank lines, trailing comments, keys - one journal edit
 draft_close(bool as_module, i64 at, i64 count, next, blank, rest, i64 since, sources, i64 source) => native "cpp" {
@@ -1029,7 +1029,7 @@ lower(str s) {
 }
 // --- Views: Find, Open, Close ---
 empty_layout() => layout{"", "\n", array{-1}, array{0}, array{0}, array{0}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{}, array{0}, array{}, array{}, "", array{}, array{}, array{}, array{}, 0, 0, 0, 0, -1};
-empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}, 0};
+empty_draft() => draft{false, array{}, code(), 0, array{}, array{}, 0, "", array{}, 0, code(), 1, 0, 0, 0};
 new_view(i64 peer, i64 id, root, str kind) => view{peer, id, root, kind, "", code(), empty_layout(), 0, -1, -1, false, false, false, false, array{}, 0, 0, array{}, empty_draft(), array{}, array{}, array{}, array{}, ""};
 // Representation of the client whose message is served by his number; -1 - no (or closed); number -1 -
 // first open
@@ -2120,15 +2120,34 @@ draft_edit(i64 v, i64 a, i64 b, str ins, i64 caret) {
   views[v].redo = array{};
   array{hn, hp, ho} = caret_of(v, a);
   hint = edit_hint{hn, hp, ho, b - a, code_points(ins), true};
+  views[v].d.target = code();
+  for(u : units_around(v, a, b)) if(!given(views[v].d.target) && (u.kind == 0)) {
+    views[v].d.target = u.node;
+    views[v].d.target_kind = u.kind;
+    views[v].d.target_from = byte_of(v, u.from) - base;
+    views[v].d.target_to = ((byte_of(v, u.to) - base) + ins.size) - (ib - ia);
+    views[v].d.target_revision = revision();
+  }
   commit_draft(v, edited, ia + cp_bytes(ins, caret), r.from, r.to);
   1
 }
 // Disassemble the text of the draft and put its elements in the module (id elements of the same
 // type are saved); send out the layout. From, to - the draft places before editing.
 commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to) {
+  if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE commit input=" + t + " before=" + views[v].d.before + "\n");
   at = if(views[v].kind == "module") group_at(v) else 0;
   old = views[v].d.items;
-  array{ids, source, blank, rest, reparsed} = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
+  result = array{};
+  if(given(views[v].d.target)) {
+    target = views[v].d.target;
+    snapshot = syntax_context(node_parent(target), target, views[v].projection);
+    parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot);
+    if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
+    if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, parsed[6], target);
+  }
+  if(result.size == 0) result = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
+  array{ids, source, blank, rest, reparsed} = result;
+  views[v].d.target = code(); // the boundaries of this edit cannot be applied to the undo snapshot of the whole draft
   views[v].d.items = ids;
   views[v].d.source = source;
   views[v].d.sources.push(source);
@@ -2263,6 +2282,7 @@ finalize_mode(i64 v, i64 mode) {
   cur = byte_of(v, views[v].cursor);
   anc = if(views[v].anchor >= 0) byte_of(v, views[v].anchor) else -1;
   draft_close(as_module, at, count, views[v].d.next, views[v].d.blank, views[v].d.rest, views[v].d.since, views[v].d.sources, views[v].d.source);
+  if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE finalize before=" + views[v].d.before + " draft=" + was + "\n");
   entry = closed{views[v].d.items, views[v].d.next, views[v].d.before, ""};
   views[v].d = empty_draft();
   views[v].undo = array{};
@@ -2275,6 +2295,7 @@ finalize_mode(i64 v, i64 mode) {
   if(as_module) {
     // History of the accepted: the text of the unit after - canon
     entry.after = slice_text(views[v].lay.text, ob, ne);
+    if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE closed after=" + entry.after + "\n");
     if(entry.before != entry.after) {
       if(mode == 1) views[v].undone.push(entry) else views[v].done.push(entry);
       if(mode == 0) views[v].undone = array{};
@@ -2421,7 +2442,7 @@ undo_closed(i64 v, bool again) {
   for(w : range(views.size)) if((w != v) && (given(views[w].root) && views[w].d.open)) for(x : views[w].d.items) if(has_code(e.items, x)) return report("элемент правит другой клиент");
   from_place = place_of_byte(v, ob);
   to_place = place_of_byte(v, oe);
-  views[v].d = draft{true, e.items, e.next, 0, array{}, array{}, revision(), e.after, array{}, node_limit()};
+  views[v].d = draft{true, e.items, e.next, 0, array{}, array{}, revision(), e.after, array{}, node_limit(), code(), 1, 0, 0, 0};
   views[v].anchor = -1;
   views[v].goal = -1;
   views[v].typing = false;
@@ -2429,6 +2450,7 @@ undo_closed(i64 v, bool again) {
   same = 0;
   while((same < e.before.size) && ((same < e.after.size) && (e.before[same] == e.after[same]))) same += 1;
   while((same > 0) && ((same < e.before.size) && ((e.before[same] & 192) == 128))) same -= 1;
+  if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE undo before=" + e.before + " after=" + e.after + "\n");
   commit_draft(v, e.before, same, from_place, to_place);
   finalize_mode(v, if(again) 2 else 1);
 }
