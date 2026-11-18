@@ -1269,7 +1269,7 @@ record_match(ps s) {
       ru_at += 1;
       continue;
     }
-    // 3. {a body} or a branch expression; `{}` / `{x: ...}` in a value is not supported
+    // 3. {a body} or a branch expression
     ru_bv = array{};
     for(i : ru_live) {
       ru_p = if(ru_at < s.rules[i][1].size) s.rules[i][1][ru_at] else "";
@@ -1290,8 +1290,10 @@ record_match(ps s) {
         for(i : ru_bv) if(rule_piece(s, i, ru_at) == "{=") ru_value_slot = true;
         ru_empty = is_close_ch_at(s, 125, 1) && (is_close_ch_at(s, 41, 2) || (is_close_ch_at(s, 125, 2) || (is_op_at(s, ",", 2) || is_op_at(s, ";", 2))));
         if(ru_value_slot && ru_empty) { // {} in a value slot is an empty literal (the author's remark: in all kinds of foo({}), return {} - nothing needs to be written)
+          ru_empty_node = ast.construct{code(), array{}, array{}};
+          source_place(ru_empty_node, s.origin, tk(s, 0).from, tk(s, 1).to);
           s.pos += 2;
-          ru_args.push(ast.construct{code(), array{}, array{}});
+          ru_args.push(ru_empty_node);
         } else if((tk(s, 1).kind == kind_ident()) && is_op_at(s, ":", 2)) { // a record {x: ...} is an expression
           ru_head = s.head;
           s.head = s.pos;
@@ -1923,7 +1925,12 @@ item_node_located_body(ps s) {
     s.head = s.pos;
     e = expression(s);
     // `;` is optional (end_expr_body parser.hpp); a tail record (g() => if(c) return x;) has eaten it itself
-    if((s.error != "") || (s.unsupported != "")) { if(s.unsupported == "") want(s, "тело-выражение"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    if((s.error != "") || (s.unsupported != "")) {
+      s.pos = from;
+      why = if(s.unsupported != "") s.unsupported else s.error;
+      skip_item(s);
+      return ires{false, code(), from, s.pos, why};
+    }
     r = node_of(e);
     if(!r.ok) { want(s, "выражение без узла"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     // Two operands without an operator on one line are a body error,
