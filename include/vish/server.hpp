@@ -1159,6 +1159,7 @@ struct editor_server {
       for(uint32_t i = 0; i < leading.size(); ++i) note.lead.emplace_back(leading.get(i).as<str_v>().view());
       db.set_note(fresh[0], std::move(note));
     }
+    std::unordered_map<uint32_t, node_id> rule_ids;
     node_list ids;
     if(target) {
       if(fresh.size() != 1 || (!(db.is<n_block>(target) && db.is<n_block>(fresh[0])) && !(db.is<n_raw>(target) && db.is<n_raw>(fresh[0]))))
@@ -1169,7 +1170,8 @@ struct editor_server {
       all.push_back(fresh[0]);
       pr.resolve_refs(all);
       bool body_rules = db.is<n_block>(target) && items_trace(target) != items_trace(fresh[0]);
-      graft(target, fresh[0]);
+      graft(target, fresh[0], &rule_ids);
+      remap_draft_rules(target, rule_ids);
       for(uint32_t i = 0; i < locations.size(); ++i) {
         auto row = locations.get(i).as<array_v>();
         db.place(vm.code_node(row.get(0), {}), span{uint32_t(row.get(1).as<int64_t>()), uint32_t(row.get(2).as<int64_t>()), pr.source});
@@ -1188,7 +1190,8 @@ struct editor_server {
           db.replace(fn_root, db[d.items[0]].kind);
           db.place(fn_root, db[d.items[0]].where);
           db.set_note(fn_root, db.note_of(d.items[0]) ? *db.note_of(d.items[0]) : node_note{});
-        } else graft(fn_root, d.items[0]);
+        } else graft(fn_root, d.items[0], &rule_ids);
+        remap_draft_rules(fn_root, rule_ids);
       } else { // stopped being a function - a hole (the same node), until it becomes one again
         db.replace(fn_root, n_hole{text, "не функция"});
         db.place(fn_root, span{0, uint32_t(text.size()), pr.source});
@@ -1213,7 +1216,7 @@ struct editor_server {
       for(uint32_t i = 0; i < d.items.size(); ++i) {
         node_id f = d.items[i];
         if(i >= count) ids.push_back(f);
-        else if(db[old[i]].kind.index() == db[f].kind.index()) ids.push_back(graft(old[i], f)); // nodes of the same kind - the same ids
+        else if(db[old[i]].kind.index() == db[f].kind.index()) ids.push_back(graft(old[i], f, &rule_ids)); // nodes of the same kind - the same ids
         else { // a module element keeps its id even when its kind changes: an edit of the ct code's source rolls back its changes (§7.4)
           db.replace(old[i], db[f].kind);
           db.place(old[i], db[f].where);
@@ -1221,6 +1224,7 @@ struct editor_server {
           ids.push_back(old[i]);
         }
       }
+      for(node_id id: ids) remap_draft_rules(id, rule_ids);
       m.items.erase(m.items.begin() + at, m.items.begin() + at + count);
       m.items.insert(m.items.begin() + at, ids.begin(), ids.end());
       if(!m.blank.empty()) {
@@ -1247,9 +1251,10 @@ struct editor_server {
   // the positions of the old words". Marks, other clients' cursors and layers
   // survive typing. The children lists are matched from the start and from the end - an insertion or
   // a deletion in the middle does not shift the neighbours.
-  node_id graft(node_id o, node_id n) {
+  node_id graft(node_id o, node_id n, std::unordered_map<uint32_t, node_id> * rule_ids = nullptr) {
     auto & db = session.db;
     if(!o || !n || o == n || db[o].kind.index() != db[n].kind.index()) return n;
+    if(rule_ids && db.is<n_fn>(n)) rule_ids->emplace(n.value, o);
     node_kind k = db[n].kind;
     node_kind const was = db[o].kind;
     auto same = [&](node_id a, node_id b) { return a && b && db[a].kind.index() == db[b].kind.index(); };
@@ -1258,14 +1263,14 @@ struct editor_server {
       T const & y = std::get<T>(was);
       template for(constexpr auto m: fields_of<T>()) {
         using field_t = [:std::meta::type_of(m):];
-        if constexpr(std::is_same_v<field_t, node_id>) x.[:m:] = graft(y.[:m:], x.[:m:]);
+        if constexpr(std::is_same_v<field_t, node_id>) x.[:m:] = graft(y.[:m:], x.[:m:], rule_ids);
         else if constexpr(std::is_same_v<field_t, list<node_id>>) {
           auto & xs = x.[:m:];
           auto const & ys = y.[:m:];
           std::size_t a = 0, b = 0;
-          for(; a < xs.size() && a < ys.size() && same(ys[a], xs[a]); ++a) xs[a] = graft(ys[a], xs[a]);
+          for(; a < xs.size() && a < ys.size() && same(ys[a], xs[a]); ++a) xs[a] = graft(ys[a], xs[a], rule_ids);
           for(; b < xs.size() - a && b < ys.size() - a && same(ys[ys.size() - 1 - b], xs[xs.size() - 1 - b]); ++b)
-            xs[xs.size() - 1 - b] = graft(ys[ys.size() - 1 - b], xs[xs.size() - 1 - b]);
+            xs[xs.size() - 1 - b] = graft(ys[ys.size() - 1 - b], xs[xs.size() - 1 - b], rule_ids);
         }
       }
     }, k);
@@ -1279,8 +1284,30 @@ struct editor_server {
     return o;
   }
 
-  // The canon of the draft: empty lines of the set - layout of the module, comments after the last
-  // element - the next (or end of the module), the draft keys - one edit journal.
+  // form and rule keep a reference as a number, outside the children tree. After graft
+  // a reference to a parsed declaration must lead to its installed ID.
+  void remap_draft_rules(node_id n, std::unordered_map<uint32_t, node_id> const & rule_ids) {
+    if(rule_ids.empty()) return;
+    auto & db = session.db;
+    auto remap = [&](auto & x, uint32_t & link) {
+      if(!link) return;
+      auto it = rule_ids.find(link - 1);
+      if(it == rule_ids.end()) return;
+      link = it->second.value + 1;
+      db.replace(n, std::move(x));
+    };
+    if(db.is<n_call>(n)) {
+      auto c = db.copy_of<n_call>(n);
+      remap(c, c.form);
+    } else if(db.is<n_raw>(n)) {
+      auto r = db.copy_of<n_raw>(n);
+      remap(r, r.rule);
+    }
+    db.for_each_child(n, [&](node_id child) { remap_draft_rules(child, rule_ids); });
+  }
+
+  // The draft canon: the typed blank lines go to the module layout, the comments after the last
+  // element to the next one (or to the end of the module), the draft keys are one journal edit.
   void draft_close(bool module, uint32_t at, uint32_t count, node_id next, std::span<uint32_t const> blank, std::vector<std::string> const & rest, uint64_t since, std::vector<uint32_t> const & sources, uint32_t source) {
     auto & db = session.db;
     if(module) {
