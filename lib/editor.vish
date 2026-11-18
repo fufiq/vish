@@ -171,7 +171,7 @@ print_splice(layout lay, root, projection, i64 at, old, i64 count, i64 source) =
 };
 // draft: the text of module elements [at, at + old.size) (or of function root) is parsed and put into
 // the database; the result is array{elements, the text import, blank lines, trailing comments, reparsed ones}
-draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, leading, target, i64 origin, i64 offset, locations) => native "cpp" {
+draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fresh, snapshot, metadata, target, i64 origin, i64 offset, locations) => native "cpp" {
   for(auto & x: a)
     if(!x.known()) return erase(value(array_v::of({})));
   auto & s = *editor_host;
@@ -189,10 +189,10 @@ draft_parse(bool as_module, root, str text, old, next, i64 at, projection) {
   ctx = if(as_module) root else node_parent(root);
   before = if(old.size > 0) old[0] else next;
   snapshot = syntax_context(ctx, before, projection);
-  parsed = unit_from_context(text, false, snapshot);
+  parsed = draft_group_from_context(text, snapshot);
   if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE draft reason=" + parsed[2] + parsed[3] + "\n");
   if(!parsed[0]) throw "ED-1 Vish: " + parsed[2] + parsed[3];
-  draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6], code(), parsed[7], 0, array{})
+  draft_publish(as_module, root, text, old, next, at, projection, parsed[1], snapshot, array{array{}, parsed[5], parsed[6]}, code(), parsed[4], 0, array{})
 }
 // the draft canon in the database: blank lines, trailing comments, keys - one journal edit
 draft_close(bool as_module, i64 at, i64 count, next, blank, rest, i64 since, sources, i64 source) => native "cpp" {
@@ -2188,7 +2188,7 @@ commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to, locations) {
     parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot, target);
     if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE unit bytes=" + text(views[v].d.target_from) + ":" + text(views[v].d.target_to) + " ok=" + text(parsed[0]) + " reason=" + parsed[2] + parsed[3] + "\n");
     if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
-    if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, parsed[6], target, parsed[7], views[v].d.target_from, locations);
+    if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, array{parsed[6], views[v].d.blank, views[v].d.rest}, target, parsed[7], views[v].d.target_from, locations);
   }
   if(result.size == 0) result = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
   array{ids, source, blank, rest, reparsed} = result;

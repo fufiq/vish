@@ -1088,7 +1088,7 @@ struct editor_server {
     return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
   }
 
-  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & leading, node_id target = {}, int64_t origin = -1, int64_t offset = 0, array_v const & locations = {}) {
+  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & metadata, node_id target = {}, int64_t origin = -1, int64_t offset = 0, array_v const & locations = {}) {
     auto & db = session.db;
     // Opt-in synchronous interleaving probe: a real foreign canonical edit.
     static bool probe_done = false;
@@ -1116,14 +1116,14 @@ struct editor_server {
       auto publication = edits;
       bool rejected = false;
       try {
-        draft_publish(vm, module, fn_root, text, old, next, at, projection, fresh, revision, leading, target, origin, offset, locations);
+        draft_publish(vm, module, fn_root, text, old, next, at, projection, fresh, revision, metadata, target, origin, offset, locations);
       } catch(diagnostic const & e) {
         rejected = std::string(e.what()).find("stale publication") != std::string::npos;
       }
       if(!rejected || db.size() != nodes || db.source_count() != sources || db.journal().size() != journal || db.edits != clock || edits != publication || db.as<n_int>(foreign).value != changed.value)
         throw diagnostic("stale probe: invariant failed", {});
       fprintf(stderr, "ED1_STALE rejected before mutation; foreign=%lld sources=%u journal=%zu\n", (long long)changed.value, sources, journal);
-      auto result = draft_publish(vm, module, fn_root, text, old, next, at, projection, fresh, db.edits, leading, target, origin, offset, locations);
+      auto result = draft_publish(vm, module, fn_root, text, old, next, at, projection, fresh, db.edits, metadata, target, origin, offset, locations);
       if(db.as<n_int>(foreign).value != changed.value) throw diagnostic("stale probe: lost foreign edit", {});
       fprintf(stderr, "ED1_STALE fresh retry accepted\n");
       return result;
@@ -1152,6 +1152,7 @@ struct editor_server {
       }
     }
     // The metadata of a unit already parsed by Vish; the text is not parsed here.
+    auto leading = metadata.get(0).as<array_v>();
     if(!fresh.empty() && leading.size()) {
       node_note note = db.note_of(fresh[0]) ? *db.note_of(fresh[0]) : node_note{};
       note.lead.clear();
@@ -1238,10 +1239,7 @@ struct editor_server {
       }
     }
     db.link_parents(session.root);
-    array_v blank, rest;
-    for(uint32_t x: d.blank) blank.push(value(int64_t(x)));
-    for(auto & x: d.rest) rest.push(value(x));
-    return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
+    return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), metadata.get(1), metadata.get(2), codes(vm, reparsed)}));
   }
 
   // The nodes of the new subtree that match old ones by place and kind get the old ids:

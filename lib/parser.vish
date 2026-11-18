@@ -135,6 +135,40 @@ phase1_of(str src) {
   if(broken) toks = close_by_indent(src, toks, errors);
   phase1{toks, rematch(toks), errors, broken}
 }
+// The draft: like end_unfinished_by_lines, we separate the next instruction
+// with an empty lexeme ';' with a reason. The ranges stay bytes of the source text.
+draft_lines(str src, phase1 r) {
+  out = array{};
+  opens = array{123};
+  starts = array{-1};
+  depth = 0;
+  for(t : r.tokens) {
+    ind = indent_of(src, t.from);
+    first = (t.kind != kind_end()) && ((line_begin(src, t.from) + ind) == t.from);
+    if(first && ((opens[depth] == 123) && ((starts[depth] >= ind) && (t.kind != kind_close())))) {
+      prev = out[out.size - 1];
+      attr = (prev.kind == kind_close()) && ((prev.ch == 93) && ((out.size > 1) && ((out[out.size - 2].kind == kind_close()) && (out[out.size - 2].ch == 93))));
+      cont = (prev.kind == kind_open()) || ((prev.kind == kind_close()) && (prev.ch == 125)) || attr || ((prev.kind == kind_op()) && ((prev.ch == 59) || (prev.ch == 44)));
+      if(!cont) {
+        r.errors.push(lex_error{"инструкция не дописана: нет ';' в конце строки", prev.from, prev.to});
+        out.push(ptok{kind_op(), prev.to, prev.to, true, r.errors.size - 1, 59});
+        starts[depth] = -1;
+      }
+    }
+    if(t.kind == kind_open()) {
+      if(starts[depth] < 0) starts[depth] = ind;
+      depth += 1;
+      if(depth == opens.size) { opens.push(t.ch); starts.push(-1); }
+      else { opens[depth] = t.ch; starts[depth] = -1; }
+    } else if(t.kind == kind_close()) {
+      depth -= 1;
+      if(t.ch == 125) starts[depth] = -1;
+    } else if((t.kind == kind_op()) && (t.ch == 59)) starts[depth] = -1
+    else if((t.kind != kind_end()) && (starts[depth] < 0)) starts[depth] = ind;
+    out.push(t);
+  }
+  if(out.size == r.tokens.size) r else phase1{out, rematch(out), r.errors, r.bracket_error}
+}
 dump1(phase1 r) {
   // a buffer, not `out = out + ...` (a square from copies of a growing string; see dump in lib/lexer.vish; the author's "buffer + position")
   out = text_buffer();
@@ -186,7 +220,7 @@ check_cli(args) {
 // lambdas, `name"..."`, trailing call blocks, declarations in parentheses; the prelude's record words and `Name{...}`/`...x` - see record_use and postfix.
 // Real literals are already supported; #name is n_splice without children, like unary_core in C++ (without glued and a direct postfix).
 struct pn { str kind; str info; array kids; array callee; array ops = array{}; str raw = ""; code node = code(); i64 origin = -1; i64 begin = 0; i64 end = 0; } // node - in n_ready: the node is already built (a syntax record) // ops - the infix operators of a run (n_chain): not part of the stage0 dump
-struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; array variant = array{}; i64 origin = -1; }
+struct ps { str src; array toks; array match; i64 pos; str unsupported; str error; array rules = array{}; bool tail = false; i64 head = -1; bool lwv = false; bool custom = false; array cons = array{}; array ops = array{array{}, array{}, array{}}; bool line = false; array lerrs = array{}; array variant = array{}; i64 origin = -1; i64 unfinished = -1; }
 // Source locations are projection metadata, selected by the Vish lexer.
 source_import(str src) => native "cpp" {
   return value(int64_t(vm.db.record_import(std::string(a[0].as<str_v>().view()), "<Vish unit>")));
@@ -195,8 +229,8 @@ source_place(c, i64 origin, i64 begin, i64 end) => native "cpp" {
   if(a[1].as<int64_t>() >= 0) vm.db.place(vm.code_node(a[0], where), span{uint32_t(a[2].as<int64_t>()), uint32_t(a[3].as<int64_t>()), uint32_t(a[1].as<int64_t>())});
   return a[0];
 };
-// Only metadata: comments were selected by the Vish lexer; no host text parse.
-source_notes(c, str src, comments, i64 origin) => native "cpp" {
+// The attachment of the comments of the whole group by Vish ranges (parse_draft/assign).
+source_notes(items, str src, comments, i64 origin, bool group) => native "cpp" {
   parser pr(vm.db, nullptr);
   pr.src = a[1].as<str_v>().view();
   pr.source = uint32_t(a[3].as<int64_t>());
@@ -207,8 +241,19 @@ source_notes(c, str src, comments, i64 origin) => native "cpp" {
     cs.push_back(span{uint32_t(r.get(0).as<int64_t>()), uint32_t(r.get(1).as<int64_t>()), pr.source});
   }
   pr.take_comments(cs, 0);
-  pr.attach_root(vm.code_node(a[0], where));
-  return a[0];
+  node_list nodes;
+  auto items = a[0].as<array_v>();
+  for(uint32_t i = 0; i < items.size(); ++i) {
+    node_id n = vm.code_node(items.get(i), where);
+    nodes.push_back(n);
+    if(a[4].as<bool>()) pr.attach(n);
+    else pr.attach_root(n);
+  }
+  std::vector<std::string> rest;
+  if(a[4].as<bool>()) pr.assign({}, nodes, 0, uint32_t(pr.src.size()), &rest);
+  array_v result;
+  for(auto & note: rest) result.push(value(std::move(note)));
+  return value(std::move(result));
 };
 located(ps s, i64 start, pn x) {
   x.origin = s.origin;
@@ -278,7 +323,8 @@ longest_op(ps s, i64 k) {
   }
   longest_op_reference(s,k)
 }
-is_op_at(ps s, str o, i64 k) => longest_op(s, k) == o;
+draft_semi(ptok t) => (t.kind == kind_op()) && ((t.ch == 59) && (t.from == t.to));
+is_op_at(ps s, str o, i64 k) => if(draft_semi(tk(s, k))) o == ";" else longest_op(s, k) == o;
 is_role(ps s, str sym, i64 role) => has_text(if(role == 0) roles_prefix(s) else if(role == 1) roles_infix(s) else roles_postfix(s), sym);
 run_length(ps s, i64 k) {
   n = 0;
@@ -1349,6 +1395,7 @@ cons_group(ps s, i64 ci, str word, bool head_stmt, cgroup cg) {
   }
   if(cg_packed && (cg.args.size > cg_first)) { fail(s, "в скобках клаузы — только имена"); return false; }
   cg_body = code();
+  cg_body_from = tk(s, 0).from;
   if(is_open_ch(s, 123, 0)) {
     cg_b = if((s.cons[ci].size > 5) && (s.cons[ci][4] == 1)) raw_node(s, s.cons[ci][5]) else block_node(s);
     if(!cg_b.ok) return false;
@@ -1364,7 +1411,10 @@ cons_group(ps s, i64 ci, str word, bool head_stmt, cgroup cg) {
     if(word != "") { fail(s, "после клаузы ожидался блок"); return false; }
     return true;
   }
-  if(cg_binders.size > 0) cg_body = ast.lambda{cg_binders, cg_body, true};
+  if(cg_binders.size > 0) {
+    cg_body = ast.lambda{cg_binders, cg_body, true};
+    source_place(cg_body, s.origin, cg_body_from, tk_at(s, s.pos - 1).to);
+  }
   cg.args.push(cg_body);
   cg.words.push(word);
   if(word == "") cg.tail = true;
@@ -1519,7 +1569,15 @@ local_fn_ahead(ps s) {
 statement_node(ps s) {
   loc_start = s.pos;
   loc_result = statement_node_located_body(s);
-  if(loc_result.ok) source_place(loc_result.node, s.origin, tk_at(s, loc_start).from, if(s.pos > loc_start) tk_at(s, s.pos - 1).to else tk_at(s, loc_start).from);
+  if(loc_result.ok) {
+    from = tk_at(s, loc_start).from;
+    end = if(s.pos > loc_start) tk_at(s, s.pos - 1).to else from;
+    if((s.pos > loc_start) && (draft_semi(tk_at(s, s.pos - 1)) && (s.unfinished != s.pos))) {
+      loc_result.node = ast.hole{slice_text(s.src, from, end), hole_reason(s, loc_start, s.pos, "")};
+      s.unfinished = s.pos;
+    }
+    source_place(loc_result.node, s.origin, from, end);
+  }
   loc_result
 }
 statement_node_located_body(ps s) {
@@ -1597,21 +1655,25 @@ statement_node_located_body(ps s) {
   else if(!ends_with_block_pn(sn_e)) { fail(s, "инструкция без ; перед «" + tk_text(s, 0) + "»"); return nres{false, code()}; }
   sn_r
 }
-// Empty lines before the next token, excluding comment lines (existing notes contract).
-blank_before(ps s) {
-  if(s.pos == 0) return 0;
-  from = tk_at(s, s.pos - 1).to;
-  to = tk(s, 0).from;
-  for(c : lex(s.src).comments) {
+// The blank lines before the first comment of the gap. Between elements
+// we skip the trailing comment of the previous element.
+gap_blank(str src, comments, i64 begin, i64 end, i64 canon, bool skip_tail) {
+  from = begin;
+  to = end;
+  tail = skip_tail;
+  for(c : comments) {
     if((c.from >= from) && (c.from < to)) {
-      same = true;
-      for(k : range(c.from - from)) if(s.src[from + k] == 10) same = false;
-      if(same) from = c.to else { to = c.from; break; }
+      if(tail && (line_begin(src, from) == line_begin(src, c.from))) { from = c.to; tail = false; }
+      else { to = c.from; break; }
     }
   }
   count = 0;
-  for(k : range(to - from)) if(s.src[from + k] == 10) count += 1;
-  if(count > 1) count - 1 else 0
+  for(k : range(to - from)) if(src[from + k] == 10) count += 1;
+  if(count > canon) count - canon else 0
+}
+blank_before(ps s) {
+  if(s.pos == 0) return 0;
+  gap_blank(s.src, lex(s.src).comments, tk_at(s, s.pos - 1).to, tk(s, 0).from, 1, true)
 }
 block_body(ps s) {
   // at `{`
@@ -1717,7 +1779,7 @@ item_node_located_body(ps s) {
   if((attrs.size == 0) && (tk(s, 0).kind == kind_ident()) && !is_keyword_word(tk_text(s, 0)) && is_open_ch(s, 123, 1)) {
     // Name { ... } - an extension; the rules of its functions - constructs/operators - are taken by learn_item: conservative for now (ps.custom)
     ie_r = extension_item(s, "");
-    if(!ie_r.ok) { s.custom = true; why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    if(!ie_r.ok) { why = if(s.unsupported != "") s.unsupported else s.error; s.pos = from; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     s.custom = true;
     return ires{true, ie_r.node, from, s.pos, ""};
   }
@@ -1778,8 +1840,9 @@ item_node_located_body(ps s) {
     rtype = ast.name{tk_text(s, 0)};
     k = 1;
   } else if(!((tk(s, 0).kind == kind_ident()) && is_open_ch(s, 40, 1) && !core_word_text(tk_text(s, 0)))) { // a name is also a record word (core_word parser.hpp)
-    want(s, "не функция, начало «" + tk_text(s, 0) + "»");
-    why = s.unsupported;
+    msg = "не функция, начало «" + tk_text(s, 0) + "»";
+    if(s.line && ((tk(s, 0).kind == kind_bad()) || ((attrs.size == 0) && ((tk(s, 0).kind == kind_ident()) && !is_keyword_word(tk_text(s, 0)))))) fail(s, msg) else want(s, msg);
+    why = if(s.unsupported != "") s.unsupported else s.error;
     skip_item(s);
     return ires{false, code(), from, s.pos, why};
   }
@@ -1793,7 +1856,8 @@ item_node_located_body(ps s) {
     if(c2 < 0) break;
     after = (c2 + 1) - s.pos;
   }
-  if(!(is_op_at(s, "=>", after) || is_open_ch(s, 123, after))) { want(s, "не объявление функции"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+  if(!(is_op_at(s, "=>", after) || is_open_ch(s, 123, after))) {
+    if(s.line && ((tk(s, after).kind == kind_end()) || draft_semi(tk(s, after)))) fail(s, "не объявление функции") else want(s, "не объявление функции"); why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
   s.pos += k + 2;
   params = array{};
   loop {
@@ -1826,6 +1890,14 @@ item_node_located_body(ps s) {
     if((s.error != "") || (s.unsupported != "")) { if(s.unsupported == "") want(s, "тело-выражение"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
     r = node_of(e);
     if(!r.ok) { want(s, "выражение без узла"); s.pos = from; why = if(s.unsupported != "") s.unsupported else s.error; skip_item(s); return ires{false, code(), from, s.pos, why}; }
+    // Two operands without an operator on one line are a body error,
+    // not the start of the next draft element.
+    if(s.line && (!s.tail && ((tk(s, 0).kind == kind_ident()) && ((tk(s, 1).kind == kind_end()) || is_op_at(s, ";", 1))))) {
+      if(line_begin(s.src, tk(s, 0).from) == line_begin(s.src, tk_at(s, s.pos - 1).from)) {
+        fail(s, "лишнее после единицы");
+        return ires{false, code(), from, s.pos, s.error};
+      }
+    }
     if(s.tail) s.tail = false else if(is_op_at(s, ";", 0)) s.pos += 1;
     learn_fn(s, fname, params);
     return ires{true, ast.function{fname, params, rtype, r.node, false, true, attrs, false, array{}}, from, s.pos, ""};
@@ -2256,7 +2328,9 @@ extension_item(ps s, str ex_from) {
       for(a : ex_at.items) ex_attrs.push(a);
       continue;
     }
-    if(ex_at.items.size == 0) { want(s, "в расширении ожидались поле, функция или [[атрибут]]"); return nres{false, code()}; }
+    if(ex_at.items.size == 0) {
+      msg = "в расширении ожидались поле, функция или [[атрибут]]";
+      if(s.line && ((tk(s, 0).kind == kind_ident()) && is_op_at(s, "=", 1))) fail(s, msg) else want(s, msg); return nres{false, code()}; }
     for(a : ex_at.items) ex_attrs.push(a);
     if(is_op_at(s, ";", 0)) s.pos += 1;
   }
@@ -2937,6 +3011,7 @@ raw_node(ps s, i64 rule) {
   items = array{};
   while(s.pos < close) {
     t = tk(s, 0);
+    if(draft_semi(t)) { s.pos += 1; continue; }
     lit = tk_text(s, 0);
     n = code();
     if(t.kind == kind_open()) {
@@ -2964,17 +3039,61 @@ raw_node(ps s, i64 rule) {
   source_place(n, s.origin, start.from, end);
   nres{true, n}
 }
+draft_group_from_context(str src, snapshot) {
+  if(!syntax_context_current(snapshot)) return array{false, array{}, "устаревший syntax_context", "", -1, array{}, array{}};
+  r = draft_lines(src, phase1_of(src));
+  s = ps{src, r.tokens, r.match, 0, "", "", snapshot[1], false, -1, false, false, snapshot[2], snapshot[3], true, r.errors};
+  s.origin = source_import(src);
+  items = array{};
+  comments = lex(src).comments;
+  blank = array{};
+  end = 0;
+  while(tk(s, 0).kind != kind_end()) {
+    start = s.pos;
+    from = tk(s, 0).from;
+    blank.push(gap_blank(src, comments, end, from, if(items.size == 0) 1 else 2, items.size > 0));
+    rules = s.rules;
+    cons = s.cons;
+    ops = s.ops;
+    custom = s.custom;
+    it = item_node(s);
+    if(s.unsupported != "") return array{false, items, s.unsupported, s.error, s.origin, blank, array{}};
+    node = it.node;
+    if(!it.ok || (s.error != "") || ((s.pos > start) && draft_semi(tk_at(s, s.pos - 1)))) {
+      s.pos = start;
+      skip_stmt(s);
+      if(s.pos == start) s.pos += 1;
+      end = tk_at(s, s.pos - 1).to;
+      node = ast.hole{slice_text(src, from, end), hole_reason(s, start, s.pos, s.error)};
+      source_place(node, s.origin, from, end);
+      s.rules = rules;
+      s.cons = cons;
+      s.ops = ops;
+      s.custom = custom;
+      s.error = "";
+      s.tail = false;
+      s.lwv = false;
+    } else end = tk_at(s, s.pos - 1).to;
+    items.push(node);
+  }
+  blank.push(gap_blank(src, comments, end, src.size, if(items.size == 0) 1 else 2, false));
+  spans = array{};
+  for(c : comments) spans.push(array{c.from, c.to});
+  rest = source_notes(items, src, spans, s.origin, true);
+  array{true, items, "", "", s.origin, blank, rest}
+}
 unit_from_context(str src, bool block, snapshot) => unit_from_context(src, block, snapshot, code());
-// An explicit result: array{ok, node, unsupported, error, backend, bytes}.
 // The snapshot is checked before the first AST constructor; there is no silent C++ fallback.
 unit_from_context(str src, bool block, snapshot, target) {
   if(!syntax_context_current(snapshot)) return array{false, code(), "устаревший syntax_context", "", "Vish", src.size};
+  raw = block && (given(target) && (code_kind(target) == ast.raw));
   r = phase1_of(src);
-  s = ps{src, r.tokens, r.match, 0, "", "", snapshot[1], false, -1, false, false, snapshot[2], snapshot[3], true, r.errors}; // live context has the complete operator table
+  if(block && (given(target) && !raw)) r = draft_lines(src, r);
+  s = ps{src, r.tokens, r.match, 0, "", "", snapshot[1], false, -1, false, false, snapshot[2], snapshot[3], true, r.errors};
   s.origin = source_import(src);
   ok = false;
   node = code();
-  if(block) { n = if(given(target) && (code_kind(target) == ast.raw)) raw_node(s, node_field(target, "rule")) else block_node(s); ok = n.ok; node = n.node; }
+  if(block) { n = if(raw) raw_node(s, node_field(target, "rule")) else block_node(s); ok = n.ok; node = n.node; }
   else { n = item_node(s); ok = n.ok; node = n.node; }
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после единицы");
   // Like recover_statement when parsing a draft group: an erroneous element
@@ -2990,10 +3109,12 @@ unit_from_context(str src, bool block, snapshot, target) {
     }
   }
   comments = array{};
-  for(c : lex(src).comments) comments.push(array{c.from, c.to});
-  if(ok) source_notes(node, src, comments, s.origin);
   leading = array{};
-  for(c : lex(src).comments) if(c.to <= r.tokens[0].from) leading.push(slice_text(src, c.from, c.to));
+  for(c : lex(src).comments) {
+    comments.push(array{c.from, c.to});
+    if(c.to <= r.tokens[0].from) leading.push(slice_text(src, c.from, c.to));
+  }
+  if(ok) source_notes(array{node}, src, comments, s.origin, false);
   array{ok && ((s.error == "") && (s.unsupported == "")), node, s.unsupported, s.error, "Vish", src.size, leading, s.origin}
 }
 
