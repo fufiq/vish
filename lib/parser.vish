@@ -1690,7 +1690,7 @@ statement_node_located_body(ps s) {
     s.pos += 1;
     s.lwv = false;
   } else if(is_close_ch(s, 125)) s.lwv = true
-  else if(!ends_with_block_pn(sn_e)) { fail(s, "инструкция без ; перед «" + tk_text(s, 0) + "»"); return nres{false, code()}; }
+  else if(!ends_with_block_pn(sn_e)) { fail(s, "ожидалось ';'"); return nres{false, code()}; }
   sn_r
 }
 // The blank lines before the first comment of the gap. Between elements
