@@ -190,6 +190,7 @@ draft_parse(bool as_module, root, str text, old, next, i64 at, projection) {
   before = if(old.size > 0) old[0] else next;
   snapshot = syntax_context(ctx, before, projection);
   parsed = unit_from_context(text, false, snapshot);
+  if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE draft reason=" + parsed[2] + parsed[3] + "\n");
   if(!parsed[0]) throw "ED-1 Vish: " + parsed[2] + parsed[3];
   draft_publish(as_module, root, text, old, next, at, projection, array{parsed[1]}, snapshot, parsed[6], code(), parsed[7], 0, array{})
 }

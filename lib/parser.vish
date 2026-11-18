@@ -2979,7 +2979,7 @@ unit_from_context(str src, bool block, snapshot, target) {
   if((s.error == "") && (tk(s, 0).kind != kind_end())) fail(s, "лишнее после единицы");
   // Like recover_statement when parsing a draft group: an erroneous element
   // stays a text hole. An unsupported form is not masked by recovery.
-  if(!block && (!ok && ((s.error != "") && (s.unsupported == "")))) {
+  if(!block && ((s.error != "") && (s.unsupported == ""))) {
     s.pos = 0;
     skip_stmt(s);
     if(tk(s, 0).kind == kind_end()) {
