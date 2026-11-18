@@ -2061,16 +2061,56 @@ struct ast_db {
     while(from < oplog.size() && oplog[from].second.revision < since) ++from;
     if(from == oplog.size()) return;
     std::size_t imports = 0;
-    for(std::size_t i = from; i < oplog.size(); ++i) imports += std::holds_alternative<j_import>(oplog[i].second.op);
+    for(std::size_t i = from; i < oplog.size(); ++i) {
+      auto const & op = oplog[i].second.op;
+      if(std::holds_alternative<j_import>(op)) ++imports;
+      else if(auto g = std::get_if<j_gap>(&op)) imports += g->imports;
+    }
     uint32_t source = uint32_t(source_count() - imports);
     std::set<uint32_t> used; // draft imports referred to by node wood
     for(uint32_t x = 0; x < nodes.size(); ++x)
       if(std::ranges::contains(drafts, nodes[node_id(x)].where.source) && !used.contains(nodes[node_id(x)].where.source) && installed(node_id(x))) used.insert(nodes[node_id(x)].where.source);
-    auto draft_source = [&](uint32_t x) { return x != keep && std::ranges::contains(drafts, x) && !used.contains(x); };
-    auto garbage = [&](uint32_t id) {
-      node_id n(id);
-      return id < nodes.size() && std::ranges::contains(drafts, nodes[n].where.source) && !born_has(id) && !installed(n);
+    // The Vish constructors produce derived nodes at the constructor's place. After
+    // source_place the node already belongs to the draft's source and is not suitable for
+    // a repeated take by the place of birth. It can be kept by installation into
+    // the tree or a reference from a record that we keep for replay.
+    std::set<uint32_t> disposable;
+    for(std::size_t i = from; i < oplog.size(); ++i)
+      if(auto x = std::get_if<j_add>(&oplog[i].second.op); x
+         && std::ranges::contains(drafts, nodes[node_id(x->id)].where.source)
+         && (!born_has(x->id) || x->where.source != nodes[node_id(x->id)].where.source)
+         && !installed(node_id(x->id))) disposable.insert(x->id);
+    auto references = [&](node_kind const & k, auto && take) {
+      auto child = [&](node_id n) { take(n.value); };
+      std::visit([&](auto const & v) { for_each_child_of(v, child); }, k);
+      ref_keys(k, [&](uint32_t table, uint32_t key) { if(table == 1) take(key); });
+      if(auto c = std::get_if<n_call>(&k); c && c->form) take(c->form - 1);
+      if(auto r = std::get_if<n_raw>(&k); r && r->rule) take(r->rule - 1);
     };
+    auto retain = [&](auto && self, uint32_t id) -> void {
+      if(!disposable.erase(id)) return;
+      used.insert(nodes[node_id(id)].where.source);
+      references(nodes[node_id(id)].kind, [&](uint32_t child) { self(self, child); });
+    };
+    auto keep_node = [&](uint32_t id) { retain(retain, id); };
+    // The references in the journal may differ from the current ones: on replay the record
+    // of a mutation or of setting a parent sees the state of its own moment.
+    for(std::size_t before = 0; before != disposable.size();) {
+      before = disposable.size();
+      for(std::size_t i = from; i < oplog.size(); ++i) {
+        std::visit([&](auto const & x) {
+          using T = std::remove_cvref_t<decltype(x)>;
+          if constexpr(std::is_same_v<T, j_mutate>) {
+            keep_node(x.id);
+            keep_node(x.source);
+          } else if constexpr(std::is_same_v<T, j_rollback>) keep_node(x.source);
+          if constexpr(requires { x.kind; })
+            if(!disposable.contains(x.id)) references(x.kind, keep_node);
+        }, oplog[i].second.op);
+      }
+    }
+    auto garbage = [&](uint32_t id) { return disposable.contains(id); };
+    auto draft_source = [&](uint32_t x) { return x != keep && std::ranges::contains(drafts, x) && !used.contains(x); };
     std::vector<std::pair<uint32_t, journal_entry>> out(oplog.begin(), oplog.begin() + std::ptrdiff_t(from));
     // last edit of node in the segment without mutations: (option type, id) → record number
     std::map<std::pair<std::size_t, uint32_t>, std::size_t> last;
@@ -2095,6 +2135,8 @@ struct ast_db {
         if(garbage(x->root)) drop[i] = true;
         else one(x->root);
       } else if(auto * x = std::get_if<j_add>(&op); x && garbage(x->id)) gap[i] = 1;
+      else if(auto * x = std::get_if<j_derived>(&op); x && garbage(x->id)) drop[i] = true;
+      else if(auto * x = std::get_if<j_gap>(&op)) source += x->imports;
       else if(std::holds_alternative<j_import>(op)) {
         if(draft_source(source)) gap[i] = 2;
         ++source;

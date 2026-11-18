@@ -184,12 +184,16 @@ draft_publish(bool as_module, root, str text, old, next, i64 at, projection, fre
 node_parent(n) => native "cpp" {
   return vm.code_value(vm.db[vm.code_node(a[0], where)].parent);
 };
-draft_parse(bool as_module, root, str text, old, next, i64 at, projection) {
-  if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
+draft_source(str text) => native "cpp" {
+  if(!a[0].known()) return erase(value(int64_t(0)));
+  auto & s = *editor_host;
+  return value(int64_t(vm.db.record_import(std::string(a[0].as<str_v>().view()), cat("<черновик #", s.edits + 1, ">"))));
+};
+draft_parse(bool as_module, root, str text, old, next, i64 at, projection, i64 source) {
   ctx = if(as_module) root else node_parent(root);
   before = if(old.size > 0) old[0] else next;
   snapshot = syntax_context(ctx, before, projection);
-  parsed = draft_group_from_context(text, snapshot);
+  parsed = draft_group_from_context(text, snapshot, source);
   if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE draft reason=" + parsed[2] + parsed[3] + "\n");
   if(!parsed[0]) throw "ED-1 Vish: " + parsed[2] + parsed[3];
   draft_publish(as_module, root, text, old, next, at, projection, parsed[1], snapshot, array{array{}, parsed[5], parsed[6]}, code(), parsed[4], 0, array{})
@@ -2182,20 +2186,21 @@ commit_draft(i64 v, str t, i64 caret_at, i64 from, i64 to, locations) {
       }
     }
   }
+  if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
+  origin = draft_source(t);
+  views[v].d.sources.push(origin);
   if(given(views[v].d.target)) {
     target = views[v].d.target;
     snapshot = syntax_context(node_parent(target), target, views[v].projection);
-    parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot, target);
+    parsed = unit_from_context(slice_text(t, views[v].d.target_from, views[v].d.target_to), true, snapshot, target, origin);
     if(env_get("VISH_UNDO_TRACE") == "1") write_err("TRACE unit bytes=" + text(views[v].d.target_from) + ":" + text(views[v].d.target_to) + " ok=" + text(parsed[0]) + " reason=" + parsed[2] + parsed[3] + "\n");
-    if(env_get("VISH_ED1_DISABLE_PARSER") == "1") throw "ED-1: Vish parser disabled";
     if(parsed[0]) result = draft_publish(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, array{parsed[1]}, snapshot, array{parsed[6], views[v].d.blank, views[v].d.rest}, target, parsed[7], views[v].d.target_from, locations);
   }
-  if(result.size == 0) result = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection);
+  if(result.size == 0) result = draft_parse(views[v].kind == "module", views[v].root, t, views[v].d.items, views[v].d.next, at, views[v].projection, origin);
   array{ids, source, blank, rest, reparsed} = result;
   views[v].d.target = code(); // the boundaries of this edit cannot be applied to the undo snapshot of the whole draft
   views[v].d.items = ids;
   views[v].d.source = source;
-  views[v].d.sources.push(source);
   views[v].d.blank = blank;
   views[v].d.rest = rest;
   close_traces();

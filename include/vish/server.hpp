@@ -1088,7 +1088,7 @@ struct editor_server {
     return value(array_v::of({codes(vm, ids), value(int64_t(pr.source)), value(std::move(blank)), value(std::move(rest)), codes(vm, reparsed)}));
   }
 
-  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & metadata, node_id target = {}, int64_t origin = -1, int64_t offset = 0, array_v const & locations = {}) {
+  value draft_publish(interpreter & vm, bool module, node_id fn_root, std::string const & text, node_span old, node_id next, uint32_t at, node_id projection, node_list fresh, uint64_t revision, array_v const & metadata, node_id target, int64_t origin, int64_t offset, array_v const & locations) {
     auto & db = session.db;
     // Opt-in synchronous interleaving probe: a real foreign canonical edit.
     static bool probe_done = false;
@@ -1134,20 +1134,21 @@ struct editor_server {
       for(auto x: old) fprintf(stderr, "TRACE AST before=%s\n", printer(db).print(x).c_str());
       for(auto x: fresh) fprintf(stderr, "TRACE AST fresh=%s\n", printer(db).print(x).c_str());
     }
+    if(origin < 0 || uint64_t(origin) >= db.source_count() || db.source(uint32_t(origin)) != text)
+      throw diagnostic("ED-1: invalid draft source", {});
     ++edits;
     parser pr(db, nullptr); // only resolve_refs, no text parsing
-    pr.source = db.record_import(text, cat("<черновик #", edits, ">"));
+    pr.source = uint32_t(origin);
     reparsed.clear();
     parser::draft_items d;
     d.items = fresh;
-    // Only written nodes of this parse are rebased; template provenance stays intact.
-    for(uint32_t i = 0; i < db.size(); ++i) {
+    // The slice uses the import of the whole draft. We carry over only the positions of the written nodes.
+    if(offset) for(uint32_t i = 0; i < db.size(); ++i) {
       node_id n{i};
       auto w = db[n].where;
-      if(origin >= 0 && w.source == uint32_t(origin)) {
+      if(w.source == pr.source) {
         w.begin += uint32_t(offset);
         w.end += uint32_t(offset);
-        w.source = pr.source;
         db.place(n, w);
       }
     }
@@ -1174,7 +1175,10 @@ struct editor_server {
       remap_draft_rules(target, rule_ids);
       for(uint32_t i = 0; i < locations.size(); ++i) {
         auto row = locations.get(i).as<array_v>();
-        db.place(vm.code_node(row.get(0), {}), span{uint32_t(row.get(1).as<int64_t>()), uint32_t(row.get(2).as<int64_t>()), pr.source});
+        node_id n = vm.code_node(row.get(0), {});
+        db.place(n, span{uint32_t(row.get(1).as<int64_t>()), uint32_t(row.get(2).as<int64_t>()), pr.source});
+        // An outer node gets a new range together with its comments.
+        if(auto note = db.note_of(n)) db.set_note(n, *note);
       }
       if(body_rules) reparse_users(target);
       ids.assign(old.begin(), old.end());
