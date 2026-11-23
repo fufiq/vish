@@ -72,3 +72,8 @@ Commands include `run`, `check`, `fmt`, `jit`, `slice`, `residual`, `stats`, `di
 
 - The file extension `.tzdb` and the `tz` name in early history are from the project's former name.
 - The project is developed solo; the commit history is a curated set of milestones.
+
+## License
+
+GNU General Public License v3.0 or (at your option) any later version; see [`LICENSE`](LICENSE).
+SPDX-License-Identifier: GPL-3.0-or-later
